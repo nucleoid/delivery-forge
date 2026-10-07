@@ -170,6 +170,27 @@ public sealed class PlanningBehaviorTests
         Assert.Contains(assessment.Limitations, item => item.Contains("additional bounded", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void Deep_intake_does_not_count_distinct_locator_aliases_for_the_same_bound_content()
+    {
+        var request = Request() with { Depth = IntakeDepth.Deep };
+        var sharedBytes = Encoding.UTF8.GetBytes("same exact repository bytes");
+        EvidenceItem BoundAlias(string path) => EvidenceItem.FromRepositoryFile(
+            new RepositoryFile(
+                path, new string('c', 40), "100644", sharedBytes,
+                isSymlink: false, escapesWorktree: false, "not-detected", SymlinkResolution.NotSymlink,
+                new string('a', 40), new string('b', 40)),
+            ObservedAt,
+            []);
+        var first = BoundAlias("README.md");
+        var alias = BoundAlias("docs/README-alias.md");
+
+        var assessment = IntakePlanner.Assess(request, [first, alias]);
+
+        Assert.False(assessment.Ready);
+        Assert.Contains(assessment.Limitations, item => item.Contains("additional bounded", StringComparison.OrdinalIgnoreCase));
+    }
+
     [Theory]
     [InlineData("memory", false, false, false)]
     [InlineData("code-index", true, false, false)]
@@ -340,6 +361,44 @@ public sealed class PlanningBehaviorTests
 
         Assert.Contains(assessment.Limitations, item => item.Contains("unverified", StringComparison.OrdinalIgnoreCase));
         Assert.DoesNotContain(assessment.Limitations, item => item.Contains("was verified", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData("kind")]
+    [InlineData("summary")]
+    [InlineData("digest")]
+    [InlineData("observedAt")]
+    [InlineData("stale")]
+    [InlineData("truncated")]
+    [InlineData("heuristic")]
+    public void Post_verification_imported_record_mutation_downgrades_to_unverified(string field)
+    {
+        var exactFile = RepositoryFileFor("callers.txt");
+        var digest = $"sha256:{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(exactFile.Bytes))}";
+        var verified = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry(
+                "code-index", "git:callers.txt", "Verified caller evidence", digest, ObservedAt,
+                CheckoutDigest: digest),
+            exactFile);
+        var mutated = field switch
+        {
+            "kind" => verified with { Kind = "repository" },
+            "summary" => verified with { Summary = "Changed summary" },
+            "digest" => verified with { Digest = "sha256:" + new string('d', 64) },
+            "observedAt" => verified with { ObservedAt = verified.ObservedAt.AddSeconds(1) },
+            "stale" => verified with { Stale = true },
+            "truncated" => verified with { Truncated = true },
+            "heuristic" => verified with { Heuristic = true },
+            _ => throw new InvalidOperationException(field)
+        };
+
+        var assessment = IntakePlanner.Assess(
+            Request() with { Depth = IntakeDepth.Deep },
+            [RepositoryEvidence()],
+            new ImportedContextEnvelope("1.0.0", [mutated], [], []));
+
+        Assert.Contains(assessment.Limitations, item => item.Contains("unverified", StringComparison.OrdinalIgnoreCase));
+        Assert.False(assessment.Ready);
     }
 
     [Fact]
@@ -760,6 +819,44 @@ public sealed class PlanningBehaviorTests
         Assert.Contains("generated-by-convention", canonical, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Freeze_rejects_every_repository_provenance_item_bound_to_a_different_base(bool unsafeSymlink)
+    {
+        var file = new RepositoryFile(
+            unsafeSymlink ? "unsafe-link" : "Generated.g.cs",
+            new string('c', 40),
+            unsafeSymlink ? "120000" : "100644",
+            Encoding.UTF8.GetBytes("content"),
+            isSymlink: unsafeSymlink,
+            escapesWorktree: unsafeSymlink,
+            unsafeSymlink ? "not-detected" : "generated-by-convention",
+            unsafeSymlink ? SymlinkResolution.Escapes : SymlinkResolution.NotSymlink,
+            new string('d', 40),
+            new string('e', 40));
+        var repositoryEvidence = EvidenceItem.FromRepositoryFile(file, ObservedAt, []);
+        var draft = Draft();
+        EvidenceItem[] provenance = [repositoryEvidence, PolicyEvidence()];
+
+        var error = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(
+            draft with { Provenance = provenance, Intake = IntakePlanner.Assess(draft.Request, provenance) },
+            "revision-mismatched-incomplete-repository",
+            ObservedAt));
+
+        Assert.Contains("commit/tree", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Frozen_canonical_provenance_exposes_each_repository_commit_and_tree()
+    {
+        var frozen = PlanFreezer.Freeze(Draft(), "revision-auditable-repository-binding", ObservedAt);
+        var canonical = Encoding.UTF8.GetString(frozen.CanonicalBytes);
+
+        Assert.Contains("\"repositoryCommit\":\"" + new string('a', 40) + "\"", canonical, StringComparison.Ordinal);
+        Assert.Contains("\"repositoryTree\":\"" + new string('b', 40) + "\"", canonical, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Pinned_old_commit_cannot_reconcile_a_frozen_mutable_ref()
     {
@@ -930,6 +1027,37 @@ public sealed class PlanningBehaviorTests
         var error = Assert.Throws<PlanningException>(() =>
             PlanFreezer.Freeze(draft, "revision-private-material", ObservedAt));
         Assert.Contains("host path or credential", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("found in $env:USERPROFILE\\private-index")]
+    [InlineData("found in $env:HOME/private-index")]
+    [InlineData("found in %APPDATA%\\private-index")]
+    [InlineData("found in %LOCALAPPDATA%\\private-index")]
+    [InlineData("sk-proj-abcdefghijklmnopqrstuvwxyz0123456789")]
+    [InlineData("sk-ant-api03-abcdefghijklmnopqrstuvwxyz0123456789")]
+    [InlineData("tool --password hunter2")]
+    [InlineData("curl -u alice:hunter2 https://example.invalid")]
+    public void Portable_plan_and_imported_context_reject_current_home_and_cli_secret_forms(string privateText)
+    {
+        var original = Draft();
+        EvidenceItem[] provenance = [RepositoryEvidence(privateText)];
+        var draft = original with
+        {
+            Provenance = provenance,
+            Intake = IntakePlanner.Assess(original.Request, provenance)
+        };
+        Assert.Throws<PlanningException>(() =>
+            PlanFreezer.Freeze(draft, "revision-current-private-material", ObservedAt));
+
+        var json = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            schemaVersion = "1.0.0",
+            entries = new[] { new { kind = "memory", locator = "memory:item-1", summary = privateText, digest = (string?)null, observedAt = "2026-10-07T20:00:00Z" } },
+            conflicts = Array.Empty<string>(),
+            limitations = Array.Empty<string>()
+        }));
+        Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
     }
 
     [Theory]

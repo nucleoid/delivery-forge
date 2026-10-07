@@ -274,6 +274,23 @@ public sealed class GitRepositoryContextTests : IDisposable
     }
 
     [Fact]
+    public async Task Public_repository_paths_reject_backslashes_instead_of_aliasing_a_slash_path()
+    {
+        InitializeRepository();
+        Directory.CreateDirectory(Path.Combine(_root, "dir"));
+        File.WriteAllText(Path.Combine(_root, "dir", "tracked.txt"), "slash path");
+        Run("git", "add dir/tracked.txt");
+        Run("git", "commit -q -m slash-path");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+        var error = await Assert.ThrowsAsync<PlanningException>(() =>
+            reader.ReadFileAsync(context, "dir\\tracked.txt", TestContext.Current.CancellationToken));
+
+        Assert.Contains("backslash", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Oversized_exact_blob_fails_within_the_operation_deadline()
     {
         InitializeRepository();
@@ -477,17 +494,10 @@ public sealed class GitRepositoryContextTests : IDisposable
     }
 
     [Fact]
-    public async Task Posix_backslash_filename_cannot_hide_a_nested_symlink_escape()
+    public async Task Plumbing_built_backslash_filename_cannot_hide_a_nested_symlink_escape()
     {
-        if (OperatingSystem.IsWindows()) return;
-
         InitializeRepository();
-        Directory.CreateDirectory(Path.Combine(_root, "a"));
-        File.WriteAllText(Path.Combine(_root, "a", "b"), "Windows lexical destination");
-        Run("git", "add a/b");
-        AddCommittedSymlink("a\\b", "../outside");
-        AddCommittedSymlink("x", "a\\b");
-        Run("git", "commit -q -m posix-backslash-nested-escape");
+        CommitDivergentBackslashTree();
         var reader = new GitRepositoryContextReader();
         var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
 
@@ -495,6 +505,23 @@ public sealed class GitRepositoryContextTests : IDisposable
 
         Assert.Equal(SymlinkResolution.Escapes, file.SymlinkResolution);
         Assert.True(file.EscapesWorktree);
+    }
+
+    [Fact]
+    public async Task Imported_git_locators_reject_backslash_aliases()
+    {
+        var exactFile = new RepositoryFile(
+            "dir/tracked.txt", new string('c', 40), "100644", Encoding.UTF8.GetBytes("exact bytes"),
+            isSymlink: false, escapesWorktree: false, "not-detected", SymlinkResolution.NotSymlink,
+            new string('a', 40), new string('b', 40));
+        var digest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(exactFile.Bytes))}";
+        var entry = new ImportedContextEntry(
+            "repository", "git:dir\\tracked.txt", "alias", digest, DateTimeOffset.UnixEpoch,
+            CheckoutDigest: digest);
+
+        var verified = ImportedContextVerifier.VerifyAgainst(entry, exactFile);
+
+        Assert.NotEqual(CheckoutVerification.Verified, verified.CheckoutVerification);
     }
 
     [Fact]
@@ -665,6 +692,44 @@ public sealed class GitRepositoryContextTests : IDisposable
         var objectId = RunCapture("git", $"hash-object -w {Path.GetFileName(input)}");
         File.Delete(input);
         Run("git", $"update-index --add --cacheinfo 120000,{objectId},{path}");
+    }
+
+    private void CommitDivergentBackslashTree()
+    {
+        var tracked = RunCapture("git", "rev-parse HEAD:tracked.txt");
+        var slashBlob = RunGitWithInput(["hash-object", "-w", "--stdin"], Encoding.UTF8.GetBytes("Windows lexical destination")).Trim();
+        var slashTree = RunGitWithInput(
+            ["mktree", "-z"],
+            Encoding.UTF8.GetBytes($"100644 blob {slashBlob}\tb\0")).Trim();
+        var escapeBlob = RunGitWithInput(["hash-object", "-w", "--stdin"], Encoding.UTF8.GetBytes("../outside")).Trim();
+        var targetBlob = RunGitWithInput(["hash-object", "-w", "--stdin"], Encoding.UTF8.GetBytes("a\\b")).Trim();
+        var rootTree = RunGitWithInput(
+            ["mktree", "-z"],
+            Encoding.UTF8.GetBytes(
+                $"040000 tree {slashTree}\ta\0" +
+                $"120000 blob {escapeBlob}\ta\\b\0" +
+                $"100644 blob {tracked}\ttracked.txt\0" +
+                $"120000 blob {targetBlob}\tx\0")).Trim();
+        var parent = RunCapture("git", "rev-parse HEAD");
+        var commit = RunGitWithInput(
+            ["commit-tree", rootTree, "-p", parent, "-m", "divergent-backslash-tree"],
+            []).Trim();
+        Run("git", $"update-ref HEAD {commit}");
+    }
+
+    private string RunGitWithInput(IReadOnlyList<string> arguments, byte[] input)
+    {
+        var startInfo = CreateStartInfo("git", string.Empty);
+        startInfo.RedirectStandardInput = true;
+        foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
+        using var process = Process.Start(startInfo)!;
+        process.StandardInput.BaseStream.Write(input);
+        process.StandardInput.Close();
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        Assert.True(process.ExitCode == 0, error);
+        return output;
     }
 
     private static RepositoryContext ForgeContext(RepositoryContext source, string? tree = null)
