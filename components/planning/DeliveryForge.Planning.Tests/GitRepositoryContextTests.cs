@@ -1,4 +1,7 @@
 using System.Diagnostics;
+using System.Net;
+using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace DeliveryForge.Planning.Tests;
@@ -23,6 +26,84 @@ public sealed class GitRepositoryContextTests : IDisposable
         Assert.True(observed.Dirty);
         Assert.Matches("^[0-9a-f]{40}$", context.Commit);
         Assert.Matches("^[0-9a-f]{40}$", context.Tree);
+        Assert.Equal(context.Commit, typeof(RepositoryFile).GetProperty("Commit")?.GetValue(exact));
+        Assert.Equal(context.Tree, typeof(RepositoryFile).GetProperty("Tree")?.GetValue(exact));
+    }
+
+    [Fact]
+    public async Task Verified_imported_context_is_bound_to_the_exact_repository_commit_and_tree()
+    {
+        InitializeRepository();
+        var reader = new GitRepositoryContextReader();
+        var first = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+        var file = await reader.ReadFileAsync(first, "tracked.txt", TestContext.Current.CancellationToken);
+        var digest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(file.Bytes))}";
+        var imported = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry("repository", "git:tracked.txt", "summary", null, DateTimeOffset.UnixEpoch, CheckoutDigest: digest),
+            file);
+
+        File.WriteAllText(Path.Combine(_root, "tracked.txt"), "second commit bytes");
+        Run("git", "add tracked.txt");
+        Run("git", "commit -q -m second");
+        var second = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+        var request = new PlanningRequest("owner/repo", "#4", "implement", "Bind repository identity", ["planning"], ["execution"], ["identity is exact"], "implement");
+        EvidenceItem[] evidence = [new(EvidenceSourceKind.Repository, "git:tracked.txt", digest, DateTimeOffset.UnixEpoch, [])];
+        var envelope = new ImportedContextEnvelope("1.0.0", [imported], [], []);
+        var assessment = IntakePlanner.Assess(request, evidence, envelope, EvidenceRequirement.Required);
+        var draft = new PlanDraft(
+            request,
+            second,
+            evidence,
+            [new("tracked.txt", "content", "update")],
+            [new("root", [], "repository context is exact")],
+            [new("test", "dotnet test", "passes")],
+            new("additive", "none", "none", "none", "none", "none", "tests", "revert", []),
+            [],
+            assessment);
+
+        Assert.Contains(assessment.Limitations, limitation => limitation.Contains(first.Commit, StringComparison.Ordinal) && limitation.Contains(first.Tree, StringComparison.Ordinal));
+        var error = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(draft, "revision-identity", DateTimeOffset.UnixEpoch));
+        Assert.Contains("repository identity", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Partial_clone_object_read_never_contacts_the_promisor_remote()
+    {
+        var source = Path.Combine(Path.GetTempPath(), $"delivery-forge-planning-source-{Guid.NewGuid():N}");
+        var bare = Path.Combine(Path.GetTempPath(), $"delivery-forge-planning-bare-{Guid.NewGuid():N}.git");
+        Directory.CreateDirectory(source);
+        try
+        {
+            RunIn(source, "git", "init -q");
+            RunIn(source, "git", "config user.email planning@example.invalid");
+            RunIn(source, "git", "config user.name Planning Tests");
+            File.WriteAllText(Path.Combine(source, "tracked.txt"), new string('x', 8192));
+            RunIn(source, "git", "add tracked.txt");
+            RunIn(source, "git", "commit -q -m initial");
+            RunIn(source, "git", $"clone -q --bare . {bare}");
+            RunIn(bare, "git", "config uploadpack.allowFilter true");
+            Directory.CreateDirectory(_root);
+            RunIn(_root, "git", $"clone -q --filter=blob:none --no-checkout file://{bare} .");
+
+            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            RunIn(_root, "git", $"remote set-url origin http://127.0.0.1:{port}/repo.git");
+            var connection = listener.AcceptTcpClientAsync(TestContext.Current.CancellationToken).AsTask();
+            var reader = new GitRepositoryContextReader();
+            var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+            var error = await Assert.ThrowsAsync<PlanningException>(() =>
+                reader.ReadFileAsync(context, "tracked.txt", TestContext.Current.CancellationToken));
+            Assert.Contains("partial clone", error.Message, StringComparison.OrdinalIgnoreCase);
+            await Task.Delay(250, TestContext.Current.CancellationToken);
+            Assert.False(connection.IsCompleted, "Exact object reads must reject before contacting a promisor remote.");
+        }
+        finally
+        {
+            DeleteTree(source);
+            DeleteTree(bare);
+        }
     }
 
     [Fact]
@@ -251,6 +332,30 @@ public sealed class GitRepositoryContextTests : IDisposable
         using var process = Process.Start(CreateStartInfo(fileName, arguments))!;
         process.WaitForExit();
         Assert.True(process.ExitCode == 0, process.StandardError.ReadToEnd());
+    }
+
+    private static void RunIn(string workingDirectory, string fileName, string arguments)
+    {
+        var startInfo = new ProcessStartInfo(fileName, arguments)
+        {
+            WorkingDirectory = workingDirectory,
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false
+        };
+        startInfo.Environment["GIT_CONFIG_NOSYSTEM"] = "1";
+        startInfo.Environment["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+        using var process = Process.Start(startInfo)!;
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        Assert.True(process.ExitCode == 0, error);
+    }
+
+    private static void DeleteTree(string path)
+    {
+        if (!Directory.Exists(path)) return;
+        foreach (var file in Directory.EnumerateFiles(path, "*", SearchOption.AllDirectories)) File.SetAttributes(file, FileAttributes.Normal);
+        Directory.Delete(path, recursive: true);
     }
 
     private string RunCapture(string fileName, string arguments)

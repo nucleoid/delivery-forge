@@ -193,6 +193,34 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
+    public void Required_empty_imported_context_blocks_readiness_and_freeze()
+    {
+        var draft = Draft();
+        var empty = new ImportedContextEnvelope("1.0.0", [], [], ["The bounded search returned no matches."]);
+        var assessment = IntakePlanner.Assess(draft.Request, draft.Provenance, empty, EvidenceRequirement.Required);
+
+        Assert.False(assessment.Ready);
+        Assert.Contains(assessment.Limitations, item => item.Contains("required", StringComparison.OrdinalIgnoreCase) && item.Contains("empty", StringComparison.OrdinalIgnoreCase));
+        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(draft with { Intake = assessment }, "revision-required-empty", ObservedAt));
+    }
+
+    [Fact]
+    public void Optional_incomplete_advisory_provenance_degrades_without_blocking_freeze()
+    {
+        var draft = Draft();
+        EvidenceItem[] provenance =
+        [
+            RepositoryEvidence(),
+            new(EvidenceSourceKind.Memory, "memory:item-1", null, ObservedAt, ["Search was truncated."], IsComplete: false)
+        ];
+        var assessment = IntakePlanner.Assess(draft.Request, provenance);
+
+        Assert.True(assessment.Ready);
+        var frozen = PlanFreezer.Freeze(draft with { Provenance = provenance, Intake = assessment }, "revision-incomplete-optional", ObservedAt);
+        Assert.Contains("Search was truncated", Encoding.UTF8.GetString(frozen.CanonicalBytes), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Missing_required_plan_sections_and_blocking_unknowns_prevent_freeze()
     {
         var incomplete = Draft() with { ChangeMap = [], Unknowns = [new("Product decision", "user", true)] };
@@ -230,6 +258,35 @@ public sealed class PlanningBehaviorTests
             ObservedAt);
 
         Assert.Contains(locator, Encoding.UTF8.GetString(frozen.CanonicalBytes), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("file:///home/alice/work/repo/README.md")]
+    [InlineData("ftp:///home/alice/work/repo/README.md")]
+    [InlineData("https://alice:secret@example.invalid/repo.git")]
+    [InlineData("https://example.invalid/a|/home/alice/.ssh/config")]
+    [InlineData("see `/home/alice/.ssh/config`")]
+    [InlineData("see [/home/alice/.ssh/config]")]
+    [InlineData("see `C:\\Users\\alice\\.ssh\\config`")]
+    [InlineData("github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99II")]
+    public void Portable_material_rejects_non_network_urls_embedded_paths_and_credentials(string value)
+    {
+        var draft = Draft();
+        EvidenceItem[] provenance = [RepositoryEvidence(value)];
+        var frozenError = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(
+            draft with { Provenance = provenance, Intake = IntakePlanner.Assess(draft.Request, provenance) },
+            "revision-portability",
+            ObservedAt));
+        Assert.Contains("private material", frozenError.Message, StringComparison.OrdinalIgnoreCase);
+
+        var json = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            schemaVersion = "1.0.0",
+            entries = new[] { new { kind = "memory", locator = "memory:item-1", summary = value, digest = (string?)null, observedAt = "2026-10-07T20:00:00Z" } },
+            conflicts = Array.Empty<string>(),
+            limitations = Array.Empty<string>()
+        }));
+        Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
     }
 
     [Theory]
@@ -517,6 +574,7 @@ public sealed class PlanningBehaviorTests
     public void Readiness_and_frozen_plan_state_are_not_publicly_constructible_or_mutable()
     {
         Assert.Empty(typeof(IntakeAssessment).GetConstructors());
+        Assert.Empty(typeof(RepositoryFile).GetConstructors());
         Assert.All(
             typeof(FrozenPlan).GetProperties().Where(property => property.Name != nameof(FrozenPlan.CanonicalBytes) && property.Name != nameof(FrozenPlan.PlanContractBytes)),
             property => Assert.False(property.CanWrite, $"{property.Name} must be get-only."));
