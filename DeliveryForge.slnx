@@ -1,0 +1,6 @@
+<Solution>
+  <Folder Name="/components/">
+    <Project Path="components/contracts/DeliveryForge.Contracts/DeliveryForge.Contracts.csproj" />
+    <Project Path="components/contracts/DeliveryForge.Contracts.Tests/DeliveryForge.Contracts.Tests.csproj" />
+  </Folder>
+</Solution>
