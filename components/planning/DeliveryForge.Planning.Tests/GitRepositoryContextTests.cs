@@ -274,6 +274,41 @@ public sealed class GitRepositoryContextTests : IDisposable
     }
 
     [Fact]
+    public async Task Reader_verified_unsafe_symlink_import_retains_safety_and_cannot_satisfy_deep_intake()
+    {
+        InitializeRepository();
+        AddCommittedSymlink("escape", "../outside");
+        Run("git", "commit -q -m unsafe-import");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+        var file = await reader.ReadFileAsync(context, "escape", TestContext.Current.CancellationToken);
+        var digest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(file.Bytes))}";
+        var imported = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry(
+                "code-index", "git:escape", "Unsafe linked evidence", digest, DateTimeOffset.UnixEpoch,
+                CheckoutDigest: digest),
+            file);
+        var request = new PlanningRequest(
+            "owner/repo", "#4", "implement", "Retain reader safety", ["planning"], ["execution"],
+            ["unsafe imports do not establish readiness"], "implement", IntakeDepth.Deep);
+        EvidenceItem[] evidence =
+        [
+            new(EvidenceSourceKind.Policy, "policy:planning", "sha256:" + new string('a', 64), DateTimeOffset.UnixEpoch, [])
+        ];
+
+        var assessment = IntakePlanner.Assess(
+            request,
+            evidence,
+            new ImportedContextEnvelope("1.0.0", [imported], [], []));
+
+        Assert.Equal(SymlinkResolution.Escapes, file.SymlinkResolution);
+        Assert.Equal(CheckoutVerification.Verified, imported.CheckoutVerification);
+        Assert.False(assessment.Ready);
+        Assert.Contains(assessment.Limitations, item =>
+            item.Contains("symlink safety is Escapes", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task Public_repository_paths_reject_backslashes_instead_of_aliasing_a_slash_path()
     {
         InitializeRepository();
@@ -467,6 +502,25 @@ public sealed class GitRepositoryContextTests : IDisposable
 
         Assert.True(file.EscapesWorktree);
         Assert.NotEqual(SymlinkResolution.InTree, file.SymlinkResolution);
+    }
+
+    [Fact]
+    public async Task Depth_fifteen_sibling_symlink_resolves_in_tree_under_both_platform_semantics()
+    {
+        InitializeRepository();
+        var parent = string.Join('/', Enumerable.Range(1, 15).Select(index => $"d{index}"));
+        Directory.CreateDirectory(Path.Combine(_root, parent.Replace('/', Path.DirectorySeparatorChar)));
+        File.WriteAllText(Path.Combine(_root, parent.Replace('/', Path.DirectorySeparatorChar), "target.txt"), "target");
+        Run("git", $"add {parent}/target.txt");
+        AddCommittedSymlink($"{parent}/link", "target.txt");
+        Run("git", "commit -q -m deep-in-tree-symlink");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+        var file = await reader.ReadFileAsync(context, $"{parent}/link", TestContext.Current.CancellationToken);
+
+        Assert.Equal(SymlinkResolution.InTree, file.SymlinkResolution);
+        Assert.False(file.EscapesWorktree);
     }
 
     [Fact]

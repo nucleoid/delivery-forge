@@ -279,6 +279,32 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
+    public void Verified_generated_import_retains_reader_classification_and_cannot_satisfy_deep_intake()
+    {
+        var request = Request() with { Depth = IntakeDepth.Deep };
+        var generatedFile = new RepositoryFile(
+            "Generated.g.cs", new string('c', 40), "100644", Encoding.UTF8.GetBytes("generated"),
+            isSymlink: false, escapesWorktree: false, "generated-by-convention", SymlinkResolution.NotSymlink,
+            new string('a', 40), new string('b', 40));
+        var digest = $"sha256:{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(generatedFile.Bytes))}";
+        var imported = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry(
+                "code-index", "git:Generated.g.cs", "Generated index evidence", digest, ObservedAt,
+                CheckoutDigest: digest),
+            generatedFile);
+
+        var assessment = IntakePlanner.Assess(
+            request,
+            [PolicyEvidence()],
+            new ImportedContextEnvelope("1.0.0", [imported], [], []));
+
+        Assert.Equal(CheckoutVerification.Verified, imported.CheckoutVerification);
+        Assert.False(assessment.Ready);
+        Assert.Contains(assessment.Limitations, item =>
+            item.Contains("generation classification is generated-by-convention", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void Optional_absent_imported_context_degrades_with_a_limitation()
     {
         var assessment = IntakePlanner.Assess(Request(), [RepositoryEvidence()], importedContext: null);
@@ -974,6 +1000,38 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
+    public void Detached_checkout_reconciles_the_exact_same_mutable_branch_ref_commit_and_tree()
+    {
+        var draft = Draft();
+        var detachedBranch = RepositoryContext.Create(
+            "/portable/display-only",
+            "refs/heads/main",
+            draft.Repository.Commit,
+            draft.Repository.Tree,
+            detachedHead: true,
+            dirty: false,
+            shallow: false,
+            submodules: [],
+            limitations: []);
+        var frozen = PlanFreezer.Freeze(
+            draft with { Repository = detachedBranch },
+            "revision-detached-branch",
+            ObservedAt);
+        var current = RepositoryContext.Create(
+            "/portable/display-only",
+            "refs/heads/main",
+            frozen.BaseCommit,
+            frozen.BaseTree,
+            detachedHead: true,
+            dirty: false,
+            shallow: false,
+            submodules: [],
+            limitations: []);
+
+        Assert.Same(frozen, frozen.ReconcileBase(current));
+    }
+
+    [Fact]
     public void Freeze_rejects_an_unresolved_user_owned_decision()
     {
         var draft = Draft() with
@@ -1100,6 +1158,79 @@ public sealed class PlanningBehaviorTests
             limitations = Array.Empty<string>()
         }));
         Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
+    }
+
+    [Theory]
+    [InlineData("found in ${env:USERPROFILE}\\.ssh\\id_rsa")]
+    [InlineData("found in $env:APPDATA\\Code\\User\\settings.json")]
+    [InlineData("found in $env:LOCALAPPDATA/tool/cache")]
+    [InlineData("found in $env:HOMEPATH\\private-index")]
+    [InlineData("sk-admin-12345678901234567890")]
+    [InlineData("sk-live_service-12345678901234567890")]
+    [InlineData("curl --user alice:hunter2 https://example.invalid")]
+    [InlineData("curl --user=alice:hunter2 https://example.invalid")]
+    [InlineData("curl -ualice:hunter2 https://example.invalid")]
+    [InlineData("curl -fsu alice:hunter2 https://example.invalid")]
+    public void Portable_consumers_reject_powerShell_key_and_curl_credential_form_classes(string privateText)
+    {
+        var original = Draft();
+        EvidenceItem[] provenance = [RepositoryEvidence(privateText)];
+        var draft = original with
+        {
+            Provenance = provenance,
+            Intake = IntakePlanner.Assess(original.Request, provenance)
+        };
+        Assert.Throws<PlanningException>(() =>
+            PlanFreezer.Freeze(draft, "revision-private-form-class", ObservedAt));
+
+        var json = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            schemaVersion = "1.0.0",
+            entries = new[] { new { kind = "memory", locator = "memory:item-1", summary = privateText, digest = (string?)null, observedAt = "2026-10-07T20:00:00Z" } },
+            conflicts = Array.Empty<string>(),
+            limitations = Array.Empty<string>()
+        }));
+        Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
+    }
+
+    [Theory]
+    [InlineData("dotnet test ./tests/Foo.csproj")]
+    [InlineData("dotnet test ../tests/Foo.csproj")]
+    public void Portable_plan_accepts_ordinary_relative_gate_paths(string command)
+    {
+        var draft = Draft() with { Gates = [new("test", command, "all tests pass")] };
+
+        var frozen = PlanFreezer.Freeze(draft, "revision-relative-gate", ObservedAt);
+
+        Assert.True(frozen.DownstreamReady);
+        Assert.Contains(command, Encoding.UTF8.GetString(frozen.CanonicalBytes), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("curl --user-agent delivery-forge https://example.invalid")]
+    [InlineData("sk-short")]
+    [InlineData("PowerShell exposes $env:APPDATA without revealing a path")]
+    public void Portable_consumers_preserve_non_secret_sibling_controls(string portableText)
+    {
+        var original = Draft();
+        EvidenceItem[] provenance = [RepositoryEvidence(portableText)];
+        var draft = original with
+        {
+            Provenance = provenance,
+            Intake = IntakePlanner.Assess(original.Request, provenance)
+        };
+
+        var frozen = PlanFreezer.Freeze(draft, "revision-portable-sibling", ObservedAt);
+        var json = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            schemaVersion = "1.0.0",
+            entries = new[] { new { kind = "memory", locator = "memory:item-1", summary = portableText, digest = (string?)null, observedAt = "2026-10-07T20:00:00Z" } },
+            conflicts = Array.Empty<string>(),
+            limitations = Array.Empty<string>()
+        }));
+
+        Assert.True(frozen.DownstreamReady);
+        Assert.Single(ImportedContextEnvelope.Parse(json).Entries);
     }
 
     [Theory]
