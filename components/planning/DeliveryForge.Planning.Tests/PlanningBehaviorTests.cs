@@ -27,13 +27,40 @@ public sealed class PlanningBehaviorTests
         Assert.False(assessment.Ready);
         Assert.Contains("recommend", assessment.RecommendedQuestion!, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain('\n', assessment.RecommendedQuestion!);
+        Assert.NotNull(typeof(PlanningRequest).GetProperty("RecommendedOption"));
     }
 
     [Fact]
     public void Deep_intake_is_only_enabled_explicitly()
     {
-        var assessment = IntakePlanner.Assess(Request() with { Depth = IntakeDepth.Deep }, [RepositoryEvidence()]);
-        Assert.Equal(IntakeDepth.Deep, assessment.Depth);
+        var request = Request() with { Depth = IntakeDepth.Deep };
+        var shallowAssessment = IntakePlanner.Assess(request, [RepositoryEvidence()]);
+        var deepAssessment = IntakePlanner.Assess(request,
+        [
+            RepositoryEvidence(),
+            new(EvidenceSourceKind.Policy, "policy:planning", "sha256:" + new string('c', 64), ObservedAt, [])
+        ]);
+
+        Assert.Equal(IntakeDepth.Deep, shallowAssessment.Depth);
+        Assert.False(shallowAssessment.Ready);
+        Assert.Contains(shallowAssessment.Limitations, item => item.Contains("additional", StringComparison.OrdinalIgnoreCase));
+        Assert.True(deepAssessment.Ready);
+    }
+
+    [Fact]
+    public void Deep_intake_evidence_is_bounded()
+    {
+        var request = Request() with { Depth = IntakeDepth.Deep };
+        var evidence = Enumerable.Range(0, 257)
+            .Select(index => new EvidenceItem(
+                index == 0 ? EvidenceSourceKind.Repository : EvidenceSourceKind.Policy,
+                $"policy:item-{index}",
+                null,
+                ObservedAt,
+                []))
+            .ToArray();
+
+        Assert.Throws<PlanningException>(() => IntakePlanner.Assess(request, evidence));
     }
 
     [Fact]
@@ -271,6 +298,16 @@ public sealed class PlanningBehaviorTests
     [InlineData("ftp:///home/alice/work/repo/README.md")]
     [InlineData("https://alice:secret@example.invalid/repo.git")]
     [InlineData("https://example.invalid/a|/home/alice/.ssh/config")]
+    [InlineData("<path>/home/alice/.ssh/id_rsa</path>")]
+    [InlineData("https://example.invalid/a>/home/alice/.ssh/config")]
+    [InlineData("found in /home/Ølaf/.ssh/config")]
+    [InlineData("found in /home/Алиса/.ssh/config")]
+    [InlineData("found@/home/alice/.ssh/config")]
+    [InlineData("found!/home/alice/.ssh/config")]
+    [InlineData("found*/home/alice/.ssh/config")]
+    [InlineData("found#/home/alice/.ssh/config")]
+    [InlineData("found+/home/alice/.ssh/config")]
+    [InlineData("found&/home/alice/.ssh/config")]
     [InlineData("see `/home/alice/.ssh/config`")]
     [InlineData("see [/home/alice/.ssh/config]")]
     [InlineData("see `C:\\Users\\alice\\.ssh\\config`")]
@@ -581,6 +618,9 @@ public sealed class PlanningBehaviorTests
     {
         Assert.Empty(typeof(IntakeAssessment).GetConstructors());
         Assert.Empty(typeof(RepositoryFile).GetConstructors());
+        Assert.Empty(typeof(RepositoryContext).GetConstructors());
+        Assert.All(typeof(RepositoryContext).GetProperties(), property =>
+            Assert.False(property.CanWrite, $"{property.Name} must be reader-issued and get-only."));
         Assert.All(
             typeof(FrozenPlan).GetProperties().Where(property => property.Name != nameof(FrozenPlan.CanonicalBytes) && property.Name != nameof(FrozenPlan.PlanContractBytes)),
             property => Assert.False(property.CanWrite, $"{property.Name} must be get-only."));

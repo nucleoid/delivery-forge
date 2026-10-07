@@ -116,6 +116,30 @@ public sealed class GitRepositoryContextTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Effective_included_and_worktree_promisor_configuration_is_rejected(bool useWorktreeConfig)
+    {
+        InitializeRepository();
+        if (useWorktreeConfig)
+        {
+            Run("git", "config extensions.worktreeConfig true");
+            Run("git", "config --worktree remote.origin.promisor true");
+        }
+        else
+        {
+            File.WriteAllText(Path.Combine(_root, ".git", "promisor.cfg"), "[remote \"origin\"]\n\tpromisor = true\n");
+            Run("git", "config include.path promisor.cfg");
+        }
+
+        var reader = new GitRepositoryContextReader();
+
+        var error = await Assert.ThrowsAsync<PlanningException>(() =>
+            reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken));
+        Assert.Contains("partial clone", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public async Task Detached_head_and_symlink_escape_are_reported_honestly()
     {
@@ -224,6 +248,64 @@ public sealed class GitRepositoryContextTests : IDisposable
     }
 
     [Fact]
+    public async Task Repeated_symlink_path_cannot_hide_a_later_posix_escape_as_a_cycle()
+    {
+        InitializeRepository();
+        File.WriteAllText(Path.Combine(_root, "outside"), "inside only before traversal");
+        Run("git", "add outside");
+        AddCommittedSymlink("d", ".");
+        AddCommittedSymlink("x", "d/d/../outside");
+        Run("git", "commit -q -m repeated-symlink-path");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+        var file = await reader.ReadFileAsync(context, "x", TestContext.Current.CancellationToken);
+
+        Assert.Equal(SymlinkResolution.Escapes, file.SymlinkResolution);
+        Assert.True(file.EscapesWorktree);
+    }
+
+    [Fact]
+    public async Task Windows_text_collapse_escape_wins_over_an_in_tree_posix_resolution()
+    {
+        InitializeRepository();
+        Directory.CreateDirectory(Path.Combine(_root, "sub", "inner"));
+        File.WriteAllText(Path.Combine(_root, "sub", "inner", ".keep"), "kept");
+        File.WriteAllText(Path.Combine(_root, "outside"), "root file");
+        Run("git", "add sub/inner/.keep outside");
+        AddCommittedSymlink("d", "sub/inner");
+        AddCommittedSymlink("x", "d/../../outside");
+        Run("git", "commit -q -m windows-text-collapse");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+        var file = await reader.ReadFileAsync(context, "x", TestContext.Current.CancellationToken);
+
+        Assert.Equal(SymlinkResolution.Escapes, file.SymlinkResolution);
+        Assert.True(file.EscapesWorktree);
+    }
+
+    [Fact]
+    public async Task Symlink_segment_work_is_globally_bounded_and_fails_conservatively()
+    {
+        InitializeRepository();
+        Directory.CreateDirectory(Path.Combine(_root, "dir"));
+        File.WriteAllText(Path.Combine(_root, "dir", ".keep"), "kept");
+        Run("git", "add dir/.keep");
+        var target = string.Join('/', Enumerable.Repeat("dir/..", 5_000)) + "/tracked.txt";
+        AddCommittedSymlink("bounded", target);
+        Run("git", "commit -q -m bounded-symlink");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+
+        var file = await reader.ReadFileAsync(context, "bounded", deadline.Token);
+
+        Assert.True(file.EscapesWorktree);
+        Assert.NotEqual(SymlinkResolution.InTree, file.SymlinkResolution);
+    }
+
+    [Fact]
     public async Task Exact_symlink_resolution_reports_cycles_missing_targets_and_windows_separators()
     {
         InitializeRepository();
@@ -241,6 +323,8 @@ public sealed class GitRepositoryContextTests : IDisposable
 
         Assert.Equal(SymlinkResolution.Cycle, cycle.SymlinkResolution);
         Assert.Equal(SymlinkResolution.Missing, missing.SymlinkResolution);
+        Assert.True(cycle.EscapesWorktree);
+        Assert.True(missing.EscapesWorktree);
         Assert.Equal(SymlinkResolution.Escapes, windowsEscape.SymlinkResolution);
         Assert.True(windowsEscape.EscapesWorktree);
     }
