@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://delivery-forge.dev/schemas/publication-receipt/1.0.0",
+  "title": "Delivery Forge publication receipt",
+  "x-contract-kind": "publication-receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "identity", "baseCommit", "headCommit", "treeId", "action", "remoteRef", "resultId", "createdAt"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "kind": { "const": "publication-receipt" },
+    "identity": { "$ref": "#/$defs/identity" },
+    "baseCommit": { "$ref": "#/$defs/gitObject" },
+    "headCommit": { "$ref": "#/$defs/gitObject" },
+    "treeId": { "$ref": "#/$defs/gitObject" },
+    "action": { "enum": ["PR_PUBLISHED", "MERGED"] },
+    "remoteRef": { "$ref": "#/$defs/nonEmpty" },
+    "resultId": { "$ref": "#/$defs/nonEmpty" },
+    "createdAt": { "$ref": "#/$defs/timestamp" }
+  },
+  "$defs": {
+    "identity": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "gitObject": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "nonEmpty": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,7})?Z$" }
+  }
+}

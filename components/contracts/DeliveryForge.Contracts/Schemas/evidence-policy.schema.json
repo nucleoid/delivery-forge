@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://delivery-forge.dev/schemas/evidence-policy/1.0.0",
+  "title": "Delivery Forge evidence policy",
+  "x-contract-kind": "evidence-policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "identity", "policyId", "requiredGates", "authorizedCeiling", "requireIndependentReview", "allowedNotApplicable", "createdAt"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "kind": { "const": "evidence-policy" },
+    "identity": { "$ref": "#/$defs/identity" },
+    "policyId": { "$ref": "#/$defs/nonEmpty" },
+    "requiredGates": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmpty" } },
+    "authorizedCeiling": { "enum": ["plan", "implement", "pr", "merge"] },
+    "requireIndependentReview": { "type": "boolean" },
+    "allowedNotApplicable": { "$ref": "#/$defs/stringArray" },
+    "createdAt": { "$ref": "#/$defs/timestamp" }
+  },
+  "$defs": {
+    "identity": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nonEmpty": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,7})?Z$" },
+    "stringArray": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmpty" } }
+  }
+}

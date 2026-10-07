@@ -1,0 +1,1 @@
+{"schemaVersion":"1.0.0","kind":"capability-report","identity":"sha256:ff356ce19751b4a030e0688d880c4f7ee5ed40f9c99c5544d46992f76fe30ddf","capabilityId":"dotnet-sdk","tool":"dotnet","version":"10.0.401","supported":true,"limitations":["Linux validation only"],"observedAt":"2026-10-07T05:00:00Z"}

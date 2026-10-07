@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://delivery-forge.dev/schemas/gate-receipt/1.0.0",
+  "title": "Delivery Forge gate receipt",
+  "x-contract-kind": "gate-receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "identity", "gateId", "policyIdentity", "baseCommit", "headCommit", "treeId", "command", "startedAt", "completedAt", "exitCode", "outcome", "reason", "artifactHashes", "sourceChanged", "limitations"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "kind": { "const": "gate-receipt" },
+    "identity": { "$ref": "#/$defs/identity" },
+    "gateId": { "$ref": "#/$defs/nonEmpty" },
+    "policyIdentity": { "$ref": "#/$defs/identity" },
+    "baseCommit": { "$ref": "#/$defs/gitObject" },
+    "headCommit": { "$ref": "#/$defs/gitObject" },
+    "treeId": { "$ref": "#/$defs/gitObject" },
+    "command": { "$ref": "#/$defs/nonEmpty" },
+    "startedAt": { "$ref": "#/$defs/timestamp" },
+    "completedAt": { "$ref": "#/$defs/timestamp" },
+    "exitCode": { "type": ["integer", "null"], "minimum": -9007199254740991, "maximum": 9007199254740991 },
+    "outcome": { "enum": ["PASS", "FAIL", "INCOMPLETE", "ERROR", "NOT_APPLICABLE"] },
+    "reason": { "$ref": "#/$defs/nonEmpty" },
+    "artifactHashes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/identity" } },
+    "sourceChanged": { "type": "boolean" },
+    "limitations": { "$ref": "#/$defs/stringArray" },
+    "notApplicableRationale": { "$ref": "#/$defs/nonEmpty" }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "outcome": { "const": "NOT_APPLICABLE" } } },
+      "then": { "required": ["notApplicableRationale"] }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "PASS" } } },
+      "then": { "properties": { "exitCode": { "const": 0 }, "sourceChanged": { "const": false } } }
+    }
+  ],
+  "$defs": {
+    "identity": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "gitObject": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "nonEmpty": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time", "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,7})?Z$" },
+    "stringArray": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmpty" } }
+  }
+}

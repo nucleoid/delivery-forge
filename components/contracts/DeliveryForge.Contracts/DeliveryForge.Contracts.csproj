@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>DeliveryForge.Contracts</AssemblyName>
+    <RootNamespace>DeliveryForge.Contracts</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="Schemas/*.schema.json" />
+  </ItemGroup>
+</Project>
