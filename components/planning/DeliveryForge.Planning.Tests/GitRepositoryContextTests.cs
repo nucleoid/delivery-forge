@@ -101,6 +101,25 @@ public sealed class GitRepositoryContextTests : IDisposable
     }
 
     [Fact]
+    public async Task Parent_traversal_after_expanded_directory_symlink_is_an_escape()
+    {
+        InitializeRepository();
+        Directory.CreateDirectory(Path.Combine(_root, "sub"));
+        File.WriteAllText(Path.Combine(_root, "outside"), "still inside lexically");
+        Run("git", "add outside");
+        AddCommittedSymlink("sub/d", "..");
+        AddCommittedSymlink("sub/x", "d/../../outside");
+        Run("git", "commit -q -m symlink-parent-traversal");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+        var file = await reader.ReadFileAsync(context, "sub/x", TestContext.Current.CancellationToken);
+
+        Assert.Equal(SymlinkResolution.Escapes, file.SymlinkResolution);
+        Assert.True(file.EscapesWorktree);
+    }
+
+    [Fact]
     public async Task Exact_symlink_resolution_reports_cycles_missing_targets_and_windows_separators()
     {
         InitializeRepository();
@@ -144,6 +163,76 @@ public sealed class GitRepositoryContextTests : IDisposable
             Environment.SetEnvironmentVariable("GIT_DIR", previousDirectory);
             Environment.SetEnvironmentVariable("GIT_WORK_TREE", previousWorktree);
         }
+    }
+
+    [Fact]
+    public async Task Exact_git_reads_ignore_replace_refs()
+    {
+        InitializeRepository();
+        File.WriteAllText(Path.Combine(_root, "replacement.txt"), "replacement bytes");
+        var original = RunCapture("git", "rev-parse HEAD:tracked.txt");
+        var replacement = RunCapture("git", "hash-object -w replacement.txt");
+        Run("git", $"replace {original} {replacement}");
+
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+        var file = await reader.ReadFileAsync(context, "tracked.txt", TestContext.Current.CancellationToken);
+
+        Assert.Equal(original, file.ObjectId);
+        Assert.Equal("committed bytes", Encoding.UTF8.GetString(file.Bytes));
+    }
+
+    [Fact]
+    public async Task Exact_git_reads_ignore_inherited_object_index_common_dir_and_config_routing()
+    {
+        InitializeRepository();
+        var names = new[]
+        {
+            "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_COMMON_DIR",
+            "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CONFIG_KEY_0", "GIT_CONFIG_VALUE_0"
+        };
+        var previous = names.ToDictionary(name => name, Environment.GetEnvironmentVariable, StringComparer.Ordinal);
+        try
+        {
+            var invalid = Path.Combine(_root, "inherited-routing-must-not-be-used");
+            Environment.SetEnvironmentVariable("GIT_OBJECT_DIRECTORY", invalid);
+            Environment.SetEnvironmentVariable("GIT_ALTERNATE_OBJECT_DIRECTORIES", invalid);
+            Environment.SetEnvironmentVariable("GIT_INDEX_FILE", invalid);
+            Environment.SetEnvironmentVariable("GIT_COMMON_DIR", invalid);
+            Environment.SetEnvironmentVariable("GIT_CONFIG_PARAMETERS", "'core.repositoryformatversion=999'");
+            Environment.SetEnvironmentVariable("GIT_CONFIG_COUNT", "1");
+            Environment.SetEnvironmentVariable("GIT_CONFIG_KEY_0", "core.repositoryformatversion");
+            Environment.SetEnvironmentVariable("GIT_CONFIG_VALUE_0", "999");
+
+            var reader = new GitRepositoryContextReader();
+            var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+            var file = await reader.ReadFileAsync(context, "tracked.txt", TestContext.Current.CancellationToken);
+
+            Assert.False(context.Dirty);
+            Assert.Equal("committed bytes", Encoding.UTF8.GetString(file.Bytes));
+        }
+        finally
+        {
+            foreach (var pair in previous) Environment.SetEnvironmentVariable(pair.Key, pair.Value);
+        }
+    }
+
+    [Fact]
+    public async Task Exact_git_paths_are_always_literal_pathspecs()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        InitializeRepository();
+        File.WriteAllText(Path.Combine(_root, "*.txt"), "literal wildcard");
+        File.WriteAllText(Path.Combine(_root, "a.txt"), "wildcard bait");
+        Run("git", "add -- *.txt a.txt");
+        Run("git", "commit -q -m literal-pathspec");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+        var file = await reader.ReadFileAsync(context, "*.txt", TestContext.Current.CancellationToken);
+
+        Assert.Equal("literal wildcard", Encoding.UTF8.GetString(file.Bytes));
     }
 
     private void InitializeRepository()

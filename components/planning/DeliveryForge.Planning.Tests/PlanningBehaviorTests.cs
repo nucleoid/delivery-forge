@@ -106,6 +106,43 @@ public sealed class PlanningBehaviorTests
         Assert.Equal("Checkout verification required", Assert.Single(envelope.Limitations));
     }
 
+    [Theory]
+    [InlineData("verified")]
+    [InlineData("7")]
+    [InlineData("unverified,verified")]
+    public void Imported_context_cannot_assert_checkout_verification(string verification)
+    {
+        var json = Encoding.UTF8.GetBytes($$"""
+            {
+              "schemaVersion":"1.0.0",
+              "entries":[{
+                "kind":"repository",
+                "locator":"git:tracked.txt",
+                "summary":"Advisory summary",
+                "digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "observedAt":"2026-10-07T20:00:00Z",
+                "checkoutVerification":"{{verification}}"
+              }],
+              "conflicts":[],
+              "limitations":[]
+            }
+            """);
+
+        Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
+    }
+
+    [Fact]
+    public void Imported_summary_digest_is_distinct_from_locally_verified_checkout_digest()
+    {
+        var bytes = Encoding.UTF8.GetBytes("committed bytes");
+        var checkoutDigest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
+        var entry = ImportedEntryWithCheckoutDigest("sha256:" + new string('a', 64), checkoutDigest);
+        var file = new RepositoryFile("tracked.txt", new string('a', 40), "100644", bytes, false, false, "not-generated");
+
+        Assert.Equal(CheckoutVerification.Verified, ImportedContextVerifier.VerifyAgainst(entry, file).CheckoutVerification);
+        Assert.Equal("sha256:" + new string('a', 64), entry.Digest);
+    }
+
     [Fact]
     public void Imported_context_rejects_secret_material_inside_allowed_fields()
     {
@@ -160,6 +197,18 @@ public sealed class PlanningBehaviorTests
 
         var error = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(privateDraft, "revision-private", ObservedAt));
         Assert.Contains("private material", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Normal_scheme_urls_are_portable_evidence_locators()
+    {
+        var locator = "https://github.com/nucleoid/delivery-forge/issues/4#issuecomment-6028955264";
+        var frozen = PlanFreezer.Freeze(
+            Draft() with { Provenance = [RepositoryEvidence(locator)] },
+            "revision-url",
+            ObservedAt);
+
+        Assert.Contains(locator, Encoding.UTF8.GetString(frozen.CanonicalBytes), StringComparison.Ordinal);
     }
 
     [Fact]
@@ -382,17 +431,78 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
+    public void Mutable_repository_observations_do_not_change_declared_revision_identity()
+    {
+        var clean = Draft();
+        var first = PlanFreezer.Freeze(clean, "revision-1", ObservedAt);
+        var dirty = clean with
+        {
+            Repository = clean.Repository with
+            {
+                Dirty = true,
+                Submodules = ["+0123456789012345678901234567890123456789 dependency"],
+                Limitations = ["Mutable worktree is dirty; exact-object reads remain pinned to the resolved commit."]
+            }
+        };
+
+        var second = PlanFreezer.Freeze(dirty, "revision-1", ObservedAt, first);
+
+        Assert.Equal(first.ContentDigest, second.ContentDigest);
+        Assert.Equal(first.PlanRevision, second.PlanRevision);
+        Assert.Equal(first.ContractIdentity, second.ContractIdentity);
+        Assert.NotEqual(first.Identity, second.Identity);
+        Assert.Contains("dirty", Encoding.UTF8.GetString(second.CanonicalBytes), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Intake_assessment_is_bound_to_the_request_and_evidence_used_to_create_it()
+    {
+        var draft = Draft();
+        var unrelatedEvidence = new[] { RepositoryEvidence("git:other.txt") };
+        var unrelated = IntakePlanner.Assess(
+            draft.Request with { Outcome = "Different outcome" },
+            unrelatedEvidence,
+            new ImportedContextEnvelope("1.0.0", [], [], ["Different imported caveat"]),
+            EvidenceRequirement.Required);
+
+        var error = Assert.Throws<PlanningException>(() =>
+            PlanFreezer.Freeze(draft with { Intake = unrelated }, "revision-1", ObservedAt));
+
+        Assert.Contains("intake assessment", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Readiness_and_frozen_plan_state_are_not_publicly_constructible_or_mutable()
+    {
+        Assert.Empty(typeof(IntakeAssessment).GetConstructors());
+        Assert.All(
+            typeof(FrozenPlan).GetProperties().Where(property => property.Name != nameof(FrozenPlan.CanonicalBytes) && property.Name != nameof(FrozenPlan.PlanContractBytes)),
+            property => Assert.False(property.CanWrite, $"{property.Name} must be get-only."));
+    }
+
+    [Fact]
     public void Imported_context_verification_compares_exact_committed_blob_bytes()
     {
         var bytes = Encoding.UTF8.GetBytes("committed bytes");
         var digest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
         var file = new RepositoryFile("tracked.txt", new string('a', 40), "100644", bytes, false, false, "not-generated");
-        var entry = new ImportedContextEntry("repository", "git:tracked.txt", "summary", digest, ObservedAt);
+        var entry = ImportedEntryWithCheckoutDigest(null, digest);
 
         Assert.Equal(CheckoutVerification.Verified, ImportedContextVerifier.VerifyAgainst(entry, file).CheckoutVerification);
         Assert.Equal(
             CheckoutVerification.Conflict,
-            ImportedContextVerifier.VerifyAgainst(entry with { Digest = "sha256:" + new string('b', 64) }, file).CheckoutVerification);
+            ImportedContextVerifier.VerifyAgainst(ImportedEntryWithCheckoutDigest(null, "sha256:" + new string('b', 64)), file).CheckoutVerification);
+    }
+
+    [Fact]
+    public void Imported_context_verification_is_bound_to_the_exact_git_locator_path()
+    {
+        var bytes = Encoding.UTF8.GetBytes("committed bytes");
+        var digest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
+        var file = new RepositoryFile("other.txt", new string('a', 40), "100644", bytes, false, false, "not-generated");
+        var entry = ImportedEntryWithCheckoutDigest(null, digest);
+
+        Assert.Equal(CheckoutVerification.Conflict, ImportedContextVerifier.VerifyAgainst(entry, file).CheckoutVerification);
     }
 
     [Fact]
@@ -416,6 +526,32 @@ public sealed class PlanningBehaviorTests
 
     private static EvidenceItem RepositoryEvidence(string locator = "git:README.md") => new(
         EvidenceSourceKind.Repository, locator, "sha256:" + new string('b', 64), ObservedAt, []);
+
+    private static ImportedContextEntry ImportedEntryWithCheckoutDigest(
+        string? summaryDigest,
+        string checkoutDigest,
+        string locator = "git:tracked.txt")
+    {
+        var json = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            schemaVersion = "1.0.0",
+            entries = new[]
+            {
+                new
+                {
+                    kind = "repository",
+                    locator,
+                    summary = "summary",
+                    digest = summaryDigest,
+                    checkoutDigest,
+                    observedAt = "2026-10-07T20:00:00Z"
+                }
+            },
+            conflicts = Array.Empty<string>(),
+            limitations = Array.Empty<string>()
+        }));
+        return Assert.Single(ImportedContextEnvelope.Parse(json).Entries);
+    }
 
     private static PlanDraft Draft()
     {
