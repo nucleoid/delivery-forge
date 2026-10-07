@@ -338,10 +338,16 @@ public static partial class ContractValidator
             throw new ContractValidationException("NOT_APPLICABLE requires notApplicableRationale.");
         }
 
-        if (kind == "gate-receipt" && RequireString(root, "outcome") == "PASS" &&
-            root.GetProperty("sourceChanged").GetBoolean())
+        if (kind == "gate-receipt" && RequireString(root, "outcome") == "PASS")
         {
-            throw new ContractValidationException("A PASS gate receipt cannot set sourceChanged=true.");
+            if (root.GetProperty("sourceChanged").GetBoolean())
+            {
+                throw new ContractValidationException("A PASS gate receipt cannot set sourceChanged=true.");
+            }
+            if (root.GetProperty("exitCode").ValueKind != JsonValueKind.Number || root.GetProperty("exitCode").GetInt64() != 0)
+            {
+                throw new ContractValidationException("A PASS gate receipt requires exitCode=0.");
+            }
         }
     }
 

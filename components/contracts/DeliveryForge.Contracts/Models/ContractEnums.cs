@@ -33,7 +33,14 @@ public static class ContractValues
         _ => throw new ArgumentOutOfRangeException(nameof(value))
     };
 
-    public static string ToWireValue(this WorkflowState value) =>
-        string.Concat(value.ToString().Select((character, index) =>
+    public static string ToWireValue(this WorkflowState value)
+    {
+        if (!Enum.IsDefined(value))
+        {
+            throw new ArgumentOutOfRangeException(nameof(value));
+        }
+
+        return string.Concat(value.ToString().Select((character, index) =>
             index > 0 && char.IsUpper(character) ? $"_{character}" : character.ToString())).ToUpperInvariant();
+    }
 }

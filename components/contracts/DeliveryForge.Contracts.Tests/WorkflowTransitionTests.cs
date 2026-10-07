@@ -120,6 +120,96 @@ public sealed class WorkflowTransitionTests
     }
 
     [Fact]
+    public void Hosted_review_revalidates_the_independent_receipt()
+    {
+        var evidence = FullEvidence();
+        var wrongKind = evidence.GateReceipts![0];
+        var failing = MutatedFixture("review-receipt.json", node => node["outcome"] = "FAIL");
+        var wrongBase = MutatedFixture("review-receipt.json", node => node["baseCommit"] = new string('f', 40));
+
+        AssertMessage("validated review-receipt", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.CiComplete, WorkflowState.HostReviewComplete, evidence with { ReviewReceipt = wrongKind }));
+        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.CiComplete, WorkflowState.HostReviewComplete, evidence with { ReviewReceipt = failing }));
+        AssertMessage("current head commit and tree identity", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.CiComplete, WorkflowState.HostReviewComplete, evidence with { ReviewReceipt = wrongBase }));
+    }
+
+    [Theory]
+    [InlineData(WorkflowState.IndependentReview, WorkflowState.PrAuthorized)]
+    [InlineData(WorkflowState.PrAuthorized, WorkflowState.PrPublished)]
+    [InlineData(WorkflowState.CiComplete, WorkflowState.HostReviewComplete)]
+    public void Hosted_reviewer_cannot_supply_independent_review(WorkflowState from, WorkflowState to)
+    {
+        var hosted = MutatedFixture("review-receipt.json", node =>
+        {
+            node["reviewerFamily"] = "github-hosted";
+            node["createdAt"] = "2026-10-07T05:02:00Z";
+        });
+        AssertMessage("independent review cannot use reviewerFamily 'github-hosted'", () =>
+            WorkflowTransition.EnsureAllowed(from, to, FullEvidence() with { ReviewReceipt = hosted }));
+    }
+
+    [Fact]
+    public void Hosted_review_receipts_must_be_distinct_by_identity()
+    {
+        var evidence = FullEvidence();
+        AssertMessage("distinct from independent review", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.CiComplete, WorkflowState.HostReviewComplete,
+            evidence with { HostReviewReceipt = evidence.ReviewReceipt }));
+    }
+
+    [Fact]
+    public void Hosted_review_requires_the_documented_reviewer_family()
+    {
+        AssertMessage("reviewerFamily 'github-hosted'", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.CiComplete, WorkflowState.HostReviewComplete,
+            FullEvidence() with
+            {
+                HostReviewReceipt = MutatedFixture("review-receipt.json", node => node["createdAt"] = "2026-10-07T05:02:00Z")
+            }));
+    }
+
+    [Fact]
+    public void Caller_authority_cannot_exceed_the_policy_ceiling()
+    {
+        var policy = MutatedFixture("evidence-policy.json", node => node["authorizedCeiling"] = "pr");
+        AssertMessage("exceeds the immutable evidence-policy ceiling", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized,
+            FullEvidence() with { Ceiling = AuthorizationCeiling.Merge, Policy = policy }));
+    }
+
+    [Fact]
+    public void Gate_receipts_must_bind_the_supplied_policy()
+    {
+        var evidence = FullEvidence();
+        var gate = GateFixture(ParseFixture("evidence-policy.json").Identity, "build");
+        AssertMessage("required policy or gate identity", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.Evaluating, WorkflowState.IndependentReview,
+            evidence with { GateReceipts = [gate, .. evidence.GateReceipts!.Skip(1)] }));
+    }
+
+    [Fact]
+    public void Receipt_gated_authority_requires_an_evidence_policy()
+    {
+        var evidence = FullEvidence();
+        AssertMessage("validated evidence-policy", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized, evidence with { Policy = null }));
+        AssertMessage("validated evidence-policy", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized,
+            evidence with { Policy = evidence.ReviewReceipt }));
+    }
+
+    [Fact]
+    public void Receipt_base_commit_must_match_current_evidence()
+    {
+        var receipt = MutatedFixture("review-receipt.json", node => node["baseCommit"] = new string('f', 40));
+        AssertMessage("current head commit and tree identity", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized,
+            FullEvidence() with { ReviewReceipt = receipt }));
+    }
+
+    [Fact]
     public void Immutable_policy_limits_authority_and_requires_independent_review()
     {
         var implementPolicy = MutatedFixture("evidence-policy.json", node => node["authorizedCeiling"] = "implement");
@@ -154,6 +244,7 @@ public sealed class WorkflowTransitionTests
             (WorkflowState)99, WorkflowState.Blocked, FullEvidence()));
         Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
             WorkflowState.Ready, WorkflowState.Executing, FullEvidence() with { Ceiling = (AuthorizationCeiling)99 }));
+        Assert.Throws<ArgumentOutOfRangeException>(() => ((WorkflowState)99).ToWireValue());
     }
 
     [Fact]
@@ -202,5 +293,11 @@ public sealed class WorkflowTransitionTests
         node["identity"] = "sha256:" + new string('0', 64);
         node["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(node.ToJsonString()));
         return ContractValidator.ParseAndValidate(Encoding.UTF8.GetBytes(node.ToJsonString()));
+    }
+
+    private static void AssertMessage(string expected, Action action)
+    {
+        var error = Assert.Throws<InvalidWorkflowTransitionException>(action);
+        Assert.Contains(expected, error.Message, StringComparison.Ordinal);
     }
 }

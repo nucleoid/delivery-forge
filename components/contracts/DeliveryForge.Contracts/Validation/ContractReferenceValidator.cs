@@ -16,7 +16,14 @@ public static class ContractReferenceValidator
                 parsed.Add((contract, JsonDocument.Parse(bytes)));
             }
 
-            var identities = parsed.ToDictionary(item => item.Contract.Identity, StringComparer.Ordinal);
+            var identities = new Dictionary<string, (ValidatedContract Contract, JsonDocument Document)>(StringComparer.Ordinal);
+            foreach (var item in parsed)
+            {
+                if (!identities.TryAdd(item.Contract.Identity, item))
+                {
+                    throw new ContractReferenceException($"Duplicate immutable contract identity '{item.Contract.Identity}'.");
+                }
+            }
             foreach (var item in parsed)
             {
                 var root = item.Document.RootElement;
@@ -76,6 +83,10 @@ public static class ContractReferenceValidator
         if (plan.GetProperty("baseCommit").GetString() != manifest.GetProperty("baseCommit").GetString())
         {
             throw new ContractReferenceException("run-manifest baseCommit does not match its immutable plan.");
+        }
+        if (plan.GetProperty("repository").GetString() != manifest.GetProperty("repository").GetString())
+        {
+            throw new ContractReferenceException("run-manifest repository does not match its immutable plan.");
         }
 
         var ceilings = new Dictionary<string, int>(StringComparer.Ordinal) { ["plan"] = 0, ["implement"] = 1, ["pr"] = 2, ["merge"] = 3 };

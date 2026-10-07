@@ -11,7 +11,7 @@
     "kind": { "const": "evidence-policy" },
     "identity": { "$ref": "#/$defs/identity" },
     "policyId": { "$ref": "#/$defs/nonEmpty" },
-    "requiredGates": { "$ref": "#/$defs/stringArray" },
+    "requiredGates": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmpty" } },
     "authorizedCeiling": { "enum": ["plan", "implement", "pr", "merge"] },
     "requireIndependentReview": { "type": "boolean" },
     "allowedNotApplicable": { "$ref": "#/$defs/stringArray" },

@@ -68,13 +68,13 @@ public static class WorkflowTransition
         if (to == WorkflowState.PrAuthorized)
         {
             RequirePolicyCeiling(evidence, AuthorizationCeiling.Pr, "PR authorization");
-            RequireReceipt(evidence.ReviewReceipt, "review-receipt", "PASS", action: null, evidence);
+            RequireIndependentReview(evidence);
         }
 
         if (to == WorkflowState.PrPublished)
         {
             RequirePolicyCeiling(evidence, AuthorizationCeiling.Pr, "PR publication");
-            RequireReceipt(evidence.ReviewReceipt, "review-receipt", "PASS", action: null, evidence);
+            RequireIndependentReview(evidence);
             RequireReceipt(evidence.PublicationReceipt, "publication-receipt", outcome: null, "PR_PUBLISHED", evidence);
         }
 
@@ -132,14 +132,10 @@ public static class WorkflowTransition
 
     private static void RequireDistinctHostReview(TransitionEvidence evidence)
     {
-        if (evidence.ReviewReceipt is null)
-        {
-            throw new InvalidWorkflowTransitionException("Hosted review requires the prior independent-review receipt.");
-        }
-
+        RequireIndependentReview(evidence);
         RequireReceipt(evidence.HostReviewReceipt, "review-receipt", "PASS", action: null, evidence);
         if (evidence.HostReviewReceipt is not null &&
-            string.Equals(evidence.ReviewReceipt.Identity, evidence.HostReviewReceipt.Identity, StringComparison.Ordinal))
+            string.Equals(evidence.ReviewReceipt!.Identity, evidence.HostReviewReceipt.Identity, StringComparison.Ordinal))
         {
             throw new InvalidWorkflowTransitionException("Hosted review requires a receipt distinct from independent review.");
         }
@@ -148,6 +144,16 @@ public static class WorkflowTransition
         if (hosted.RootElement.GetProperty("reviewerFamily").GetString() != "github-hosted")
         {
             throw new InvalidWorkflowTransitionException("Hosted review requires reviewerFamily 'github-hosted'.");
+        }
+    }
+
+    private static void RequireIndependentReview(TransitionEvidence evidence)
+    {
+        RequireReceipt(evidence.ReviewReceipt, "review-receipt", "PASS", action: null, evidence);
+        using var review = JsonDocument.Parse(evidence.ReviewReceipt!.CanonicalBytes);
+        if (review.RootElement.GetProperty("reviewerFamily").GetString() == "github-hosted")
+        {
+            throw new InvalidWorkflowTransitionException("The independent review cannot use reviewerFamily 'github-hosted'.");
         }
     }
 

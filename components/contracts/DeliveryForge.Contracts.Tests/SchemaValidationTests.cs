@@ -160,6 +160,158 @@ public sealed class SchemaValidationTests
         Assert.Contains("invalid kind", error.Message);
     }
 
+    [Theory]
+    [InlineData("baseCommit")]
+    [InlineData("headCommit")]
+    [InlineData("treeId")]
+    public void Manifest_receipts_bind_every_exact_revision_field(string field)
+    {
+        var bundle = ReferenceBundle.Create();
+        bundle.Gates[0][field] = new string('f', 40);
+        bundle.Relink();
+
+        AssertReferenceMessage("different head or tree", () => ContractReferenceValidator.Validate(bundle.Documents()));
+    }
+
+    [Theory]
+    [InlineData("baseCommit")]
+    [InlineData("headCommit")]
+    [InlineData("treeId")]
+    public void Replay_receipts_bind_every_manifest_revision_field(string field)
+    {
+        var bundle = ReferenceBundle.Create();
+        var review = LoadNode("review-receipt.json");
+        review[field] = new string('f', 40);
+        SetIdentity(review);
+        bundle.Replay["receiptIdentities"] = new JsonArray(
+            bundle.Gates.Select(gate => JsonValue.Create(gate["identity"]!.GetValue<string>()))
+                .Append(JsonValue.Create(review["identity"]!.GetValue<string>())).ToArray());
+        SetIdentity(bundle.Replay);
+
+        AssertReferenceMessage("different head or tree", () =>
+            ContractReferenceValidator.Validate(bundle.Documents(review)));
+    }
+
+    [Fact]
+    public void Manifest_base_commit_must_match_its_plan()
+    {
+        var bundle = ReferenceBundle.Create();
+        bundle.Plan["baseCommit"] = new string('f', 40);
+        bundle.Relink();
+
+        AssertReferenceMessage("baseCommit does not match", () => ContractReferenceValidator.Validate(bundle.Documents()));
+    }
+
+    [Fact]
+    public void Manifest_repository_must_match_its_plan()
+    {
+        var bundle = ReferenceBundle.Create();
+        bundle.Manifest["repository"] = "other/repository";
+        bundle.Relink();
+
+        AssertReferenceMessage("repository does not match", () => ContractReferenceValidator.Validate(bundle.Documents()));
+    }
+
+    [Fact]
+    public void Manifest_authority_cannot_exceed_its_policy()
+    {
+        var bundle = ReferenceBundle.Create();
+        bundle.Manifest["authorizationCeiling"] = "merge";
+        bundle.Relink();
+
+        AssertReferenceMessage("authorizationCeiling exceeds", () => ContractReferenceValidator.Validate(bundle.Documents()));
+    }
+
+    [Fact]
+    public void Manifest_gates_must_pass_under_the_bound_policy()
+    {
+        var failing = ReferenceBundle.Create();
+        failing.Gates[0]["outcome"] = "FAIL";
+        failing.Relink();
+        AssertReferenceMessage("not a PASS under its immutable policy", () =>
+            ContractReferenceValidator.Validate(failing.Documents()));
+
+        var wrongPolicy = ReferenceBundle.Create();
+        var alternatePolicy = LoadNode("evidence-policy.json");
+        alternatePolicy["policyId"] = "alternate";
+        SetIdentity(alternatePolicy);
+        wrongPolicy.Gates[0]["policyIdentity"] = alternatePolicy["identity"]!.GetValue<string>();
+        wrongPolicy.Relink();
+        AssertReferenceMessage("not a PASS under its immutable policy", () =>
+            ContractReferenceValidator.Validate(wrongPolicy.Documents(alternatePolicy)));
+    }
+
+    [Fact]
+    public void Manifest_must_include_each_policy_required_gate()
+    {
+        var bundle = ReferenceBundle.Create();
+        bundle.Manifest["gateReceiptIds"] = new JsonArray(
+            bundle.Gates.Take(2).Select(gate => JsonValue.Create(gate["identity"]!.GetValue<string>())).ToArray());
+        SetIdentity(bundle.Manifest);
+        bundle.Replay["runManifestIdentity"] = bundle.Manifest["identity"]!.GetValue<string>();
+        SetIdentity(bundle.Replay);
+
+        AssertReferenceMessage("does not include every gate required", () =>
+            ContractReferenceValidator.Validate(bundle.Documents()));
+    }
+
+    [Theory]
+    [InlineData("plan")]
+    [InlineData("policy")]
+    [InlineData("gate")]
+    public void Replay_bundle_must_include_all_manifest_evidence(string omitted)
+    {
+        var bundle = ReferenceBundle.Create();
+        if (omitted == "gate")
+        {
+            bundle.Replay["receiptIdentities"] = new JsonArray(
+                bundle.Gates.Skip(1).Select(gate => JsonValue.Create(gate["identity"]!.GetValue<string>())).ToArray());
+        }
+        else
+        {
+            var excluded = omitted == "plan"
+                ? bundle.Plan["identity"]!.GetValue<string>()
+                : bundle.Policy["identity"]!.GetValue<string>();
+            bundle.Replay["contractIdentities"] = new JsonArray(
+                bundle.Replay["contractIdentities"]!.AsArray()
+                    .Select(item => item!.GetValue<string>()).Where(identity => identity != excluded)
+                    .Select(identity => JsonValue.Create(identity)).ToArray());
+        }
+        SetIdentity(bundle.Replay);
+
+        AssertReferenceMessage("omits manifest plan, policy, or gate evidence", () =>
+            ContractReferenceValidator.Validate(bundle.Documents()));
+    }
+
+    [Fact]
+    public void Duplicate_contract_identities_fail_as_reference_errors()
+    {
+        var plan = LoadNode("plan.json");
+        AssertReferenceMessage("Duplicate immutable contract identity", () =>
+            ContractReferenceValidator.Validate([Bytes(plan), Bytes(plan)]));
+    }
+
+    [Fact]
+    public void Evidence_policy_requires_at_least_one_gate()
+    {
+        var policy = LoadNode("evidence-policy.json");
+        policy["requiredGates"] = new JsonArray();
+        SetIdentity(policy);
+
+        Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(Bytes(policy).Span));
+    }
+
+    [Fact]
+    public void Passing_gate_requires_zero_exit_code()
+    {
+        var gate = LoadNode("gate-receipt.json");
+        gate["exitCode"] = 1;
+        SetIdentity(gate);
+
+        var error = Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(Bytes(gate).Span));
+        Assert.Contains("exitCode=0", error.Message, StringComparison.Ordinal);
+    }
+
     [Fact]
     public void Receipt_references_must_match_checkpoint_head_and_tree()
     {
@@ -207,6 +359,61 @@ public sealed class SchemaValidationTests
         ReadOnlyMemory<byte>[] documents = [Bytes(policy), Bytes(gate)];
         var error = Assert.Throws<ContractReferenceException>(() => ContractReferenceValidator.Validate(documents));
         Assert.Contains("does not permit", error.Message);
+    }
+
+    private sealed record ReferenceBundle(
+        JsonObject Plan,
+        JsonObject Policy,
+        JsonObject[] Gates,
+        JsonObject Manifest,
+        JsonObject Replay)
+    {
+        public static ReferenceBundle Create()
+        {
+            var bundle = new ReferenceBundle(
+                LoadNode("plan.json"),
+                LoadNode("evidence-policy.json"),
+                new[] { "build", "test", "review" }.Select(gateId => GateNode(LoadNode("evidence-policy.json"), gateId)).ToArray(),
+                LoadNode("run-manifest.json"),
+                LoadNode("replay-bundle.json"));
+            foreach (var gate in bundle.Gates)
+            {
+                gate["policyIdentity"] = bundle.Policy["identity"]!.GetValue<string>();
+                SetIdentity(gate);
+            }
+            bundle.Relink();
+            return bundle;
+        }
+
+        public void Relink()
+        {
+            SetIdentity(Plan);
+            SetIdentity(Policy);
+            foreach (var gate in Gates)
+            {
+                SetIdentity(gate);
+            }
+            Manifest["planIdentity"] = Plan["identity"]!.GetValue<string>();
+            Manifest["policyIdentity"] = Policy["identity"]!.GetValue<string>();
+            Manifest["gateReceiptIds"] = new JsonArray(
+                Gates.Select(gate => JsonValue.Create(gate["identity"]!.GetValue<string>())).ToArray());
+            SetIdentity(Manifest);
+            Replay["runManifestIdentity"] = Manifest["identity"]!.GetValue<string>();
+            Replay["receiptIdentities"] = new JsonArray(
+                Gates.Select(gate => JsonValue.Create(gate["identity"]!.GetValue<string>())).ToArray());
+            Replay["contractIdentities"] = new JsonArray(
+                Plan["identity"]!.GetValue<string>(), Policy["identity"]!.GetValue<string>());
+            SetIdentity(Replay);
+        }
+
+        public ReadOnlyMemory<byte>[] Documents(params JsonObject[] extra) =>
+            [Bytes(Plan), Bytes(Policy), .. Gates.Select(Bytes), Bytes(Manifest), Bytes(Replay), .. extra.Select(Bytes)];
+    }
+
+    private static void AssertReferenceMessage(string expected, Action action)
+    {
+        var error = Assert.Throws<ContractReferenceException>(action);
+        Assert.Contains(expected, error.Message, StringComparison.Ordinal);
     }
 
     private static void SetIdentity(JsonObject node)

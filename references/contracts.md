@@ -42,14 +42,15 @@ present in the same store; replacement is atomic.
 - Modes: `plan`, `implement`, `pr`, `merge`, `resume`.
 - Gate outcomes: `PASS`, `FAIL`, `INCOMPLETE`, `ERROR`, `NOT_APPLICABLE`.
 - `NOT_APPLICABLE` requires a concrete `notApplicableRationale` permitted by policy.
-- A gate cannot be `PASS` if its `sourceChanged` observation is true. Timeouts, unsupported
-  capabilities, absent artifacts, and incomplete enumeration use a non-pass outcome.
+- A gate can be `PASS` only with `exitCode: 0` and `sourceChanged: false`. Timeouts,
+  unsupported capabilities, absent artifacts, and incomplete enumeration use a non-pass outcome.
 - Git object fields use lowercase hexadecimal object IDs. Gate, review, and publication receipts
   bind `baseCommit`, `headCommit`, and `treeId`; exact-head evidence is never inferred from a
   mutable worktree.
-- Every gate receipt names an immutable evidence-policy identity. A run manifest binds one policy;
-  all listed gates must be PASS receipts for that policy, exact base/head/tree, and every required
-  gate. `NOT_APPLICABLE` is valid only when that immutable policy explicitly allows the gate.
+- Every gate receipt names an immutable evidence-policy identity. A policy names at least one
+  required gate. A run manifest binds one policy; all listed gates must be PASS receipts for that
+  policy, exact base/head/tree, and every required gate. `NOT_APPLICABLE` is valid only when that
+  immutable policy explicitly allows the gate.
 
 ## State machine and authority
 
@@ -69,8 +70,10 @@ Entering execution requires at least `implement` authority. Receipt-gated author
 the immutable evidence policy. `PR_AUTHORIZED` requires `pr` authority
 and a passing independent-review receipt bound to the current head and tree. `PR_PUBLISHED`
 additionally requires that review receipt and a `PR_PUBLISHED` publication receipt.
-`CI_COMPLETE` requires a gate receipt, while `HOST_REVIEW_COMPLETE` uses a distinct hosted-review
-receipt. `MERGE_AUTHORIZED` and `MERGED` require `merge` authority and their matching passing hosted
+`CI_COMPLETE` requires a policy-bound PASS gate receipt with `gateId: ci`.
+`HOST_REVIEW_COMPLETE` revalidates the prior PASS independent-review receipt, rejects
+`reviewerFamily: github-hosted` for that independent evidence, and requires a distinct PASS hosted
+receipt whose `reviewerFamily` is exactly `github-hosted`. `MERGE_AUTHORIZED` and `MERGED` require `merge` authority and their matching passing hosted
 review and `MERGED` publication receipts, all bound to the current head and tree. Credentials,
 labels, or available tools never raise a ceiling.
 
