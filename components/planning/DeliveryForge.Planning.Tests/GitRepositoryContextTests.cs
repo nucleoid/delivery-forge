@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 
@@ -141,6 +142,45 @@ public sealed class GitRepositoryContextTests : IDisposable
     }
 
     [Fact]
+    public async Task Parent_context_records_gitlinks_without_entering_a_promisor_submodule()
+    {
+        var source = Path.Combine(Path.GetTempPath(), $"delivery-forge-planning-submodule-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(source);
+        try
+        {
+            RunIn(source, "git", "init -q");
+            RunIn(source, "git", "config user.email planning@example.invalid");
+            RunIn(source, "git", "config user.name Planning Tests");
+            File.WriteAllText(Path.Combine(source, "dependency.txt"), "dependency bytes");
+            RunIn(source, "git", "add dependency.txt");
+            RunIn(source, "git", "commit -q -m dependency");
+            InitializeRepository();
+            Run("git", $"-c protocol.file.allow=always submodule add -q {source} dependency");
+            Run("git", "commit -q -am submodule");
+
+            using var listener = new TcpListener(IPAddress.Loopback, 0);
+            listener.Start();
+            var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+            RunIn(Path.Combine(_root, "dependency"), "git", "config remote.origin.promisor true");
+            RunIn(Path.Combine(_root, "dependency"), "git", $"remote set-url origin http://127.0.0.1:{port}/dependency.git");
+            var connection = listener.AcceptTcpClientAsync(TestContext.Current.CancellationToken).AsTask();
+
+            var context = await new GitRepositoryContextReader().ReadAsync(
+                _root,
+                "HEAD",
+                TestContext.Current.CancellationToken);
+
+            Assert.Contains(context.Submodules, item => item.EndsWith(" dependency", StringComparison.Ordinal));
+            await Task.Delay(250, TestContext.Current.CancellationToken);
+            Assert.False(connection.IsCompleted, "Reading parent context must not launch Git or contact a remote in submodules.");
+        }
+        finally
+        {
+            DeleteTree(source);
+        }
+    }
+
+    [Fact]
     public async Task Detached_head_and_symlink_escape_are_reported_honestly()
     {
         InitializeRepository();
@@ -168,16 +208,17 @@ public sealed class GitRepositoryContextTests : IDisposable
     }
 
     [Fact]
-    public async Task Repository_file_reader_rejects_a_caller_forged_tree_identity()
+    public async Task Repository_file_reader_rejects_a_context_with_a_forged_reader_binding()
     {
         InitializeRepository();
         var reader = new GitRepositoryContextReader();
         var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
 
+        var forged = ForgeContext(context, tree: new string('f', 40));
         var error = await Assert.ThrowsAsync<PlanningException>(() =>
-            reader.ReadFileAsync(context with { Tree = new string('f', 40) }, "tracked.txt", TestContext.Current.CancellationToken));
+            reader.ReadFileAsync(forged, "tracked.txt", TestContext.Current.CancellationToken));
 
-        Assert.Contains("commit/tree identity", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("issued", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -497,6 +538,25 @@ public sealed class GitRepositoryContextTests : IDisposable
         var objectId = RunCapture("git", $"hash-object -w {Path.GetFileName(input)}");
         File.Delete(input);
         Run("git", $"update-index --add --cacheinfo 120000,{objectId},{path}");
+    }
+
+    private static RepositoryContext ForgeContext(RepositoryContext source, string? tree = null)
+    {
+        var constructor = Assert.Single(typeof(RepositoryContext).GetConstructors(
+            BindingFlags.Instance | BindingFlags.NonPublic));
+        return (RepositoryContext)constructor.Invoke(
+        [
+            source.RepositoryRoot,
+            source.RequestedRef,
+            source.Commit,
+            tree ?? source.Tree,
+            source.DetachedHead,
+            source.Dirty,
+            source.Shallow,
+            source.Submodules,
+            source.Limitations,
+            "sha256:" + new string('0', 64)
+        ]);
     }
 
     public void Dispose()

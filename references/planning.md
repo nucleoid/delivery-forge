@@ -9,9 +9,13 @@ repository reads.
 
 Minimal intake is the default. Ordinary engineering choices should be resolved from pinned
 repository or policy evidence. Deep intake is enabled only when the caller explicitly sets
-`IntakeDepth.Deep`. A genuine product, scope, risk, or authority choice is represented as one
-user-owned decision; assessment returns one conversational question with a recommendation and
-does not pretend the plan is ready. The resulting `IntakeAssessment` is a required part of the
+`IntakeDepth.Deep`; it requires at least one additional distinct complete evidence item beyond
+the evidence sufficient for minimal intake, and the complete intake is capped at 256 items. The
+host collects that evidence through the same repository, policy, and imported-context contracts;
+the .NET core does not call host tools. A genuine product, scope, risk, or authority choice is
+represented as one user-owned decision paired with a concrete recommended option; assessment
+returns one conversational question naming that option and does not pretend the plan is ready.
+The resulting `IntakeAssessment` is a required part of the
 `PlanDraft`; freeze rechecks its deterministic binding to the request, evidence, imported-context
 requirement/availability, and retained caveats, as well as unresolved user-owned decisions. An
 assessment from an unrelated earlier intake call cannot be substituted.
@@ -31,15 +35,23 @@ is always required for readiness. Raw memory/index content should not be placed 
 item.
 
 `GitRepositoryContextReader` resolves a requested ref to exact commit and tree objects and reads
-file bytes by blob object ID. Dirty state and detached HEAD are separate mutable observations.
-Shallow history and submodules remain explicit limitations. Symlink targets are returned as blob
-bytes; in-tree chains are resolved from committed tree/blob objects using portable slash semantics,
-with escape, cycle, and missing-target outcomes kept distinct. Git reads have a finite deadline,
+file bytes by blob object ID. Dirty state and detached HEAD are immutable snapshots of mutable
+observations. Repository contexts are reader-issued, defensively copied, and bound across commit,
+tree, root, requested ref, submodule gitlinks, limitations, and every mutable observation; freeze
+and file reads reject an unbound or altered context. Shallow history and submodules remain explicit
+limitations. Submodule gitlinks are read from the parent commit without launching Git in submodule
+worktrees. Symlink targets are returned as blob bytes; in-tree chains are resolved from committed
+tree/blob objects using both POSIX expansion and conservative Windows text-collapse semantics.
+Resolution has one wall deadline plus global hop, segment, target-size, and Git-invocation budgets.
+Escape is reported when either platform rule escapes, and cycle, missing, or bound-exceeded outcomes
+are conservatively marked as potentially escaping. Git reads have a finite deadline,
 terminate the process tree on overflow or cancellation, disable replace refs, lazy fetch, optional
 locks, and fsmonitor side effects, force literal pathspecs, and remove inherited repository,
-object, index, common-directory, and config routing. Partial clone or promisor repositories are
-rejected before tree/blob object reads, including on Git versions earlier than 2.44 where
-`GIT_NO_LAZY_FETCH` is unavailable; ordinary full clones remain supported. Generated-file
+object, index, common-directory, and config routing. Effective included configuration across
+repository, worktree, global, and system scopes is inspected fail closed for partial-clone/promisor
+settings. All Git transport protocols are disabled for these local reads, providing a second
+no-network boundary on Git versions earlier than 2.44 where `GIT_NO_LAZY_FETCH` is unavailable;
+ordinary full clones remain supported. Generated-file
 classification is deliberately conservative: known path/name conventions are marked, while all
 other files say that generator metadata was not asserted. Missing refs and objects fail rather
 than falling back to worktree bytes.

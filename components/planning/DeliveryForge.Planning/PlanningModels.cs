@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text.Json;
+
 namespace DeliveryForge.Planning;
 
 public sealed class PlanningException(string message) : Exception(message);
@@ -6,7 +9,7 @@ public enum IntakeDepth { Minimal, Deep }
 public enum EvidenceRequirement { Optional, Required }
 public enum EvidenceSourceKind { User, Repository, Policy, Memory, CodeIntelligence, Imported }
 public enum CheckoutVerification { Unverified, Verified, Conflict }
-public enum SymlinkResolution { NotSymlink, InTree, Escapes, Cycle, Missing }
+public enum SymlinkResolution { NotSymlink, InTree, Escapes, Cycle, Missing, BoundExceeded }
 
 public sealed record PlanningRequest(
     string Repository,
@@ -18,7 +21,8 @@ public sealed record PlanningRequest(
     IReadOnlyList<string> AcceptanceCriteria,
     string RequestedCeiling,
     IntakeDepth Depth = IntakeDepth.Minimal,
-    string? UserOwnedDecision = null);
+    string? UserOwnedDecision = null,
+    string? RecommendedOption = null);
 
 public sealed record EvidenceItem(
     EvidenceSourceKind SourceKind,
@@ -121,16 +125,100 @@ public sealed class RepositoryFile
     public string Tree { get; }
 }
 
-public sealed record RepositoryContext(
-    string RepositoryRoot,
-    string RequestedRef,
-    string Commit,
-    string Tree,
-    bool DetachedHead,
-    bool Dirty,
-    bool Shallow,
-    IReadOnlyList<string> Submodules,
-    IReadOnlyList<string> Limitations);
+public sealed class RepositoryContext
+{
+    private readonly string[] _submodules;
+    private readonly string[] _limitations;
+    private readonly string _readerBinding;
+
+    private RepositoryContext(
+        string repositoryRoot,
+        string requestedRef,
+        string commit,
+        string tree,
+        bool detachedHead,
+        bool dirty,
+        bool shallow,
+        IReadOnlyList<string> submodules,
+        IReadOnlyList<string> limitations,
+        string readerBinding)
+    {
+        RepositoryRoot = repositoryRoot;
+        RequestedRef = requestedRef;
+        Commit = commit;
+        Tree = tree;
+        DetachedHead = detachedHead;
+        Dirty = dirty;
+        Shallow = shallow;
+        _submodules = submodules.ToArray();
+        _limitations = limitations.ToArray();
+        _readerBinding = readerBinding;
+    }
+
+    public string RepositoryRoot { get; }
+    public string RequestedRef { get; }
+    public string Commit { get; }
+    public string Tree { get; }
+    public bool DetachedHead { get; }
+    public bool Dirty { get; }
+    public bool Shallow { get; }
+    public IReadOnlyList<string> Submodules => _submodules.ToArray();
+    public IReadOnlyList<string> Limitations => _limitations.ToArray();
+
+    internal static RepositoryContext Create(
+        string repositoryRoot,
+        string requestedRef,
+        string commit,
+        string tree,
+        bool detachedHead,
+        bool dirty,
+        bool shallow,
+        IReadOnlyList<string> submodules,
+        IReadOnlyList<string> limitations)
+    {
+        var copiedSubmodules = submodules.ToArray();
+        var copiedLimitations = limitations.ToArray();
+        var binding = ComputeBinding(
+            repositoryRoot, requestedRef, commit, tree, detachedHead, dirty, shallow,
+            copiedSubmodules, copiedLimitations);
+        return new RepositoryContext(
+            repositoryRoot, requestedRef, commit, tree, detachedHead, dirty, shallow,
+            copiedSubmodules, copiedLimitations, binding);
+    }
+
+    internal bool IsReaderIssued() => string.Equals(
+        _readerBinding,
+        ComputeBinding(
+            RepositoryRoot, RequestedRef, Commit, Tree, DetachedHead, Dirty, Shallow,
+            _submodules, _limitations),
+        StringComparison.Ordinal);
+
+    private static string ComputeBinding(
+        string repositoryRoot,
+        string requestedRef,
+        string commit,
+        string tree,
+        bool detachedHead,
+        bool dirty,
+        bool shallow,
+        IReadOnlyList<string> submodules,
+        IReadOnlyList<string> limitations)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            repositoryRoot,
+            requestedRef,
+            commit,
+            tree,
+            detachedHead,
+            dirty,
+            shallow,
+            submodules,
+            limitations
+        });
+        return $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
+    }
+}
 
 public sealed record ChangeTarget(string Path, string Symbol, string Effect);
 public sealed record DependencyNode(string Id, IReadOnlyList<string> DependsOn, string IntegrationCondition);

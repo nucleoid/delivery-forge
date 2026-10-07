@@ -245,6 +245,8 @@ public static class PlanFreezer
         if (request.AcceptanceCriteria.Count == 0) failures.Add("acceptance criteria are required");
         ValidateRequiredItems(request.AcceptanceCriteria, "acceptance criteria", failures);
         if (!string.IsNullOrWhiteSpace(request.UserOwnedDecision)) failures.Add("user-owned decision remains unresolved");
+        if (string.IsNullOrWhiteSpace(request.UserOwnedDecision) != string.IsNullOrWhiteSpace(request.RecommendedOption))
+            failures.Add("a user-owned decision and concrete recommended option must be supplied together");
         if (!draft.Intake.Ready) failures.Add("intake readiness evidence is not ready");
         if (draft.Intake.Depth != request.Depth) failures.Add("intake depth does not match the planning request");
         if (!IntakePlanner.IsBoundTo(draft.Intake, request, draft.Provenance))
@@ -269,6 +271,7 @@ public static class PlanFreezer
         ValidateUnique(draft.Unknowns, item => item.Description, "unknown descriptions", failures);
         ValidateGitObject(draft.Repository.Commit, "base commit", failures);
         ValidateGitObject(draft.Repository.Tree, "base tree", failures);
+        if (!draft.Repository.IsReaderIssued()) failures.Add("repository context was not issued by the exact Git reader or its bound observations changed");
         if (request.RequestedCeiling is not ("plan" or "implement" or "pr" or "merge"))
             failures.Add("requested ceiling is not recognized");
         foreach (var evidence in draft.Provenance)
@@ -357,6 +360,7 @@ public static class PlanFreezer
         {
             revision, draft.Request.Repository, draft.Request.WorkItem, draft.Request.Mode, draft.Request.Outcome,
             draft.Request.RequestedCeiling, draft.Request.UserOwnedDecision ?? string.Empty,
+            draft.Request.RecommendedOption ?? string.Empty,
             draft.Repository.RequestedRef,
             draft.Rollout.Compatibility, draft.Rollout.Configuration, draft.Rollout.Secrets,
             draft.Rollout.Migration, draft.Rollout.Reauthentication, draft.Rollout.Backfill,

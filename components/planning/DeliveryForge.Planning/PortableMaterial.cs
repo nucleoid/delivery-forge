@@ -35,13 +35,19 @@ internal static partial class PortableMaterial
         value.StartsWith('\\') ||
         WindowsDrivePath().IsMatch(value);
 
-    [GeneratedRegex("""(?ix)(?:^|[\s=:'"(\[\]`{|;,])(?:[a-z]:[\\/]|[\\/]{2}[^\\/\s]+[\\/][^\\/\s]+|/(?!/)(?:[a-z0-9._~-]+/)+[a-z0-9._~-]+)""")]
+    [GeneratedRegex(
+        """(?:(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/\s]+[\\/][^\\/\s]+|/(?:home|Users|root|tmp|var|opt|srv|mnt|etc|private)(?:/[^/\s]+)+))""",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex HostPath();
 
-    [GeneratedRegex("""(?i)\b[a-z][a-z0-9+.-]*://[^\s`|\[\]{}<>"']+""")]
+    [GeneratedRegex(
+        """\b[a-z][a-z0-9+.-]*://[^\s`|\[\]{}<>"']+""",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SchemeUrl();
 
-    [GeneratedRegex(@"(?i)(?:-----BEGIN\s|Bearer\s|api[_-]?key\s*=|password\s*=|token\s*=|(?:^|[^A-Za-z0-9])(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}))")]
+    [GeneratedRegex(
+        @"(?:-----BEGIN\s|Bearer\s|api[_-]?key\s*=|password\s*=|token\s*=|(?:^|[^A-Za-z0-9])(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}))",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex Credential();
 
     [GeneratedRegex(@"^[A-Za-z]:[\\/]")]

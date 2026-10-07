@@ -170,6 +170,8 @@ public sealed record ImportedContextEnvelope(
 
 public static class IntakePlanner
 {
+    private const int MaximumEvidenceItems = 256;
+
     public static IntakeAssessment Assess(
         PlanningRequest request,
         IReadOnlyList<EvidenceItem> evidence,
@@ -178,6 +180,15 @@ public static class IntakePlanner
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(evidence);
+        var importedEntryCount = importedContext?.Entries.Count ?? 0;
+        if (evidence.Count + importedEntryCount > MaximumEvidenceItems)
+        {
+            throw new PlanningException($"Planning evidence exceeds the {MaximumEvidenceItems}-item intake limit.");
+        }
+        if (string.IsNullOrWhiteSpace(request.UserOwnedDecision) != string.IsNullOrWhiteSpace(request.RecommendedOption))
+        {
+            throw new PlanningException("A genuine user-owned decision and its concrete recommended option must be supplied together.");
+        }
         var limitations = new List<string>();
         var ready = evidence.Any(item =>
             item.SourceKind is EvidenceSourceKind.Repository or EvidenceSourceKind.Policy && item.IsComplete);
@@ -190,6 +201,20 @@ public static class IntakePlanner
             {
                 limitations.Add($"{item.Requirement} evidence at {item.Locator} is incomplete.");
                 if (item.Requirement == EvidenceRequirement.Required) ready = false;
+            }
+        }
+
+        if (request.Depth == IntakeDepth.Deep)
+        {
+            var distinctCompleteEvidence = evidence
+                .Where(item => item.IsComplete)
+                .Select(item => (item.SourceKind, item.Locator))
+                .Distinct()
+                .Count();
+            if (distinctCompleteEvidence < 2)
+            {
+                ready = false;
+                limitations.Add("Deep intake requires additional bounded repository, policy, or imported evidence beyond minimal intake.");
             }
         }
 
@@ -239,7 +264,7 @@ public static class IntakePlanner
         if (!string.IsNullOrWhiteSpace(request.UserOwnedDecision))
         {
             ready = false;
-            question = $"I recommend the safest reversible option; should we decide this before planning: {request.UserOwnedDecision.Trim().TrimEnd('?')}?";
+            question = $"I recommend {request.RecommendedOption!.Trim().TrimEnd('.')}. Shall we decide this before planning: {request.UserOwnedDecision.Trim().TrimEnd('?')}?";
         }
 
         var normalizedLimitations = limitations.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
@@ -290,7 +315,8 @@ public static class IntakePlanner
                 acceptanceCriteria = request.AcceptanceCriteria.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
                 request.RequestedCeiling,
                 depth = request.Depth.ToString().ToLowerInvariant(),
-                request.UserOwnedDecision
+                request.UserOwnedDecision,
+                request.RecommendedOption
             },
             evidence = evidence
                 .OrderBy(item => item.SourceKind)

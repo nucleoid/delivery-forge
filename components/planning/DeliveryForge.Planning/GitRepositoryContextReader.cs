@@ -6,8 +6,10 @@ namespace DeliveryForge.Planning;
 public sealed class GitRepositoryContextReader
 {
     private const int MaximumGitOutputBytes = 16 * 1024 * 1024;
+    private const int MaximumSymlinkTargetBytes = 4 * 1024;
     private static readonly TimeSpan GitOperationTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan GitTerminationTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan SymlinkResolutionTimeout = TimeSpan.FromSeconds(10);
 
     public async Task<RepositoryContext> ReadAsync(
         string repositoryRoot,
@@ -30,30 +32,32 @@ public sealed class GitRepositoryContextReader
         await RejectPromisorRepositoryAsync(root, cancellationToken);
         var commit = (await GitTextAsync(root, cancellationToken, "rev-parse", "--verify", "--end-of-options", $"{reference}^{{commit}}")).Trim();
         var tree = (await GitTextAsync(root, cancellationToken, "rev-parse", "--verify", "--end-of-options", $"{commit}^{{tree}}")).Trim();
-        var status = await GitTextAsync(root, cancellationToken, "status", "--porcelain=v1", "--untracked-files=normal");
+        var status = await GitTextAsync(
+            root,
+            cancellationToken,
+            "status", "--porcelain=v1", "--untracked-files=normal", "--ignore-submodules=all");
         var shallow = string.Equals(
             (await GitTextAsync(root, cancellationToken, "rev-parse", "--is-shallow-repository")).Trim(),
             "true",
             StringComparison.Ordinal);
         var symbolic = await RunGitAsync(root, cancellationToken, allowFailure: true, "symbolic-ref", "-q", "HEAD");
-        var submoduleResult = await RunGitAsync(root, cancellationToken, allowFailure: true, "submodule", "status", "--recursive");
-        var submodules = Encoding.UTF8.GetString(submoduleResult.StandardOutput)
-            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var submodules = await ReadGitlinksAsync(root, commit, cancellationToken);
         var limitations = new List<string>();
         if (shallow) limitations.Add("Repository is shallow; objects outside the retained history may be unavailable.");
-        if (submodules.Length > 0) limitations.Add("Submodule commits are recorded separately and are not expanded into the parent tree.");
+        if (submodules.Length > 0)
+            limitations.Add("Submodule gitlinks are recorded from the parent tree; submodule worktrees are not entered or inspected.");
         if (!string.IsNullOrEmpty(status)) limitations.Add("Mutable worktree is dirty; exact-object reads remain pinned to the resolved commit.");
 
-        return new RepositoryContext(
+        return RepositoryContext.Create(
             root,
             reference,
             commit,
             tree,
-            DetachedHead: symbolic.ExitCode != 0,
-            Dirty: !string.IsNullOrEmpty(status),
-            Shallow: shallow,
-            Submodules: submodules,
-            Limitations: limitations);
+            detachedHead: symbolic.ExitCode != 0,
+            dirty: !string.IsNullOrEmpty(status),
+            shallow,
+            submodules,
+            limitations);
     }
 
     public async Task<RepositoryFile> ReadFileAsync(
@@ -62,6 +66,10 @@ public sealed class GitRepositoryContextReader
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+        if (!context.IsReaderIssued())
+        {
+            throw new PlanningException("Repository context was not issued by the exact Git reader or its bound observations changed.");
+        }
         await RejectPromisorRepositoryAsync(context.RepositoryRoot, cancellationToken);
         var commit = (await GitTextAsync(
             context.RepositoryRoot,
@@ -102,7 +110,7 @@ public sealed class GitRepositoryContextReader
             treeEntry.Mode,
             bytes,
             isSymlink,
-            resolution == SymlinkResolution.Escapes,
+            resolution is not (SymlinkResolution.NotSymlink or SymlinkResolution.InTree),
             generated,
             resolution,
             context.Commit,
@@ -111,21 +119,37 @@ public sealed class GitRepositoryContextReader
 
     private static async Task RejectPromisorRepositoryAsync(string root, CancellationToken cancellationToken)
     {
-        var partialClone = await RunGitAsync(
+        var effectiveConfiguration = await RunGitAsync(
             root,
             cancellationToken,
             allowFailure: true,
-            "config", "--local", "--get", "extensions.partialClone");
-        var promisorRemote = await RunGitAsync(
-            root,
-            cancellationToken,
-            allowFailure: true,
-            "config", "--local", "--get-regexp", "^remote\\..*\\.promisor$");
-        if (partialClone.ExitCode == 0 || promisorRemote.ExitCode == 0)
+            "config", "--includes", "--get-regexp", "^(remote\\..*\\.promisor|extensions\\.partialclone)$");
+        if (effectiveConfiguration.ExitCode != 1)
         {
             throw new PlanningException(
-                "Exact object reads reject partial clone/promisor repositories before object access so missing objects cannot trigger a network fetch.");
+                effectiveConfiguration.ExitCode == 0
+                    ? "Exact object reads reject partial clone/promisor repositories before object access so missing objects cannot trigger a network fetch."
+                    : "Exact object reads reject repositories whose effective included promisor configuration cannot be inspected safely.");
         }
+    }
+
+    private static async Task<string[]> ReadGitlinksAsync(
+        string root,
+        string commit,
+        CancellationToken cancellationToken)
+    {
+        var result = await RunGitAsync(
+            root,
+            cancellationToken,
+            allowFailure: false,
+            "ls-tree", "-r", "-z", "--full-tree", "--end-of-options", commit);
+        return Encoding.UTF8.GetString(result.StandardOutput)
+            .Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Select(entry => entry.Split('\t', 2))
+            .Where(parts => parts.Length == 2 && parts[0].StartsWith("160000 commit ", StringComparison.Ordinal))
+            .Select(parts => $"{parts[0][14..]} {parts[1]}")
+            .Order(StringComparer.Ordinal)
+            .ToArray();
     }
 
     private static string NormalizeRepositoryPath(string path)
@@ -150,8 +174,27 @@ public sealed class GitRepositoryContextReader
         string target,
         CancellationToken cancellationToken)
     {
-        var visited = new HashSet<string>(StringComparer.Ordinal) { symlinkPath };
-        return await ResolveTargetAsync(context, ParentSegments(symlinkPath), target, [], visited, cancellationToken);
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(SymlinkResolutionTimeout);
+        var budget = new ResolutionBudget();
+        try
+        {
+            return await ResolveTargetAsync(
+                context,
+                ParentSegments(symlinkPath),
+                target,
+                [],
+                budget,
+                deadline.Token);
+        }
+        catch (ResolutionBoundExceededException)
+        {
+            return SymlinkResolution.BoundExceeded;
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return SymlinkResolution.BoundExceeded;
+        }
     }
 
     private static async Task<SymlinkResolution> ResolveTargetAsync(
@@ -159,18 +202,27 @@ public sealed class GitRepositoryContextReader
         IReadOnlyList<string> parent,
         string target,
         IReadOnlyList<string> remaining,
-        HashSet<string> visited,
+        ResolutionBudget budget,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(target) || PortableMaterial.IsAbsolutePath(target))
         {
             return SymlinkResolution.Escapes;
         }
+        if (Encoding.UTF8.GetByteCount(target) > MaximumSymlinkTargetBytes)
+        {
+            return SymlinkResolution.BoundExceeded;
+        }
+        if (TextCollapseEscapes(parent, target, budget))
+        {
+            return SymlinkResolution.Escapes;
+        }
 
         var resolved = parent.ToList();
-        var pending = new Queue<string>(SplitTarget(target).Concat(remaining));
+        var pending = new Queue<string>(SplitTarget(target, budget).Concat(remaining));
         while (pending.Count > 0)
         {
+            budget.VisitSegment();
             var segment = pending.Dequeue();
             if (segment is "" or ".") continue;
             if (segment == "..")
@@ -181,7 +233,7 @@ public sealed class GitRepositoryContextReader
             }
 
             var candidate = string.Join('/', resolved.Append(segment));
-            var entry = await TryReadTreeEntryAsync(context, candidate, cancellationToken);
+            var entry = await TryReadTreeEntryAsync(context, candidate, cancellationToken, budget);
             if (entry is null)
             {
                 return SymlinkResolution.Missing;
@@ -189,17 +241,25 @@ public sealed class GitRepositoryContextReader
 
             if (entry.Mode == "120000")
             {
-                if (!visited.Add(candidate))
+                if (!budget.FollowSymlink())
                 {
                     return SymlinkResolution.Cycle;
                 }
-                var nestedTarget = Encoding.UTF8.GetString(await ReadBlobAsync(context, entry.ObjectId, cancellationToken));
+                var nestedTarget = Encoding.UTF8.GetString(await ReadBlobAsync(context, entry.ObjectId, cancellationToken, budget));
                 if (string.IsNullOrEmpty(nestedTarget) || PortableMaterial.IsAbsolutePath(nestedTarget))
                 {
                     return SymlinkResolution.Escapes;
                 }
+                if (Encoding.UTF8.GetByteCount(nestedTarget) > MaximumSymlinkTargetBytes)
+                {
+                    return SymlinkResolution.BoundExceeded;
+                }
+                if (TextCollapseEscapes(ParentSegments(candidate), nestedTarget, budget))
+                {
+                    return SymlinkResolution.Escapes;
+                }
 
-                pending = new Queue<string>(SplitTarget(nestedTarget).Concat(pending));
+                pending = new Queue<string>(SplitTarget(nestedTarget, budget).Concat(pending));
                 continue;
             }
 
@@ -217,7 +277,34 @@ public sealed class GitRepositoryContextReader
         return resolved.Count == 0 ? SymlinkResolution.Missing : SymlinkResolution.InTree;
     }
 
-    private static IEnumerable<string> SplitTarget(string target) => target.Replace('\\', '/').Split('/');
+    private static string[] SplitTarget(string target, ResolutionBudget budget)
+    {
+        var segments = target.Replace('\\', '/').Split('/');
+        budget.AddSegments(segments.Length);
+        return segments;
+    }
+
+    private static bool TextCollapseEscapes(
+        IReadOnlyList<string> parent,
+        string target,
+        ResolutionBudget budget)
+    {
+        var collapsed = parent.ToList();
+        foreach (var segment in SplitTarget(target, budget))
+        {
+            if (segment is "" or ".") continue;
+            if (segment == "..")
+            {
+                if (collapsed.Count == 0) return true;
+                collapsed.RemoveAt(collapsed.Count - 1);
+            }
+            else
+            {
+                collapsed.Add(segment);
+            }
+        }
+        return false;
+    }
 
     private static string[] ParentSegments(string path)
     {
@@ -228,8 +315,10 @@ public sealed class GitRepositoryContextReader
     private static async Task<TreeEntry?> TryReadTreeEntryAsync(
         RepositoryContext context,
         string path,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ResolutionBudget? budget = null)
     {
+        budget?.InvokeGit();
         var result = await RunGitAsync(
             context.RepositoryRoot,
             cancellationToken,
@@ -246,12 +335,16 @@ public sealed class GitRepositoryContextReader
     private static async Task<byte[]> ReadBlobAsync(
         RepositoryContext context,
         string objectId,
-        CancellationToken cancellationToken) =>
-        (await RunGitAsync(
+        CancellationToken cancellationToken,
+        ResolutionBudget? budget = null)
+    {
+        budget?.InvokeGit();
+        return (await RunGitAsync(
             context.RepositoryRoot,
             cancellationToken,
             allowFailure: false,
             "cat-file", "blob", "--end-of-options", objectId)).StandardOutput;
+    }
 
     private static async Task<string> GitTextAsync(string root, CancellationToken cancellationToken, params string[] arguments) =>
         Encoding.UTF8.GetString((await RunGitAsync(root, cancellationToken, false, arguments)).StandardOutput);
@@ -288,9 +381,17 @@ public sealed class GitRepositoryContextReader
         startInfo.Environment["GIT_NO_REPLACE_OBJECTS"] = "1";
         startInfo.Environment["GIT_LITERAL_PATHSPECS"] = "1";
         startInfo.Environment["GIT_NO_LAZY_FETCH"] = "1";
+        startInfo.Environment["GIT_TERMINAL_PROMPT"] = "0";
         startInfo.Environment["GIT_OPTIONAL_LOCKS"] = "0";
         startInfo.ArgumentList.Add("-c");
         startInfo.ArgumentList.Add("core.fsmonitor=false");
+        startInfo.ArgumentList.Add("-c");
+        startInfo.ArgumentList.Add("protocol.allow=never");
+        foreach (var protocol in new[] { "file", "git", "http", "https", "ssh", "ftp", "ftps", "ext" })
+        {
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add($"protocol.{protocol}.allow=never");
+        }
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -373,4 +474,35 @@ public sealed class GitRepositoryContextReader
 
     private sealed record GitResult(int ExitCode, byte[] StandardOutput, byte[] StandardError);
     private sealed record TreeEntry(string Mode, string Type, string ObjectId);
+
+    private sealed class ResolutionBudget
+    {
+        private const int MaximumSegments = 256;
+        private const int MaximumSymlinkHops = 40;
+        private const int MaximumGitInvocations = 128;
+        private int _segments;
+        private int _symlinkHops;
+        private int _gitInvocations;
+
+        public void AddSegments(int count)
+        {
+            _segments = checked(_segments + count);
+            if (_segments > MaximumSegments) throw new ResolutionBoundExceededException();
+        }
+
+        public void VisitSegment()
+        {
+            _segments = checked(_segments + 1);
+            if (_segments > MaximumSegments) throw new ResolutionBoundExceededException();
+        }
+
+        public bool FollowSymlink() => ++_symlinkHops <= MaximumSymlinkHops;
+
+        public void InvokeGit()
+        {
+            if (++_gitInvocations > MaximumGitInvocations) throw new ResolutionBoundExceededException();
+        }
+    }
+
+    private sealed class ResolutionBoundExceededException : Exception;
 }

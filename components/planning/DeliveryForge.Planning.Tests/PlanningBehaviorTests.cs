@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using DeliveryForge.Contracts.Validation;
@@ -22,12 +23,20 @@ public sealed class PlanningBehaviorTests
     [Fact]
     public void User_owned_choice_blocks_with_one_recommended_conversational_question()
     {
-        var assessment = IntakePlanner.Assess(Request() with { UserOwnedDecision = "Choose whether v1 may delete user data" }, [RepositoryEvidence()]);
+        var assessment = IntakePlanner.Assess(
+            Request() with
+            {
+                UserOwnedDecision = "Choose whether v1 may delete user data",
+                RecommendedOption = "do not delete user data in v1"
+            },
+            [RepositoryEvidence()]);
 
         Assert.False(assessment.Ready);
-        Assert.Contains("recommend", assessment.RecommendedQuestion!, StringComparison.OrdinalIgnoreCase);
+        Assert.StartsWith("I recommend do not delete user data in v1.", assessment.RecommendedQuestion!, StringComparison.Ordinal);
         Assert.DoesNotContain('\n', assessment.RecommendedQuestion!);
-        Assert.NotNull(typeof(PlanningRequest).GetProperty("RecommendedOption"));
+        Assert.Throws<PlanningException>(() => IntakePlanner.Assess(
+            Request() with { UserOwnedDecision = "Choose whether v1 may delete user data" },
+            [RepositoryEvidence()]));
     }
 
     [Fact]
@@ -40,11 +49,23 @@ public sealed class PlanningBehaviorTests
             RepositoryEvidence(),
             new(EvidenceSourceKind.Policy, "policy:planning", "sha256:" + new string('c', 64), ObservedAt, [])
         ]);
+        var importedDeepAssessment = IntakePlanner.Assess(
+            request,
+            [
+                RepositoryEvidence(),
+                new(EvidenceSourceKind.Imported, "index:callers", null, ObservedAt, ["Advisory and unverified against checkout bytes."])
+            ],
+            new ImportedContextEnvelope(
+                "1.0.0",
+                [new("code-index", "index:callers", "Additional bounded caller evidence", null, ObservedAt)],
+                [],
+                []));
 
         Assert.Equal(IntakeDepth.Deep, shallowAssessment.Depth);
         Assert.False(shallowAssessment.Ready);
         Assert.Contains(shallowAssessment.Limitations, item => item.Contains("additional", StringComparison.OrdinalIgnoreCase));
         Assert.True(deepAssessment.Ready);
+        Assert.True(importedDeepAssessment.Ready);
     }
 
     [Fact]
@@ -288,6 +309,21 @@ public sealed class PlanningBehaviorTests
         var frozen = PlanFreezer.Freeze(
             draft with { Provenance = provenance, Intake = IntakePlanner.Assess(draft.Request, provenance) },
             "revision-url",
+            ObservedAt);
+
+        Assert.Contains(locator, Encoding.UTF8.GetString(frozen.CanonicalBytes), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Valid_url_with_host_path_shaped_segments_remains_portable()
+    {
+        var locator = "https://example.invalid/home/alice/.ssh/config";
+        var draft = Draft();
+        EvidenceItem[] provenance = [RepositoryEvidence(locator)];
+
+        var frozen = PlanFreezer.Freeze(
+            draft with { Provenance = provenance, Intake = IntakePlanner.Assess(draft.Request, provenance) },
+            "revision-url-shaped-path",
             ObservedAt);
 
         Assert.Contains(locator, Encoding.UTF8.GetString(frozen.CanonicalBytes), StringComparison.Ordinal);
@@ -579,12 +615,16 @@ public sealed class PlanningBehaviorTests
         var first = PlanFreezer.Freeze(clean, "revision-1", ObservedAt);
         var dirty = clean with
         {
-            Repository = clean.Repository with
-            {
-                Dirty = true,
-                Submodules = ["+0123456789012345678901234567890123456789 dependency"],
-                Limitations = ["Mutable worktree is dirty; exact-object reads remain pinned to the resolved commit."]
-            }
+            Repository = RepositoryContext.Create(
+                clean.Repository.RepositoryRoot,
+                clean.Repository.RequestedRef,
+                clean.Repository.Commit,
+                clean.Repository.Tree,
+                clean.Repository.DetachedHead,
+                dirty: true,
+                clean.Repository.Shallow,
+                ["+0123456789012345678901234567890123456789 dependency"],
+                ["Mutable worktree is dirty; exact-object reads remain pinned to the resolved commit."])
         };
 
         var second = PlanFreezer.Freeze(dirty, "revision-1", ObservedAt, first);
@@ -627,6 +667,34 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
+    public void Freeze_rejects_a_repository_context_with_forged_mutable_observations()
+    {
+        var draft = Draft();
+        var constructor = Assert.Single(typeof(RepositoryContext).GetConstructors(
+            BindingFlags.Instance | BindingFlags.NonPublic));
+        var forged = (RepositoryContext)constructor.Invoke(
+        [
+            draft.Repository.RepositoryRoot,
+            draft.Repository.RequestedRef,
+            draft.Repository.Commit,
+            draft.Repository.Tree,
+            draft.Repository.DetachedHead,
+            true,
+            draft.Repository.Shallow,
+            Array.Empty<string>(),
+            Array.Empty<string>(),
+            "sha256:" + new string('0', 64)
+        ]);
+
+        var error = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(
+            draft with { Repository = forged },
+            "revision-forged-observations",
+            ObservedAt));
+
+        Assert.Contains("issued", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Imported_context_rejects_non_sha256_digest()
     {
         var json = Encoding.UTF8.GetBytes("""
@@ -652,9 +720,9 @@ public sealed class PlanningBehaviorTests
     {
         var request = Request();
         EvidenceItem[] provenance = [RepositoryEvidence("git:README.md"), RepositoryEvidence("git:Directory.Build.props")];
-        var repository = new RepositoryContext(
+        var repository = RepositoryContext.Create(
             "/portable/display-only", "HEAD", new string('a', 40), new string('b', 40),
-            DetachedHead: false, Dirty: false, Shallow: false, Submodules: [], Limitations: []);
+            detachedHead: false, dirty: false, shallow: false, submodules: [], limitations: []);
         return new PlanDraft(
             request, repository,
             provenance,

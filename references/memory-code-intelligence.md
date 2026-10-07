@@ -8,6 +8,9 @@ execution authority, publication authority, or substitutes for checkout bytes.
 The future host integration owns capability detection, tool calls, authentication, search limits,
 and conversion into the host-neutral `ImportedContextEnvelope`. `DeliveryForge.Planning` itself
 does not know OpenClaw, Engram, MCP, provider IDs, host paths, credentials, or private skill text.
+Explicit deep intake asks the host for additional bounded evidence, but transports it through the
+same repository/policy evidence items and imported-context envelope; no host capability or provider
+contract enters the planning library.
 
 The JSON envelope is capped at 256 KiB and 256 entries. It accepts only:
 
@@ -17,7 +20,8 @@ The JSON envelope is capped at 256 KiB and 256 entries. It accepts only:
   stale/truncated/heuristic flags;
 - conflicts and limitations.
 
-Unknown fields, absolute host paths, obvious credential material, malformed/duplicate JSON, and
+Unknown fields, absolute host paths (including delimiter-adjacent and non-ASCII path segments),
+obvious credential material, malformed/duplicate JSON, and
 oversized input fail closed. Raw documents, prompts, transcripts, source bodies, credentials, and
 private filesystem locations are outside the envelope.
 
