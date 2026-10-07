@@ -30,8 +30,7 @@ public sealed class GitRepositoryContextTests : IDisposable
     {
         InitializeRepository();
         Run("git", "checkout --detach HEAD");
-        File.CreateSymbolicLink(Path.Combine(_root, "escape"), "../outside");
-        Run("git", "add escape");
+        AddCommittedSymlink("escape", "../outside");
         Run("git", "commit -m symlink");
 
         var reader = new GitRepositoryContextReader();
@@ -89,9 +88,8 @@ public sealed class GitRepositoryContextTests : IDisposable
     public async Task Chained_committed_symlinks_detect_escape_with_portable_slash_semantics()
     {
         InitializeRepository();
-        File.CreateSymbolicLink(Path.Combine(_root, "d"), "..");
-        File.CreateSymbolicLink(Path.Combine(_root, "x"), "d/outside");
-        Run("git", "add d x");
+        AddCommittedSymlink("d", "..");
+        AddCommittedSymlink("x", "d/outside");
         Run("git", "commit -q -m chained-symlinks");
         var reader = new GitRepositoryContextReader();
         var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
@@ -100,6 +98,52 @@ public sealed class GitRepositoryContextTests : IDisposable
 
         Assert.True(file.IsSymlink);
         Assert.True(file.EscapesWorktree);
+    }
+
+    [Fact]
+    public async Task Exact_symlink_resolution_reports_cycles_missing_targets_and_windows_separators()
+    {
+        InitializeRepository();
+        AddCommittedSymlink("a", "b");
+        AddCommittedSymlink("b", "a");
+        AddCommittedSymlink("missing", "not-present");
+        AddCommittedSymlink("windows-escape", "..\\outside");
+        Run("git", "commit -q -m symlink-dispositions");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+        var cycle = await reader.ReadFileAsync(context, "a", TestContext.Current.CancellationToken);
+        var missing = await reader.ReadFileAsync(context, "missing", TestContext.Current.CancellationToken);
+        var windowsEscape = await reader.ReadFileAsync(context, "windows-escape", TestContext.Current.CancellationToken);
+
+        Assert.Equal(SymlinkResolution.Cycle, cycle.SymlinkResolution);
+        Assert.Equal(SymlinkResolution.Missing, missing.SymlinkResolution);
+        Assert.Equal(SymlinkResolution.Escapes, windowsEscape.SymlinkResolution);
+        Assert.True(windowsEscape.EscapesWorktree);
+    }
+
+    [Fact]
+    public async Task Exact_git_reads_ignore_inherited_repository_routing_variables()
+    {
+        InitializeRepository();
+        var previousDirectory = Environment.GetEnvironmentVariable("GIT_DIR");
+        var previousWorktree = Environment.GetEnvironmentVariable("GIT_WORK_TREE");
+        try
+        {
+            Environment.SetEnvironmentVariable("GIT_DIR", Path.Combine(_root, "not-the-repository"));
+            Environment.SetEnvironmentVariable("GIT_WORK_TREE", Path.Combine(_root, "not-the-worktree"));
+
+            var reader = new GitRepositoryContextReader();
+            var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+            var file = await reader.ReadFileAsync(context, "tracked.txt", TestContext.Current.CancellationToken);
+
+            Assert.Equal("committed bytes", Encoding.UTF8.GetString(file.Bytes));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("GIT_DIR", previousDirectory);
+            Environment.SetEnvironmentVariable("GIT_WORK_TREE", previousWorktree);
+        }
     }
 
     private void InitializeRepository()
@@ -115,21 +159,57 @@ public sealed class GitRepositoryContextTests : IDisposable
 
     private void Run(string fileName, string arguments)
     {
-        using var process = Process.Start(new ProcessStartInfo(fileName, arguments)
+        using var process = Process.Start(CreateStartInfo(fileName, arguments))!;
+        process.WaitForExit();
+        Assert.True(process.ExitCode == 0, process.StandardError.ReadToEnd());
+    }
+
+    private string RunCapture(string fileName, string arguments)
+    {
+        using var process = Process.Start(CreateStartInfo(fileName, arguments))!;
+        var output = process.StandardOutput.ReadToEnd();
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        Assert.True(process.ExitCode == 0, error);
+        return output.Trim();
+    }
+
+    private ProcessStartInfo CreateStartInfo(string fileName, string arguments)
+    {
+        var startInfo = new ProcessStartInfo(fileName, arguments)
         {
             WorkingDirectory = _root,
             RedirectStandardError = true,
             RedirectStandardOutput = true,
             UseShellExecute = false
-        })!;
-        process.WaitForExit();
-        Assert.True(process.ExitCode == 0, process.StandardError.ReadToEnd());
+        };
+        startInfo.Environment["GIT_CONFIG_NOSYSTEM"] = "1";
+        startInfo.Environment["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+        startInfo.Environment["GIT_OPTIONAL_LOCKS"] = "0";
+        return startInfo;
+    }
+
+    private void AddCommittedSymlink(string path, string target)
+    {
+        var input = Path.Combine(_root, $"symlink-target-{Guid.NewGuid():N}");
+        File.WriteAllText(input, target);
+        var objectId = RunCapture("git", $"hash-object -w {Path.GetFileName(input)}");
+        File.Delete(input);
+        Run("git", $"update-index --add --cacheinfo 120000,{objectId},{path}");
     }
 
     public void Dispose()
     {
         if (Directory.Exists(_root))
         {
+            foreach (var file in Directory.EnumerateFiles(_root, "*", SearchOption.AllDirectories))
+            {
+                File.SetAttributes(file, FileAttributes.Normal);
+            }
+            foreach (var directory in Directory.EnumerateDirectories(_root, "*", SearchOption.AllDirectories))
+            {
+                File.SetAttributes(directory, FileAttributes.Directory);
+            }
             Directory.Delete(_root, recursive: true);
         }
     }

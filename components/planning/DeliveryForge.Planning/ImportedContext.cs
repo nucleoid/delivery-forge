@@ -1,3 +1,5 @@
+using System.Globalization;
+using System.Security.Cryptography;
 using System.Text.Json;
 using DeliveryForge.Contracts.Serialization;
 
@@ -11,7 +13,8 @@ public sealed record ImportedContextEnvelope(
 {
     private const int MaximumEnvelopeBytes = 256 * 1024;
     private static readonly HashSet<string> EnvelopeFields = ["schemaVersion", "entries", "conflicts", "limitations"];
-    private static readonly HashSet<string> EntryFields = ["kind", "locator", "summary", "digest", "observedAt", "stale", "truncated", "heuristic"];
+    private static readonly HashSet<string> EntryFields = ["kind", "locator", "summary", "digest", "observedAt", "stale", "truncated", "heuristic", "checkoutVerification"];
+    private static readonly string[] UtcTimestampFormats = ["yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'"];
 
     public static ImportedContextEnvelope Parse(ReadOnlySpan<byte> json)
     {
@@ -39,6 +42,10 @@ public sealed record ImportedContextEnvelope(
             {
                 throw new PlanningException("Imported context exceeds the 256-entry portable envelope limit.");
             }
+            if (entries.Select(entry => (entry.Kind, entry.Locator)).Distinct().Count() != entries.Length)
+            {
+                throw new PlanningException("Imported context entry kind/locator keys must be unique.");
+            }
 
             return new ImportedContextEnvelope(
                 version,
@@ -50,7 +57,7 @@ public sealed record ImportedContextEnvelope(
         {
             throw;
         }
-        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        catch (Exception exception) when (exception is ContractJsonException or JsonException or InvalidOperationException or ArgumentException or FormatException)
         {
             throw new PlanningException($"Imported context is not a valid portable envelope: {exception.Message}");
         }
@@ -66,10 +73,27 @@ public sealed record ImportedContextEnvelope(
         var digest = item.TryGetProperty("digest", out var digestElement) && digestElement.ValueKind != JsonValueKind.Null
             ? PortableText(digestElement.GetString() ?? string.Empty, "digest")
             : null;
-        if (!DateTimeOffset.TryParse(RequireString(item, "observedAt"), out var observedAt) || observedAt.Offset != TimeSpan.Zero)
+        if (digest is not null &&
+            (digest.Length != 71 || !digest.StartsWith("sha256:", StringComparison.Ordinal) ||
+             digest[7..].Any(character => character is < '0' or > '9' && character is < 'a' or > 'f')))
+        {
+            throw new PlanningException("Imported context digest must be lowercase sha256 when supplied.");
+        }
+        if (!DateTimeOffset.TryParseExact(
+                RequireString(item, "observedAt"),
+                UtcTimestampFormats,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out var observedAt))
         {
             throw new PlanningException("Imported context observedAt must be an explicit UTC timestamp.");
         }
+
+        var verification = item.TryGetProperty("checkoutVerification", out var verificationElement)
+            ? verificationElement.ValueKind == JsonValueKind.String && Enum.TryParse<CheckoutVerification>(verificationElement.GetString(), ignoreCase: true, out var parsed)
+                ? parsed
+                : throw new PlanningException("Imported context checkoutVerification must be unverified, verified, or conflict.")
+            : CheckoutVerification.Unverified;
 
         return new ImportedContextEntry(
             kind,
@@ -79,18 +103,15 @@ public sealed record ImportedContextEnvelope(
             observedAt,
             OptionalBoolean(item, "stale"),
             OptionalBoolean(item, "truncated"),
-            OptionalBoolean(item, "heuristic"));
+            OptionalBoolean(item, "heuristic"),
+            verification);
     }
 
     private static string PortableText(string value, string field)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > 4096 || value.IndexOf('\0') >= 0 ||
-            value[0] == '/' ||
-            (value.Length >= 3 && char.IsLetter(value[0]) && value[1] == ':' && (value[2] == '\\' || value[2] == '/')) ||
-            value.Contains("-----BEGIN ", StringComparison.OrdinalIgnoreCase) ||
-            value.Contains("Bearer ", StringComparison.OrdinalIgnoreCase) ||
-            value.Contains("api_key=", StringComparison.OrdinalIgnoreCase) ||
-            value.Contains("apikey=", StringComparison.OrdinalIgnoreCase))
+            PortableMaterial.ContainsPrivateMaterial(value) ||
+            PortableMaterial.IsAbsolutePath(value))
         {
             throw new PlanningException($"Imported context field '{field}' is not portable or may contain private/secret material.");
         }
@@ -166,7 +187,9 @@ public static class IntakePlanner
 
         if (importedContext is null)
         {
-            limitations.Add("Optional imported memory/code-intelligence context is unavailable; repository evidence remains authoritative.");
+            limitations.Add(importedContextRequirement == EvidenceRequirement.Required
+                ? "Required imported memory/code-intelligence context is unavailable; readiness is blocked."
+                : "Optional imported memory/code-intelligence context is unavailable; repository evidence remains authoritative.");
             ready &= importedContextRequirement == EvidenceRequirement.Optional;
         }
         else
@@ -178,6 +201,15 @@ public static class IntakePlanner
                 if (entry.Stale) limitations.Add($"Imported context at {entry.Locator} is stale.");
                 if (entry.Truncated) limitations.Add($"Imported context at {entry.Locator} is truncated.");
                 if (entry.Heuristic) limitations.Add($"Imported context at {entry.Locator} is heuristic.");
+                if (entry.CheckoutVerification == CheckoutVerification.Unverified)
+                    limitations.Add($"Imported context at {entry.Locator} is unverified against exact checkout bytes.");
+                if (entry.CheckoutVerification == CheckoutVerification.Verified)
+                    limitations.Add($"Imported context at {entry.Locator} was verified against exact checkout bytes.");
+                if (entry.CheckoutVerification == CheckoutVerification.Conflict)
+                {
+                    limitations.Add($"Imported context at {entry.Locator} conflicts with exact checkout bytes.");
+                    ready = false;
+                }
             }
         }
 
@@ -192,6 +224,29 @@ public static class IntakePlanner
             ready,
             request.Depth,
             question,
-            limitations.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray());
+            limitations.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+            importedContextRequirement,
+            importedContext is not null);
+    }
+}
+
+public static class ImportedContextVerifier
+{
+    public static ImportedContextEntry VerifyAgainst(ImportedContextEntry entry, RepositoryFile exactFile)
+    {
+        ArgumentNullException.ThrowIfNull(entry);
+        ArgumentNullException.ThrowIfNull(exactFile);
+        if (entry.Digest is null)
+        {
+            return entry with { CheckoutVerification = CheckoutVerification.Unverified };
+        }
+
+        var exactDigest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(exactFile.Bytes))}";
+        return entry with
+        {
+            CheckoutVerification = string.Equals(entry.Digest, exactDigest, StringComparison.Ordinal)
+                ? CheckoutVerification.Verified
+                : CheckoutVerification.Conflict
+        };
     }
 }

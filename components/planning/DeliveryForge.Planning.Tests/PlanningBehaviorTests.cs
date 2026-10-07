@@ -1,6 +1,8 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using DeliveryForge.Contracts.Validation;
 
 namespace DeliveryForge.Planning.Tests;
 
@@ -260,6 +262,7 @@ public sealed class PlanningBehaviorTests
     [InlineData("found in /root/private-index")]
     [InlineData("found in /tmp/private-index")]
     [InlineData("found in /var/private-index")]
+    [InlineData("found in /opt/build/private-index")]
     public void Portable_plan_rejects_cross_platform_host_paths(string privateText)
     {
         var draft = Draft() with { Provenance = [RepositoryEvidence(privateText)] };
@@ -269,6 +272,7 @@ public sealed class PlanningBehaviorTests
 
     [Theory]
     [InlineData("found in /home/alice/.ssh/config")]
+    [InlineData("found in /opt/build/private-index")]
     [InlineData("found in C:/Users/alice/private-index")]
     [InlineData("password=do-not-copy")]
     [InlineData("token=do-not-copy")]
@@ -333,12 +337,77 @@ public sealed class PlanningBehaviorTests
             ["Checkout verification is pending"]);
         var assessment = IntakePlanner.Assess(Request(), [RepositoryEvidence()], envelope, EvidenceRequirement.Required);
 
-        var frozen = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
+        var frozen = PlanFreezer.Freeze(Draft() with { Intake = assessment }, "revision-1", ObservedAt);
         var text = Encoding.UTF8.GetString(frozen.CanonicalBytes);
 
         Assert.True(assessment.Ready);
         Assert.Contains("stale", text, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("checkout verification", text, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Required_imported_context_readiness_is_enforced_at_freeze()
+    {
+        var assessment = IntakePlanner.Assess(Request(), [RepositoryEvidence()], null, EvidenceRequirement.Required);
+        var error = Assert.Throws<PlanningException>(() =>
+            PlanFreezer.Freeze(Draft() with { Intake = assessment }, "revision-1", ObservedAt));
+
+        Assert.Contains("required imported context", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Frozen_plan_exposes_validated_contract_bytes_and_defensive_copies()
+    {
+        var frozen = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
+        var validated = ContractValidator.ParseAndValidate(frozen.PlanContractBytes);
+        var first = frozen.PlanContractBytes;
+        first[0] = (byte)'!';
+
+        Assert.Equal(frozen.ContractIdentity, validated.Identity);
+        Assert.Equal((byte)'{', frozen.PlanContractBytes[0]);
+        Assert.Equal((byte)'{', frozen.CanonicalBytes[0]);
+    }
+
+    [Fact]
+    public void Same_declared_revision_with_different_content_fails_closed_against_predecessor()
+    {
+        var first = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
+        var changed = Draft() with { Gates = [new("test", "dotnet test -c Release", "all tests pass")] };
+
+        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(changed, "revision-1", ObservedAt, first));
+
+        var successor = PlanFreezer.Freeze(changed, "revision-2", ObservedAt, first);
+        Assert.Equal(first.ContractIdentity, successor.Supersedes);
+        Assert.NotEqual(first.PlanRevision, successor.PlanRevision);
+    }
+
+    [Fact]
+    public void Imported_context_verification_compares_exact_committed_blob_bytes()
+    {
+        var bytes = Encoding.UTF8.GetBytes("committed bytes");
+        var digest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
+        var file = new RepositoryFile("tracked.txt", new string('a', 40), "100644", bytes, false, false, "not-generated");
+        var entry = new ImportedContextEntry("repository", "git:tracked.txt", "summary", digest, ObservedAt);
+
+        Assert.Equal(CheckoutVerification.Verified, ImportedContextVerifier.VerifyAgainst(entry, file).CheckoutVerification);
+        Assert.Equal(
+            CheckoutVerification.Conflict,
+            ImportedContextVerifier.VerifyAgainst(entry with { Digest = "sha256:" + new string('b', 64) }, file).CheckoutVerification);
+    }
+
+    [Fact]
+    public void Imported_context_rejects_non_sha256_digest()
+    {
+        var json = Encoding.UTF8.GetBytes("""
+            {
+              "schemaVersion":"1.0.0",
+              "entries":[{"kind":"memory","locator":"memory:item","summary":"summary","digest":"md5:nope","observedAt":"2026-10-07T20:00:00Z"}],
+              "conflicts":[],
+              "limitations":[]
+            }
+            """);
+
+        Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
     }
 
     private static PlanningRequest Request() => new(
@@ -350,16 +419,19 @@ public sealed class PlanningBehaviorTests
 
     private static PlanDraft Draft()
     {
+        var request = Request();
+        EvidenceItem[] provenance = [RepositoryEvidence("git:README.md"), RepositoryEvidence("git:Directory.Build.props")];
         var repository = new RepositoryContext(
             "/portable/display-only", "HEAD", new string('a', 40), new string('b', 40),
             DetachedHead: false, Dirty: false, Shallow: false, Submodules: [], Limitations: []);
         return new PlanDraft(
-            Request(), repository,
-            [RepositoryEvidence("git:README.md"), RepositoryEvidence("git:Directory.Build.props")],
+            request, repository,
+            provenance,
             [new("components/planning/Core.cs", "PlanFreezer", "freeze plans"), new("references/planning.md", "document", "describe boundaries")],
             [new("contracts", [], "issue #3 is integrated")],
             [new("test", "dotnet test", "all tests pass"), new("build", "dotnet build", "zero warnings")],
             new("additive", "none", "none", "none", "none", "none", "test results", "revert commit", []),
-            []);
+            [],
+            IntakePlanner.Assess(request, provenance));
     }
 }

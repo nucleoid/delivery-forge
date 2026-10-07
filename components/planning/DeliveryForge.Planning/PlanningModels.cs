@@ -5,6 +5,8 @@ public sealed class PlanningException(string message) : Exception(message);
 public enum IntakeDepth { Minimal, Deep }
 public enum EvidenceRequirement { Optional, Required }
 public enum EvidenceSourceKind { User, Repository, Policy, Memory, CodeIntelligence, Imported }
+public enum CheckoutVerification { Unverified, Verified, Conflict }
+public enum SymlinkResolution { NotSymlink, InTree, Escapes, Cycle, Missing }
 
 public sealed record PlanningRequest(
     string Repository,
@@ -35,13 +37,16 @@ public sealed record ImportedContextEntry(
     DateTimeOffset ObservedAt,
     bool Stale = false,
     bool Truncated = false,
-    bool Heuristic = false);
+    bool Heuristic = false,
+    CheckoutVerification CheckoutVerification = CheckoutVerification.Unverified);
 
 public sealed record IntakeAssessment(
     bool Ready,
     IntakeDepth Depth,
     string? RecommendedQuestion,
-    IReadOnlyList<string> Limitations);
+    IReadOnlyList<string> Limitations,
+    EvidenceRequirement ImportedContextRequirement = EvidenceRequirement.Optional,
+    bool ImportedContextAvailable = false);
 
 public sealed record RepositoryFile(
     string Path,
@@ -50,7 +55,8 @@ public sealed record RepositoryFile(
     byte[] Bytes,
     bool IsSymlink,
     bool EscapesWorktree,
-    string GenerationClassification);
+    string GenerationClassification,
+    SymlinkResolution SymlinkResolution = SymlinkResolution.NotSymlink);
 
 public sealed record RepositoryContext(
     string RepositoryRoot,
@@ -86,18 +92,55 @@ public sealed record PlanDraft(
     IReadOnlyList<DependencyNode> Dependencies,
     IReadOnlyList<PlanGate> Gates,
     RolloutPlan Rollout,
-    IReadOnlyList<PlanUnknown> Unknowns);
+    IReadOnlyList<PlanUnknown> Unknowns,
+    IntakeAssessment Intake);
 
-public sealed record FrozenPlan(
-    string Identity,
-    string ContractIdentity,
-    string Revision,
-    string BaseCommit,
-    string BaseTree,
-    byte[] CanonicalBytes,
-    bool DownstreamReady,
-    IReadOnlyList<string> Limitations)
+public sealed record FrozenPlan
 {
+    private readonly byte[] _canonicalBytes;
+    private readonly byte[] _planContractBytes;
+
+    internal FrozenPlan(
+        string identity,
+        string contractIdentity,
+        string revision,
+        string planRevision,
+        string contentDigest,
+        string? supersedes,
+        string baseCommit,
+        string baseTree,
+        byte[] canonicalBytes,
+        byte[] planContractBytes,
+        bool downstreamReady,
+        IReadOnlyList<string> limitations)
+    {
+        Identity = identity;
+        ContractIdentity = contractIdentity;
+        Revision = revision;
+        PlanRevision = planRevision;
+        ContentDigest = contentDigest;
+        Supersedes = supersedes;
+        BaseCommit = baseCommit;
+        BaseTree = baseTree;
+        _canonicalBytes = canonicalBytes.ToArray();
+        _planContractBytes = planContractBytes.ToArray();
+        DownstreamReady = downstreamReady;
+        Limitations = limitations.ToArray();
+    }
+
+    public string Identity { get; init; }
+    public string ContractIdentity { get; init; }
+    public string Revision { get; init; }
+    public string PlanRevision { get; init; }
+    public string ContentDigest { get; init; }
+    public string? Supersedes { get; init; }
+    public string BaseCommit { get; init; }
+    public string BaseTree { get; init; }
+    public byte[] CanonicalBytes => _canonicalBytes.ToArray();
+    public byte[] PlanContractBytes => _planContractBytes.ToArray();
+    public bool DownstreamReady { get; init; }
+    public IReadOnlyList<string> Limitations { get; init; }
+
     public FrozenPlan ReconcileBase(string currentCommit, string currentTree)
     {
         if (string.Equals(BaseCommit, currentCommit, StringComparison.Ordinal) &&
