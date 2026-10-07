@@ -766,7 +766,8 @@ public sealed class PlanningBehaviorTests
         var original = Draft();
         var branch = RepositoryContext.Create(
             "/portable/display-only", "refs/heads/main", original.Repository.Commit, original.Repository.Tree,
-            detachedHead: false, dirty: false, shallow: false, submodules: [], limitations: []);
+            detachedHead: false, dirty: false, shallow: false, submodules: [], limitations: [],
+            exactBranchReferenceVerified: true);
         var frozen = PlanFreezer.Freeze(original with { Repository = branch }, "revision-1", ObservedAt);
         var changed = Draft() with { Repository = branch };
         var changedRequest = changed.Request with { Outcome = "A materially different outcome" };
@@ -787,7 +788,8 @@ public sealed class PlanningBehaviorTests
             [typeof(string), typeof(string)]));
         var driftContext = RepositoryContext.Create(
             "/portable/display-only", "refs/heads/main", new string('d', 40), new string('e', 40),
-            detachedHead: false, dirty: false, shallow: false, submodules: [], limitations: []);
+            detachedHead: false, dirty: false, shallow: false, submodules: [], limitations: [],
+            exactBranchReferenceVerified: true);
         var drifted = Assert.IsType<FrozenPlan>(contextBoundary.Invoke(frozen, [driftContext]));
         Assert.False(drifted.DownstreamReady);
         Assert.Contains(drifted.Limitations, item => item.Contains("drift", StringComparison.OrdinalIgnoreCase));
