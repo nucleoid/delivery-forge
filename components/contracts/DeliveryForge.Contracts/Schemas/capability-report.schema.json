@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://delivery-forge.dev/schemas/capability-report/1.0.0",
+  "title": "Delivery Forge capability report",
+  "x-contract-kind": "capability-report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "identity", "capabilityId", "tool", "version", "supported", "limitations", "observedAt"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "kind": { "const": "capability-report" },
+    "identity": { "$ref": "#/$defs/identity" },
+    "capabilityId": { "$ref": "#/$defs/nonEmpty" },
+    "tool": { "$ref": "#/$defs/nonEmpty" },
+    "version": { "$ref": "#/$defs/nonEmpty" },
+    "supported": { "type": "boolean" },
+    "limitations": { "$ref": "#/$defs/stringArray" },
+    "observedAt": { "$ref": "#/$defs/timestamp" }
+  },
+  "$defs": {
+    "identity": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "nonEmpty": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "stringArray": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmpty" } }
+  }
+}

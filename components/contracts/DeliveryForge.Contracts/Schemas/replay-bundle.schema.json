@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://delivery-forge.dev/schemas/replay-bundle/1.0.0",
+  "title": "Delivery Forge replay bundle",
+  "x-contract-kind": "replay-bundle",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "identity", "runManifestIdentity", "receiptIdentities", "contractIdentities", "createdAt"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "kind": { "const": "replay-bundle" },
+    "identity": { "$ref": "#/$defs/identity" },
+    "runManifestIdentity": { "$ref": "#/$defs/identity" },
+    "receiptIdentities": { "$ref": "#/$defs/identityArray" },
+    "contractIdentities": { "$ref": "#/$defs/identityArray" },
+    "createdAt": { "$ref": "#/$defs/timestamp" }
+  },
+  "$defs": {
+    "identity": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "identityArray": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/identity" } }
+  }
+}

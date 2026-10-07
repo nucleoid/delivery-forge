@@ -1,0 +1,1 @@
+{"schemaVersion":"1.0.0","kind":"plan","identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000","repository":"repo","workItem":"#3","mode":"publish","planRevision":"r1","baseCommit":"6304c90f83df3cdb918dff03f6358dcf4a939d16","createdAt":"2026-10-07T05:00:00Z","scope":{"outcome":"x","included":[],"excluded":[]},"acceptanceCriteria":["x"]}

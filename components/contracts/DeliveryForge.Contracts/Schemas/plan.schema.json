@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://delivery-forge.dev/schemas/plan/1.0.0",
+  "title": "Delivery Forge plan",
+  "x-contract-kind": "plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "identity", "repository", "workItem", "mode", "planRevision", "baseCommit", "createdAt", "scope", "acceptanceCriteria"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "kind": { "const": "plan" },
+    "identity": { "$ref": "#/$defs/identity" },
+    "repository": { "$ref": "#/$defs/nonEmpty" },
+    "workItem": { "$ref": "#/$defs/nonEmpty" },
+    "mode": { "enum": ["plan", "implement", "pr", "merge", "resume"] },
+    "planRevision": { "$ref": "#/$defs/nonEmpty" },
+    "baseCommit": { "$ref": "#/$defs/gitObject" },
+    "createdAt": { "$ref": "#/$defs/timestamp" },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["outcome", "included", "excluded"],
+      "properties": {
+        "outcome": { "$ref": "#/$defs/nonEmpty" },
+        "included": { "$ref": "#/$defs/stringArray" },
+        "excluded": { "$ref": "#/$defs/stringArray" }
+      }
+    },
+    "acceptanceCriteria": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/nonEmpty" } }
+  },
+  "$defs": {
+    "identity": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "gitObject": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "nonEmpty": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "stringArray": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmpty" } }
+  }
+}

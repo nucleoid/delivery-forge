@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://delivery-forge.dev/schemas/review-receipt/1.0.0",
+  "title": "Delivery Forge independent review receipt",
+  "x-contract-kind": "review-receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "identity", "baseCommit", "headCommit", "treeId", "patchSha256", "reviewerFamily", "outcome", "findingCount", "artifactHash", "createdAt"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "kind": { "const": "review-receipt" },
+    "identity": { "$ref": "#/$defs/identity" },
+    "baseCommit": { "$ref": "#/$defs/gitObject" },
+    "headCommit": { "$ref": "#/$defs/gitObject" },
+    "treeId": { "$ref": "#/$defs/gitObject" },
+    "patchSha256": { "$ref": "#/$defs/identity" },
+    "reviewerFamily": { "$ref": "#/$defs/nonEmpty" },
+    "outcome": { "enum": ["PASS", "FAIL", "INCOMPLETE", "ERROR"] },
+    "findingCount": { "type": "integer", "minimum": 0 },
+    "artifactHash": { "$ref": "#/$defs/identity" },
+    "createdAt": { "$ref": "#/$defs/timestamp" }
+  },
+  "$defs": {
+    "identity": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "gitObject": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "nonEmpty": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" }
+  }
+}

@@ -1,0 +1,1 @@
+{"schemaVersion":"1.0.0","kind":"evidence-policy","identity":"sha256:5b20c1e7cb638ae6a87f49a56a91f3c49b7d35dab394e816d0554e009f6e33fe","policyId":"default","requiredGates":["build","test","review"],"authorizedCeiling":"pr","requireIndependentReview":true,"allowedNotApplicable":["mutation"],"createdAt":"2026-10-07T05:00:00Z"}

@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://delivery-forge.dev/schemas/gate-receipt/1.0.0",
+  "title": "Delivery Forge gate receipt",
+  "x-contract-kind": "gate-receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "kind", "identity", "gateId", "policyId", "baseCommit", "headCommit", "treeId", "command", "startedAt", "completedAt", "exitCode", "outcome", "reason", "artifactHashes", "sourceChanged", "limitations"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "kind": { "const": "gate-receipt" },
+    "identity": { "$ref": "#/$defs/identity" },
+    "gateId": { "$ref": "#/$defs/nonEmpty" },
+    "policyId": { "$ref": "#/$defs/nonEmpty" },
+    "baseCommit": { "$ref": "#/$defs/gitObject" },
+    "headCommit": { "$ref": "#/$defs/gitObject" },
+    "treeId": { "$ref": "#/$defs/gitObject" },
+    "command": { "$ref": "#/$defs/nonEmpty" },
+    "startedAt": { "$ref": "#/$defs/timestamp" },
+    "completedAt": { "$ref": "#/$defs/timestamp" },
+    "exitCode": { "type": ["integer", "null"] },
+    "outcome": { "enum": ["PASS", "FAIL", "INCOMPLETE", "ERROR", "NOT_APPLICABLE"] },
+    "reason": { "$ref": "#/$defs/nonEmpty" },
+    "artifactHashes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/identity" } },
+    "sourceChanged": { "type": "boolean" },
+    "limitations": { "$ref": "#/$defs/stringArray" },
+    "notApplicableRationale": { "$ref": "#/$defs/nonEmpty" }
+  },
+  "$defs": {
+    "identity": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "gitObject": { "type": "string", "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$" },
+    "nonEmpty": { "type": "string", "minLength": 1 },
+    "timestamp": { "type": "string", "format": "date-time" },
+    "stringArray": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/nonEmpty" } }
+  }
+}

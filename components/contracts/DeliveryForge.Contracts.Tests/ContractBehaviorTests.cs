@@ -52,6 +52,3 @@ public sealed class ContractBehaviorTests
 
     private static byte[] Utf8(string value) => Encoding.UTF8.GetBytes(value);
 }
-
-public sealed class ContractValidationException(string message) : Exception(message);
-public sealed class InvalidWorkflowTransitionException(string message) : Exception(message);

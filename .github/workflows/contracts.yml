@@ -1,0 +1,30 @@
+name: contracts
+
+on:
+  pull_request:
+    paths:
+      - "components/contracts/**"
+      - "DeliveryForge.slnx"
+      - "Directory.*.props"
+      - "global.json"
+      - ".github/workflows/contracts.yml"
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.401
+      - run: dotnet restore DeliveryForge.slnx --locked-mode
+      - run: dotnet test DeliveryForge.slnx --no-restore --configuration Release
