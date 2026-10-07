@@ -809,6 +809,7 @@ public sealed class PlanningBehaviorTests
             "detachedHead" => false,
             "dirty" => false,
             "shallow" => false,
+            "exactBranchReferenceVerified" => false,
             "submodules" or "limitations" => Array.Empty<string>(),
             "readerBinding" => "sha256:" + new string('0', 64),
             _ => throw new InvalidOperationException(parameter.Name)
@@ -1098,7 +1099,8 @@ public sealed class PlanningBehaviorTests
             dirty: false,
             shallow: false,
             submodules: [],
-            limitations: []);
+            limitations: [],
+            exactBranchReferenceVerified: true);
         var frozen = PlanFreezer.Freeze(draft with { Repository = branch }, "revision-1", ObservedAt);
         var sameBranch = RepositoryContext.Create(
             "/portable/display-only",
@@ -1109,9 +1111,31 @@ public sealed class PlanningBehaviorTests
             dirty: false,
             shallow: false,
             submodules: [],
-            limitations: []);
+            limitations: [],
+            exactBranchReferenceVerified: true);
 
         Assert.Same(frozen, frozen.ReconcileBase(sameBranch));
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public void Base_reconciliation_requires_exact_branch_verification_on_both_sides(
+        bool frozenRefVerified,
+        bool currentRefVerified)
+    {
+        var draft = Draft();
+        var branch = RepositoryContext.Create(
+            "/portable/display-only", "refs/heads/main", draft.Repository.Commit, draft.Repository.Tree,
+            detachedHead: false, dirty: false, shallow: false, submodules: [], limitations: [],
+            exactBranchReferenceVerified: frozenRefVerified);
+        var frozen = PlanFreezer.Freeze(draft with { Repository = branch }, "revision-bound-branch", ObservedAt);
+        var current = RepositoryContext.Create(
+            "/portable/display-only", "refs/heads/main", frozen.BaseCommit, frozen.BaseTree,
+            detachedHead: false, dirty: false, shallow: false, submodules: [], limitations: [],
+            exactBranchReferenceVerified: currentRefVerified);
+
+        Assert.False(frozen.ReconcileBase(current).DownstreamReady);
     }
 
     [Fact]
@@ -1127,7 +1151,8 @@ public sealed class PlanningBehaviorTests
             dirty: false,
             shallow: false,
             submodules: [],
-            limitations: []);
+            limitations: [],
+            exactBranchReferenceVerified: true);
         var frozen = PlanFreezer.Freeze(
             draft with { Repository = detachedBranch },
             "revision-detached-branch",
@@ -1141,7 +1166,8 @@ public sealed class PlanningBehaviorTests
             dirty: false,
             shallow: false,
             submodules: [],
-            limitations: []);
+            limitations: [],
+            exactBranchReferenceVerified: true);
 
         Assert.Same(frozen, frozen.ReconcileBase(current));
     }
@@ -1152,14 +1178,16 @@ public sealed class PlanningBehaviorTests
         var draft = Draft();
         var detachedBranch = RepositoryContext.Create(
             "/portable/display-only", "refs/heads/main", draft.Repository.Commit, draft.Repository.Tree,
-            detachedHead: true, dirty: false, shallow: false, submodules: [], limitations: []);
+            detachedHead: true, dirty: false, shallow: false, submodules: [], limitations: [],
+            exactBranchReferenceVerified: true);
         var frozen = PlanFreezer.Freeze(
             draft with { Repository = detachedBranch },
             "revision-detached-branch-drift",
             ObservedAt);
         var changed = RepositoryContext.Create(
             "/portable/display-only", "refs/heads/main", new string('d', 40), new string('e', 40),
-            detachedHead: true, dirty: false, shallow: false, submodules: [], limitations: []);
+            detachedHead: true, dirty: false, shallow: false, submodules: [], limitations: [],
+            exactBranchReferenceVerified: true);
 
         var reconciled = frozen.ReconcileBase(changed);
 
@@ -1339,6 +1367,7 @@ public sealed class PlanningBehaviorTests
     [InlineData("cc -Wl,-L/home/alice/lib")]
     [InlineData("cl \"-IC:/Users/alice/sdk\"")]
     [InlineData("cl /IC:\\work\\alice\\sdk")]
+    [InlineData("cc /I/home/alice/sdk/include")]
     [InlineData("-I~/sdk/include")]
     [InlineData("-I$HOME/sdk/include")]
     [InlineData("-I%USERPROFILE%\\sdk")]
@@ -1652,6 +1681,7 @@ public sealed class PlanningBehaviorTests
             draft.Repository.Shallow,
             Array.Empty<string>(),
             Array.Empty<string>(),
+            false,
             "sha256:" + new string('0', 64)
         ]);
 

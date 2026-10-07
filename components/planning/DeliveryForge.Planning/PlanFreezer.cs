@@ -73,6 +73,7 @@ public static class PlanFreezer
             repositoryObservations = new
             {
                 requestedRef = draft.Repository.RequestedRef,
+                draft.Repository.ExactBranchReferenceVerified,
                 draft.Repository.HeadCommit,
                 draft.Repository.HeadTree,
                 draft.Repository.DetachedHead,
@@ -194,6 +195,7 @@ public static class PlanFreezer
             request.Repository,
             request.WorkItem,
             draft.Repository.RequestedRef,
+            draft.Repository.ExactBranchReferenceVerified,
             draft.Repository.DetachedHead,
             draft.Repository.Commit,
             draft.Repository.Tree,

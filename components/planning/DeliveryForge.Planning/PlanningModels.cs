@@ -227,6 +227,7 @@ public sealed class RepositoryContext
         bool shallow,
         IReadOnlyList<string> submodules,
         IReadOnlyList<string> limitations,
+        bool exactBranchReferenceVerified,
         string readerBinding)
     {
         RepositoryRoot = repositoryRoot;
@@ -236,6 +237,7 @@ public sealed class RepositoryContext
         DetachedHead = detachedHead;
         Dirty = dirty;
         Shallow = shallow;
+        ExactBranchReferenceVerified = exactBranchReferenceVerified;
         _submodules = submodules.ToArray();
         _limitations = limitations.ToArray();
         _readerBinding = readerBinding;
@@ -255,6 +257,7 @@ public sealed class RepositoryContext
     public bool DetachedHead { get; }
     public bool Dirty { get; }
     public bool Shallow { get; }
+    public bool ExactBranchReferenceVerified { get; }
     public IReadOnlyList<string> Submodules => _submodules.ToArray();
     public IReadOnlyList<string> Limitations => _limitations.ToArray();
 
@@ -269,7 +272,8 @@ public sealed class RepositoryContext
         IReadOnlyList<string> submodules,
         IReadOnlyList<string> limitations,
         string? headCommit = null,
-        string? headTree = null)
+        string? headTree = null,
+        bool exactBranchReferenceVerified = false)
     {
         var copiedSubmodules = submodules.ToArray();
         if ((headCommit is null) != (headTree is null))
@@ -287,18 +291,44 @@ public sealed class RepositoryContext
         var normalizedLimitations = copiedLimitations.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         var binding = ComputeBinding(
             repositoryRoot, requestedRef, commit, tree, detachedHead, dirty, shallow,
-            copiedSubmodules, normalizedLimitations);
+            copiedSubmodules, normalizedLimitations, exactBranchReferenceVerified);
         return new RepositoryContext(
             repositoryRoot, requestedRef, commit, tree, detachedHead, dirty, shallow,
-            copiedSubmodules, normalizedLimitations, binding);
+            copiedSubmodules, normalizedLimitations, exactBranchReferenceVerified, binding);
     }
 
     internal bool IsReaderIssued() => string.Equals(
         _readerBinding,
         ComputeBinding(
             RepositoryRoot, RequestedRef, Commit, Tree, DetachedHead, Dirty, Shallow,
-            _submodules, _limitations),
+            _submodules, _limitations, ExactBranchReferenceVerified),
         StringComparison.Ordinal);
+
+    internal static bool IsFreshnessBearingReference(string reference)
+    {
+        if (!reference.StartsWith("refs/heads/", StringComparison.Ordinal) ||
+            reference.EndsWith('/') ||
+            reference.EndsWith('.') ||
+            reference.Contains("//", StringComparison.Ordinal) ||
+            reference.Contains("..", StringComparison.Ordinal) ||
+            reference.Contains("@{", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        foreach (var character in reference)
+        {
+            if (character <= ' ' || character == '\u007f' || character is '~' or '^' or ':' or '?' or '*' or '[' or '\\')
+            {
+                return false;
+            }
+        }
+
+        return reference.Split('/').All(component =>
+            component.Length > 0 &&
+            !component.StartsWith('.') &&
+            !component.EndsWith(".lock", StringComparison.Ordinal));
+    }
 
     private static string ComputeBinding(
         string repositoryRoot,
@@ -309,7 +339,8 @@ public sealed class RepositoryContext
         bool dirty,
         bool shallow,
         IReadOnlyList<string> submodules,
-        IReadOnlyList<string> limitations)
+        IReadOnlyList<string> limitations,
+        bool exactBranchReferenceVerified)
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new
         {
@@ -321,7 +352,8 @@ public sealed class RepositoryContext
             dirty,
             shallow,
             submodules,
-            limitations
+            limitations,
+            exactBranchReferenceVerified
         });
         return $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
     }
@@ -368,6 +400,7 @@ public sealed class FrozenPlan
         string repository,
         string workItem,
         string baseReference,
+        bool baseReferenceExactBranchVerified,
         bool baseReferenceWasDetached,
         string baseCommit,
         string baseTree,
@@ -385,6 +418,7 @@ public sealed class FrozenPlan
         Repository = repository;
         WorkItem = workItem;
         BaseReference = baseReference;
+        BaseReferenceExactBranchVerified = baseReferenceExactBranchVerified;
         BaseReferenceWasDetached = baseReferenceWasDetached;
         BaseCommit = baseCommit;
         BaseTree = baseTree;
@@ -403,6 +437,7 @@ public sealed class FrozenPlan
     public string Repository { get; }
     public string WorkItem { get; }
     public string BaseReference { get; }
+    public bool BaseReferenceExactBranchVerified { get; }
     public bool BaseReferenceWasDetached { get; }
     public string BaseCommit { get; }
     public string BaseTree { get; }
@@ -419,8 +454,10 @@ public sealed class FrozenPlan
             throw new PlanningException("Base reconciliation requires a reader-issued repository context.");
         }
         if (!string.Equals(BaseReference, current.RequestedRef, StringComparison.Ordinal) ||
-            !IsFreshnessBearingReference(BaseReference) ||
-            !IsFreshnessBearingReference(current.RequestedRef))
+            !RepositoryContext.IsFreshnessBearingReference(BaseReference) ||
+            !RepositoryContext.IsFreshnessBearingReference(current.RequestedRef) ||
+            !BaseReferenceExactBranchVerified ||
+            !current.ExactBranchReferenceVerified)
         {
             return WithBaseDrift(
                 $"Base ref freshness could not be established: frozen ref '{BaseReference}' must be reconciled through the same mutable ref; current ref is '{current.RequestedRef}' and detached/pinned snapshots are not freshness evidence.");
@@ -446,6 +483,7 @@ public sealed class FrozenPlan
             Repository,
             WorkItem,
             BaseReference,
+            BaseReferenceExactBranchVerified,
             BaseReferenceWasDetached,
             BaseCommit,
             BaseTree,
@@ -458,29 +496,4 @@ public sealed class FrozenPlan
                 .Order(StringComparer.Ordinal)
                 .ToArray());
 
-    private static bool IsFreshnessBearingReference(string reference)
-    {
-        if (!reference.StartsWith("refs/heads/", StringComparison.Ordinal) ||
-            reference.EndsWith('/') ||
-            reference.EndsWith('.') ||
-            reference.Contains("//", StringComparison.Ordinal) ||
-            reference.Contains("..", StringComparison.Ordinal) ||
-            reference.Contains("@{", StringComparison.Ordinal))
-        {
-            return false;
-        }
-
-        foreach (var character in reference)
-        {
-            if (character <= ' ' || character == '\u007f' || character is '~' or '^' or ':' or '?' or '*' or '[' or '\\')
-            {
-                return false;
-            }
-        }
-
-        return reference.Split('/').All(component =>
-            component.Length > 0 &&
-            !component.StartsWith('.') &&
-            !component.EndsWith(".lock", StringComparison.Ordinal));
-    }
 }

@@ -158,6 +158,7 @@ public sealed class GitRepositoryContextTests : IDisposable
         var unchanged = await reader.ReadAsync(_root, "refs/heads/main", TestContext.Current.CancellationToken);
 
         Assert.True(initial.DetachedHead);
+        Assert.True(initial.ExactBranchReferenceVerified);
         Assert.Same(frozen, frozen.ReconcileBase(unchanged));
 
         File.WriteAllText(Path.Combine(_root, "tracked.txt"), "advanced branch bytes");
@@ -167,6 +168,7 @@ public sealed class GitRepositoryContextTests : IDisposable
         var advanced = await reader.ReadAsync(_root, "refs/heads/main", TestContext.Current.CancellationToken);
 
         Assert.True(advanced.DetachedHead);
+        Assert.True(advanced.ExactBranchReferenceVerified);
         Assert.False(frozen.ReconcileBase(advanced).DownstreamReady);
     }
 
@@ -915,6 +917,7 @@ public sealed class GitRepositoryContextTests : IDisposable
             source.Shallow,
             source.Submodules,
             source.Limitations,
+            source.ExactBranchReferenceVerified,
             "sha256:" + new string('0', 64)
         ]);
     }

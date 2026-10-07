@@ -72,6 +72,22 @@ public sealed class GitRepositoryContextReader
         root = Path.GetFullPath(root);
         await RejectPromisorRepositoryAsync(root, cancellationToken);
         var commit = (await GitTextAsync(root, cancellationToken, "rev-parse", "--verify", "--end-of-options", $"{reference}^{{commit}}")).Trim();
+        var exactBranchReferenceVerified = false;
+        if (RepositoryContext.IsFreshnessBearingReference(reference))
+        {
+            var exactRef = await RunGitAsync(
+                root,
+                cancellationToken,
+                allowFailure: true,
+                "show-ref", "--verify", "--hash", reference);
+            var exactRefCommit = Encoding.UTF8.GetString(exactRef.StandardOutput).Trim();
+            if (exactRef.ExitCode != 0 || !string.Equals(exactRefCommit, commit, StringComparison.Ordinal))
+            {
+                throw new PlanningException(
+                    $"The requested exact branch ref '{reference}' does not exist or does not resolve to the requested commit.");
+            }
+            exactBranchReferenceVerified = true;
+        }
         var tree = (await GitTextAsync(root, cancellationToken, "rev-parse", "--verify", "--end-of-options", $"{commit}^{{tree}}")).Trim();
         var headCommit = (await GitTextAsync(root, cancellationToken, "rev-parse", "--verify", "HEAD^{commit}")).Trim();
         var headTree = (await GitTextAsync(root, cancellationToken, "rev-parse", "--verify", $"{headCommit}^{{tree}}")).Trim();
@@ -102,7 +118,8 @@ public sealed class GitRepositoryContextReader
             submodules,
             limitations,
             headCommit,
-            headTree);
+            headTree,
+            exactBranchReferenceVerified);
     }
 
     public async Task<RepositoryFile> ReadFileAsync(
