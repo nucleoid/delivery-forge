@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 
@@ -192,6 +193,152 @@ public sealed class PlanningBehaviorTests
         var drifted = frozen.ReconcileBase(new string('d', 40), new string('e', 40));
         Assert.False(drifted.DownstreamReady);
         Assert.Contains(drifted.Limitations, item => item.Contains("drift", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Freeze_rejects_an_unresolved_user_owned_decision()
+    {
+        var draft = Draft() with
+        {
+            Request = Request() with { UserOwnedDecision = "Choose whether v1 may delete user data" }
+        };
+
+        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(draft, "revision-1", ObservedAt));
+    }
+
+    [Fact]
+    public void Material_plan_content_changes_the_downstream_contract_identity()
+    {
+        var first = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
+        var second = PlanFreezer.Freeze(
+            Draft() with { Gates = [new("test", "dotnet test --configuration Release", "all tests pass")] },
+            "revision-1",
+            ObservedAt);
+
+        Assert.NotEqual(first.ContractIdentity, second.ContractIdentity);
+    }
+
+    [Fact]
+    public void Freeze_is_invariant_under_the_ambient_culture()
+    {
+        var previousCulture = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("th-TH");
+            var thai = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
+            CultureInfo.CurrentCulture = CultureInfo.InvariantCulture;
+            var invariant = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
+
+            Assert.Equal(invariant.Identity, thai.Identity);
+            Assert.Equal(invariant.CanonicalBytes, thai.CanonicalBytes);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = previousCulture;
+        }
+    }
+
+    [Fact]
+    public void Planning_boundaries_wrap_contract_validation_failures()
+    {
+        var malformed = Encoding.UTF8.GetBytes("""
+            {"schemaVersion":"1.0.0","schemaVersion":"1.0.0","entries":[],"conflicts":[],"limitations":[]}
+            """);
+        Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(malformed));
+
+        var invalidMode = Draft() with { Request = Request() with { Mode = "deliver" } };
+        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(invalidMode, "revision-1", ObservedAt));
+
+        var blankScope = Draft() with { Request = Request() with { Included = [" "] } };
+        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(blankScope, "revision-1", ObservedAt));
+    }
+
+    [Theory]
+    [InlineData("C:/Users/alice/private-index")]
+    [InlineData("C:\\Users\\alice\\private-index")]
+    [InlineData("found in /Users/alice/private-index")]
+    [InlineData("found in /root/private-index")]
+    [InlineData("found in /tmp/private-index")]
+    [InlineData("found in /var/private-index")]
+    public void Portable_plan_rejects_cross_platform_host_paths(string privateText)
+    {
+        var draft = Draft() with { Provenance = [RepositoryEvidence(privateText)] };
+        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(draft, "revision-1", ObservedAt));
+        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(Draft(), privateText, ObservedAt));
+    }
+
+    [Theory]
+    [InlineData("found in /home/alice/.ssh/config")]
+    [InlineData("found in C:/Users/alice/private-index")]
+    [InlineData("password=do-not-copy")]
+    [InlineData("token=do-not-copy")]
+    public void Imported_context_rejects_embedded_private_material(string summary)
+    {
+        var json = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            schemaVersion = "1.0.0",
+            entries = new[] { new { kind = "memory", locator = "memory:item-1", summary, digest = (string?)null, observedAt = "2026-10-07T20:00:00Z" } },
+            conflicts = Array.Empty<string>(),
+            limitations = Array.Empty<string>()
+        }));
+
+        Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
+    }
+
+    [Theory]
+    [InlineData("2026-10-07T20:00:00")]
+    [InlineData("07/10/2026 20:00Z")]
+    [InlineData("2026-10-07T20:00:00+00:00")]
+    public void Imported_context_requires_the_explicit_invariant_Z_timestamp(string observedAt)
+    {
+        var json = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            schemaVersion = "1.0.0",
+            entries = new[] { new { kind = "memory", locator = "memory:item-1", summary = "summary", digest = (string?)null, observedAt } },
+            conflicts = Array.Empty<string>(),
+            limitations = Array.Empty<string>()
+        }));
+
+        Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
+    }
+
+    [Fact]
+    public void Duplicate_semantic_keys_fail_closed()
+    {
+        var duplicateGate = Draft() with
+        {
+            Gates = [new("test", "dotnet test", "passes"), new("test", "dotnet test -c Release", "passes in Release")]
+        };
+        var duplicateProvenance = Draft() with
+        {
+            Provenance = [RepositoryEvidence("git:README.md"), RepositoryEvidence("git:README.md") with { Digest = "sha256:" + new string('c', 64) }]
+        };
+        var duplicateChange = Draft() with
+        {
+            ChangeMap = [new("README.md", "doc", "first"), new("README.md", "doc", "second")]
+        };
+
+        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(duplicateGate, "revision-1", ObservedAt));
+        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(duplicateProvenance, "revision-1", ObservedAt));
+        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(duplicateChange, "revision-1", ObservedAt));
+    }
+
+    [Fact]
+    public void Imported_context_caveats_cannot_disappear_before_freeze()
+    {
+        var envelope = new ImportedContextEnvelope(
+            "1.0.0",
+            [new("memory", "memory:item-1", "Advisory summary", null, ObservedAt, Stale: true)],
+            [],
+            ["Checkout verification is pending"]);
+        var assessment = IntakePlanner.Assess(Request(), [RepositoryEvidence()], envelope, EvidenceRequirement.Required);
+
+        var frozen = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
+        var text = Encoding.UTF8.GetString(frozen.CanonicalBytes);
+
+        Assert.True(assessment.Ready);
+        Assert.Contains("stale", text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("checkout verification", text, StringComparison.OrdinalIgnoreCase);
     }
 
     private static PlanningRequest Request() => new(

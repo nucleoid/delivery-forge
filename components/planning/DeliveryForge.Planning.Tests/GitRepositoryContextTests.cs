@@ -70,6 +70,38 @@ public sealed class GitRepositoryContextTests : IDisposable
             reader.ReadFileAsync(context, "../outside", TestContext.Current.CancellationToken));
     }
 
+    [Fact]
+    public async Task Oversized_exact_blob_fails_within_the_operation_deadline()
+    {
+        InitializeRepository();
+        await File.WriteAllBytesAsync(Path.Combine(_root, "large.bin"), new byte[17 * 1024 * 1024], TestContext.Current.CancellationToken);
+        Run("git", "add large.bin");
+        Run("git", "commit -q -m large");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+
+        var error = await Assert.ThrowsAsync<PlanningException>(() => reader.ReadFileAsync(context, "large.bin", deadline.Token));
+        Assert.Contains("bound", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Chained_committed_symlinks_detect_escape_with_portable_slash_semantics()
+    {
+        InitializeRepository();
+        File.CreateSymbolicLink(Path.Combine(_root, "d"), "..");
+        File.CreateSymbolicLink(Path.Combine(_root, "x"), "d/outside");
+        Run("git", "add d x");
+        Run("git", "commit -q -m chained-symlinks");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+        var file = await reader.ReadFileAsync(context, "x", TestContext.Current.CancellationToken);
+
+        Assert.True(file.IsSymlink);
+        Assert.True(file.EscapesWorktree);
+    }
+
     private void InitializeRepository()
     {
         Directory.CreateDirectory(_root);
