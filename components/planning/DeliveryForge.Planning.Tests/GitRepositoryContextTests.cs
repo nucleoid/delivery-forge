@@ -11,6 +11,41 @@ public sealed class GitRepositoryContextTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), $"delivery-forge-planning-{Guid.NewGuid():N}");
 
+    [Theory]
+    [InlineData(false, "git")]
+    [InlineData(true, "git.exe")]
+    public void Git_executable_resolution_uses_only_absolute_configured_or_path_candidates(
+        bool windows,
+        string executableName)
+    {
+        var trusted = Path.Combine(_root, "trusted-tools");
+        var repository = Path.Combine(_root, "repository");
+        Directory.CreateDirectory(trusted);
+        Directory.CreateDirectory(repository);
+        var trustedGit = Path.Combine(trusted, executableName);
+        var repositoryGit = Path.Combine(repository, executableName);
+        File.WriteAllText(trustedGit, "trusted");
+        File.WriteAllText(repositoryGit, "repository bait");
+        var resolver = typeof(GitRepositoryContextReader).GetMethod(
+            "ResolveGitExecutable",
+            BindingFlags.Static | BindingFlags.NonPublic);
+
+        Assert.NotNull(resolver);
+        var resolvedFromPath = Assert.IsType<string>(resolver.Invoke(
+            null,
+            [null, string.Join(Path.PathSeparator, [".", repository, trusted]), windows]));
+        var resolvedExplicitly = Assert.IsType<string>(resolver.Invoke(
+            null,
+            [trustedGit, string.Empty, windows]));
+
+        Assert.Equal(Path.GetFullPath(repositoryGit), resolvedFromPath);
+        Assert.Equal(Path.GetFullPath(trustedGit), resolvedExplicitly);
+        var relativeError = Assert.Throws<TargetInvocationException>(() => resolver.Invoke(
+            null,
+            [executableName, trusted, windows]));
+        Assert.IsType<PlanningException>(relativeError.InnerException);
+    }
+
     [Fact]
     public async Task Reads_exact_objects_separately_from_mutable_worktree_observations()
     {
@@ -439,6 +474,27 @@ public sealed class GitRepositoryContextTests : IDisposable
         Assert.True(missing.EscapesWorktree);
         Assert.Equal(SymlinkResolution.Escapes, windowsEscape.SymlinkResolution);
         Assert.True(windowsEscape.EscapesWorktree);
+    }
+
+    [Fact]
+    public async Task Posix_backslash_filename_cannot_hide_a_nested_symlink_escape()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        InitializeRepository();
+        Directory.CreateDirectory(Path.Combine(_root, "a"));
+        File.WriteAllText(Path.Combine(_root, "a", "b"), "Windows lexical destination");
+        Run("git", "add a/b");
+        AddCommittedSymlink("a\\b", "../outside");
+        AddCommittedSymlink("x", "a\\b");
+        Run("git", "commit -q -m posix-backslash-nested-escape");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+        var file = await reader.ReadFileAsync(context, "x", TestContext.Current.CancellationToken);
+
+        Assert.Equal(SymlinkResolution.Escapes, file.SymlinkResolution);
+        Assert.True(file.EscapesWorktree);
     }
 
     [Fact]

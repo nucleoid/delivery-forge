@@ -42,6 +42,12 @@ public sealed class PlanningBehaviorTests
     [Theory]
     [InlineData("Choose rollout\nChoose deletion", "do the safe thing")]
     [InlineData("Choose rollout", "safe\r\nrisky")]
+    [InlineData("Choose rollout\u0085Choose deletion", "do the safe thing")]
+    [InlineData("Choose rollout", "safe\u2028risky")]
+    [InlineData("Choose rollout\u2029Choose deletion", "do the safe thing")]
+    [InlineData("Choose rollout", "safe\vrisky")]
+    [InlineData("Choose rollout\frisky", "do the safe thing")]
+    [InlineData("Choose rollout", "safe\trisky")]
     [InlineData("Choose rollout", ".")]
     [InlineData("?", "safe")]
     public void User_owned_choice_requires_one_concrete_single_line_decision(
@@ -54,6 +60,22 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
+    public void User_owned_choice_accepts_valid_single_line_unicode_prose()
+    {
+        var assessment = IntakePlanner.Assess(
+            Request() with
+            {
+                UserOwnedDecision = "Choose the café rollout for 東京",
+                RecommendedOption = "use the safer café rollout ✅"
+            },
+            [RepositoryEvidence()]);
+
+        Assert.False(assessment.Ready);
+        Assert.Contains("東京", assessment.RecommendedQuestion!, StringComparison.Ordinal);
+        Assert.Contains("✅", assessment.RecommendedQuestion!, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Deep_intake_is_only_enabled_explicitly()
     {
         var request = Request() with { Depth = IntakeDepth.Deep };
@@ -63,15 +85,23 @@ public sealed class PlanningBehaviorTests
             RepositoryEvidence(),
             new(EvidenceSourceKind.Policy, "policy:planning", "sha256:" + new string('c', 64), ObservedAt, [])
         ]);
+        var exactFile = RepositoryFileFor("callers.txt");
+        var digest = $"sha256:{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(exactFile.Bytes))}";
+        var verifiedImport = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry(
+                "code-index",
+                "git:callers.txt",
+                "Additional bounded caller evidence",
+                digest,
+                ObservedAt,
+                CheckoutDigest: digest),
+            exactFile);
         var importedDeepAssessment = IntakePlanner.Assess(
             request,
-            [
-                RepositoryEvidence(),
-                new(EvidenceSourceKind.Imported, "index:callers", null, ObservedAt, ["Advisory and unverified against checkout bytes."])
-            ],
+            [RepositoryEvidence()],
             new ImportedContextEnvelope(
                 "1.0.0",
-                [new("code-index", "index:callers", "Additional bounded caller evidence", null, ObservedAt)],
+                [verifiedImport],
                 [],
                 []));
 
@@ -113,6 +143,90 @@ public sealed class PlanningBehaviorTests
 
         Assert.False(assessment.Ready);
         Assert.Contains(assessment.Limitations, item => item.Contains("additional bounded", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Deep_intake_counts_each_eligible_locator_once_across_evidence_and_imports()
+    {
+        var request = Request() with { Depth = IntakeDepth.Deep };
+        var repository = RepositoryEvidence();
+        var exactFile = RepositoryFileFor("README.md");
+        var duplicateImport = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry(
+                "repository",
+                repository.Locator,
+                "Duplicate checkout claim",
+                repository.Digest,
+                ObservedAt,
+                CheckoutDigest: repository.Digest),
+            exactFile);
+
+        var assessment = IntakePlanner.Assess(
+            request,
+            [repository],
+            new ImportedContextEnvelope("1.0.0", [duplicateImport], [], []));
+
+        Assert.False(assessment.Ready);
+        Assert.Contains(assessment.Limitations, item => item.Contains("additional bounded", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData("memory", false, false, false)]
+    [InlineData("code-index", true, false, false)]
+    [InlineData("code-index", false, true, false)]
+    [InlineData("code-index", false, false, true)]
+    public void Deep_intake_rejects_ineligible_imported_claims(
+        string kind,
+        bool stale,
+        bool truncated,
+        bool heuristic)
+    {
+        var request = Request() with { Depth = IntakeDepth.Deep };
+        var exactFile = RepositoryFileFor("callers.txt");
+        var digest = $"sha256:{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(exactFile.Bytes))}";
+        var imported = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry(
+                kind,
+                "git:callers.txt",
+                "Additional claim",
+                digest,
+                ObservedAt,
+                stale,
+                truncated,
+                heuristic,
+                CheckoutDigest: digest),
+            exactFile);
+
+        var assessment = IntakePlanner.Assess(
+            request,
+            [RepositoryEvidence()],
+            new ImportedContextEnvelope("1.0.0", [imported], [], []));
+
+        Assert.False(assessment.Ready);
+    }
+
+    [Fact]
+    public void Deep_intake_accepts_a_distinct_verified_non_memory_import()
+    {
+        var request = Request() with { Depth = IntakeDepth.Deep };
+        var exactFile = RepositoryFileFor("callers.txt");
+        var digest = $"sha256:{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(exactFile.Bytes))}";
+        var imported = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry(
+                "code-index",
+                "git:callers.txt",
+                "Verified caller evidence",
+                digest,
+                ObservedAt,
+                CheckoutDigest: digest),
+            exactFile);
+
+        var assessment = IntakePlanner.Assess(
+            request,
+            [RepositoryEvidence()],
+            new ImportedContextEnvelope("1.0.0", [imported], [], []));
+
+        Assert.True(assessment.Ready);
     }
 
     [Fact]
@@ -570,6 +684,107 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
+    public void Git_locator_cannot_masquerade_as_policy_readiness()
+    {
+        var masquerading = new EvidenceItem(
+            EvidenceSourceKind.Policy,
+            "git:README.md",
+            "sha256:" + new string('c', 64),
+            ObservedAt,
+            []);
+
+        var assessment = IntakePlanner.Assess(Request(), [masquerading]);
+
+        Assert.False(assessment.Ready);
+        Assert.Contains(assessment.Limitations, item => item.Contains("source kind", StringComparison.OrdinalIgnoreCase));
+        var draft = Draft();
+        EvidenceItem[] provenance = [masquerading, PolicyEvidence()];
+        var error = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(
+            draft with
+            {
+                Provenance = provenance,
+                Intake = IntakePlanner.Assess(draft.Request, provenance)
+            },
+            "revision-locator-kind",
+            ObservedAt));
+        Assert.Contains("locator", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData(SymlinkResolution.Escapes)]
+    [InlineData(SymlinkResolution.Cycle)]
+    [InlineData(SymlinkResolution.Missing)]
+    [InlineData(SymlinkResolution.BoundExceeded)]
+    public void Unsafe_repository_file_metadata_blocks_readiness_and_survives_freeze(
+        SymlinkResolution resolution)
+    {
+        var unsafeFile = new RepositoryFile(
+            "unsafe-link", new string('c', 40), "120000", Encoding.UTF8.GetBytes("target"),
+            isSymlink: true, escapesWorktree: true, "not-detected", resolution,
+            new string('a', 40), new string('b', 40));
+        var unsafeEvidence = EvidenceItem.FromRepositoryFile(unsafeFile, ObservedAt, []);
+
+        Assert.False(IntakePlanner.Assess(Request(), [unsafeEvidence]).Ready);
+        Assert.False(unsafeEvidence.IsComplete);
+
+        var draft = Draft();
+        EvidenceItem[] provenance = [unsafeEvidence, PolicyEvidence()];
+        var frozen = PlanFreezer.Freeze(
+            draft with { Provenance = provenance, Intake = IntakePlanner.Assess(draft.Request, provenance) },
+            "revision-unsafe-file",
+            ObservedAt);
+        var canonical = Encoding.UTF8.GetString(frozen.CanonicalBytes);
+        Assert.Contains(resolution.ToString().ToLowerInvariant(), canonical, StringComparison.Ordinal);
+        Assert.Contains("symlink", canonical, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Generated_repository_file_classification_survives_intake_and_freeze()
+    {
+        var generatedFile = new RepositoryFile(
+            "Generated.g.cs", new string('c', 40), "100644", Encoding.UTF8.GetBytes("generated"),
+            isSymlink: false, escapesWorktree: false, "generated-by-convention", SymlinkResolution.NotSymlink,
+            new string('a', 40), new string('b', 40));
+        var generated = EvidenceItem.FromRepositoryFile(generatedFile, ObservedAt, []);
+        var draft = Draft();
+        EvidenceItem[] provenance = [generated, PolicyEvidence()];
+        var assessment = IntakePlanner.Assess(draft.Request, provenance);
+
+        var frozen = PlanFreezer.Freeze(
+            draft with { Provenance = provenance, Intake = assessment },
+            "revision-generated-file",
+            ObservedAt);
+        var canonical = Encoding.UTF8.GetString(frozen.CanonicalBytes);
+
+        Assert.Contains(assessment.Limitations, item => item.Contains("generated", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("generated-by-convention", canonical, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Pinned_old_commit_cannot_reconcile_a_frozen_mutable_ref()
+    {
+        var frozen = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
+        var pinnedOldCommit = RepositoryContext.Create(
+            "/portable/display-only",
+            frozen.BaseCommit,
+            frozen.BaseCommit,
+            frozen.BaseTree,
+            detachedHead: true,
+            dirty: false,
+            shallow: false,
+            submodules: [],
+            limitations: []);
+
+        var reconciled = frozen.ReconcileBase(pinnedOldCommit);
+
+        var baseReference = typeof(FrozenPlan).GetProperty("BaseReference");
+        Assert.NotNull(baseReference);
+        Assert.Equal("HEAD", baseReference.GetValue(frozen));
+        Assert.False(reconciled.DownstreamReady);
+        Assert.Contains(reconciled.Limitations, item => item.Contains("ref", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Freeze_rejects_an_unresolved_user_owned_decision()
     {
         var draft = Draft() with
@@ -640,6 +855,51 @@ public sealed class PlanningBehaviorTests
         var draft = Draft() with { Provenance = [RepositoryEvidence(privateText)] };
         Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(draft, "revision-1", ObservedAt));
         Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(Draft(), privateText, ObservedAt));
+    }
+
+    [Theory]
+    [InlineData("found in ~alice/private-index")]
+    [InlineData("found in $HOME/private-index")]
+    [InlineData("found in ${HOME}/private-index")]
+    [InlineData("found in %USERPROFILE%\\private-index")]
+    [InlineData("found in \\Users\\alice\\private-index")]
+    [InlineData("secret=do-not-copy")]
+    [InlineData("passwd: do-not-copy")]
+    [InlineData("access_key=do-not-copy")]
+    [InlineData("aws_access_key_id=DO-NOT-COPY")]
+    public void Portable_plan_rejects_home_aliases_and_common_credential_assignments(string privateText)
+    {
+        var original = Draft();
+        EvidenceItem[] provenance = [RepositoryEvidence(privateText)];
+        var draft = original with
+        {
+            Provenance = provenance,
+            Intake = IntakePlanner.Assess(original.Request, provenance)
+        };
+
+        var error = Assert.Throws<PlanningException>(() =>
+            PlanFreezer.Freeze(draft, "revision-private-material", ObservedAt));
+        Assert.Contains("host path or credential", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("Use secret rotation documentation")]
+    [InlineData("The password policy has twelve requirements")]
+    [InlineData("See https://example.invalid/docs/access-key-rotation")]
+    [InlineData("Contact the home team before rollout")]
+    public void Portable_plan_accepts_portable_prose_and_urls(string portableText)
+    {
+        var original = Draft();
+        EvidenceItem[] provenance = [RepositoryEvidence(portableText)];
+        var draft = original with
+        {
+            Provenance = provenance,
+            Intake = IntakePlanner.Assess(original.Request, provenance)
+        };
+
+        var frozen = PlanFreezer.Freeze(draft, "revision-portable-control", ObservedAt);
+
+        Assert.True(frozen.DownstreamReady);
     }
 
     [Theory]
@@ -914,6 +1174,18 @@ public sealed class PlanningBehaviorTests
 
     private static EvidenceItem PolicyEvidence(string locator = "policy:planning") => new(
         EvidenceSourceKind.Policy, locator, "sha256:" + new string('c', 64), ObservedAt, []);
+
+    private static RepositoryFile RepositoryFileFor(string path) => new(
+        path,
+        new string('c', 40),
+        "100644",
+        Encoding.UTF8.GetBytes($"exact bytes for {path}"),
+        isSymlink: false,
+        escapesWorktree: false,
+        "not-detected",
+        SymlinkResolution.NotSymlink,
+        new string('a', 40),
+        new string('b', 40));
 
     private static PlanDraft Draft()
     {
