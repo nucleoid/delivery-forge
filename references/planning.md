@@ -16,15 +16,19 @@ does not pretend the plan is ready. The resulting `IntakeAssessment` is a requir
 requirement/availability, and retained caveats, as well as unresolved user-owned decisions. An
 assessment from an unrelated earlier intake call cannot be substituted.
 
-Unavailable optional imported context records a limitation and does not block repository-driven
-planning. If the caller declares that context required, its absence blocks. Empty imported search
-results are not evidence that corresponding repository behavior is absent.
+Unavailable or empty optional imported context records a limitation and does not block
+repository-driven planning. If the caller declares that context required, absence or an empty
+result blocks. Empty imported search results are not evidence that corresponding repository
+behavior is absent.
 
 ## Provenance and repository context
 
 Every `EvidenceItem` records source kind, locator, immutable digest when available, observation
-time, completeness, caveats, and optional supersession. Raw memory/index content should not be
-placed in an evidence item.
+time, completeness, an explicit optional/required requirement, caveats, and optional
+supersession. Incomplete optional evidence remains in the plan with its caveats; incomplete
+required evidence blocks both intake and freeze. At least one complete repository or policy item
+is always required for readiness. Raw memory/index content should not be placed in an evidence
+item.
 
 `GitRepositoryContextReader` resolves a requested ref to exact commit and tree objects and reads
 file bytes by blob object ID. Dirty state and detached HEAD are separate mutable observations.
@@ -33,10 +37,17 @@ bytes; in-tree chains are resolved from committed tree/blob objects using portab
 with escape, cycle, and missing-target outcomes kept distinct. Git reads have a finite deadline,
 terminate the process tree on overflow or cancellation, disable replace refs, lazy fetch, optional
 locks, and fsmonitor side effects, force literal pathspecs, and remove inherited repository,
-object, index, common-directory, and config routing. Generated-file
+object, index, common-directory, and config routing. Partial clone or promisor repositories are
+rejected before tree/blob object reads, including on Git versions earlier than 2.44 where
+`GIT_NO_LAZY_FETCH` is unavailable; ordinary full clones remain supported. Generated-file
 classification is deliberately conservative: known path/name conventions are marked, while all
 other files say that generator metadata was not asserted. Missing refs and objects fail rather
 than falling back to worktree bytes.
+
+`RepositoryFile` instances are created only by `GitRepositoryContextReader` and carry the exact
+commit and tree from which their blob was read. Imported-context verification binds locator,
+digest, verification status, commit, and tree. The identity is retained in limitations, and freeze
+rejects verified imported context whose commit or tree differs from the draft base.
 
 ## Complete plan and freeze
 

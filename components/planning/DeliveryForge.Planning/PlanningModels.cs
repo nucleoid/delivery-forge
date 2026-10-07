@@ -27,7 +27,8 @@ public sealed record EvidenceItem(
     DateTimeOffset ObservedAt,
     IReadOnlyList<string> Caveats,
     string? Supersedes = null,
-    bool IsComplete = true);
+    bool IsComplete = true,
+    EvidenceRequirement Requirement = EvidenceRequirement.Optional);
 
 public sealed record ImportedContextEntry(
     string Kind,
@@ -42,6 +43,8 @@ public sealed record ImportedContextEntry(
     string? CheckoutDigest = null)
 {
     internal string? VerificationBinding { get; init; }
+    internal string? VerifiedCommit { get; init; }
+    internal string? VerifiedTree { get; init; }
 }
 
 public sealed class IntakeAssessment
@@ -53,6 +56,7 @@ public sealed class IntakeAssessment
         IReadOnlyList<string> limitations,
         EvidenceRequirement importedContextRequirement,
         bool importedContextAvailable,
+        IReadOnlyList<VerifiedRepositoryIdentity> verifiedRepositoryIdentities,
         string bindingDigest)
     {
         Ready = ready;
@@ -61,6 +65,7 @@ public sealed class IntakeAssessment
         Limitations = limitations.ToArray();
         ImportedContextRequirement = importedContextRequirement;
         ImportedContextAvailable = importedContextAvailable;
+        VerifiedRepositoryIdentities = verifiedRepositoryIdentities.ToArray();
         BindingDigest = bindingDigest;
     }
 
@@ -70,18 +75,51 @@ public sealed class IntakeAssessment
     public IReadOnlyList<string> Limitations { get; }
     public EvidenceRequirement ImportedContextRequirement { get; }
     public bool ImportedContextAvailable { get; }
+    internal IReadOnlyList<VerifiedRepositoryIdentity> VerifiedRepositoryIdentities { get; }
     internal string BindingDigest { get; }
 }
 
-public sealed record RepositoryFile(
-    string Path,
-    string ObjectId,
-    string Mode,
-    byte[] Bytes,
-    bool IsSymlink,
-    bool EscapesWorktree,
-    string GenerationClassification,
-    SymlinkResolution SymlinkResolution = SymlinkResolution.NotSymlink);
+internal sealed record VerifiedRepositoryIdentity(string Locator, string Commit, string Tree);
+
+public sealed class RepositoryFile
+{
+    private readonly byte[] _bytes;
+
+    internal RepositoryFile(
+        string path,
+        string objectId,
+        string mode,
+        byte[] bytes,
+        bool isSymlink,
+        bool escapesWorktree,
+        string generationClassification,
+        SymlinkResolution symlinkResolution,
+        string commit,
+        string tree)
+    {
+        Path = path;
+        ObjectId = objectId;
+        Mode = mode;
+        _bytes = bytes.ToArray();
+        IsSymlink = isSymlink;
+        EscapesWorktree = escapesWorktree;
+        GenerationClassification = generationClassification;
+        SymlinkResolution = symlinkResolution;
+        Commit = commit;
+        Tree = tree;
+    }
+
+    public string Path { get; }
+    public string ObjectId { get; }
+    public string Mode { get; }
+    public byte[] Bytes => _bytes.ToArray();
+    public bool IsSymlink { get; }
+    public bool EscapesWorktree { get; }
+    public string GenerationClassification { get; }
+    public SymlinkResolution SymlinkResolution { get; }
+    public string Commit { get; }
+    public string Tree { get; }
+}
 
 public sealed record RepositoryContext(
     string RepositoryRoot,

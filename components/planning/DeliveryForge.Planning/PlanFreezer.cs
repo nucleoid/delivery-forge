@@ -91,7 +91,8 @@ public static class PlanFreezer
                     observedAt = FormatUtc(item.ObservedAt),
                     caveats = Sorted(item.Caveats),
                     item.Supersedes,
-                    item.IsComplete
+                    item.IsComplete,
+                    requirement = item.Requirement.ToString().ToLowerInvariant()
                 }).ToArray(),
             changeMap = draft.ChangeMap
                 .OrderBy(item => item.Path, StringComparer.Ordinal)
@@ -251,7 +252,12 @@ public static class PlanFreezer
         if (draft.Intake.ImportedContextRequirement == EvidenceRequirement.Required && !draft.Intake.ImportedContextAvailable)
             failures.Add("required imported context is unavailable");
         if (draft.Provenance.Count == 0) failures.Add("provenance is required");
-        if (draft.Provenance.Any(item => !item.IsComplete)) failures.Add("required provenance is incomplete");
+        if (draft.Provenance.Any(item => item.Requirement == EvidenceRequirement.Required && !item.IsComplete))
+            failures.Add("required provenance is incomplete");
+        if (draft.Intake.VerifiedRepositoryIdentities.Any(identity =>
+                !string.Equals(identity.Commit, draft.Repository.Commit, StringComparison.Ordinal) ||
+                !string.Equals(identity.Tree, draft.Repository.Tree, StringComparison.Ordinal)))
+            failures.Add("verified imported context repository identity differs from the draft base commit/tree");
         if (draft.ChangeMap.Count == 0) failures.Add("change map is required");
         if (draft.Dependencies.Count == 0) failures.Add("dependency DAG is required (use an explicit root node when empty)");
         if (draft.Gates.Count == 0) failures.Add("gates/tests are required");

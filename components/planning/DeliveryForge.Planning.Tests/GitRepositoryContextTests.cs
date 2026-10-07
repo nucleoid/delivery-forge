@@ -39,8 +39,19 @@ public sealed class GitRepositoryContextTests : IDisposable
         var file = await reader.ReadFileAsync(first, "tracked.txt", TestContext.Current.CancellationToken);
         var digest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(file.Bytes))}";
         var imported = ImportedContextVerifier.VerifyAgainst(
-            new ImportedContextEntry("repository", "git:tracked.txt", "summary", null, DateTimeOffset.UnixEpoch, CheckoutDigest: digest),
+            new ImportedContextEntry("repository", "git:tracked.txt", "summary", "sha256:" + new string('a', 64), DateTimeOffset.UnixEpoch, CheckoutDigest: digest),
             file);
+        var digestConflict = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry("repository", "git:tracked.txt", "summary", null, DateTimeOffset.UnixEpoch, CheckoutDigest: "sha256:" + new string('b', 64)),
+            file);
+        var pathConflict = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry("repository", "git:other.txt", "summary", null, DateTimeOffset.UnixEpoch, CheckoutDigest: digest),
+            file);
+
+        Assert.Equal(CheckoutVerification.Verified, imported.CheckoutVerification);
+        Assert.Equal(CheckoutVerification.Conflict, digestConflict.CheckoutVerification);
+        Assert.Equal(CheckoutVerification.Conflict, pathConflict.CheckoutVerification);
+        Assert.Equal("sha256:" + new string('a', 64), imported.Digest);
 
         File.WriteAllText(Path.Combine(_root, "tracked.txt"), "second commit bytes");
         Run("git", "add tracked.txt");
@@ -91,10 +102,9 @@ public sealed class GitRepositoryContextTests : IDisposable
             RunIn(_root, "git", $"remote set-url origin http://127.0.0.1:{port}/repo.git");
             var connection = listener.AcceptTcpClientAsync(TestContext.Current.CancellationToken).AsTask();
             var reader = new GitRepositoryContextReader();
-            var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
 
             var error = await Assert.ThrowsAsync<PlanningException>(() =>
-                reader.ReadFileAsync(context, "tracked.txt", TestContext.Current.CancellationToken));
+                reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken));
             Assert.Contains("partial clone", error.Message, StringComparison.OrdinalIgnoreCase);
             await Task.Delay(250, TestContext.Current.CancellationToken);
             Assert.False(connection.IsCompleted, "Exact object reads must reject before contacting a promisor remote.");
@@ -131,6 +141,19 @@ public sealed class GitRepositoryContextTests : IDisposable
         var error = await Assert.ThrowsAsync<PlanningException>(() =>
             reader.ReadAsync(_root, "refs/heads/missing", TestContext.Current.CancellationToken));
         Assert.Contains("ref", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Repository_file_reader_rejects_a_caller_forged_tree_identity()
+    {
+        InitializeRepository();
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+        var error = await Assert.ThrowsAsync<PlanningException>(() =>
+            reader.ReadFileAsync(context with { Tree = new string('f', 40) }, "tracked.txt", TestContext.Current.CancellationToken));
+
+        Assert.Contains("commit/tree identity", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

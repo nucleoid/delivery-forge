@@ -23,12 +23,15 @@ private filesystem locations are outside the envelope.
 
 ## Evidence semantics
 
-- An empty search means only that the bounded search returned no matches.
+- An empty search means only that the bounded search returned no matches. It degrades honestly
+  when optional and blocks readiness when the caller declares imported context required.
 - Stale, truncated, heuristic, or conflicting results retain those caveats.
 - Imported JSON cannot assert checkout-verification state. Repository claims must carry a
   `git:<repository-relative-path>` locator and be checked against the matching exact Git blob with
-  `ImportedContextVerifier.VerifyAgainst`; otherwise they remain labeled unverified. A claimed
-  checkout-byte digest or locator mismatch is retained as a conflict and blocks readiness.
+  `ImportedContextVerifier.VerifyAgainst`; otherwise they remain labeled unverified. Verification
+  is bound to the reader-supplied exact commit and tree, which are retained as a limitation, and
+  freeze rejects a verified identity that differs from the draft base. A claimed checkout-byte
+  digest or locator mismatch is retained as a conflict and blocks readiness.
 - Missing optional context degrades with a recorded limitation.
 - Missing context declared required by plan/policy blocks readiness.
 - `digest` identifies the imported summary when supplied. `checkoutDigest` is a separate claim used

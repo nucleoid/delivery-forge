@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using DeliveryForge.Contracts.Validation;
@@ -151,18 +150,6 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
-    public void Imported_summary_digest_is_distinct_from_locally_verified_checkout_digest()
-    {
-        var bytes = Encoding.UTF8.GetBytes("committed bytes");
-        var checkoutDigest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
-        var entry = ImportedEntryWithCheckoutDigest("sha256:" + new string('a', 64), checkoutDigest);
-        var file = new RepositoryFile("tracked.txt", new string('a', 40), "100644", bytes, false, false, "not-generated");
-
-        Assert.Equal(CheckoutVerification.Verified, ImportedContextVerifier.VerifyAgainst(entry, file).CheckoutVerification);
-        Assert.Equal("sha256:" + new string('a', 64), entry.Digest);
-    }
-
-    [Fact]
     public void Imported_context_rejects_secret_material_inside_allowed_fields()
     {
         var json = Encoding.UTF8.GetBytes("""
@@ -218,6 +205,25 @@ public sealed class PlanningBehaviorTests
         Assert.True(assessment.Ready);
         var frozen = PlanFreezer.Freeze(draft with { Provenance = provenance, Intake = assessment }, "revision-incomplete-optional", ObservedAt);
         Assert.Contains("Search was truncated", Encoding.UTF8.GetString(frozen.CanonicalBytes), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Required_incomplete_provenance_blocks_intake_and_freeze_without_hiding_caveats()
+    {
+        var draft = Draft();
+        EvidenceItem[] provenance =
+        [
+            RepositoryEvidence(),
+            new(EvidenceSourceKind.Policy, "policy:required", null, ObservedAt, ["Policy retrieval was truncated."], IsComplete: false, Requirement: EvidenceRequirement.Required)
+        ];
+        var assessment = IntakePlanner.Assess(draft.Request, provenance);
+
+        Assert.False(assessment.Ready);
+        Assert.Contains(assessment.Limitations, item => item.Contains("Policy retrieval was truncated", StringComparison.Ordinal));
+        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(
+            draft with { Provenance = provenance, Intake = assessment },
+            "revision-incomplete-required",
+            ObservedAt));
     }
 
     [Fact]
@@ -581,31 +587,6 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
-    public void Imported_context_verification_compares_exact_committed_blob_bytes()
-    {
-        var bytes = Encoding.UTF8.GetBytes("committed bytes");
-        var digest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
-        var file = new RepositoryFile("tracked.txt", new string('a', 40), "100644", bytes, false, false, "not-generated");
-        var entry = ImportedEntryWithCheckoutDigest(null, digest);
-
-        Assert.Equal(CheckoutVerification.Verified, ImportedContextVerifier.VerifyAgainst(entry, file).CheckoutVerification);
-        Assert.Equal(
-            CheckoutVerification.Conflict,
-            ImportedContextVerifier.VerifyAgainst(ImportedEntryWithCheckoutDigest(null, "sha256:" + new string('b', 64)), file).CheckoutVerification);
-    }
-
-    [Fact]
-    public void Imported_context_verification_is_bound_to_the_exact_git_locator_path()
-    {
-        var bytes = Encoding.UTF8.GetBytes("committed bytes");
-        var digest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
-        var file = new RepositoryFile("other.txt", new string('a', 40), "100644", bytes, false, false, "not-generated");
-        var entry = ImportedEntryWithCheckoutDigest(null, digest);
-
-        Assert.Equal(CheckoutVerification.Conflict, ImportedContextVerifier.VerifyAgainst(entry, file).CheckoutVerification);
-    }
-
-    [Fact]
     public void Imported_context_rejects_non_sha256_digest()
     {
         var json = Encoding.UTF8.GetBytes("""
@@ -626,32 +607,6 @@ public sealed class PlanningBehaviorTests
 
     private static EvidenceItem RepositoryEvidence(string locator = "git:README.md") => new(
         EvidenceSourceKind.Repository, locator, "sha256:" + new string('b', 64), ObservedAt, []);
-
-    private static ImportedContextEntry ImportedEntryWithCheckoutDigest(
-        string? summaryDigest,
-        string checkoutDigest,
-        string locator = "git:tracked.txt")
-    {
-        var json = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
-        {
-            schemaVersion = "1.0.0",
-            entries = new[]
-            {
-                new
-                {
-                    kind = "repository",
-                    locator,
-                    summary = "summary",
-                    digest = summaryDigest,
-                    checkoutDigest,
-                    observedAt = "2026-10-07T20:00:00Z"
-                }
-            },
-            conflicts = Array.Empty<string>(),
-            limitations = Array.Empty<string>()
-        }));
-        return Assert.Single(ImportedContextEnvelope.Parse(json).Entries);
-    }
 
     private static PlanDraft Draft()
     {

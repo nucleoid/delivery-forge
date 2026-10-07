@@ -181,24 +181,32 @@ public static class IntakePlanner
         var limitations = new List<string>();
         var ready = evidence.Any(item =>
             item.SourceKind is EvidenceSourceKind.Repository or EvidenceSourceKind.Policy && item.IsComplete);
+        var verifiedRepositoryIdentities = new List<VerifiedRepositoryIdentity>();
 
         foreach (var item in evidence)
         {
             limitations.AddRange(item.Caveats);
             if (!item.IsComplete)
             {
-                limitations.Add($"Evidence at {item.Locator} is incomplete.");
+                limitations.Add($"{item.Requirement} evidence at {item.Locator} is incomplete.");
+                if (item.Requirement == EvidenceRequirement.Required) ready = false;
             }
         }
 
-        if (importedContext is null)
+        var importedContextAvailable = importedContext is { Entries.Count: > 0 };
+        if (!importedContextAvailable)
         {
+            var empty = importedContext is not null;
             limitations.Add(importedContextRequirement == EvidenceRequirement.Required
-                ? "Required imported memory/code-intelligence context is unavailable; readiness is blocked."
-                : "Optional imported memory/code-intelligence context is unavailable; repository evidence remains authoritative.");
+                ? empty
+                    ? "Required imported memory/code-intelligence context is empty; readiness is blocked."
+                    : "Required imported memory/code-intelligence context is unavailable; readiness is blocked."
+                : empty
+                    ? "Optional imported memory/code-intelligence context is empty; repository evidence remains authoritative."
+                    : "Optional imported memory/code-intelligence context is unavailable; repository evidence remains authoritative.");
             ready &= importedContextRequirement == EvidenceRequirement.Optional;
         }
-        else
+        if (importedContext is not null)
         {
             limitations.AddRange(importedContext.Limitations);
             limitations.AddRange(importedContext.Conflicts.Select(conflict => $"Imported-context conflict: {conflict}"));
@@ -211,7 +219,14 @@ public static class IntakePlanner
                 if (verification == CheckoutVerification.Unverified)
                     limitations.Add($"Imported context at {entry.Locator} is unverified against exact checkout bytes.");
                 if (verification == CheckoutVerification.Verified)
-                    limitations.Add($"Imported context at {entry.Locator} was verified against exact checkout bytes.");
+                {
+                    var identity = ImportedContextVerifier.GetVerifiedRepositoryIdentity(entry);
+                    if (identity is not null)
+                    {
+                        verifiedRepositoryIdentities.Add(identity);
+                        limitations.Add($"Imported context at {entry.Locator} was verified against exact checkout bytes at commit {identity.Commit}, tree {identity.Tree}.");
+                    }
+                }
                 if (verification == CheckoutVerification.Conflict)
                 {
                     limitations.Add($"Imported context at {entry.Locator} conflicts with exact checkout bytes.");
@@ -228,7 +243,6 @@ public static class IntakePlanner
         }
 
         var normalizedLimitations = limitations.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
-        var importedContextAvailable = importedContext is not null;
         return new IntakeAssessment(
             ready,
             request.Depth,
@@ -236,7 +250,8 @@ public static class IntakePlanner
             normalizedLimitations,
             importedContextRequirement,
             importedContextAvailable,
-            ComputeBinding(request, evidence, importedContextRequirement, importedContextAvailable, normalizedLimitations));
+            verifiedRepositoryIdentities,
+            ComputeBinding(request, evidence, importedContextRequirement, importedContextAvailable, normalizedLimitations, verifiedRepositoryIdentities));
     }
 
     internal static bool IsBoundTo(
@@ -250,7 +265,8 @@ public static class IntakePlanner
                 evidence,
                 assessment.ImportedContextRequirement,
                 assessment.ImportedContextAvailable,
-                assessment.Limitations),
+                assessment.Limitations,
+                assessment.VerifiedRepositoryIdentities),
             StringComparison.Ordinal);
 
     private static string ComputeBinding(
@@ -258,7 +274,8 @@ public static class IntakePlanner
         IReadOnlyList<EvidenceItem> evidence,
         EvidenceRequirement importedContextRequirement,
         bool importedContextAvailable,
-        IReadOnlyList<string> limitations)
+        IReadOnlyList<string> limitations,
+        IReadOnlyList<VerifiedRepositoryIdentity> verifiedRepositoryIdentities)
     {
         var material = new
         {
@@ -286,10 +303,15 @@ public static class IntakePlanner
                     observedAt = item.ObservedAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
                     caveats = item.Caveats.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
                     item.Supersedes,
-                    item.IsComplete
+                    item.IsComplete,
+                    requirement = item.Requirement.ToString().ToLowerInvariant()
                 }).ToArray(),
             importedContextRequirement = importedContextRequirement.ToString().ToLowerInvariant(),
             importedContextAvailable,
+            verifiedRepositoryIdentities = verifiedRepositoryIdentities
+                .OrderBy(item => item.Locator, StringComparer.Ordinal)
+                .Select(item => new { item.Locator, item.Commit, item.Tree })
+                .ToArray(),
             limitations = limitations.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()
         };
         return CanonicalJson.ComputeIdentity(JsonSerializer.SerializeToUtf8Bytes(material));
@@ -308,11 +330,11 @@ public static class ImportedContextVerifier
         var actualPath = exactFile.Path.Replace('\\', '/');
         if (entry.CheckoutDigest is null)
         {
-            return Bind(entry, CheckoutVerification.Unverified);
+            return Bind(entry, CheckoutVerification.Unverified, exactFile);
         }
         if (!string.Equals(expectedPath, actualPath, StringComparison.Ordinal))
         {
-            return Bind(entry, CheckoutVerification.Conflict);
+            return Bind(entry, CheckoutVerification.Conflict, exactFile);
         }
 
         var exactDigest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(exactFile.Bytes))}";
@@ -320,7 +342,8 @@ public static class ImportedContextVerifier
             entry,
             string.Equals(entry.CheckoutDigest, exactDigest, StringComparison.Ordinal)
                 ? CheckoutVerification.Verified
-                : CheckoutVerification.Conflict);
+                : CheckoutVerification.Conflict,
+            exactFile);
     }
 
     internal static CheckoutVerification GetEffectiveVerification(ImportedContextEntry entry) =>
@@ -328,16 +351,29 @@ public static class ImportedContextVerifier
             ? entry.CheckoutVerification
             : CheckoutVerification.Unverified;
 
-    private static ImportedContextEntry Bind(ImportedContextEntry entry, CheckoutVerification verification) =>
-        entry with
+    internal static VerifiedRepositoryIdentity? GetVerifiedRepositoryIdentity(ImportedContextEntry entry) =>
+        GetEffectiveVerification(entry) == CheckoutVerification.Verified &&
+        entry.VerifiedCommit is not null && entry.VerifiedTree is not null
+            ? new VerifiedRepositoryIdentity(entry.Locator, entry.VerifiedCommit, entry.VerifiedTree)
+            : null;
+
+    private static ImportedContextEntry Bind(
+        ImportedContextEntry entry,
+        CheckoutVerification verification,
+        RepositoryFile exactFile)
+    {
+        var bound = entry with
         {
             CheckoutVerification = verification,
-            VerificationBinding = ComputeBinding(entry, verification)
+            VerifiedCommit = exactFile.Commit,
+            VerifiedTree = exactFile.Tree
         };
+        return bound with { VerificationBinding = ComputeBinding(bound, verification) };
+    }
 
     private static string ComputeBinding(ImportedContextEntry entry, CheckoutVerification verification)
     {
-        var material = Encoding.UTF8.GetBytes($"{entry.Locator}\0{entry.CheckoutDigest}\0{verification}");
+        var material = Encoding.UTF8.GetBytes($"{entry.Locator}\0{entry.CheckoutDigest}\0{verification}\0{entry.VerifiedCommit}\0{entry.VerifiedTree}");
         return $"sha256:{Convert.ToHexStringLower(SHA256.HashData(material))}";
     }
 }

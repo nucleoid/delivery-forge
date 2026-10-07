@@ -27,6 +27,7 @@ public sealed class GitRepositoryContextReader
 
         var root = (await GitTextAsync(requestedRoot, cancellationToken, "rev-parse", "--show-toplevel")).Trim();
         root = Path.GetFullPath(root);
+        await RejectPromisorRepositoryAsync(root, cancellationToken);
         var commit = (await GitTextAsync(root, cancellationToken, "rev-parse", "--verify", "--end-of-options", $"{reference}^{{commit}}")).Trim();
         var tree = (await GitTextAsync(root, cancellationToken, "rev-parse", "--verify", "--end-of-options", $"{commit}^{{tree}}")).Trim();
         var status = await GitTextAsync(root, cancellationToken, "status", "--porcelain=v1", "--untracked-files=normal");
@@ -61,6 +62,20 @@ public sealed class GitRepositoryContextReader
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(context);
+        await RejectPromisorRepositoryAsync(context.RepositoryRoot, cancellationToken);
+        var commit = (await GitTextAsync(
+            context.RepositoryRoot,
+            cancellationToken,
+            "rev-parse", "--verify", "--end-of-options", $"{context.Commit}^{{commit}}")).Trim();
+        var tree = (await GitTextAsync(
+            context.RepositoryRoot,
+            cancellationToken,
+            "rev-parse", "--verify", "--end-of-options", $"{commit}^{{tree}}")).Trim();
+        if (!string.Equals(commit, context.Commit, StringComparison.Ordinal) ||
+            !string.Equals(tree, context.Tree, StringComparison.Ordinal))
+        {
+            throw new PlanningException("Repository context commit/tree identity does not match the exact Git objects.");
+        }
         var path = NormalizeRepositoryPath(repositoryRelativePath);
         var treeEntry = await TryReadTreeEntryAsync(context, path, cancellationToken)
             ?? throw new PlanningException($"Path '{path}' does not exist at exact commit {context.Commit}.");
@@ -89,7 +104,28 @@ public sealed class GitRepositoryContextReader
             isSymlink,
             resolution == SymlinkResolution.Escapes,
             generated,
-            resolution);
+            resolution,
+            context.Commit,
+            context.Tree);
+    }
+
+    private static async Task RejectPromisorRepositoryAsync(string root, CancellationToken cancellationToken)
+    {
+        var partialClone = await RunGitAsync(
+            root,
+            cancellationToken,
+            allowFailure: true,
+            "config", "--local", "--get", "extensions.partialClone");
+        var promisorRemote = await RunGitAsync(
+            root,
+            cancellationToken,
+            allowFailure: true,
+            "config", "--local", "--get-regexp", "^remote\\..*\\.promisor$");
+        if (partialClone.ExitCode == 0 || promisorRemote.ExitCode == 0)
+        {
+            throw new PlanningException(
+                "Exact object reads reject partial clone/promisor repositories before object access so missing objects cannot trigger a network fetch.");
+        }
     }
 
     private static string NormalizeRepositoryPath(string path)
