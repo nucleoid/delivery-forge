@@ -1,6 +1,5 @@
 using System.Globalization;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using DeliveryForge.Contracts.Serialization;
 
@@ -70,6 +69,10 @@ public sealed record ImportedContextEnvelope(
         RejectUnknownFields(item, EntryFields);
         var kind = PortableText(RequireString(item, "kind"), "kind");
         var locator = PortableText(RequireString(item, "locator"), "locator");
+        if (locator.StartsWith("git:", StringComparison.Ordinal) && locator.Contains('\\'))
+        {
+            throw new PlanningException("Imported context git: locators must use forward slashes; backslash aliases are not accepted.");
+        }
         var summary = PortableText(RequireString(item, "summary"), "summary");
         var digest = item.TryGetProperty("digest", out var digestElement) && digestElement.ValueKind != JsonValueKind.Null
             ? PortableText(digestElement.GetString() ?? string.Empty, "digest")
@@ -229,18 +232,7 @@ public static class IntakePlanner
 
         if (request.Depth == IntakeDepth.Deep)
         {
-            var distinctEligibleLocators = evidence
-                .Where(IsPinnedReadinessEvidence)
-                .Select(item => item.Locator)
-                .ToHashSet(StringComparer.Ordinal);
-            if (importedContext is not null)
-            {
-                foreach (var entry in importedContext.Entries.Where(IsEligibleDeepImportedEvidence))
-                {
-                    distinctEligibleLocators.Add(entry.Locator);
-                }
-            }
-            if (distinctEligibleLocators.Count < 2)
+            if (CountDistinctDeepEvidence(evidence, importedContext) < 2)
             {
                 ready = false;
                 limitations.Add("Deep intake requires additional bounded repository, policy, or imported evidence beyond minimal intake.");
@@ -320,6 +312,40 @@ public static class IntakePlanner
         !string.Equals(entry.Kind, "memory", StringComparison.OrdinalIgnoreCase) &&
         ImportedContextVerifier.GetEffectiveVerification(entry) == CheckoutVerification.Verified;
 
+    private static int CountDistinctDeepEvidence(
+        IReadOnlyList<EvidenceItem> evidence,
+        ImportedContextEnvelope? importedContext)
+    {
+        var seenLocators = new HashSet<string>(StringComparer.Ordinal);
+        var seenIdentities = new HashSet<string>(StringComparer.Ordinal);
+        var count = 0;
+
+        foreach (var item in evidence.Where(IsPinnedReadinessEvidence)
+                     .OrderBy(item => item.Locator, StringComparer.Ordinal))
+        {
+            var identity = item.SourceKind == EvidenceSourceKind.Repository
+                ? $"repository\0{item.Digest}\0{item.RepositoryCommit}\0{item.RepositoryTree}"
+                : $"policy\0{item.Digest}";
+            if (seenLocators.Contains(item.Locator) || seenIdentities.Contains(identity)) continue;
+            seenLocators.Add(item.Locator);
+            seenIdentities.Add(identity);
+            count++;
+        }
+
+        if (importedContext is null) return count;
+        foreach (var entry in importedContext.Entries.Where(IsEligibleDeepImportedEvidence)
+                     .OrderBy(entry => entry.Locator, StringComparer.Ordinal))
+        {
+            var repositoryIdentity = ImportedContextVerifier.GetVerifiedRepositoryIdentity(entry)!;
+            var identity = $"repository\0{entry.CheckoutDigest}\0{repositoryIdentity.Commit}\0{repositoryIdentity.Tree}";
+            if (seenLocators.Contains(entry.Locator) || seenIdentities.Contains(identity)) continue;
+            seenLocators.Add(entry.Locator);
+            seenIdentities.Add(identity);
+            count++;
+        }
+        return count;
+    }
+
     private static bool IsSha256(string? value) =>
         value is { Length: 71 } && value.StartsWith("sha256:", StringComparison.Ordinal) &&
         value[7..].All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
@@ -383,6 +409,8 @@ public static class IntakePlanner
                     item.Supersedes,
                     item.IsComplete,
                     requirement = item.Requirement.ToString().ToLowerInvariant(),
+                    item.RepositoryCommit,
+                    item.RepositoryTree,
                     item.RepositoryIsSymlink,
                     item.RepositorySymlinkResolution,
                     item.RepositoryGenerationClassification
@@ -406,14 +434,15 @@ public static class ImportedContextVerifier
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentNullException.ThrowIfNull(exactFile);
         var expectedPath = entry.Locator.StartsWith("git:", StringComparison.Ordinal)
-            ? entry.Locator[4..].Replace('\\', '/')
+            ? entry.Locator[4..]
             : null;
-        var actualPath = exactFile.Path.Replace('\\', '/');
+        var actualPath = exactFile.Path;
         if (entry.CheckoutDigest is null)
         {
             return Bind(entry, CheckoutVerification.Unverified, exactFile);
         }
-        if (!string.Equals(expectedPath, actualPath, StringComparison.Ordinal))
+        if (expectedPath is null || expectedPath.Contains('\\') ||
+            !string.Equals(expectedPath, actualPath, StringComparison.Ordinal))
         {
             return Bind(entry, CheckoutVerification.Conflict, exactFile);
         }
@@ -454,7 +483,21 @@ public static class ImportedContextVerifier
 
     private static string ComputeBinding(ImportedContextEntry entry, CheckoutVerification verification)
     {
-        var material = Encoding.UTF8.GetBytes($"{entry.Locator}\0{entry.CheckoutDigest}\0{verification}\0{entry.VerifiedCommit}\0{entry.VerifiedTree}");
+        var material = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            entry.Kind,
+            entry.Locator,
+            entry.Summary,
+            entry.Digest,
+            entry.ObservedAt,
+            entry.Stale,
+            entry.Truncated,
+            entry.Heuristic,
+            entry.CheckoutDigest,
+            verification,
+            entry.VerifiedCommit,
+            entry.VerifiedTree
+        });
         return $"sha256:{Convert.ToHexStringLower(SHA256.HashData(material))}";
     }
 }

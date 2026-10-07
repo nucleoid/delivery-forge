@@ -522,6 +522,16 @@ public sealed class GitRepositoryContextTests : IDisposable
         var verified = ImportedContextVerifier.VerifyAgainst(entry, exactFile);
 
         Assert.NotEqual(CheckoutVerification.Verified, verified.CheckoutVerification);
+
+        var json = Encoding.UTF8.GetBytes("""
+            {
+              "schemaVersion":"1.0.0",
+              "entries":[{"kind":"repository","locator":"git:dir\\tracked.txt","summary":"alias","digest":null,"observedAt":"1970-01-01T00:00:00Z"}],
+              "conflicts":[],
+              "limitations":[]
+            }
+            """);
+        Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
     }
 
     [Fact]

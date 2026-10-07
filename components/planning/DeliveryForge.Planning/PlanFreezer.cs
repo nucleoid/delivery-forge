@@ -104,6 +104,8 @@ public static class PlanFreezer
                     repositorySafety = item.SourceKind == EvidenceSourceKind.Repository
                         ? new
                         {
+                            item.RepositoryCommit,
+                            item.RepositoryTree,
                             item.RepositoryIsSymlink,
                             symlinkResolution = item.RepositorySymlinkResolution?.ToString().ToLowerInvariant(),
                             item.RepositoryGenerationClassification
@@ -282,6 +284,11 @@ public static class PlanFreezer
                 item.SourceKind == EvidenceSourceKind.Repository &&
                 !item.IsReaderBoundRepositoryEvidence()))
             failures.Add("repository provenance is not bound to exact reader-issued file/commit/tree and safety metadata");
+        if (draft.Provenance.Any(item =>
+                item.SourceKind == EvidenceSourceKind.Repository &&
+                (!string.Equals(item.RepositoryCommit, draft.Repository.Commit, StringComparison.Ordinal) ||
+                 !string.Equals(item.RepositoryTree, draft.Repository.Tree, StringComparison.Ordinal))))
+            failures.Add("repository provenance commit/tree differs from the draft base commit/tree");
         if (draft.Intake.VerifiedRepositoryIdentities.Any(identity =>
                 !string.Equals(identity.Commit, draft.Repository.Commit, StringComparison.Ordinal) ||
                 !string.Equals(identity.Tree, draft.Repository.Tree, StringComparison.Ordinal)))
@@ -378,7 +385,8 @@ public static class PlanFreezer
         foreach (var target in draft.ChangeMap)
         {
             var normalized = target.Path.Replace('\\', '/');
-            if (PortableMaterial.IsAbsolutePath(target.Path) || normalized.Split('/').Any(segment => segment == ".."))
+            if (target.Path.Contains('\\') || PortableMaterial.IsAbsolutePath(target.Path) ||
+                normalized.Split('/').Any(segment => segment == ".."))
                 failures.Add($"change-map path '{target.Path}' is not repository-relative");
         }
 

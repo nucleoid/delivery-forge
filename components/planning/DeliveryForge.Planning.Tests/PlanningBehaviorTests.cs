@@ -191,6 +191,34 @@ public sealed class PlanningBehaviorTests
         Assert.Contains(assessment.Limitations, item => item.Contains("additional bounded", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Fact]
+    public void Deep_intake_deduplicates_a_repository_alias_across_evidence_and_imported_context()
+    {
+        var request = Request() with { Depth = IntakeDepth.Deep };
+        var exactFile = RepositoryFileFor("callers.txt");
+        var evidenceAlias = EvidenceItem.FromRepositoryFile(
+            new RepositoryFile(
+                "docs/callers-alias.txt", new string('c', 40), "100644", exactFile.Bytes,
+                isSymlink: false, escapesWorktree: false, "not-detected", SymlinkResolution.NotSymlink,
+                new string('a', 40), new string('b', 40)),
+            ObservedAt,
+            []);
+        var digest = $"sha256:{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(exactFile.Bytes))}";
+        var imported = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry(
+                "code-index", "git:callers.txt", "Same checkout bytes under another locator", digest, ObservedAt,
+                CheckoutDigest: digest),
+            exactFile);
+
+        var assessment = IntakePlanner.Assess(
+            request,
+            [evidenceAlias],
+            new ImportedContextEnvelope("1.0.0", [imported], [], []));
+
+        Assert.False(assessment.Ready);
+        Assert.Contains(assessment.Limitations, item => item.Contains("additional bounded", StringComparison.OrdinalIgnoreCase));
+    }
+
     [Theory]
     [InlineData("memory", false, false, false)]
     [InlineData("code-index", true, false, false)]
@@ -855,6 +883,20 @@ public sealed class PlanningBehaviorTests
 
         Assert.Contains("\"repositoryCommit\":\"" + new string('a', 40) + "\"", canonical, StringComparison.Ordinal);
         Assert.Contains("\"repositoryTree\":\"" + new string('b', 40) + "\"", canonical, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Freeze_rejects_backslash_change_map_repository_path_aliases()
+    {
+        var draft = Draft() with
+        {
+            ChangeMap = [new("components\\planning\\Core.cs", "PlanFreezer", "freeze plans")]
+        };
+
+        var error = Assert.Throws<PlanningException>(() =>
+            PlanFreezer.Freeze(draft, "revision-backslash-change-map", ObservedAt));
+
+        Assert.Contains("repository-relative", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

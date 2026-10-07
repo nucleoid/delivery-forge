@@ -11,8 +11,9 @@ Minimal intake is the default. Ordinary engineering choices should be resolved f
 repository or policy evidence. Deep intake is enabled only when the caller explicitly sets
 `IntakeDepth.Deep`; it requires at least one additional distinct complete evidence item beyond
 the evidence sufficient for minimal intake, and counts only pinned repository/policy evidence or
-entries carried in the bounded imported-context envelope. Eligible items are counted once by locator
-across both inputs. Imported items count only when they are distinct, verified against exact checkout
+entries carried in the bounded imported-context envelope. Eligible items are counted once across both
+inputs by locator and by canonical bound identity/digest, so aliases of the same bytes cannot satisfy
+the threshold twice. Imported items count only when they are distinct, verified against exact checkout
 bytes, non-memory, fresh, complete, and non-heuristic. User, raw memory, stale, truncated, heuristic,
 unverified, and duplicate claims do not satisfy that threshold. The complete intake is capped at 256 items. The
 host collects that evidence through the same repository, policy, and imported-context contracts;
@@ -38,11 +39,13 @@ supersession. Incomplete optional evidence remains in the plan with its caveats;
 required evidence blocks both intake and freeze. Readiness requires at least one complete pinned
 policy item or repository item created from an exact `RepositoryFile` with
 `EvidenceItem.FromRepositoryFile`; a digestless item cannot establish readiness. Raw memory/index
-content should not be placed in an evidence item. A `git:` locator is repository evidence only and
-cannot be relabeled as policy or imported readiness evidence.
+content should not be placed in an evidence item. A `git:` locator is repository evidence only,
+cannot be relabeled as policy or imported readiness evidence, and must use forward slashes rather
+than a normalized backslash alias.
 
-`GitRepositoryContextReader` resolves a requested ref to exact commit and tree objects and reads
-file bytes by blob object ID. Dirty state and detached HEAD are immutable snapshots of mutable
+`GitRepositoryContextReader` resolves a requested ref to exact commit and tree objects, walks each
+tree object segment by segment with exact entry-name matching, and reads file bytes by blob object ID.
+Dirty state and detached HEAD are immutable snapshots of mutable
 observations bound to the separately recorded checkout HEAD commit/tree. When requested objects
 differ from checkout HEAD, the context says explicitly that those observations do not describe the
 requested base. Repository contexts are reader-issued, defensively copied, and bound across commit,
@@ -56,7 +59,7 @@ a separator. Resolution has one wall deadline plus global hop, segment, target-s
 Escape is reported when either platform rule escapes, and cycle, missing, or bound-exceeded outcomes
 are conservatively marked as potentially escaping. Git reads have a finite deadline,
 terminate the process tree on overflow or cancellation, disable replace refs, lazy fetch, optional
-locks, and fsmonitor side effects, force literal pathspecs, and remove inherited repository,
+locks, and fsmonitor side effects, avoid pathspec-based file resolution, and remove inherited repository,
 object, index, common-directory, and config routing. The Git executable is
 resolved once to an absolute file from explicit configuration or absolute `PATH` entries; repository
 and current-directory executable search is never used. Effective included configuration across
@@ -73,8 +76,11 @@ commit and tree from which their blob was read. Repository evidence used for rea
 from that file, binding its `git:` locator, digest, commit, tree, symlink disposition, and generated-file
 classification. Unsafe/unresolved symlinks and conventionally generated files remain provenance with
 explicit caveats but do not establish clean readiness. Freeze preserves this metadata in canonical output
-and rejects altered or base-mismatched bindings. Imported-context verification binds locator,
-digest, verification status, commit, and tree. The identity is retained in limitations, and freeze
+including each repository item's commit/tree, and rejects every altered or base-mismatched binding,
+including incomplete unsafe/generated evidence. Imported-context verification binds kind, locator,
+summary, digest, observed time, stale/truncated/heuristic flags, claimed checkout digest,
+verification status, commit, and tree. Mutation of any bound field downgrades the record to unverified.
+The identity is retained in limitations, and freeze
 rejects verified imported context whose commit or tree differs from the draft base.
 
 ## Complete plan and freeze

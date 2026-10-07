@@ -87,7 +87,7 @@ public sealed record EvidenceItem(
     internal bool HasConsistentSourceLocator()
     {
         if (Locator.StartsWith("git:", StringComparison.Ordinal))
-            return SourceKind == EvidenceSourceKind.Repository;
+            return SourceKind == EvidenceSourceKind.Repository && !Locator.Contains('\\');
         if (SourceKind == EvidenceSourceKind.Repository)
             return false;
         if (Locator.StartsWith("policy:", StringComparison.Ordinal))

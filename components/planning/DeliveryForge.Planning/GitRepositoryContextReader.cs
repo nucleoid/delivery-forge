@@ -203,14 +203,17 @@ public sealed class GitRepositoryContextReader
         {
             throw new PlanningException("Repository paths must be non-empty, relative, and portable.");
         }
+        if (path.Contains('\\'))
+        {
+            throw new PlanningException("Repository paths must use forward slashes; backslash aliases are not accepted.");
+        }
 
-        var normalized = path.Replace('\\', '/');
-        if (normalized.Split('/').Any(segment => segment is "" or "." or ".."))
+        if (path.Split('/').Any(segment => segment is "" or "." or ".."))
         {
             throw new PlanningException("Repository paths cannot contain empty, current, or parent traversal segments.");
         }
 
-        return normalized;
+        return path;
     }
 
     private async Task<SymlinkResolution> ResolveSymlinkAsync(
@@ -410,18 +413,45 @@ public sealed class GitRepositoryContextReader
         CancellationToken cancellationToken,
         ResolutionBudget? budget = null)
     {
-        budget?.InvokeGit();
-        var result = await RunGitAsync(
-            context.RepositoryRoot,
-            cancellationToken,
-            allowFailure: false,
-            "ls-tree", "-z", "--end-of-options", context.Commit, "--", path);
-        if (result.StandardOutput.Length == 0) return null;
+        var segments = path.Split('/');
+        var treeObject = context.Tree;
+        for (var index = 0; index < segments.Length; index++)
+        {
+            budget?.InvokeGit();
+            var result = await RunGitAsync(
+                context.RepositoryRoot,
+                cancellationToken,
+                allowFailure: false,
+                "ls-tree", "-z", "--end-of-options", treeObject);
+            var entry = ParseExactTreeEntry(result.StandardOutput, segments[index]);
+            if (entry is null) return null;
+            if (index == segments.Length - 1) return entry;
+            if (entry.Type != "tree") return null;
+            treeObject = entry.ObjectId;
+        }
 
-        var metadata = Encoding.UTF8.GetString(result.StandardOutput).TrimEnd('\0');
-        var tab = metadata.IndexOf('\t');
-        var parts = (tab < 0 ? metadata : metadata[..tab]).Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        return parts.Length == 3 ? new TreeEntry(parts[0], parts[1], parts[2]) : null;
+        return null;
+    }
+
+    private static TreeEntry? ParseExactTreeEntry(byte[] output, string exactName)
+    {
+        TreeEntry? match = null;
+        foreach (var rawEntry in Encoding.UTF8.GetString(output).Split('\0', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var tab = rawEntry.IndexOf('\t');
+            if (tab < 0 || !string.Equals(rawEntry[(tab + 1)..], exactName, StringComparison.Ordinal)) continue;
+            var parts = rawEntry[..tab].Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length != 3)
+            {
+                throw new PlanningException("Git returned a malformed exact tree entry.");
+            }
+            if (match is not null)
+            {
+                throw new PlanningException("Git returned duplicate exact tree entry names.");
+            }
+            match = new TreeEntry(parts[0], parts[1], parts[2]);
+        }
+        return match;
     }
 
     private async Task<byte[]> ReadBlobAsync(
