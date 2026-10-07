@@ -31,16 +31,18 @@ public sealed class WorkflowTransitionTests
         var evidence = FullEvidence();
 
         foreach (var from in Enum.GetValues<WorkflowState>())
-        foreach (var to in Enum.GetValues<WorkflowState>())
         {
-            var expected = ExpectedLinear.Contains((from, to)) || (!terminalSources.Contains(from) && terminalTargets.Contains(to));
-            if (expected)
+            foreach (var to in Enum.GetValues<WorkflowState>())
             {
-                WorkflowTransition.EnsureAllowed(from, to, evidence);
-            }
-            else
-            {
-                Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(from, to, evidence));
+                var expected = ExpectedLinear.Contains((from, to)) || (!terminalSources.Contains(from) && terminalTargets.Contains(to));
+                if (expected)
+                {
+                    WorkflowTransition.EnsureAllowed(from, to, evidence);
+                }
+                else
+                {
+                    Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(from, to, evidence));
+                }
             }
         }
     }
