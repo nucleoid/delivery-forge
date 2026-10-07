@@ -1375,6 +1375,13 @@ public sealed class PlanningBehaviorTests
     [InlineData("-I%USERPROFILE%\\sdk")]
     [InlineData("tool -I\\work\\alice\\repo")]
     [InlineData("found at \\work\\alice\\repo")]
+    [InlineData(@"cc -I\\fileserver\alice\include app.c")]
+    [InlineData(@"cl /I\\fileserver\alice\include app.c")]
+    [InlineData(@"cc ""-I\\fileserver\alice\include"" app.c")]
+    [InlineData(@"cl '/I\\fileserver\alice\include' app.c")]
+    [InlineData(@"cc -I=\\fileserver\alice\include app.c")]
+    [InlineData(@"cl /I:\\fileserver\alice\include app.c")]
+    [InlineData(@"cc -Wl,-rpath,\\fileserver\alice\lib app.c")]
     public void Portable_consumers_reject_option_attached_absolute_host_paths(string privateText)
     {
         AssertPortableConsumersReject(privateText, "revision-option-attached-host-path");
@@ -1389,6 +1396,19 @@ public sealed class PlanningBehaviorTests
     [InlineData("curl --proxy=alice:hunter2@proxy.example:3128 https://example.invalid")]
     [InlineData("curl -H \"Authorization: token 0123456789abcdef0123456789abcdef01234567\" https://example.invalid")]
     [InlineData("curl -H \"Authorization: Digest opaque-value\" https://example.invalid")]
+    [InlineData("curl -sSx alice:hunter2@proxy.example:3128 https://example.invalid")]
+    [InlineData("curl -fsxalice:hunter2@proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --proxy1.0 alice:hunter2@proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --proxy1.0=alice:hunter2@proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --preproxy alice:hunter2@proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --preproxy=alice:hunter2@proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --socks4 alice:hunter2@proxy.example:1080 https://example.invalid")]
+    [InlineData("curl --socks4a=alice:hunter2@proxy.example:1080 https://example.invalid")]
+    [InlineData("curl --socks5 alice:hunter2@proxy.example:1080 https://example.invalid")]
+    [InlineData("curl --socks5-hostname=alice:hunter2@proxy.example:1080 https://example.invalid")]
+    [InlineData("curl -H \"Authorization: lin_api_0123456789\" https://example.invalid")]
+    [InlineData("curl -H \"Authorization: 0123456789\" https://example.invalid")]
+    [InlineData("Authorization: x")]
     public void Portable_consumers_reject_curl_proxy_credentials(string privateText)
     {
         AssertPortableConsumersReject(privateText, "revision-curl-proxy-credential");
@@ -1421,6 +1441,15 @@ public sealed class PlanningBehaviorTests
     [InlineData("curl --proxy=proxy.example:3128 https://example.invalid")]
     [InlineData("curl -H \"Accept: application/json\" https://example.invalid")]
     [InlineData("The Authorization header selects an authentication scheme")]
+    [InlineData("curl -sSx proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --proxy1.0=proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --preproxy proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --socks5-hostname=proxy.example:1080 https://example.invalid")]
+    [InlineData("curl -H \"Authorization:\" https://example.invalid")]
+    [InlineData("curl -H 'Authorization:   ' https://example.invalid")]
+    [InlineData(@"cc -I.\include app.c")]
+    [InlineData(@"cl /I..\include app.c")]
+    [InlineData("cc -Wl,-rpath,./lib app.c")]
     public void Portable_consumers_preserve_non_secret_sibling_controls(string portableText)
     {
         var original = Draft();
