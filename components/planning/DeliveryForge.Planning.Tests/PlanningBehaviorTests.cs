@@ -1333,6 +1333,17 @@ public sealed class PlanningBehaviorTests
     [InlineData("make CFLAGS=-I/home/alice/sdk/include")]
     [InlineData("cc -L/opt/alice/lib app.c")]
     [InlineData("cl -IC:/Users/alice/sdk/include app.c")]
+    [InlineData("make CFLAGS=\"-I/home/alice/sdk/include\"")]
+    [InlineData("'-L/opt/alice/lib'")]
+    [InlineData("(-I/home/alice/inc)")]
+    [InlineData("cc -Wl,-L/home/alice/lib")]
+    [InlineData("cl \"-IC:/Users/alice/sdk\"")]
+    [InlineData("cl /IC:\\work\\alice\\sdk")]
+    [InlineData("-I~/sdk/include")]
+    [InlineData("-I$HOME/sdk/include")]
+    [InlineData("-I%USERPROFILE%\\sdk")]
+    [InlineData("tool -I\\work\\alice\\repo")]
+    [InlineData("found at \\work\\alice\\repo")]
     public void Portable_consumers_reject_option_attached_absolute_host_paths(string privateText)
     {
         AssertPortableConsumersReject(privateText, "revision-option-attached-host-path");
@@ -1341,6 +1352,12 @@ public sealed class PlanningBehaviorTests
     [Theory]
     [InlineData("curl --proxy-user alice:hunter2 https://example.invalid")]
     [InlineData("curl --proxy-user=alice:hunter2 https://example.invalid")]
+    [InlineData("curl -x alice:hunter2@proxy.example:3128 https://example.invalid")]
+    [InlineData("curl -xalice:hunter2@proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --proxy alice:hunter2@proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --proxy=alice:hunter2@proxy.example:3128 https://example.invalid")]
+    [InlineData("curl -H \"Authorization: token 0123456789abcdef0123456789abcdef01234567\" https://example.invalid")]
+    [InlineData("curl -H \"Authorization: Digest opaque-value\" https://example.invalid")]
     public void Portable_consumers_reject_curl_proxy_credentials(string privateText)
     {
         AssertPortableConsumersReject(privateText, "revision-curl-proxy-credential");
@@ -1368,6 +1385,11 @@ public sealed class PlanningBehaviorTests
     [InlineData("curl -fsS https://example.invalid && docker run -u 1000:1000 image")]
     [InlineData("sk-short")]
     [InlineData("PowerShell exposes $env:APPDATA without revealing a path")]
+    [InlineData("Use -v/--verbose or -n/--dry-run")]
+    [InlineData("curl -x proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --proxy=proxy.example:3128 https://example.invalid")]
+    [InlineData("curl -H \"Accept: application/json\" https://example.invalid")]
+    [InlineData("The Authorization header selects an authentication scheme")]
     public void Portable_consumers_preserve_non_secret_sibling_controls(string portableText)
     {
         var original = Draft();

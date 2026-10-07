@@ -108,6 +108,68 @@ public sealed class GitRepositoryContextTests : IDisposable
         Assert.False(frozen.ReconcileBase(sameHistoricalSnapshot).DownstreamReady);
     }
 
+    [Theory]
+    [InlineData("describe")]
+    [InlineData("alternate-namespace")]
+    public async Task Exact_branch_requests_reject_git_dwim_fallbacks(string fallbackKind)
+    {
+        InitializeRepository();
+        Run("git", "branch -M main");
+        var requestedRef = fallbackKind == "describe"
+            ? $"refs/heads/release-g{RunCapture("git", "rev-parse --short HEAD")}"
+            : "refs/heads/fallback";
+        if (fallbackKind == "alternate-namespace")
+        {
+            Run("git", "update-ref refs/tags/refs/heads/fallback HEAD");
+        }
+
+        var reader = new GitRepositoryContextReader();
+
+        var error = await Assert.ThrowsAsync<PlanningException>(() =>
+            reader.ReadAsync(_root, requestedRef, TestContext.Current.CancellationToken));
+
+        Assert.Contains("exact branch", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Real_reader_reconciles_an_unchanged_detached_branch_and_detects_branch_drift()
+    {
+        InitializeRepository();
+        Run("git", "branch -M main");
+        Run("git", "checkout -q --detach");
+        var reader = new GitRepositoryContextReader();
+        var initial = await reader.ReadAsync(_root, "refs/heads/main", TestContext.Current.CancellationToken);
+        var exactFile = await reader.ReadFileAsync(initial, "tracked.txt", TestContext.Current.CancellationToken);
+        var evidence = new[] { EvidenceItem.FromRepositoryFile(exactFile, DateTimeOffset.UnixEpoch, []) };
+        var request = new PlanningRequest(
+            "owner/repo", "#4", "implement", "Bind an exact mutable branch",
+            ["planning"], ["execution"], ["exact branch drift is detected"], "implement");
+        var draft = new PlanDraft(
+            request,
+            initial,
+            evidence,
+            [new("tracked.txt", "content", "update")],
+            [new("root", [], "repository context is exact")],
+            [new("test", "dotnet test", "passes")],
+            new("additive", "none", "none", "none", "none", "none", "tests", "revert", []),
+            [],
+            IntakePlanner.Assess(request, evidence));
+        var frozen = PlanFreezer.Freeze(draft, "revision-real-detached-branch", DateTimeOffset.UnixEpoch);
+        var unchanged = await reader.ReadAsync(_root, "refs/heads/main", TestContext.Current.CancellationToken);
+
+        Assert.True(initial.DetachedHead);
+        Assert.Same(frozen, frozen.ReconcileBase(unchanged));
+
+        File.WriteAllText(Path.Combine(_root, "tracked.txt"), "advanced branch bytes");
+        Run("git", "add tracked.txt");
+        Run("git", "commit -q -m detached-advance");
+        Run("git", "update-ref refs/heads/main HEAD");
+        var advanced = await reader.ReadAsync(_root, "refs/heads/main", TestContext.Current.CancellationToken);
+
+        Assert.True(advanced.DetachedHead);
+        Assert.False(frozen.ReconcileBase(advanced).DownstreamReady);
+    }
+
     [Fact]
     public async Task Verified_imported_context_is_bound_to_the_exact_repository_commit_and_tree()
     {
