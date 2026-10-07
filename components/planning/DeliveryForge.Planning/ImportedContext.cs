@@ -204,6 +204,11 @@ public static class IntakePlanner
         foreach (var item in evidence)
         {
             limitations.AddRange(item.Caveats);
+            if (!item.HasConsistentSourceLocator())
+            {
+                limitations.Add($"Evidence source kind at {item.Locator} is inconsistent with its locator scheme.");
+                if (item.Requirement == EvidenceRequirement.Required) ready = false;
+            }
             if (item.IsComplete &&
                 item.SourceKind is EvidenceSourceKind.Repository or EvidenceSourceKind.Policy &&
                 !IsSha256(item.Digest))
@@ -224,15 +229,18 @@ public static class IntakePlanner
 
         if (request.Depth == IntakeDepth.Deep)
         {
-            var distinctCompleteEvidence = evidence
+            var distinctEligibleLocators = evidence
                 .Where(IsPinnedReadinessEvidence)
-                .Select(item => (item.SourceKind, item.Locator))
-                .Distinct()
-                .Count() + (importedContext?.Entries
-                    .Select(item => (item.Kind, item.Locator))
-                    .Distinct()
-                    .Count() ?? 0);
-            if (distinctCompleteEvidence < 2)
+                .Select(item => item.Locator)
+                .ToHashSet(StringComparer.Ordinal);
+            if (importedContext is not null)
+            {
+                foreach (var entry in importedContext.Entries.Where(IsEligibleDeepImportedEvidence))
+                {
+                    distinctEligibleLocators.Add(entry.Locator);
+                }
+            }
+            if (distinctEligibleLocators.Count < 2)
             {
                 ready = false;
                 limitations.Add("Deep intake requires additional bounded repository, policy, or imported evidence beyond minimal intake.");
@@ -301,9 +309,16 @@ public static class IntakePlanner
     }
 
     private static bool IsPinnedReadinessEvidence(EvidenceItem item) =>
-        item.IsComplete && IsSha256(item.Digest) &&
+        item.IsComplete && item.HasConsistentSourceLocator() && IsSha256(item.Digest) &&
         (item.SourceKind == EvidenceSourceKind.Policy ||
          item.SourceKind == EvidenceSourceKind.Repository && item.IsReaderBoundRepositoryEvidence());
+
+    private static bool IsEligibleDeepImportedEvidence(ImportedContextEntry entry) =>
+        !entry.Stale &&
+        !entry.Truncated &&
+        !entry.Heuristic &&
+        !string.Equals(entry.Kind, "memory", StringComparison.OrdinalIgnoreCase) &&
+        ImportedContextVerifier.GetEffectiveVerification(entry) == CheckoutVerification.Verified;
 
     private static bool IsSha256(string? value) =>
         value is { Length: 71 } && value.StartsWith("sha256:", StringComparison.Ordinal) &&
@@ -312,7 +327,7 @@ public static class IntakePlanner
     private static bool IsConcreteSingleLine(string? value)
     {
         if (value is null) return true;
-        if (value.IndexOfAny(['\r', '\n']) >= 0) return false;
+        if (value.Any(character => char.IsControl(character) || character is '\u2028' or '\u2029')) return false;
         return !string.IsNullOrWhiteSpace(value.Trim().Trim('.', '?', '!', ':', ';'));
     }
 
@@ -367,7 +382,10 @@ public static class IntakePlanner
                     caveats = item.Caveats.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
                     item.Supersedes,
                     item.IsComplete,
-                    requirement = item.Requirement.ToString().ToLowerInvariant()
+                    requirement = item.Requirement.ToString().ToLowerInvariant(),
+                    item.RepositoryIsSymlink,
+                    item.RepositorySymlinkResolution,
+                    item.RepositoryGenerationClassification
                 }).ToArray(),
             importedContextRequirement = importedContextRequirement.ToString().ToLowerInvariant(),
             importedContextAvailable,

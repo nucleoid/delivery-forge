@@ -100,7 +100,15 @@ public static class PlanFreezer
                     caveats = Sorted(item.Caveats),
                     item.Supersedes,
                     item.IsComplete,
-                    requirement = item.Requirement.ToString().ToLowerInvariant()
+                    requirement = item.Requirement.ToString().ToLowerInvariant(),
+                    repositorySafety = item.SourceKind == EvidenceSourceKind.Repository
+                        ? new
+                        {
+                            item.RepositoryIsSymlink,
+                            symlinkResolution = item.RepositorySymlinkResolution?.ToString().ToLowerInvariant(),
+                            item.RepositoryGenerationClassification
+                        }
+                        : null
                 }).ToArray(),
             changeMap = draft.ChangeMap
                 .OrderBy(item => item.Path, StringComparer.Ordinal)
@@ -183,6 +191,8 @@ public static class PlanFreezer
             supersedes,
             request.Repository,
             request.WorkItem,
+            draft.Repository.RequestedRef,
+            draft.Repository.DetachedHead,
             draft.Repository.Commit,
             draft.Repository.Tree,
             canonical,
@@ -266,10 +276,12 @@ public static class PlanFreezer
         if (draft.Provenance.Count == 0) failures.Add("provenance is required");
         if (draft.Provenance.Any(item => item.Requirement == EvidenceRequirement.Required && !item.IsComplete))
             failures.Add("required provenance is incomplete");
+        if (draft.Provenance.Any(item => !item.HasConsistentSourceLocator()))
+            failures.Add("provenance source kind and locator scheme must be consistent");
         if (draft.Provenance.Any(item =>
-                item.SourceKind == EvidenceSourceKind.Repository && item.IsComplete &&
+                item.SourceKind == EvidenceSourceKind.Repository &&
                 !item.IsReaderBoundRepositoryEvidence()))
-            failures.Add("complete repository provenance is not bound to an exact reader-issued file/commit/tree");
+            failures.Add("repository provenance is not bound to exact reader-issued file/commit/tree and safety metadata");
         if (draft.Intake.VerifiedRepositoryIdentities.Any(identity =>
                 !string.Equals(identity.Commit, draft.Repository.Commit, StringComparison.Ordinal) ||
                 !string.Equals(identity.Tree, draft.Repository.Tree, StringComparison.Ordinal)))

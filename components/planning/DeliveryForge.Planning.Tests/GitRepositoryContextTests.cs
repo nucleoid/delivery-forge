@@ -33,12 +33,12 @@ public sealed class GitRepositoryContextTests : IDisposable
         Assert.NotNull(resolver);
         var resolvedFromPath = Assert.IsType<string>(resolver.Invoke(
             null,
-            [null, string.Join(Path.PathSeparator, [".", repository, trusted]), windows]));
+            [null, string.Join(Path.PathSeparator, [".", trusted]), windows]));
         var resolvedExplicitly = Assert.IsType<string>(resolver.Invoke(
             null,
             [trustedGit, string.Empty, windows]));
 
-        Assert.Equal(Path.GetFullPath(repositoryGit), resolvedFromPath);
+        Assert.Equal(Path.GetFullPath(trustedGit), resolvedFromPath);
         Assert.Equal(Path.GetFullPath(trustedGit), resolvedExplicitly);
         var relativeError = Assert.Throws<TargetInvocationException>(() => resolver.Invoke(
             null,

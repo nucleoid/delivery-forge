@@ -37,6 +37,9 @@ public sealed record EvidenceItem(
     internal string? RepositoryCommit { get; init; }
     internal string? RepositoryTree { get; init; }
     internal string? RepositoryBinding { get; init; }
+    internal bool? RepositoryIsSymlink { get; init; }
+    internal SymlinkResolution? RepositorySymlinkResolution { get; init; }
+    internal string? RepositoryGenerationClassification { get; init; }
 
     public static EvidenceItem FromRepositoryFile(
         RepositoryFile exactFile,
@@ -46,16 +49,31 @@ public sealed record EvidenceItem(
     {
         ArgumentNullException.ThrowIfNull(exactFile);
         ArgumentNullException.ThrowIfNull(caveats);
+        var unsafeSymlink = exactFile.SymlinkResolution is not (SymlinkResolution.NotSymlink or SymlinkResolution.InTree);
+        var generated = !exactFile.GenerationClassification.StartsWith("not-detected", StringComparison.Ordinal);
+        var safetyCaveats = caveats
+            .Concat(unsafeSymlink
+                ? [$"Repository symlink safety is {exactFile.SymlinkResolution}; it cannot establish readiness."]
+                : [])
+            .Concat(generated
+                ? [$"Repository file generation classification is {exactFile.GenerationClassification}; it cannot establish readiness without authoritative generator provenance."]
+                : [])
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
         var item = new EvidenceItem(
             EvidenceSourceKind.Repository,
             $"git:{exactFile.Path}",
             $"sha256:{Convert.ToHexStringLower(SHA256.HashData(exactFile.Bytes))}",
             observedAt,
-            caveats.ToArray(),
+            safetyCaveats,
+            IsComplete: !unsafeSymlink && !generated,
             Requirement: requirement)
         {
             RepositoryCommit = exactFile.Commit,
-            RepositoryTree = exactFile.Tree
+            RepositoryTree = exactFile.Tree,
+            RepositoryIsSymlink = exactFile.IsSymlink,
+            RepositorySymlinkResolution = exactFile.SymlinkResolution,
+            RepositoryGenerationClassification = exactFile.GenerationClassification
         };
         return item with { RepositoryBinding = ComputeRepositoryBinding(item) };
     }
@@ -65,6 +83,17 @@ public sealed record EvidenceItem(
         RepositoryCommit is not null &&
         RepositoryTree is not null &&
         string.Equals(RepositoryBinding, ComputeRepositoryBinding(this), StringComparison.Ordinal);
+
+    internal bool HasConsistentSourceLocator()
+    {
+        if (Locator.StartsWith("git:", StringComparison.Ordinal))
+            return SourceKind == EvidenceSourceKind.Repository;
+        if (SourceKind == EvidenceSourceKind.Repository)
+            return false;
+        if (Locator.StartsWith("policy:", StringComparison.Ordinal))
+            return SourceKind == EvidenceSourceKind.Policy;
+        return true;
+    }
 
     private static string ComputeRepositoryBinding(EvidenceItem item)
     {
@@ -79,7 +108,10 @@ public sealed record EvidenceItem(
             item.IsComplete,
             item.Requirement,
             item.RepositoryCommit,
-            item.RepositoryTree
+            item.RepositoryTree,
+            item.RepositoryIsSymlink,
+            item.RepositorySymlinkResolution,
+            item.RepositoryGenerationClassification
         });
         return $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
     }
@@ -333,6 +365,8 @@ public sealed class FrozenPlan
         string? supersedes,
         string repository,
         string workItem,
+        string baseReference,
+        bool baseReferenceWasDetached,
         string baseCommit,
         string baseTree,
         byte[] canonicalBytes,
@@ -348,6 +382,8 @@ public sealed class FrozenPlan
         Supersedes = supersedes;
         Repository = repository;
         WorkItem = workItem;
+        BaseReference = baseReference;
+        BaseReferenceWasDetached = baseReferenceWasDetached;
         BaseCommit = baseCommit;
         BaseTree = baseTree;
         _canonicalBytes = canonicalBytes.ToArray();
@@ -364,6 +400,8 @@ public sealed class FrozenPlan
     public string? Supersedes { get; }
     public string Repository { get; }
     public string WorkItem { get; }
+    public string BaseReference { get; }
+    public bool BaseReferenceWasDetached { get; }
     public string BaseCommit { get; }
     public string BaseTree { get; }
     public byte[] CanonicalBytes => _canonicalBytes.ToArray();
@@ -378,13 +416,26 @@ public sealed class FrozenPlan
         {
             throw new PlanningException("Base reconciliation requires a reader-issued repository context.");
         }
+        if (!string.Equals(BaseReference, current.RequestedRef, StringComparison.Ordinal) ||
+            BaseReferenceWasDetached ||
+            current.DetachedHead ||
+            !IsFreshnessBearingReference(current.RequestedRef))
+        {
+            return WithBaseDrift(
+                $"Base ref freshness could not be established: frozen ref '{BaseReference}' must be reconciled through the same mutable ref; current ref is '{current.RequestedRef}' and detached/pinned snapshots are not freshness evidence.");
+        }
         if (string.Equals(BaseCommit, current.Commit, StringComparison.Ordinal) &&
             string.Equals(BaseTree, current.Tree, StringComparison.Ordinal))
         {
             return this;
         }
 
-        return new FrozenPlan(
+        return WithBaseDrift(
+            $"Base drift detected for ref '{BaseReference}': frozen {BaseCommit}/{BaseTree}, current {current.Commit}/{current.Tree}; reconcile before downstream work.");
+    }
+
+    private FrozenPlan WithBaseDrift(string limitation) =>
+        new FrozenPlan(
             Identity,
             ContractIdentity,
             Revision,
@@ -393,15 +444,20 @@ public sealed class FrozenPlan
             Supersedes,
             Repository,
             WorkItem,
+            BaseReference,
+            BaseReferenceWasDetached,
             BaseCommit,
             BaseTree,
             _canonicalBytes,
             _planContractBytes,
             downstreamReady: false,
             Limitations
-                .Append($"Base drift detected: frozen {BaseCommit}/{BaseTree}, current {current.Commit}/{current.Tree}; reconcile before downstream work.")
+                .Append(limitation)
                 .Distinct(StringComparer.Ordinal)
                 .Order(StringComparer.Ordinal)
                 .ToArray());
-    }
+
+    private static bool IsFreshnessBearingReference(string reference) =>
+        string.Equals(reference, "HEAD", StringComparison.Ordinal) ||
+        reference.StartsWith("refs/heads/", StringComparison.Ordinal);
 }

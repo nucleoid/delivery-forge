@@ -784,6 +784,56 @@ public sealed class PlanningBehaviorTests
         Assert.Contains(reconciled.Limitations, item => item.Contains("ref", StringComparison.OrdinalIgnoreCase));
     }
 
+    [Theory]
+    [InlineData("refs/tags/v1")]
+    [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
+    [InlineData("main")]
+    public void Non_freshness_bearing_refs_cannot_reconcile_an_unchanged_base(string requestedRef)
+    {
+        var draft = Draft();
+        var baseContext = RepositoryContext.Create(
+            "/portable/display-only",
+            requestedRef,
+            draft.Repository.Commit,
+            draft.Repository.Tree,
+            detachedHead: false,
+            dirty: false,
+            shallow: false,
+            submodules: [],
+            limitations: []);
+        var frozen = PlanFreezer.Freeze(draft with { Repository = baseContext }, "revision-1", ObservedAt);
+        var snapshot = RepositoryContext.Create(
+            "/portable/display-only",
+            requestedRef,
+            frozen.BaseCommit,
+            frozen.BaseTree,
+            detachedHead: false,
+            dirty: false,
+            shallow: false,
+            submodules: [],
+            limitations: []);
+
+        Assert.False(frozen.ReconcileBase(snapshot).DownstreamReady);
+    }
+
+    [Fact]
+    public void Same_mutable_ref_and_unchanged_base_preserves_downstream_readiness()
+    {
+        var frozen = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
+        var sameBranch = RepositoryContext.Create(
+            "/portable/display-only",
+            "HEAD",
+            frozen.BaseCommit,
+            frozen.BaseTree,
+            detachedHead: false,
+            dirty: false,
+            shallow: false,
+            submodules: [],
+            limitations: []);
+
+        Assert.Same(frozen, frozen.ReconcileBase(sameBranch));
+    }
+
     [Fact]
     public void Freeze_rejects_an_unresolved_user_owned_decision()
     {

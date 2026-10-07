@@ -10,6 +10,47 @@ public sealed class GitRepositoryContextReader
     private static readonly TimeSpan GitOperationTimeout = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan GitTerminationTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan SymlinkResolutionTimeout = TimeSpan.FromSeconds(10);
+    private readonly string _gitExecutable;
+
+    public GitRepositoryContextReader(string? gitExecutablePath = null)
+    {
+        _gitExecutable = ResolveGitExecutable(
+            gitExecutablePath,
+            Environment.GetEnvironmentVariable("PATH"),
+            OperatingSystem.IsWindows());
+    }
+
+    internal static string ResolveGitExecutable(
+        string? configuredPath,
+        string? path,
+        bool windows)
+    {
+        if (!string.IsNullOrWhiteSpace(configuredPath))
+        {
+            if (!Path.IsPathFullyQualified(configuredPath))
+            {
+                throw new PlanningException("The configured Git executable path must be absolute.");
+            }
+
+            var configured = Path.GetFullPath(configuredPath);
+            if (!File.Exists(configured))
+            {
+                throw new PlanningException($"The configured Git executable '{configured}' does not exist.");
+            }
+            return configured;
+        }
+
+        var executableName = windows ? "git.exe" : "git";
+        foreach (var rawEntry in (path ?? string.Empty).Split(Path.PathSeparator))
+        {
+            var entry = rawEntry.Trim().Trim('"');
+            if (entry.Length == 0 || !Path.IsPathFullyQualified(entry)) continue;
+            var candidate = Path.GetFullPath(Path.Combine(entry, executableName));
+            if (File.Exists(candidate)) return candidate;
+        }
+
+        throw new PlanningException("Git could not be resolved from an absolute configured path or an absolute PATH entry.");
+    }
 
     public async Task<RepositoryContext> ReadAsync(
         string repositoryRoot,
@@ -121,7 +162,7 @@ public sealed class GitRepositoryContextReader
             context.Tree);
     }
 
-    private static async Task RejectPromisorRepositoryAsync(string root, CancellationToken cancellationToken)
+    private async Task RejectPromisorRepositoryAsync(string root, CancellationToken cancellationToken)
     {
         var effectiveConfiguration = await RunGitAsync(
             root,
@@ -137,7 +178,7 @@ public sealed class GitRepositoryContextReader
         }
     }
 
-    private static async Task<string[]> ReadGitlinksAsync(
+    private async Task<string[]> ReadGitlinksAsync(
         string root,
         string commit,
         CancellationToken cancellationToken)
@@ -172,7 +213,7 @@ public sealed class GitRepositoryContextReader
         return normalized;
     }
 
-    private static async Task<SymlinkResolution> ResolveSymlinkAsync(
+    private async Task<SymlinkResolution> ResolveSymlinkAsync(
         RepositoryContext context,
         string symlinkPath,
         string target,
@@ -211,7 +252,7 @@ public sealed class GitRepositoryContextReader
         }
     }
 
-    private static async Task<SymlinkResolution> ResolveTargetAsync(
+    private async Task<SymlinkResolution> ResolveTargetAsync(
         RepositoryContext context,
         IReadOnlyList<string> parent,
         string target,
@@ -240,7 +281,7 @@ public sealed class GitRepositoryContextReader
         else
         {
             resolved = parent.ToList();
-            pending = new Queue<string>(SplitTarget(target, budget).Concat(remaining));
+            pending = new Queue<string>(SplitPosixTarget(target, budget).Concat(remaining));
         }
         while (pending.Count > 0)
         {
@@ -285,7 +326,7 @@ public sealed class GitRepositoryContextReader
                 }
                 else
                 {
-                    pending = new Queue<string>(SplitTarget(nestedTarget, budget).Concat(pending));
+                    pending = new Queue<string>(SplitPosixTarget(nestedTarget, budget).Concat(pending));
                 }
                 continue;
             }
@@ -304,7 +345,14 @@ public sealed class GitRepositoryContextReader
         return resolved.Count == 0 ? SymlinkResolution.Missing : SymlinkResolution.InTree;
     }
 
-    private static string[] SplitTarget(string target, ResolutionBudget budget)
+    private static string[] SplitPosixTarget(string target, ResolutionBudget budget)
+    {
+        var segments = target.Split('/');
+        budget.AddSegments(segments.Length);
+        return segments;
+    }
+
+    private static string[] SplitWindowsTarget(string target, ResolutionBudget budget)
     {
         var segments = target.Replace('\\', '/').Split('/');
         budget.AddSegments(segments.Length);
@@ -317,7 +365,7 @@ public sealed class GitRepositoryContextReader
         ResolutionBudget budget)
     {
         var collapsed = parent.ToList();
-        foreach (var segment in SplitTarget(target, budget))
+        foreach (var segment in SplitWindowsTarget(target, budget))
         {
             if (segment is "" or ".") continue;
             if (segment == "..")
@@ -356,7 +404,7 @@ public sealed class GitRepositoryContextReader
         return segments.Length == 1 ? [] : segments[..^1];
     }
 
-    private static async Task<TreeEntry?> TryReadTreeEntryAsync(
+    private async Task<TreeEntry?> TryReadTreeEntryAsync(
         RepositoryContext context,
         string path,
         CancellationToken cancellationToken,
@@ -376,7 +424,7 @@ public sealed class GitRepositoryContextReader
         return parts.Length == 3 ? new TreeEntry(parts[0], parts[1], parts[2]) : null;
     }
 
-    private static async Task<byte[]> ReadBlobAsync(
+    private async Task<byte[]> ReadBlobAsync(
         RepositoryContext context,
         string objectId,
         CancellationToken cancellationToken,
@@ -390,16 +438,16 @@ public sealed class GitRepositoryContextReader
             "cat-file", "blob", "--end-of-options", objectId)).StandardOutput;
     }
 
-    private static async Task<string> GitTextAsync(string root, CancellationToken cancellationToken, params string[] arguments) =>
+    private async Task<string> GitTextAsync(string root, CancellationToken cancellationToken, params string[] arguments) =>
         Encoding.UTF8.GetString((await RunGitAsync(root, cancellationToken, false, arguments)).StandardOutput);
 
-    private static async Task<GitResult> RunGitAsync(
+    private async Task<GitResult> RunGitAsync(
         string root,
         CancellationToken cancellationToken,
         bool allowFailure,
         params string[] arguments)
     {
-        var startInfo = new ProcessStartInfo("git")
+        var startInfo = new ProcessStartInfo(_gitExecutable)
         {
             WorkingDirectory = root,
             RedirectStandardOutput = true,

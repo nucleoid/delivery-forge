@@ -20,9 +20,11 @@ The JSON envelope is capped at 256 KiB and 256 entries. It accepts only:
   stale/truncated/heuristic flags;
 - conflicts and limitations.
 
-Unknown fields, arbitrary absolute POSIX/Windows/UNC or tilde-home paths (including
+Unknown fields, arbitrary absolute POSIX/Windows/UNC or tilde/named-home paths, environment-variable
+home aliases, single-backslash Windows roots (including
 delimiter-adjacent and non-ASCII path segments), URL user-info, obvious key/value, JSON, or
-authorization-header credential material, malformed/duplicate JSON, and
+authorization-header credential material (including common secret, password/passwd, and access-key
+assignments), malformed/duplicate JSON, and
 oversized input fail closed. Raw documents, prompts, transcripts, source bodies, credentials, and
 private filesystem locations are outside the envelope.
 
@@ -31,6 +33,9 @@ private filesystem locations are outside the envelope.
 - An empty search means only that the bounded search returned no matches. It degrades honestly
   when optional and blocks readiness when the caller declares imported context required.
 - Stale, truncated, heuristic, or conflicting results retain those caveats.
+- Deep-intake threshold accounting deduplicates locators across evidence and imported context. Only
+  non-memory imported entries verified against exact checkout bytes, with no stale, truncated, or
+  heuristic flags, can satisfy the additional-evidence threshold.
 - Imported JSON cannot assert checkout-verification state. Repository claims must carry a
   `git:<repository-relative-path>` locator and be checked against the matching exact Git blob with
   `ImportedContextVerifier.VerifyAgainst`; otherwise they remain labeled unverified. Verification
