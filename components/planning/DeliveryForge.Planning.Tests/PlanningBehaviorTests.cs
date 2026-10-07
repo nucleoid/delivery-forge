@@ -132,6 +132,25 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
+    public void Caller_constructed_checkout_verification_is_treated_as_unverified()
+    {
+        var entry = new ImportedContextEntry(
+            "repository",
+            "git:tracked.txt",
+            "summary",
+            null,
+            ObservedAt,
+            CheckoutVerification: CheckoutVerification.Verified,
+            CheckoutDigest: "sha256:" + new string('a', 64));
+        var envelope = new ImportedContextEnvelope("1.0.0", [entry], [], []);
+
+        var assessment = IntakePlanner.Assess(Request(), [RepositoryEvidence()], envelope);
+
+        Assert.Contains(assessment.Limitations, item => item.Contains("unverified", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(assessment.Limitations, item => item.Contains("was verified", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
     public void Imported_summary_digest_is_distinct_from_locally_verified_checkout_digest()
     {
         var bytes = Encoding.UTF8.GetBytes("committed bytes");
@@ -203,12 +222,29 @@ public sealed class PlanningBehaviorTests
     public void Normal_scheme_urls_are_portable_evidence_locators()
     {
         var locator = "https://github.com/nucleoid/delivery-forge/issues/4#issuecomment-6028955264";
+        var draft = Draft();
+        EvidenceItem[] provenance = [RepositoryEvidence(locator)];
         var frozen = PlanFreezer.Freeze(
-            Draft() with { Provenance = [RepositoryEvidence(locator)] },
+            draft with { Provenance = provenance, Intake = IntakePlanner.Assess(draft.Request, provenance) },
             "revision-url",
             ObservedAt);
 
         Assert.Contains(locator, Encoding.UTF8.GetString(frozen.CanonicalBytes), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("//server/share/private")]
+    [InlineData("\\\\server\\share\\private")]
+    public void Unc_and_host_paths_remain_non_portable(string locator)
+    {
+        var draft = Draft();
+        EvidenceItem[] provenance = [RepositoryEvidence(locator)];
+        var error = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(
+            draft with { Provenance = provenance, Intake = IntakePlanner.Assess(draft.Request, provenance) },
+            "revision-host-path",
+            ObservedAt));
+
+        Assert.Contains("private material", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -236,7 +272,12 @@ public sealed class PlanningBehaviorTests
     public void Material_revision_changes_identity_and_base_drift_invalidates_readiness()
     {
         var frozen = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
-        var revised = PlanFreezer.Freeze(Draft() with { Request = Request() with { Outcome = "A materially different outcome" } }, "revision-2", ObservedAt);
+        var changed = Draft();
+        var changedRequest = changed.Request with { Outcome = "A materially different outcome" };
+        var revised = PlanFreezer.Freeze(
+            changed with { Request = changedRequest, Intake = IntakePlanner.Assess(changedRequest, changed.Provenance) },
+            "revision-2",
+            ObservedAt);
 
         Assert.NotEqual(frozen.Identity, revised.Identity);
         Assert.True(frozen.DownstreamReady);
@@ -379,14 +420,15 @@ public sealed class PlanningBehaviorTests
     [Fact]
     public void Imported_context_caveats_cannot_disappear_before_freeze()
     {
+        var draft = Draft();
         var envelope = new ImportedContextEnvelope(
             "1.0.0",
             [new("memory", "memory:item-1", "Advisory summary", null, ObservedAt, Stale: true)],
             [],
             ["Checkout verification is pending"]);
-        var assessment = IntakePlanner.Assess(Request(), [RepositoryEvidence()], envelope, EvidenceRequirement.Required);
+        var assessment = IntakePlanner.Assess(draft.Request, draft.Provenance, envelope, EvidenceRequirement.Required);
 
-        var frozen = PlanFreezer.Freeze(Draft() with { Intake = assessment }, "revision-1", ObservedAt);
+        var frozen = PlanFreezer.Freeze(draft with { Intake = assessment }, "revision-1", ObservedAt);
         var text = Encoding.UTF8.GetString(frozen.CanonicalBytes);
 
         Assert.True(assessment.Ready);

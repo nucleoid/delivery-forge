@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Contracts.Validation;
 
@@ -122,7 +123,11 @@ public static class PlanFreezer
         };
 
         var materialBytes = JsonSerializer.SerializeToUtf8Bytes(material, JsonOptions);
-        var contentDigest = CanonicalJson.ComputeIdentity(materialBytes);
+        var identityMaterial = JsonNode.Parse(materialBytes)?.AsObject()
+            ?? throw new PlanningException("Plan material could not be projected for identity.");
+        identityMaterial.Remove("repositoryObservations");
+        identityMaterial["limitations"] = JsonSerializer.SerializeToNode(Sorted(draft.Intake.Limitations), JsonOptions);
+        var contentDigest = CanonicalJson.ComputeIdentity(JsonSerializer.SerializeToUtf8Bytes(identityMaterial, JsonOptions));
         if (predecessor is not null &&
             string.Equals(predecessor.Revision, revision, StringComparison.Ordinal) &&
             !string.Equals(predecessor.ContentDigest, contentDigest, StringComparison.Ordinal))
@@ -241,6 +246,8 @@ public static class PlanFreezer
         if (!string.IsNullOrWhiteSpace(request.UserOwnedDecision)) failures.Add("user-owned decision remains unresolved");
         if (!draft.Intake.Ready) failures.Add("intake readiness evidence is not ready");
         if (draft.Intake.Depth != request.Depth) failures.Add("intake depth does not match the planning request");
+        if (!IntakePlanner.IsBoundTo(draft.Intake, request, draft.Provenance))
+            failures.Add("intake assessment is not bound to this planning request, evidence, and imported-context caveats");
         if (draft.Intake.ImportedContextRequirement == EvidenceRequirement.Required && !draft.Intake.ImportedContextAvailable)
             failures.Add("required imported context is unavailable");
         if (draft.Provenance.Count == 0) failures.Add("provenance is required");

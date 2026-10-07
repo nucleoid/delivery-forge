@@ -12,8 +12,9 @@ repository or policy evidence. Deep intake is enabled only when the caller expli
 `IntakeDepth.Deep`. A genuine product, scope, risk, or authority choice is represented as one
 user-owned decision; assessment returns one conversational question with a recommendation and
 does not pretend the plan is ready. The resulting `IntakeAssessment` is a required part of the
-`PlanDraft`; freeze rechecks it, the requested depth, unresolved user-owned decisions, and required
-imported-context availability rather than trusting an unrelated earlier intake call.
+`PlanDraft`; freeze rechecks its deterministic binding to the request, evidence, imported-context
+requirement/availability, and retained caveats, as well as unresolved user-owned decisions. An
+assessment from an unrelated earlier intake call cannot be substituted.
 
 Unavailable optional imported context records a limitation and does not block repository-driven
 planning. If the caller declares that context required, its absence blocks. Empty imported search
@@ -30,8 +31,9 @@ file bytes by blob object ID. Dirty state and detached HEAD are separate mutable
 Shallow history and submodules remain explicit limitations. Symlink targets are returned as blob
 bytes; in-tree chains are resolved from committed tree/blob objects using portable slash semantics,
 with escape, cycle, and missing-target outcomes kept distinct. Git reads have a finite deadline,
-terminate the process tree on overflow or cancellation, disable lazy fetch, optional locks, and
-fsmonitor side effects, and ignore inherited `GIT_DIR`/`GIT_WORK_TREE` routing. Generated-file
+terminate the process tree on overflow or cancellation, disable replace refs, lazy fetch, optional
+locks, and fsmonitor side effects, force literal pathspecs, and remove inherited repository,
+object, index, common-directory, and config routing. Generated-file
 classification is deliberately conservative: known path/name conventions are marked, while all
 other files say that generator metadata was not asserted. Missing refs and objects fail rather
 than falling back to worktree bytes.
@@ -50,18 +52,20 @@ A ready `PlanDraft` includes:
 
 Freeze normalizes set-like inputs, rejects duplicate semantic keys, validates completeness and
 platform-neutral portability, and creates two linked identities. A canonical digest covers the
-complete material plan (intake evidence, provenance, exact change map, DAG, gates, rollout,
-unknowns, repository observations, and retained limitations). The strict issue-#3-compatible
+stable material plan (intake evidence, provenance, exact change map, DAG, gates, rollout,
+unknowns, and intake limitations). Mutable repository observations and their limitations remain
+in the frozen bundle for honesty but do not alter the declared revision's content digest. The strict issue-#3-compatible
 `plan@1.0.0` contract uses a `planRevision` deterministically bound to that digest, so its
 `contractIdentity` changes whenever material substance changes. `FrozenPlan.PlanContractBytes`
 returns the canonical validated contract bytes for downstream reference validation; consumers do
 not reconstruct a private projection. The complete `planning-bundle` is independently
 JCS-canonicalized and SHA-256 identified.
 
-Supplying a predecessor rejects reuse of the same declared revision for different content and
-records supersession when a new revision changes substance. A frozen commit/tree mismatch marks
-downstream readiness false until reconciliation. Validation proves shape and identity only; it is
-not approval, execution, publication, or merge authority.
+Supplying a predecessor rejects reuse of the same declared revision for different stable content
+and records supersession when a new revision changes substance. Frozen-plan properties are
+get-only; base reconciliation returns a new immutable view whose downstream readiness is false
+without permitting identity, base, or readiness to diverge from canonical bytes. Validation proves
+shape and identity only; it is not approval, execution, publication, or merge authority.
 
 ## Platform boundary
 

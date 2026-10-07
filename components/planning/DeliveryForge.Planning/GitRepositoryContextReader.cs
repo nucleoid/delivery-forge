@@ -126,18 +126,25 @@ public sealed class GitRepositoryContextReader
         HashSet<string> visited,
         CancellationToken cancellationToken)
     {
-        if (!TryCombinePortable(parent, target, remaining, out var segments))
+        if (string.IsNullOrEmpty(target) || PortableMaterial.IsAbsolutePath(target))
         {
             return SymlinkResolution.Escapes;
         }
-        if (segments.Count == 0)
-        {
-            return SymlinkResolution.Missing;
-        }
 
-        for (var index = 0; index < segments.Count; index++)
+        var resolved = parent.ToList();
+        var pending = new Queue<string>(SplitTarget(target).Concat(remaining));
+        while (pending.Count > 0)
         {
-            var candidate = string.Join('/', segments.Take(index + 1));
+            var segment = pending.Dequeue();
+            if (segment is "" or ".") continue;
+            if (segment == "..")
+            {
+                if (resolved.Count == 0) return SymlinkResolution.Escapes;
+                resolved.RemoveAt(resolved.Count - 1);
+                continue;
+            }
+
+            var candidate = string.Join('/', resolved.Append(segment));
             var entry = await TryReadTreeEntryAsync(context, candidate, cancellationToken);
             if (entry is null)
             {
@@ -151,16 +158,16 @@ public sealed class GitRepositoryContextReader
                     return SymlinkResolution.Cycle;
                 }
                 var nestedTarget = Encoding.UTF8.GetString(await ReadBlobAsync(context, entry.ObjectId, cancellationToken));
-                return await ResolveTargetAsync(
-                    context,
-                    ParentSegments(candidate),
-                    nestedTarget,
-                    segments.Skip(index + 1).ToArray(),
-                    visited,
-                    cancellationToken);
+                if (string.IsNullOrEmpty(nestedTarget) || PortableMaterial.IsAbsolutePath(nestedTarget))
+                {
+                    return SymlinkResolution.Escapes;
+                }
+
+                pending = new Queue<string>(SplitTarget(nestedTarget).Concat(pending));
+                continue;
             }
 
-            if (index < segments.Count - 1 && entry.Type != "tree")
+            if (pending.Count > 0 && entry.Type != "tree")
             {
                 return SymlinkResolution.Missing;
             }
@@ -168,40 +175,13 @@ public sealed class GitRepositoryContextReader
             {
                 return SymlinkResolution.Missing;
             }
+            resolved.Add(segment);
         }
 
-        return SymlinkResolution.InTree;
+        return resolved.Count == 0 ? SymlinkResolution.Missing : SymlinkResolution.InTree;
     }
 
-    private static bool TryCombinePortable(
-        IReadOnlyList<string> parent,
-        string target,
-        IReadOnlyList<string> remaining,
-        out IReadOnlyList<string> combined)
-    {
-        combined = [];
-        if (string.IsNullOrEmpty(target) || PortableMaterial.IsAbsolutePath(target))
-        {
-            return false;
-        }
-
-        var result = parent.ToList();
-        foreach (var segment in target.Replace('\\', '/').Split('/').Concat(remaining))
-        {
-            if (segment is "" or ".") continue;
-            if (segment == "..")
-            {
-                if (result.Count == 0) return false;
-                result.RemoveAt(result.Count - 1);
-            }
-            else
-            {
-                result.Add(segment);
-            }
-        }
-        combined = result;
-        return true;
-    }
+    private static IEnumerable<string> SplitTarget(string target) => target.Replace('\\', '/').Split('/');
 
     private static string[] ParentSegments(string path)
     {
@@ -254,8 +234,23 @@ public sealed class GitRepositoryContextReader
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        startInfo.Environment.Remove("GIT_DIR");
-        startInfo.Environment.Remove("GIT_WORK_TREE");
+        var inheritedRoutingVariables = new[]
+        {
+            "GIT_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_CONFIG", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL",
+            "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT", "GIT_CEILING_DIRECTORIES",
+            "GIT_DISCOVERY_ACROSS_FILESYSTEM"
+        };
+        foreach (var variable in inheritedRoutingVariables) startInfo.Environment.Remove(variable);
+        foreach (var variable in startInfo.Environment.Keys
+                     .Where(name => name.StartsWith("GIT_CONFIG_KEY_", StringComparison.Ordinal) ||
+                                    name.StartsWith("GIT_CONFIG_VALUE_", StringComparison.Ordinal))
+                     .ToArray())
+        {
+            startInfo.Environment.Remove(variable);
+        }
+        startInfo.Environment["GIT_NO_REPLACE_OBJECTS"] = "1";
+        startInfo.Environment["GIT_LITERAL_PATHSPECS"] = "1";
         startInfo.Environment["GIT_NO_LAZY_FETCH"] = "1";
         startInfo.Environment["GIT_OPTIONAL_LOCKS"] = "0";
         startInfo.ArgumentList.Add("-c");

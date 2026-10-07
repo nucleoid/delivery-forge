@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using DeliveryForge.Contracts.Serialization;
 
@@ -13,7 +14,7 @@ public sealed record ImportedContextEnvelope(
 {
     private const int MaximumEnvelopeBytes = 256 * 1024;
     private static readonly HashSet<string> EnvelopeFields = ["schemaVersion", "entries", "conflicts", "limitations"];
-    private static readonly HashSet<string> EntryFields = ["kind", "locator", "summary", "digest", "observedAt", "stale", "truncated", "heuristic", "checkoutVerification"];
+    private static readonly HashSet<string> EntryFields = ["kind", "locator", "summary", "digest", "checkoutDigest", "observedAt", "stale", "truncated", "heuristic"];
     private static readonly string[] UtcTimestampFormats = ["yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'"];
 
     public static ImportedContextEnvelope Parse(ReadOnlySpan<byte> json)
@@ -73,12 +74,11 @@ public sealed record ImportedContextEnvelope(
         var digest = item.TryGetProperty("digest", out var digestElement) && digestElement.ValueKind != JsonValueKind.Null
             ? PortableText(digestElement.GetString() ?? string.Empty, "digest")
             : null;
-        if (digest is not null &&
-            (digest.Length != 71 || !digest.StartsWith("sha256:", StringComparison.Ordinal) ||
-             digest[7..].Any(character => character is < '0' or > '9' && character is < 'a' or > 'f')))
-        {
-            throw new PlanningException("Imported context digest must be lowercase sha256 when supplied.");
-        }
+        ValidateDigest(digest, "digest");
+        var checkoutDigest = item.TryGetProperty("checkoutDigest", out var checkoutDigestElement) && checkoutDigestElement.ValueKind != JsonValueKind.Null
+            ? PortableText(checkoutDigestElement.GetString() ?? string.Empty, "checkoutDigest")
+            : null;
+        ValidateDigest(checkoutDigest, "checkoutDigest");
         if (!DateTimeOffset.TryParseExact(
                 RequireString(item, "observedAt"),
                 UtcTimestampFormats,
@@ -89,12 +89,6 @@ public sealed record ImportedContextEnvelope(
             throw new PlanningException("Imported context observedAt must be an explicit UTC timestamp.");
         }
 
-        var verification = item.TryGetProperty("checkoutVerification", out var verificationElement)
-            ? verificationElement.ValueKind == JsonValueKind.String && Enum.TryParse<CheckoutVerification>(verificationElement.GetString(), ignoreCase: true, out var parsed)
-                ? parsed
-                : throw new PlanningException("Imported context checkoutVerification must be unverified, verified, or conflict.")
-            : CheckoutVerification.Unverified;
-
         return new ImportedContextEntry(
             kind,
             locator,
@@ -104,7 +98,18 @@ public sealed record ImportedContextEnvelope(
             OptionalBoolean(item, "stale"),
             OptionalBoolean(item, "truncated"),
             OptionalBoolean(item, "heuristic"),
-            verification);
+            CheckoutVerification.Unverified,
+            checkoutDigest);
+    }
+
+    private static void ValidateDigest(string? digest, string field)
+    {
+        if (digest is not null &&
+            (digest.Length != 71 || !digest.StartsWith("sha256:", StringComparison.Ordinal) ||
+             digest[7..].Any(character => character is < '0' or > '9' && character is < 'a' or > 'f')))
+        {
+            throw new PlanningException($"Imported context {field} must be lowercase sha256 when supplied.");
+        }
     }
 
     private static string PortableText(string value, string field)
@@ -174,7 +179,8 @@ public static class IntakePlanner
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(evidence);
         var limitations = new List<string>();
-        var ready = evidence.Any(item => item.SourceKind is EvidenceSourceKind.Repository or EvidenceSourceKind.Policy && item.IsComplete);
+        var ready = evidence.Any(item =>
+            item.SourceKind is EvidenceSourceKind.Repository or EvidenceSourceKind.Policy && item.IsComplete);
 
         foreach (var item in evidence)
         {
@@ -201,11 +207,12 @@ public static class IntakePlanner
                 if (entry.Stale) limitations.Add($"Imported context at {entry.Locator} is stale.");
                 if (entry.Truncated) limitations.Add($"Imported context at {entry.Locator} is truncated.");
                 if (entry.Heuristic) limitations.Add($"Imported context at {entry.Locator} is heuristic.");
-                if (entry.CheckoutVerification == CheckoutVerification.Unverified)
+                var verification = ImportedContextVerifier.GetEffectiveVerification(entry);
+                if (verification == CheckoutVerification.Unverified)
                     limitations.Add($"Imported context at {entry.Locator} is unverified against exact checkout bytes.");
-                if (entry.CheckoutVerification == CheckoutVerification.Verified)
+                if (verification == CheckoutVerification.Verified)
                     limitations.Add($"Imported context at {entry.Locator} was verified against exact checkout bytes.");
-                if (entry.CheckoutVerification == CheckoutVerification.Conflict)
+                if (verification == CheckoutVerification.Conflict)
                 {
                     limitations.Add($"Imported context at {entry.Locator} conflicts with exact checkout bytes.");
                     ready = false;
@@ -220,13 +227,72 @@ public static class IntakePlanner
             question = $"I recommend the safest reversible option; should we decide this before planning: {request.UserOwnedDecision.Trim().TrimEnd('?')}?";
         }
 
+        var normalizedLimitations = limitations.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        var importedContextAvailable = importedContext is not null;
         return new IntakeAssessment(
             ready,
             request.Depth,
             question,
-            limitations.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+            normalizedLimitations,
             importedContextRequirement,
-            importedContext is not null);
+            importedContextAvailable,
+            ComputeBinding(request, evidence, importedContextRequirement, importedContextAvailable, normalizedLimitations));
+    }
+
+    internal static bool IsBoundTo(
+        IntakeAssessment assessment,
+        PlanningRequest request,
+        IReadOnlyList<EvidenceItem> evidence) =>
+        string.Equals(
+            assessment.BindingDigest,
+            ComputeBinding(
+                request,
+                evidence,
+                assessment.ImportedContextRequirement,
+                assessment.ImportedContextAvailable,
+                assessment.Limitations),
+            StringComparison.Ordinal);
+
+    private static string ComputeBinding(
+        PlanningRequest request,
+        IReadOnlyList<EvidenceItem> evidence,
+        EvidenceRequirement importedContextRequirement,
+        bool importedContextAvailable,
+        IReadOnlyList<string> limitations)
+    {
+        var material = new
+        {
+            request = new
+            {
+                request.Repository,
+                request.WorkItem,
+                request.Mode,
+                request.Outcome,
+                included = request.Included.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+                excluded = request.Excluded.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+                acceptanceCriteria = request.AcceptanceCriteria.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+                request.RequestedCeiling,
+                depth = request.Depth.ToString().ToLowerInvariant(),
+                request.UserOwnedDecision
+            },
+            evidence = evidence
+                .OrderBy(item => item.SourceKind)
+                .ThenBy(item => item.Locator, StringComparer.Ordinal)
+                .Select(item => new
+                {
+                    sourceKind = item.SourceKind.ToString().ToLowerInvariant(),
+                    item.Locator,
+                    item.Digest,
+                    observedAt = item.ObservedAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
+                    caveats = item.Caveats.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+                    item.Supersedes,
+                    item.IsComplete
+                }).ToArray(),
+            importedContextRequirement = importedContextRequirement.ToString().ToLowerInvariant(),
+            importedContextAvailable,
+            limitations = limitations.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()
+        };
+        return CanonicalJson.ComputeIdentity(JsonSerializer.SerializeToUtf8Bytes(material));
     }
 }
 
@@ -236,17 +302,42 @@ public static class ImportedContextVerifier
     {
         ArgumentNullException.ThrowIfNull(entry);
         ArgumentNullException.ThrowIfNull(exactFile);
-        if (entry.Digest is null)
+        var expectedPath = entry.Locator.StartsWith("git:", StringComparison.Ordinal)
+            ? entry.Locator[4..].Replace('\\', '/')
+            : null;
+        var actualPath = exactFile.Path.Replace('\\', '/');
+        if (entry.CheckoutDigest is null)
         {
-            return entry with { CheckoutVerification = CheckoutVerification.Unverified };
+            return Bind(entry, CheckoutVerification.Unverified);
+        }
+        if (!string.Equals(expectedPath, actualPath, StringComparison.Ordinal))
+        {
+            return Bind(entry, CheckoutVerification.Conflict);
         }
 
         var exactDigest = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(exactFile.Bytes))}";
-        return entry with
-        {
-            CheckoutVerification = string.Equals(entry.Digest, exactDigest, StringComparison.Ordinal)
+        return Bind(
+            entry,
+            string.Equals(entry.CheckoutDigest, exactDigest, StringComparison.Ordinal)
                 ? CheckoutVerification.Verified
-                : CheckoutVerification.Conflict
+                : CheckoutVerification.Conflict);
+    }
+
+    internal static CheckoutVerification GetEffectiveVerification(ImportedContextEntry entry) =>
+        string.Equals(entry.VerificationBinding, ComputeBinding(entry, entry.CheckoutVerification), StringComparison.Ordinal)
+            ? entry.CheckoutVerification
+            : CheckoutVerification.Unverified;
+
+    private static ImportedContextEntry Bind(ImportedContextEntry entry, CheckoutVerification verification) =>
+        entry with
+        {
+            CheckoutVerification = verification,
+            VerificationBinding = ComputeBinding(entry, verification)
         };
+
+    private static string ComputeBinding(ImportedContextEntry entry, CheckoutVerification verification)
+    {
+        var material = Encoding.UTF8.GetBytes($"{entry.Locator}\0{entry.CheckoutDigest}\0{verification}");
+        return $"sha256:{Convert.ToHexStringLower(SHA256.HashData(material))}";
     }
 }

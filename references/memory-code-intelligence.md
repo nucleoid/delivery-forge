@@ -12,8 +12,9 @@ does not know OpenClaw, Engram, MCP, provider IDs, host paths, credentials, or p
 The JSON envelope is capped at 256 KiB and 256 entries. It accepts only:
 
 - schema version;
-- bounded entries containing kind, opaque portable locator, advisory summary, optional digest,
-  observed invariant UTC `Z` time, stale/truncated/heuristic flags, and checkout-verification state;
+- bounded entries containing kind, opaque portable locator, advisory summary, optional summary
+  digest, optional claimed checkout-byte digest, observed invariant UTC `Z` time, and
+  stale/truncated/heuristic flags;
 - conflicts and limitations.
 
 Unknown fields, absolute host paths, obvious credential material, malformed/duplicate JSON, and
@@ -24,13 +25,15 @@ private filesystem locations are outside the envelope.
 
 - An empty search means only that the bounded search returned no matches.
 - Stale, truncated, heuristic, or conflicting results retain those caveats.
-- Repository claims must be checked against exact Git blob bytes with
-  `ImportedContextVerifier.VerifyAgainst` or explicitly remain labeled unverified. Digest mismatch
-  is retained as a conflict and blocks readiness.
+- Imported JSON cannot assert checkout-verification state. Repository claims must carry a
+  `git:<repository-relative-path>` locator and be checked against the matching exact Git blob with
+  `ImportedContextVerifier.VerifyAgainst`; otherwise they remain labeled unverified. A claimed
+  checkout-byte digest or locator mismatch is retained as a conflict and blocks readiness.
 - Missing optional context degrades with a recorded limitation.
 - Missing context declared required by plan/policy blocks readiness.
-- Digests identify imported summaries when supplied; they do not prove the source system was
-  complete, fresh, or authoritative.
+- `digest` identifies the imported summary when supplied. `checkoutDigest` is a separate claim used
+  only for local exact-byte comparison; neither proves the source system was complete, fresh, or
+  authoritative.
 
 Portable frozen plans contain distilled evidence metadata and caveats, not raw private context.
 Local host state may retain private retrieval details outside Git and outside public artifacts.

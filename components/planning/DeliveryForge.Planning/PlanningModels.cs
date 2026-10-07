@@ -38,15 +38,40 @@ public sealed record ImportedContextEntry(
     bool Stale = false,
     bool Truncated = false,
     bool Heuristic = false,
-    CheckoutVerification CheckoutVerification = CheckoutVerification.Unverified);
+    CheckoutVerification CheckoutVerification = CheckoutVerification.Unverified,
+    string? CheckoutDigest = null)
+{
+    internal string? VerificationBinding { get; init; }
+}
 
-public sealed record IntakeAssessment(
-    bool Ready,
-    IntakeDepth Depth,
-    string? RecommendedQuestion,
-    IReadOnlyList<string> Limitations,
-    EvidenceRequirement ImportedContextRequirement = EvidenceRequirement.Optional,
-    bool ImportedContextAvailable = false);
+public sealed class IntakeAssessment
+{
+    internal IntakeAssessment(
+        bool ready,
+        IntakeDepth depth,
+        string? recommendedQuestion,
+        IReadOnlyList<string> limitations,
+        EvidenceRequirement importedContextRequirement,
+        bool importedContextAvailable,
+        string bindingDigest)
+    {
+        Ready = ready;
+        Depth = depth;
+        RecommendedQuestion = recommendedQuestion;
+        Limitations = limitations.ToArray();
+        ImportedContextRequirement = importedContextRequirement;
+        ImportedContextAvailable = importedContextAvailable;
+        BindingDigest = bindingDigest;
+    }
+
+    public bool Ready { get; }
+    public IntakeDepth Depth { get; }
+    public string? RecommendedQuestion { get; }
+    public IReadOnlyList<string> Limitations { get; }
+    public EvidenceRequirement ImportedContextRequirement { get; }
+    public bool ImportedContextAvailable { get; }
+    internal string BindingDigest { get; }
+}
 
 public sealed record RepositoryFile(
     string Path,
@@ -95,7 +120,7 @@ public sealed record PlanDraft(
     IReadOnlyList<PlanUnknown> Unknowns,
     IntakeAssessment Intake);
 
-public sealed record FrozenPlan
+public sealed class FrozenPlan
 {
     private readonly byte[] _canonicalBytes;
     private readonly byte[] _planContractBytes;
@@ -128,18 +153,18 @@ public sealed record FrozenPlan
         Limitations = limitations.ToArray();
     }
 
-    public string Identity { get; init; }
-    public string ContractIdentity { get; init; }
-    public string Revision { get; init; }
-    public string PlanRevision { get; init; }
-    public string ContentDigest { get; init; }
-    public string? Supersedes { get; init; }
-    public string BaseCommit { get; init; }
-    public string BaseTree { get; init; }
+    public string Identity { get; }
+    public string ContractIdentity { get; }
+    public string Revision { get; }
+    public string PlanRevision { get; }
+    public string ContentDigest { get; }
+    public string? Supersedes { get; }
+    public string BaseCommit { get; }
+    public string BaseTree { get; }
     public byte[] CanonicalBytes => _canonicalBytes.ToArray();
     public byte[] PlanContractBytes => _planContractBytes.ToArray();
-    public bool DownstreamReady { get; init; }
-    public IReadOnlyList<string> Limitations { get; init; }
+    public bool DownstreamReady { get; }
+    public IReadOnlyList<string> Limitations { get; }
 
     public FrozenPlan ReconcileBase(string currentCommit, string currentTree)
     {
@@ -149,14 +174,22 @@ public sealed record FrozenPlan
             return this;
         }
 
-        return this with
-        {
-            DownstreamReady = false,
-            Limitations = Limitations
+        return new FrozenPlan(
+            Identity,
+            ContractIdentity,
+            Revision,
+            PlanRevision,
+            ContentDigest,
+            Supersedes,
+            BaseCommit,
+            BaseTree,
+            _canonicalBytes,
+            _planContractBytes,
+            downstreamReady: false,
+            Limitations
                 .Append($"Base drift detected: frozen {BaseCommit}/{BaseTree}, current {currentCommit}/{currentTree}; reconcile before downstream work.")
                 .Distinct(StringComparer.Ordinal)
                 .Order(StringComparer.Ordinal)
-                .ToArray()
-        };
+                .ToArray());
     }
 }
