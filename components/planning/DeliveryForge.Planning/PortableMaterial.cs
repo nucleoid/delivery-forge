@@ -11,7 +11,12 @@ internal static partial class PortableMaterial
 
     public static bool ContainsPrivateMaterial(string value)
     {
-        if (Credential().IsMatch(value)) return true;
+        if (Credential().IsMatch(value) ||
+            CurlProxyCredential().IsMatch(value) ||
+            PopulatedAuthorizationHeader().IsMatch(value))
+        {
+            return true;
+        }
 
         var invalidUrl = false;
         var withoutUrls = SchemeUrl().Replace(value, match =>
@@ -45,7 +50,7 @@ internal static partial class PortableMaterial
     private static partial Regex HostPath();
 
     [GeneratedRegex(
-        """(?:(?:^|[^A-Za-z0-9])-[A-Za-z]+|(?:^|[^A-Za-z0-9.])/[A-Za-z]+)(?:[A-Za-z]:[\\/][^\s`|\[\]{}<>"']+|/(?![-/])(?:[^/\s`|\[\]{}<>"']+/)*[^/\s`|\[\]{}<>"']+|\\(?![\\/.])(?:[^\\/\s`|\[\]{}<>"']+\\)+[^\\/\s`|\[\]{}<>"']+|(?:~[A-Za-z0-9._-]*|\$HOME|\$\{HOME\}|\$\{?env:(?:USERPROFILE|HOME|HOMEPATH|APPDATA|LOCALAPPDATA)\}?|%(?:USERPROFILE|HOMEPATH|APPDATA|LOCALAPPDATA)%)[\\/][^\s`|\[\]{}<>"']+)""",
+        """(?:(?:^|[^A-Za-z0-9])-[A-Za-z]+|(?:^|[^A-Za-z0-9.])/[A-Za-z]+)(?:[=:,])?(?:[A-Za-z]:[\\/][^\s`|\[\]{}<>"']+|/(?![-/])(?:[^/\s`|\[\]{}<>"']+/)*[^/\s`|\[\]{}<>"']+|[\\/]{2}[^\\/\s`|\[\]{}<>"']+[\\/][^\\/\s`|\[\]{}<>"']+|\\(?![\\/.])(?:[^\\/\s`|\[\]{}<>"']+\\)+[^\\/\s`|\[\]{}<>"']+|(?:~[A-Za-z0-9._-]*|\$HOME|\$\{HOME\}|\$\{?env:(?:USERPROFILE|HOME|HOMEPATH|APPDATA|LOCALAPPDATA)\}?|%(?:USERPROFILE|HOMEPATH|APPDATA|LOCALAPPDATA)%)[\\/][^\s`|\[\]{}<>"']+)""",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex OptionAttachedHostPath();
 
@@ -65,7 +70,17 @@ internal static partial class PortableMaterial
     private static partial Regex SchemeUrl();
 
     [GeneratedRegex(
-        """(?:-----BEGIN\s|Bearer\s+\S+|Authorization\s*:\s*[A-Za-z][A-Za-z0-9._~+/-]*\s+\S+|"?(?:api[_-]?key|password|passwd|token|secret|client[_-]?secret|access[_-]?key|aws[_-]?access[_-]?key[_-]?id)"?\s*[:=]\s*"?\S+|--password(?:=|\s+)\S+|\bcurl\b(?:(?![\r\n;&|]).)*(?:(?<!\S)-[A-Za-z]*u\s*|(?<!\S)--(?:proxy-)?user(?:=|\s+))\S+:\S+|\bcurl\b(?:(?![\r\n;&|]).)*(?<!\S)(?:-x|--proxy)(?:=|\s*)\S+:\S+@\S+|(?:^|[^A-Za-z0-9])(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}))""",
+        """\bcurl\b(?:(?![\r\n;&|]).)*(?:(?<!\S)-[A-Za-z]*x|(?<!\S)--(?:proxy(?:1\.0)?|preproxy|socks4a?|socks5(?:-hostname)?))(?:=|\s*)\S+:\S+@\S+""",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex CurlProxyCredential();
+
+    [GeneratedRegex(
+        """\bAuthorization\s*:\s*(?:(?<authorizationQuote>["'])\s*[^"'\s][^"'\r\n]*\k<authorizationQuote>|[^"'\s])""",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex PopulatedAuthorizationHeader();
+
+    [GeneratedRegex(
+        """(?:-----BEGIN\s|Bearer\s+\S+|"?(?:api[_-]?key|password|passwd|token|secret|client[_-]?secret|access[_-]?key|aws[_-]?access[_-]?key[_-]?id)"?\s*[:=]\s*"?\S+|--password(?:=|\s+)\S+|\bcurl\b(?:(?![\r\n;&|]).)*(?:(?<!\S)-[A-Za-z]*u\s*|(?<!\S)--(?:proxy-)?user(?:=|\s+))\S+:\S+|(?:^|[^A-Za-z0-9])(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}))""",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex Credential();
 

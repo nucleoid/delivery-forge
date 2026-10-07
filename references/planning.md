@@ -126,8 +126,9 @@ shape and identity only; it is not approval, execution, publication, or merge au
 
 Portable gate commands may use ordinary `./`, `../`, `.\\`, and `..\\` repository-relative arguments. Absolute POSIX,
 Windows, UNC, home-alias, arbitrary rooted-Windows, and option-attached private host paths remain rejected.
-Portable plan and imported-context text also reject schemeless curl proxy userinfo and any populated
-`Authorization` scheme while preserving noncredential proxy arguments and ordinary headers.
+Portable plan and imported-context text also reject schemeless curl proxy userinfo across grouped
+short flags and proxy-taking long options, plus every non-empty `Authorization` header value, while
+preserving noncredential proxy arguments, empty `Authorization` headers, and ordinary headers.
 
 The library targets Linux and Windows through `net10.0`. Local tests establish Linux behavior.
 Windows support is a hosted-CI claim only after that lane passes. macOS is not claimed for v1.
