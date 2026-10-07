@@ -78,6 +78,53 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
+    public void Imported_context_parses_only_bounded_advisory_summaries()
+    {
+        var json = Encoding.UTF8.GetBytes("""
+            {
+              "schemaVersion":"1.0.0",
+              "entries":[{
+                "kind":"code-index",
+                "locator":"engram:result-1",
+                "summary":"Callers may include PlanFreezer",
+                "digest":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "observedAt":"2026-10-07T20:00:00Z",
+                "heuristic":true
+              }],
+              "conflicts":[],
+              "limitations":["Checkout verification required"]
+            }
+            """);
+
+        var envelope = ImportedContextEnvelope.Parse(json);
+
+        Assert.Single(envelope.Entries);
+        Assert.True(envelope.Entries[0].Heuristic);
+        Assert.Equal("Checkout verification required", Assert.Single(envelope.Limitations));
+    }
+
+    [Fact]
+    public void Imported_context_rejects_secret_material_inside_allowed_fields()
+    {
+        var json = Encoding.UTF8.GetBytes("""
+            {
+              "schemaVersion":"1.0.0",
+              "entries":[{
+                "kind":"memory",
+                "locator":"memory:item-1",
+                "summary":"Bearer do-not-copy-this",
+                "digest":null,
+                "observedAt":"2026-10-07T20:00:00Z"
+              }],
+              "conflicts":[],
+              "limitations":[]
+            }
+            """);
+
+        Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
+    }
+
+    [Fact]
     public void Empty_imported_search_is_not_proof_that_repository_evidence_is_absent()
     {
         var envelope = new ImportedContextEnvelope("1.0.0", [], [], ["No imported matches"]);
@@ -93,6 +140,23 @@ public sealed class PlanningBehaviorTests
         var error = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(incomplete, "revision-1", ObservedAt));
         Assert.Contains("change map", error.Message, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("unknown", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Frozen_public_plan_rejects_host_paths_and_credentials()
+    {
+        var privateDraft = Draft() with
+        {
+            Provenance = [RepositoryEvidence("/home/person/private-index"), new(
+                EvidenceSourceKind.Imported,
+                "memory:item-1",
+                null,
+                ObservedAt,
+                ["Bearer do-not-publish"])]
+        };
+
+        var error = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(privateDraft, "revision-private", ObservedAt));
+        Assert.Contains("private material", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

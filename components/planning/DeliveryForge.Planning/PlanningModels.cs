@@ -37,30 +37,11 @@ public sealed record ImportedContextEntry(
     bool Truncated = false,
     bool Heuristic = false);
 
-public sealed record ImportedContextEnvelope(
-    string SchemaVersion,
-    IReadOnlyList<ImportedContextEntry> Entries,
-    IReadOnlyList<string> Conflicts,
-    IReadOnlyList<string> Limitations)
-{
-    public static ImportedContextEnvelope Parse(ReadOnlySpan<byte> json) => throw new NotImplementedException();
-}
-
 public sealed record IntakeAssessment(
     bool Ready,
     IntakeDepth Depth,
     string? RecommendedQuestion,
     IReadOnlyList<string> Limitations);
-
-public static class IntakePlanner
-{
-    public static IntakeAssessment Assess(
-        PlanningRequest request,
-        IReadOnlyList<EvidenceItem> evidence,
-        ImportedContextEnvelope? importedContext = null,
-        EvidenceRequirement importedContextRequirement = EvidenceRequirement.Optional) =>
-        throw new NotImplementedException();
-}
 
 public sealed record RepositoryFile(
     string Path,
@@ -68,7 +49,8 @@ public sealed record RepositoryFile(
     string Mode,
     byte[] Bytes,
     bool IsSymlink,
-    bool EscapesWorktree);
+    bool EscapesWorktree,
+    string GenerationClassification);
 
 public sealed record RepositoryContext(
     string RepositoryRoot,
@@ -80,17 +62,6 @@ public sealed record RepositoryContext(
     bool Shallow,
     IReadOnlyList<string> Submodules,
     IReadOnlyList<string> Limitations);
-
-public sealed class GitRepositoryContextReader
-{
-    public Task<RepositoryContext> ReadAsync(string repositoryRoot, string reference, CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException();
-
-    public Task<RepositoryFile> ReadFileAsync(
-        RepositoryContext context,
-        string repositoryRelativePath,
-        CancellationToken cancellationToken = default) => throw new NotImplementedException();
-}
 
 public sealed record ChangeTarget(string Path, string Symbol, string Effect);
 public sealed record DependencyNode(string Id, IReadOnlyList<string> DependsOn, string IntegrationCondition);
@@ -127,11 +98,22 @@ public sealed record FrozenPlan(
     bool DownstreamReady,
     IReadOnlyList<string> Limitations)
 {
-    public FrozenPlan ReconcileBase(string currentCommit, string currentTree) => throw new NotImplementedException();
-}
+    public FrozenPlan ReconcileBase(string currentCommit, string currentTree)
+    {
+        if (string.Equals(BaseCommit, currentCommit, StringComparison.Ordinal) &&
+            string.Equals(BaseTree, currentTree, StringComparison.Ordinal))
+        {
+            return this;
+        }
 
-public static class PlanFreezer
-{
-    public static FrozenPlan Freeze(PlanDraft draft, string revision, DateTimeOffset createdAt) =>
-        throw new NotImplementedException();
+        return this with
+        {
+            DownstreamReady = false,
+            Limitations = Limitations
+                .Append($"Base drift detected: frozen {BaseCommit}/{BaseTree}, current {currentCommit}/{currentTree}; reconcile before downstream work.")
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)
+                .ToArray()
+        };
+    }
 }

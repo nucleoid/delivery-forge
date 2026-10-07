@@ -53,6 +53,23 @@ public sealed class GitRepositoryContextTests : IDisposable
         Assert.Contains("ref", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Generated_conventions_and_path_traversal_are_reported_conservatively()
+    {
+        InitializeRepository();
+        File.WriteAllText(Path.Combine(_root, "Generated.g.cs"), "generated");
+        Run("git", "add Generated.g.cs");
+        Run("git", "commit -q -m generated");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+        var generated = await reader.ReadFileAsync(context, "Generated.g.cs", TestContext.Current.CancellationToken);
+
+        Assert.Equal("generated-by-convention", generated.GenerationClassification);
+        await Assert.ThrowsAsync<PlanningException>(() =>
+            reader.ReadFileAsync(context, "../outside", TestContext.Current.CancellationToken));
+    }
+
     private void InitializeRepository()
     {
         Directory.CreateDirectory(_root);
