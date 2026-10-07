@@ -78,7 +78,7 @@ public static partial class ContractValidator
         {
             throw new ContractValidationException(exception.Message, exception);
         }
-        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException or ArgumentException or FormatException or OverflowException)
         {
             throw new ContractValidationException("Invalid contract JSON.", exception);
         }

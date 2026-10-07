@@ -338,6 +338,15 @@ public sealed class SchemaValidationTests
     }
 
     [Fact]
+    public void Extreme_number_exponents_fail_as_contract_validation_errors()
+    {
+        var json = File.ReadAllText(FixturePath("Valid", "gate-receipt.json"))
+            .Replace("\"exitCode\":0", "\"exitCode\":1e-2147483649", StringComparison.Ordinal);
+
+        Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(Utf8(json)));
+    }
+
+    [Fact]
     public void Receipt_references_must_match_checkpoint_head_and_tree()
     {
         var policy = LoadNode("evidence-policy.json");

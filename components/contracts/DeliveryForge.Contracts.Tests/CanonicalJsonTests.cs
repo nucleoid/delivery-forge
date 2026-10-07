@@ -37,6 +37,10 @@ public sealed class CanonicalJsonTests
         Assert.Throws<ContractJsonException>(() => CanonicalJson.Canonicalize(Utf8("{\"n\":1e400}")));
 
     [Fact]
+    public void Extreme_finite_exponents_canonicalize_without_raw_parser_errors() =>
+        Assert.Equal("{\"n\":0}", Encoding.UTF8.GetString(CanonicalJson.Canonicalize(Utf8("{\"n\":1e-2147483649}"))));
+
+    [Fact]
     public void Rejects_invalid_utf8()
     {
         byte[] invalid = [0x7b, 0x22, 0x78, 0x22, 0x3a, 0x22, 0xc3, 0x28, 0x22, 0x7d];
