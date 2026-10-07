@@ -53,9 +53,10 @@ tree, root, requested ref, submodule gitlinks, limitations, and every mutable ob
 and file reads reject an unbound or altered context. Shallow history and submodules remain explicit
 limitations. Submodule gitlinks are read from the parent commit without launching Git in submodule
 worktrees. Symlink targets are returned as blob bytes; in-tree chains are resolved from committed
-tree/blob objects using full walks under both POSIX expansion and conservative Windows lexical-collapse semantics.
+tree/blob objects under both POSIX expansion and conservative Windows lexical-collapse semantics.
 POSIX parsing treats backslash as a literal filename character; Windows lexical parsing treats it as
-a separator. Resolution has one wall deadline plus global hop, segment, target-size, and Git-invocation budgets.
+a separator. Resolution caches each distinct tree listing across both semantic passes and charges that Git work once,
+with one wall deadline plus global hop, segment, target-size, and Git-invocation budgets.
 Escape is reported when either platform rule escapes, and cycle, missing, or bound-exceeded outcomes
 are conservatively marked as potentially escaping. Git reads have a finite deadline,
 terminate the process tree on overflow or cancellation, disable replace refs, lazy fetch, optional
@@ -75,7 +76,9 @@ than falling back to worktree bytes.
 commit and tree from which their blob was read. Repository evidence used for readiness is created
 from that file, binding its `git:` locator, digest, commit, tree, symlink disposition, and generated-file
 classification. Unsafe/unresolved symlinks and conventionally generated files remain provenance with
-explicit caveats but do not establish clean readiness. Freeze preserves this metadata in canonical output
+explicit caveats but do not establish clean readiness, including when imported context is verified against
+their exact bytes. Imported verification binds and retains the reader-issued symlink disposition and generated-file
+classification. Freeze preserves this metadata in canonical output
 including each repository item's commit/tree, and rejects every altered or base-mismatched binding,
 including incomplete unsafe/generated evidence. Imported-context verification binds kind, locator,
 summary, digest, observed time, stale/truncated/heuristic flags, claimed checkout digest,
@@ -110,12 +113,16 @@ Supplying a predecessor requires matching repository/work-item lineage, rejects 
 declared revision for different stable content, and directly records supersession whenever the
 contract identity changes (including a declared-revision-only change). Frozen-plan properties are
 get-only; base reconciliation accepts only a reader-issued `RepositoryContext` resolving the same
-freshness-bearing mutable ref. A pinned commit, tag, detached snapshot, or differently requested ref
-cannot prove that the original branch did not drift. Reconciliation returns a new immutable view whose downstream readiness is false
+freshness-bearing mutable ref. An explicit `refs/heads/*` request is reconciled by its resolved commit/tree even when checkout
+HEAD is detached; checkout detachment does not turn that requested branch into a snapshot. A pinned commit, tag, detached `HEAD`
+snapshot, or differently requested ref cannot prove that the original branch did not drift. Reconciliation returns a new immutable view whose downstream readiness is false
 without permitting identity, base, or readiness to diverge from canonical bytes. Validation proves
 shape and identity only; it is not approval, execution, publication, or merge authority.
 
 ## Platform boundary
+
+Portable gate commands may use ordinary `./` and `../` repository-relative arguments. Absolute POSIX,
+Windows, UNC, home-alias, and private host paths remain rejected.
 
 The library targets Linux and Windows through `net10.0`. Local tests establish Linux behavior.
 Windows support is a hosted-CI claim only after that lane passes. macOS is not claimed for v1.

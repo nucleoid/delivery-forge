@@ -266,6 +266,7 @@ public static class IntakePlanner
                     limitations.Add($"Imported context at {entry.Locator} is unverified against exact checkout bytes.");
                 if (verification == CheckoutVerification.Verified)
                 {
+                    limitations.AddRange(ImportedContextVerifier.GetReaderSafetyCaveats(entry));
                     var identity = ImportedContextVerifier.GetVerifiedRepositoryIdentity(entry);
                     if (identity is not null)
                     {
@@ -310,7 +311,8 @@ public static class IntakePlanner
         !entry.Truncated &&
         !entry.Heuristic &&
         !string.Equals(entry.Kind, "memory", StringComparison.OrdinalIgnoreCase) &&
-        ImportedContextVerifier.GetEffectiveVerification(entry) == CheckoutVerification.Verified;
+        ImportedContextVerifier.GetEffectiveVerification(entry) == CheckoutVerification.Verified &&
+        ImportedContextVerifier.IsReaderSafetyEligible(entry);
 
     private static int CountDistinctDeepEvidence(
         IReadOnlyList<EvidenceItem> evidence,
@@ -467,6 +469,26 @@ public static class ImportedContextVerifier
             ? new VerifiedRepositoryIdentity(entry.Locator, entry.VerifiedCommit, entry.VerifiedTree)
             : null;
 
+    internal static bool IsReaderSafetyEligible(ImportedContextEntry entry) =>
+        entry.VerifiedSymlinkResolution is SymlinkResolution.NotSymlink or SymlinkResolution.InTree &&
+        entry.VerifiedGenerationClassification is not null &&
+        entry.VerifiedGenerationClassification.StartsWith("not-detected", StringComparison.Ordinal);
+
+    internal static IReadOnlyList<string> GetReaderSafetyCaveats(ImportedContextEntry entry)
+    {
+        var caveats = new List<string>();
+        if (entry.VerifiedSymlinkResolution is not (SymlinkResolution.NotSymlink or SymlinkResolution.InTree))
+        {
+            caveats.Add($"Repository symlink safety is {entry.VerifiedSymlinkResolution}; it cannot establish readiness.");
+        }
+        if (entry.VerifiedGenerationClassification is not null &&
+            !entry.VerifiedGenerationClassification.StartsWith("not-detected", StringComparison.Ordinal))
+        {
+            caveats.Add($"Repository file generation classification is {entry.VerifiedGenerationClassification}; it cannot establish readiness without authoritative generator provenance.");
+        }
+        return caveats;
+    }
+
     private static ImportedContextEntry Bind(
         ImportedContextEntry entry,
         CheckoutVerification verification,
@@ -476,7 +498,9 @@ public static class ImportedContextVerifier
         {
             CheckoutVerification = verification,
             VerifiedCommit = exactFile.Commit,
-            VerifiedTree = exactFile.Tree
+            VerifiedTree = exactFile.Tree,
+            VerifiedSymlinkResolution = exactFile.SymlinkResolution,
+            VerifiedGenerationClassification = exactFile.GenerationClassification
         };
         return bound with { VerificationBinding = ComputeBinding(bound, verification) };
     }
@@ -496,7 +520,9 @@ public static class ImportedContextVerifier
             entry.CheckoutDigest,
             verification,
             entry.VerifiedCommit,
-            entry.VerifiedTree
+            entry.VerifiedTree,
+            entry.VerifiedSymlinkResolution,
+            entry.VerifiedGenerationClassification
         });
         return $"sha256:{Convert.ToHexStringLower(SHA256.HashData(material))}";
     }

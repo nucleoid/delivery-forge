@@ -24,7 +24,8 @@ Unknown fields, arbitrary absolute POSIX/Windows/UNC or tilde/named-home paths, 
 percent-environment home aliases, single-backslash Windows roots (including
 delimiter-adjacent and non-ASCII path segments), URL user-info, obvious key/value, JSON, or
 authorization-header credential material (including common secret, password/passwd, and access-key
-assignments, current hyphenated API-key forms, `--password`, and `curl -u` credentials), malformed/duplicate JSON, and
+assignments, general current hyphenated `sk-` API-key forms, `--password`, and curl `--user`, attached `-u`,
+or grouped short-option credentials), malformed/duplicate JSON, and
 oversized input fail closed. Raw documents, prompts, transcripts, source bodies, credentials, and
 private filesystem locations are outside the envelope.
 
@@ -41,7 +42,9 @@ private filesystem locations are outside the envelope.
   forward-slash `git:<repository-relative-path>` locator and be checked against the matching exact Git blob with
   `ImportedContextVerifier.VerifyAgainst`; otherwise they remain labeled unverified. Verification
   binds every meaning-bearing entry field (kind, locator, summary, both digests, observed time, and
-  stale/truncated/heuristic flags) plus the reader-supplied exact commit and tree. Post-verification
+  stale/truncated/heuristic flags) plus the reader-supplied exact commit, tree, symlink disposition, and generated-file
+  classification. Unsafe/unresolved symlinks and conventionally generated files retain matching safety caveats and cannot
+  satisfy deep readiness. Post-verification
   mutation downgrades the record to unverified. The commit/tree are retained as a limitation, and
   freeze rejects a verified identity that differs from the draft base. A claimed checkout-byte
   digest or locator mismatch is retained as a conflict and blocks readiness.

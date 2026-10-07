@@ -39,12 +39,12 @@ internal static partial class PortableMaterial
         WindowsDrivePath().IsMatch(value);
 
     [GeneratedRegex(
-        """(?:(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/\s]+[\\/][^\\/\s]+|~[\\/](?:[^\\/\s]+[\\/])*[^\\/\s]+|/(?!/)(?:[^/\s`|\[\]{}<>"']+/)+[^/\s`|\[\]{}<>"']+))""",
+        """(?:(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/\s]+[\\/][^\\/\s]+|~[\\/](?:[^\\/\s]+[\\/])*[^\\/\s]+)|(?<![A-Za-z0-9.])/(?!/)(?:[^/\s`|\[\]{}<>"']+/)+[^/\s`|\[\]{}<>"']+)""",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex HostPath();
 
     [GeneratedRegex(
-        """(?<![A-Za-z0-9])(?:~[A-Za-z0-9._-]*|\$HOME|\$\{HOME\}|\$env:(?:USERPROFILE|HOME)|%(?:USERPROFILE|HOMEPATH|APPDATA|LOCALAPPDATA)%)[\\/][^\s`|\[\]{}<>"']+""",
+        """(?<![A-Za-z0-9])(?:~[A-Za-z0-9._-]*|\$HOME|\$\{HOME\}|\$\{?env:(?:USERPROFILE|HOME|HOMEPATH|APPDATA|LOCALAPPDATA)\}?|%(?:USERPROFILE|HOMEPATH|APPDATA|LOCALAPPDATA)%)[\\/][^\s`|\[\]{}<>"']+""",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex HomeAliasPath();
 
@@ -59,7 +59,7 @@ internal static partial class PortableMaterial
     private static partial Regex SchemeUrl();
 
     [GeneratedRegex(
-        """(?:-----BEGIN\s|Bearer\s+\S+|Authorization\s*:\s*(?:Basic|Bearer)\s+\S+|"?(?:api[_-]?key|password|passwd|token|secret|client[_-]?secret|access[_-]?key|aws[_-]?access[_-]?key[_-]?id)"?\s*[:=]\s*"?\S+|--password(?:=|\s+)\S+|\bcurl\b[^\r\n]*\s-u\s+\S+:\S+|(?:^|[^A-Za-z0-9])(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-(?:proj|svcacct|ant-api\d{2})-[A-Za-z0-9_-]{20,}|sk-[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}))""",
+        """(?:-----BEGIN\s|Bearer\s+\S+|Authorization\s*:\s*(?:Basic|Bearer)\s+\S+|"?(?:api[_-]?key|password|passwd|token|secret|client[_-]?secret|access[_-]?key|aws[_-]?access[_-]?key[_-]?id)"?\s*[:=]\s*"?\S+|--password(?:=|\s+)\S+|\bcurl\b[^\r\n]*(?:-[A-Za-z]*u\s*|--user(?:=|\s+))\S+:\S+|(?:^|[^A-Za-z0-9])(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}))""",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex Credential();
 

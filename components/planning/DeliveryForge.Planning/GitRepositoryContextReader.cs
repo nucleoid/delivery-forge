@@ -225,6 +225,7 @@ public sealed class GitRepositoryContextReader
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(SymlinkResolutionTimeout);
         var budget = new ResolutionBudget();
+        var treeListings = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         try
         {
             var posix = await ResolveTargetAsync(
@@ -233,6 +234,7 @@ public sealed class GitRepositoryContextReader
                 target,
                 [],
                 budget,
+                treeListings,
                 SymlinkSemantics.PosixExpansion,
                 deadline.Token);
             var windows = await ResolveTargetAsync(
@@ -241,6 +243,7 @@ public sealed class GitRepositoryContextReader
                 target,
                 [],
                 budget,
+                treeListings,
                 SymlinkSemantics.WindowsLexicalCollapse,
                 deadline.Token);
             return CombineResolution(posix, windows);
@@ -261,6 +264,7 @@ public sealed class GitRepositoryContextReader
         string target,
         IReadOnlyList<string> remaining,
         ResolutionBudget budget,
+        Dictionary<string, byte[]> treeListings,
         SymlinkSemantics semantics,
         CancellationToken cancellationToken)
     {
@@ -299,7 +303,7 @@ public sealed class GitRepositoryContextReader
             }
 
             var candidate = string.Join('/', resolved.Append(segment));
-            var entry = await TryReadTreeEntryAsync(context, candidate, cancellationToken, budget);
+            var entry = await TryReadTreeEntryAsync(context, candidate, cancellationToken, budget, treeListings);
             if (entry is null)
             {
                 return SymlinkResolution.Missing;
@@ -411,19 +415,25 @@ public sealed class GitRepositoryContextReader
         RepositoryContext context,
         string path,
         CancellationToken cancellationToken,
-        ResolutionBudget? budget = null)
+        ResolutionBudget? budget = null,
+        Dictionary<string, byte[]>? treeListings = null)
     {
         var segments = path.Split('/');
         var treeObject = context.Tree;
         for (var index = 0; index < segments.Length; index++)
         {
-            budget?.InvokeGit();
-            var result = await RunGitAsync(
-                context.RepositoryRoot,
-                cancellationToken,
-                allowFailure: false,
-                "ls-tree", "-z", "--end-of-options", treeObject);
-            var entry = ParseExactTreeEntry(result.StandardOutput, segments[index]);
+            if (treeListings is null || !treeListings.TryGetValue(treeObject, out var listing))
+            {
+                budget?.InvokeGit();
+                var result = await RunGitAsync(
+                    context.RepositoryRoot,
+                    cancellationToken,
+                    allowFailure: false,
+                    "ls-tree", "-z", "--end-of-options", treeObject);
+                listing = result.StandardOutput;
+                treeListings?.Add(treeObject, listing);
+            }
+            var entry = ParseExactTreeEntry(listing, segments[index]);
             if (entry is null) return null;
             if (index == segments.Length - 1) return entry;
             if (entry.Type != "tree") return null;

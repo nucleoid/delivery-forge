@@ -132,6 +132,8 @@ public sealed record ImportedContextEntry(
     internal string? VerificationBinding { get; init; }
     internal string? VerifiedCommit { get; init; }
     internal string? VerifiedTree { get; init; }
+    internal SymlinkResolution? VerifiedSymlinkResolution { get; init; }
+    internal string? VerifiedGenerationClassification { get; init; }
 }
 
 public sealed class IntakeAssessment
@@ -417,9 +419,8 @@ public sealed class FrozenPlan
             throw new PlanningException("Base reconciliation requires a reader-issued repository context.");
         }
         if (!string.Equals(BaseReference, current.RequestedRef, StringComparison.Ordinal) ||
-            BaseReferenceWasDetached ||
-            current.DetachedHead ||
-            !IsFreshnessBearingReference(current.RequestedRef))
+            !IsFreshnessBearingReference(BaseReference, BaseReferenceWasDetached) ||
+            !IsFreshnessBearingReference(current.RequestedRef, current.DetachedHead))
         {
             return WithBaseDrift(
                 $"Base ref freshness could not be established: frozen ref '{BaseReference}' must be reconciled through the same mutable ref; current ref is '{current.RequestedRef}' and detached/pinned snapshots are not freshness evidence.");
@@ -457,7 +458,7 @@ public sealed class FrozenPlan
                 .Order(StringComparer.Ordinal)
                 .ToArray());
 
-    private static bool IsFreshnessBearingReference(string reference) =>
-        string.Equals(reference, "HEAD", StringComparison.Ordinal) ||
-        reference.StartsWith("refs/heads/", StringComparison.Ordinal);
+    private static bool IsFreshnessBearingReference(string reference, bool checkoutHeadDetached) =>
+        reference.StartsWith("refs/heads/", StringComparison.Ordinal) ||
+        string.Equals(reference, "HEAD", StringComparison.Ordinal) && !checkoutHeadDetached;
 }

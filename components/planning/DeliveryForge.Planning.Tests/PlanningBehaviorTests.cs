@@ -455,6 +455,54 @@ public sealed class PlanningBehaviorTests
         Assert.False(assessment.Ready);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Post_verification_reader_safety_mutation_downgrades_to_unverified(bool mutateSymlink)
+    {
+        var exactFile = RepositoryFileFor("callers.txt");
+        var digest = $"sha256:{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(exactFile.Bytes))}";
+        var verified = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry(
+                "code-index", "git:callers.txt", "Verified caller evidence", digest, ObservedAt,
+                CheckoutDigest: digest),
+            exactFile);
+        var mutated = mutateSymlink
+            ? verified with { VerifiedSymlinkResolution = SymlinkResolution.Escapes }
+            : verified with { VerifiedGenerationClassification = "generated-by-convention" };
+
+        var assessment = IntakePlanner.Assess(
+            Request() with { Depth = IntakeDepth.Deep },
+            [RepositoryEvidence()],
+            new ImportedContextEnvelope("1.0.0", [mutated], [], []));
+
+        Assert.Contains(assessment.Limitations, item => item.Contains("unverified", StringComparison.OrdinalIgnoreCase));
+        Assert.False(assessment.Ready);
+    }
+
+    [Fact]
+    public void Verified_safe_in_tree_symlink_can_satisfy_deep_intake()
+    {
+        var file = new RepositoryFile(
+            "linked.txt", new string('c', 40), "120000", Encoding.UTF8.GetBytes("target.txt"),
+            isSymlink: true, escapesWorktree: false, "not-detected; generator metadata was not asserted",
+            SymlinkResolution.InTree, new string('a', 40), new string('b', 40));
+        var digest = $"sha256:{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(file.Bytes))}";
+        var imported = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry(
+                "code-index", "git:linked.txt", "Safe linked evidence", digest, ObservedAt,
+                CheckoutDigest: digest),
+            file);
+
+        var assessment = IntakePlanner.Assess(
+            Request() with { Depth = IntakeDepth.Deep },
+            [PolicyEvidence()],
+            new ImportedContextEnvelope("1.0.0", [imported], [], []));
+
+        Assert.True(assessment.Ready);
+        Assert.DoesNotContain(assessment.Limitations, item => item.Contains("symlink safety", StringComparison.OrdinalIgnoreCase));
+    }
+
     [Fact]
     public void Imported_context_rejects_secret_material_inside_allowed_fields()
     {
@@ -1029,6 +1077,27 @@ public sealed class PlanningBehaviorTests
             limitations: []);
 
         Assert.Same(frozen, frozen.ReconcileBase(current));
+    }
+
+    [Fact]
+    public void Detached_checkout_still_reports_drift_for_a_changed_mutable_branch_ref()
+    {
+        var draft = Draft();
+        var detachedBranch = RepositoryContext.Create(
+            "/portable/display-only", "refs/heads/main", draft.Repository.Commit, draft.Repository.Tree,
+            detachedHead: true, dirty: false, shallow: false, submodules: [], limitations: []);
+        var frozen = PlanFreezer.Freeze(
+            draft with { Repository = detachedBranch },
+            "revision-detached-branch-drift",
+            ObservedAt);
+        var changed = RepositoryContext.Create(
+            "/portable/display-only", "refs/heads/main", new string('d', 40), new string('e', 40),
+            detachedHead: true, dirty: false, shallow: false, submodules: [], limitations: []);
+
+        var reconciled = frozen.ReconcileBase(changed);
+
+        Assert.False(reconciled.DownstreamReady);
+        Assert.Contains(reconciled.Limitations, item => item.Contains("drift", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
