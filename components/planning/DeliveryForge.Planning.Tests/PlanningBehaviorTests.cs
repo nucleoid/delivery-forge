@@ -763,8 +763,12 @@ public sealed class PlanningBehaviorTests
     [Fact]
     public void Material_revision_changes_identity_and_base_drift_invalidates_readiness()
     {
-        var frozen = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
-        var changed = Draft();
+        var original = Draft();
+        var branch = RepositoryContext.Create(
+            "/portable/display-only", "refs/heads/main", original.Repository.Commit, original.Repository.Tree,
+            detachedHead: false, dirty: false, shallow: false, submodules: [], limitations: []);
+        var frozen = PlanFreezer.Freeze(original with { Repository = branch }, "revision-1", ObservedAt);
+        var changed = Draft() with { Repository = branch };
         var changedRequest = changed.Request with { Outcome = "A materially different outcome" };
         var revised = PlanFreezer.Freeze(
             changed with { Request = changedRequest, Intake = IntakePlanner.Assess(changedRequest, changed.Provenance) },
@@ -782,7 +786,7 @@ public sealed class PlanningBehaviorTests
             nameof(FrozenPlan.ReconcileBase),
             [typeof(string), typeof(string)]));
         var driftContext = RepositoryContext.Create(
-            "/portable/display-only", "HEAD", new string('d', 40), new string('e', 40),
+            "/portable/display-only", "refs/heads/main", new string('d', 40), new string('e', 40),
             detachedHead: false, dirty: false, shallow: false, submodules: [], limitations: []);
         var drifted = Assert.IsType<FrozenPlan>(contextBoundary.Invoke(frozen, [driftContext]));
         Assert.False(drifted.DownstreamReady);
