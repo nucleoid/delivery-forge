@@ -1038,6 +1038,12 @@ public sealed class PlanningBehaviorTests
     [InlineData("refs/tags/v1")]
     [InlineData("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")]
     [InlineData("main")]
+    [InlineData("HEAD")]
+    [InlineData("refs/heads/main@{1}")]
+    [InlineData("refs/heads/main~1")]
+    [InlineData("refs/heads/main^")]
+    [InlineData("refs/heads/main:path")]
+    [InlineData("refs/heads/main..backup")]
     public void Non_freshness_bearing_refs_cannot_reconcile_an_unchanged_base(string requestedRef)
     {
         var draft = Draft();
@@ -1067,12 +1073,23 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
-    public void Same_mutable_ref_and_unchanged_base_preserves_downstream_readiness()
+    public void Same_exact_branch_ref_and_unchanged_base_preserves_downstream_readiness()
     {
-        var frozen = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
+        var draft = Draft();
+        var branch = RepositoryContext.Create(
+            "/portable/display-only",
+            "refs/heads/main",
+            draft.Repository.Commit,
+            draft.Repository.Tree,
+            detachedHead: false,
+            dirty: false,
+            shallow: false,
+            submodules: [],
+            limitations: []);
+        var frozen = PlanFreezer.Freeze(draft with { Repository = branch }, "revision-1", ObservedAt);
         var sameBranch = RepositoryContext.Create(
             "/portable/display-only",
-            "HEAD",
+            "refs/heads/main",
             frozen.BaseCommit,
             frozen.BaseTree,
             detachedHead: false,
