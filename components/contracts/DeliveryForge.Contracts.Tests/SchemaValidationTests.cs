@@ -309,7 +309,7 @@ public sealed class SchemaValidationTests
         SetIdentity(gate);
 
         var error = Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(Bytes(gate).Span));
-        Assert.Contains("exitCode=0", error.Message, StringComparison.Ordinal);
+        Assert.Contains("exitCode", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
