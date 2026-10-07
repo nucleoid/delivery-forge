@@ -33,7 +33,7 @@
     },
     {
       "if": { "properties": { "outcome": { "const": "PASS" } } },
-      "then": { "properties": { "sourceChanged": { "const": false } } }
+      "then": { "properties": { "exitCode": { "const": 0 }, "sourceChanged": { "const": false } } }
     }
   ],
   "$defs": {

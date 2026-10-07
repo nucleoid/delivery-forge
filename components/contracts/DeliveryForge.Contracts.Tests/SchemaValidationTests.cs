@@ -313,6 +313,31 @@ public sealed class SchemaValidationTests
     }
 
     [Fact]
+    public void Passing_gate_accepts_integral_zero_without_leaking_parser_exceptions()
+    {
+        var gate = LoadNode("gate-receipt.json");
+        gate["exitCode"] = 0.0m;
+        SetIdentity(gate);
+
+        var contract = ContractValidator.ParseAndValidate(Bytes(gate).Span);
+        Assert.Equal("gate-receipt", contract.SchemaName);
+    }
+
+    [Fact]
+    public void Authoritative_schema_encodes_the_passing_exit_code_rule()
+    {
+        var assembly = typeof(ContractValidator).Assembly;
+        var resource = assembly.GetManifestResourceNames()
+            .Single(name => name.EndsWith(".gate-receipt.schema.json", StringComparison.Ordinal));
+        using var stream = assembly.GetManifestResourceStream(resource)!;
+        var schema = JsonNode.Parse(stream)!.AsObject();
+        var passRule = schema["allOf"]!.AsArray().Single(rule =>
+            rule!["if"]!["properties"]!["outcome"]!["const"]!.GetValue<string>() == "PASS");
+
+        Assert.Equal(0, passRule!["then"]!["properties"]!["exitCode"]!["const"]!.GetValue<int>());
+    }
+
+    [Fact]
     public void Receipt_references_must_match_checkpoint_head_and_tree()
     {
         var policy = LoadNode("evidence-policy.json");

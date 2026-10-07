@@ -171,6 +171,70 @@ public sealed class WorkflowTransitionTests
     }
 
     [Fact]
+    public void Hosted_review_receipt_must_pass_and_match_current_revision()
+    {
+        var failing = MutatedFixture("review-receipt.json", node =>
+        {
+            node["reviewerFamily"] = "github-hosted";
+            node["outcome"] = "FAIL";
+        });
+        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.CiComplete, WorkflowState.HostReviewComplete,
+            FullEvidence() with { HostReviewReceipt = failing }));
+
+        var wrongTree = MutatedFixture("review-receipt.json", node =>
+        {
+            node["reviewerFamily"] = "github-hosted";
+            node["treeId"] = new string('f', 40);
+        });
+        AssertMessage("Receipt does not match", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.CiComplete, WorkflowState.HostReviewComplete,
+            FullEvidence() with { HostReviewReceipt = wrongTree }));
+    }
+
+    [Fact]
+    public void Required_gate_and_ci_receipts_must_pass()
+    {
+        var evidence = FullEvidence();
+        var failingRequired = MutatedFixture("gate-receipt.json", node =>
+        {
+            node["policyIdentity"] = evidence.Policy!.Identity;
+            node["gateId"] = "build";
+            node["outcome"] = "FAIL";
+        });
+        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.Evaluating, WorkflowState.IndependentReview,
+            evidence with { GateReceipts = [failingRequired, .. evidence.GateReceipts!.Skip(1)] }));
+
+        var failingCi = MutatedFixture("gate-receipt.json", node =>
+        {
+            node["policyIdentity"] = evidence.Policy!.Identity;
+            node["gateId"] = "ci";
+            node["outcome"] = "FAIL";
+        });
+        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.PrPublished, WorkflowState.CiComplete, evidence with { CiReceipt = failingCi }));
+    }
+
+    [Fact]
+    public void Pr_published_requires_the_matching_publication_action()
+    {
+        var merged = MutatedFixture("publication-receipt.json", node => node["action"] = "MERGED");
+        AssertMessage("action PR_PUBLISHED", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.PrAuthorized, WorkflowState.PrPublished,
+            FullEvidence() with { PublicationReceipt = merged }));
+    }
+
+    [Theory]
+    [InlineData(WorkflowState.PrPublished, WorkflowState.CiComplete)]
+    [InlineData(WorkflowState.CiComplete, WorkflowState.HostReviewComplete)]
+    public void Post_publication_evidence_transitions_reassert_pr_authority(WorkflowState from, WorkflowState to)
+    {
+        AssertMessage("requires PR authority", () => WorkflowTransition.EnsureAllowed(
+            from, to, FullEvidence() with { Ceiling = AuthorizationCeiling.Plan }));
+    }
+
+    [Fact]
     public void Caller_authority_cannot_exceed_the_policy_ceiling()
     {
         var policy = MutatedFixture("evidence-policy.json", node => node["authorizedCeiling"] = "pr");

@@ -344,7 +344,7 @@ public static partial class ContractValidator
             {
                 throw new ContractValidationException("A PASS gate receipt cannot set sourceChanged=true.");
             }
-            if (root.GetProperty("exitCode").ValueKind != JsonValueKind.Number || root.GetProperty("exitCode").GetInt64() != 0)
+            if (!root.GetProperty("exitCode").TryGetDecimal(out var exitCode) || exitCode != 0)
             {
                 throw new ContractValidationException("A PASS gate receipt requires exitCode=0.");
             }

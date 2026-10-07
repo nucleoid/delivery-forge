@@ -80,11 +80,13 @@ public static class WorkflowTransition
 
         if (to == WorkflowState.CiComplete)
         {
+            RequirePolicyCeiling(evidence, AuthorizationCeiling.Pr, "CI completion");
             using var _ = RequirePolicyBoundGate(evidence.CiReceipt, "ci", evidence);
         }
 
         if (to == WorkflowState.HostReviewComplete)
         {
+            RequirePolicyCeiling(evidence, AuthorizationCeiling.Pr, "Hosted review completion");
             RequireDistinctHostReview(evidence);
         }
 

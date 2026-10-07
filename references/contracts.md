@@ -70,7 +70,8 @@ Entering execution requires at least `implement` authority. Receipt-gated author
 the immutable evidence policy. `PR_AUTHORIZED` requires `pr` authority
 and a passing independent-review receipt bound to the current head and tree. `PR_PUBLISHED`
 additionally requires that review receipt and a `PR_PUBLISHED` publication receipt.
-`CI_COMPLETE` requires a policy-bound PASS gate receipt with `gateId: ci`.
+`CI_COMPLETE` and `HOST_REVIEW_COMPLETE` reassert the immutable `pr` ceiling.
+`CI_COMPLETE` also requires a policy-bound PASS gate receipt with `gateId: ci`.
 `HOST_REVIEW_COMPLETE` revalidates the prior PASS independent-review receipt, rejects
 `reviewerFamily: github-hosted` for that independent evidence, and requires a distinct PASS hosted
 receipt whose `reviewerFamily` is exactly `github-hosted`. `MERGE_AUTHORIZED` and `MERGED` require `merge` authority and their matching passing hosted
