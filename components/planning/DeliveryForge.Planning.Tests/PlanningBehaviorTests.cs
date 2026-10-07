@@ -39,6 +39,20 @@ public sealed class PlanningBehaviorTests
             [RepositoryEvidence()]));
     }
 
+    [Theory]
+    [InlineData("Choose rollout\nChoose deletion", "do the safe thing")]
+    [InlineData("Choose rollout", "safe\r\nrisky")]
+    [InlineData("Choose rollout", ".")]
+    [InlineData("?", "safe")]
+    public void User_owned_choice_requires_one_concrete_single_line_decision(
+        string decision,
+        string recommendation)
+    {
+        Assert.Throws<PlanningException>(() => IntakePlanner.Assess(
+            Request() with { UserOwnedDecision = decision, RecommendedOption = recommendation },
+            [RepositoryEvidence()]));
+    }
+
     [Fact]
     public void Deep_intake_is_only_enabled_explicitly()
     {
@@ -82,6 +96,23 @@ public sealed class PlanningBehaviorTests
             .ToArray();
 
         Assert.Throws<PlanningException>(() => IntakePlanner.Assess(request, evidence));
+    }
+
+    [Fact]
+    public void Deep_intake_does_not_count_user_or_memory_claims_as_bounded_extra_evidence()
+    {
+        var request = Request() with { Depth = IntakeDepth.Deep };
+        EvidenceItem[] evidence =
+        [
+            RepositoryEvidence(),
+            new(EvidenceSourceKind.User, "user:statement", "sha256:" + new string('c', 64), ObservedAt, []),
+            new(EvidenceSourceKind.Memory, "memory:item", "sha256:" + new string('d', 64), ObservedAt, [])
+        ];
+
+        var assessment = IntakePlanner.Assess(request, evidence);
+
+        Assert.False(assessment.Ready);
+        Assert.Contains(assessment.Limitations, item => item.Contains("additional bounded", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -348,6 +379,19 @@ public sealed class PlanningBehaviorTests
     [InlineData("see [/home/alice/.ssh/config]")]
     [InlineData("see `C:\\Users\\alice\\.ssh\\config`")]
     [InlineData("github_pat_11AA22BB33CC44DD55EE66FF77GG88HH99II")]
+    [InlineData("_https://alice:hunter2@db.example")]
+    [InlineData("1https://alice:hunter2@db.example")]
+    [InlineData("éhttps://alice:hunter2@db.example")]
+    [InlineData("https:\\\\alice:hunter2@db.example")]
+    [InlineData("password: hunter2")]
+    [InlineData("{\"password\":\"hunter2\"}")]
+    [InlineData("api_key: hunter2")]
+    [InlineData("client_secret=hunter2")]
+    [InlineData("Authorization: Basic Zm9vOmJhcg==")]
+    [InlineData("found in /workspace/alice/client-x")]
+    [InlineData("found in /data/private/report")]
+    [InlineData("found in /run/secrets/db-password")]
+    [InlineData("~/.ssh/id_rsa")]
     public void Portable_material_rejects_non_network_urls_embedded_paths_and_credentials(string value)
     {
         var draft = Draft();
@@ -418,9 +462,88 @@ public sealed class PlanningBehaviorTests
         Assert.NotEqual(frozen.Identity, revised.Identity);
         Assert.True(frozen.DownstreamReady);
 
-        var drifted = frozen.ReconcileBase(new string('d', 40), new string('e', 40));
+        var contextBoundary = typeof(FrozenPlan).GetMethod(
+            nameof(FrozenPlan.ReconcileBase),
+            [typeof(RepositoryContext)]);
+        Assert.NotNull(contextBoundary);
+        Assert.Null(typeof(FrozenPlan).GetMethod(
+            nameof(FrozenPlan.ReconcileBase),
+            [typeof(string), typeof(string)]));
+        var driftContext = RepositoryContext.Create(
+            "/portable/display-only", "HEAD", new string('d', 40), new string('e', 40),
+            detachedHead: false, dirty: false, shallow: false, submodules: [], limitations: []);
+        var drifted = Assert.IsType<FrozenPlan>(contextBoundary.Invoke(frozen, [driftContext]));
         Assert.False(drifted.DownstreamReady);
         Assert.Contains(drifted.Limitations, item => item.Contains("drift", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Base_reconciliation_rejects_a_forged_repository_context()
+    {
+        var frozen = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
+        var valid = Draft().Repository;
+        var constructor = Assert.Single(typeof(RepositoryContext).GetConstructors(
+            BindingFlags.Instance | BindingFlags.NonPublic));
+        object ConstructorArgument(ParameterInfo parameter) => parameter.Name switch
+            {
+                "repositoryRoot" => (object)valid.RepositoryRoot,
+                "requestedRef" => valid.RequestedRef,
+                "commit" or "headCommit" => valid.Commit,
+                "tree" or "headTree" => valid.Tree,
+                "detachedHead" => false,
+                "dirty" => false,
+                "shallow" => false,
+                "submodules" or "limitations" => Array.Empty<string>(),
+                "readerBinding" => "sha256:" + new string('0', 64),
+                _ => throw new InvalidOperationException(parameter.Name)
+            };
+        var arguments = constructor.GetParameters().Select(ConstructorArgument).ToArray();
+        var forged = (RepositoryContext)constructor.Invoke(arguments);
+        var reconcile = typeof(FrozenPlan).GetMethod(nameof(FrozenPlan.ReconcileBase), [typeof(RepositoryContext)]);
+        Assert.NotNull(reconcile);
+
+        var error = Assert.Throws<TargetInvocationException>(() => reconcile.Invoke(frozen, [forged]));
+        Assert.IsType<PlanningException>(error.InnerException);
+    }
+
+    [Theory]
+    [InlineData(EvidenceSourceKind.Repository, "git:README.md")]
+    [InlineData(EvidenceSourceKind.Policy, "policy:planning")]
+    public void Unpinned_readiness_evidence_cannot_make_intake_ready(EvidenceSourceKind kind, string locator)
+    {
+        var assessment = IntakePlanner.Assess(
+            Request(),
+            [new EvidenceItem(kind, locator, null, ObservedAt, [])]);
+
+        Assert.False(assessment.Ready);
+        Assert.Contains(assessment.Limitations, item => item.Contains("digest", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Repository_readiness_evidence_requires_an_exact_reader_file_binding()
+    {
+        var file = new RepositoryFile(
+            "README.md", new string('c', 40), "100644", Encoding.UTF8.GetBytes("readme"),
+            isSymlink: false, escapesWorktree: false, "not-detected", SymlinkResolution.NotSymlink,
+            new string('a', 40), new string('b', 40));
+        var factory = typeof(EvidenceItem).GetMethod(
+            "FromRepositoryFile",
+            BindingFlags.Public | BindingFlags.Static);
+        Assert.NotNull(factory);
+        var bound = Assert.IsType<EvidenceItem>(factory.Invoke(
+            null,
+            [file, ObservedAt, Array.Empty<string>(), EvidenceRequirement.Optional]));
+
+        Assert.True(IntakePlanner.Assess(Request(), [bound]).Ready);
+        Assert.False(IntakePlanner.Assess(Request(), [RepositoryEvidence()]).Ready);
+
+        var draft = Draft();
+        EvidenceItem[] provenance = [bound, PolicyEvidence()];
+        var error = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(
+            draft with { Provenance = provenance, Intake = IntakePlanner.Assess(draft.Request, provenance) },
+            "revision-wrong-repository-binding",
+            ObservedAt));
+        Assert.Contains("commit/tree", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -609,6 +732,38 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
+    public void Declared_revision_only_change_directly_supersedes_predecessor()
+    {
+        var first = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
+
+        var successor = PlanFreezer.Freeze(Draft(), "revision-2", ObservedAt, first);
+
+        Assert.NotEqual(first.ContractIdentity, successor.ContractIdentity);
+        Assert.Equal(first.ContractIdentity, successor.Supersedes);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Predecessor_must_share_repository_and_work_item_lineage(bool changeRepository)
+    {
+        var first = PlanFreezer.Freeze(Draft(), "revision-1", ObservedAt);
+        var successorDraft = Draft();
+        var changedRequest = changeRepository
+            ? successorDraft.Request with { Repository = "nucleoid/another-repository" }
+            : successorDraft.Request with { WorkItem = "#999" };
+        successorDraft = successorDraft with
+        {
+            Request = changedRequest,
+            Intake = IntakePlanner.Assess(changedRequest, successorDraft.Provenance)
+        };
+
+        var error = Assert.Throws<PlanningException>(() =>
+            PlanFreezer.Freeze(successorDraft, "revision-2", ObservedAt, first));
+        Assert.Contains("lineage", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Mutable_repository_observations_do_not_change_declared_revision_identity()
     {
         var clean = Draft();
@@ -715,6 +870,9 @@ public sealed class PlanningBehaviorTests
 
     private static EvidenceItem RepositoryEvidence(string locator = "git:README.md") => new(
         EvidenceSourceKind.Repository, locator, "sha256:" + new string('b', 64), ObservedAt, []);
+
+    private static EvidenceItem PolicyEvidence(string locator = "policy:planning") => new(
+        EvidenceSourceKind.Policy, locator, "sha256:" + new string('c', 64), ObservedAt, []);
 
     private static PlanDraft Draft()
     {

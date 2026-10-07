@@ -326,6 +326,77 @@ public sealed class GitRepositoryContextTests : IDisposable
         Assert.True(file.EscapesWorktree);
     }
 
+    [Theory]
+    [InlineData("escape", SymlinkResolution.Escapes)]
+    [InlineData("missing", SymlinkResolution.Missing)]
+    [InlineData("cycle", SymlinkResolution.Cycle)]
+    [InlineData("success", SymlinkResolution.InTree)]
+    public async Task Windows_lexical_walk_follows_the_divergent_collapsed_path(
+        string disposition,
+        SymlinkResolution expected)
+    {
+        InitializeRepository();
+        Directory.CreateDirectory(Path.Combine(_root, "sub", "inner"));
+        File.WriteAllText(Path.Combine(_root, "sub", "inner", ".keep"), "kept");
+        File.WriteAllText(Path.Combine(_root, "sub", "e"), "POSIX destination");
+        Run("git", "add sub/inner/.keep sub/e");
+        AddCommittedSymlink("d", "sub/inner");
+        AddCommittedSymlink("x", "d/../e");
+        switch (disposition)
+        {
+            case "escape":
+                AddCommittedSymlink("e", "../outside");
+                break;
+            case "missing":
+                AddCommittedSymlink("e", "not-present");
+                break;
+            case "cycle":
+                AddCommittedSymlink("e", "f");
+                AddCommittedSymlink("f", "e");
+                break;
+            case "success":
+                File.WriteAllText(Path.Combine(_root, "e"), "Windows destination");
+                Run("git", "add e");
+                break;
+        }
+        Run("git", "commit -q -m divergent-symlink-semantics");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+        var file = await reader.ReadFileAsync(context, "x", TestContext.Current.CancellationToken);
+
+        Assert.Equal(expected, file.SymlinkResolution);
+        Assert.Equal(expected != SymlinkResolution.InTree, file.EscapesWorktree);
+    }
+
+    [Fact]
+    public async Task Mutable_observations_are_bound_to_checkout_head_when_requested_ref_differs()
+    {
+        InitializeRepository();
+        var requestedCommit = RunCapture("git", "rev-parse HEAD");
+        File.WriteAllText(Path.Combine(_root, "second.txt"), "second commit");
+        Run("git", "add second.txt");
+        Run("git", "commit -q -m second");
+        var headCommit = RunCapture("git", "rev-parse HEAD");
+        var headTree = RunCapture("git", "rev-parse HEAD^{tree}");
+
+        var context = await new GitRepositoryContextReader().ReadAsync(
+            _root,
+            requestedCommit,
+            TestContext.Current.CancellationToken);
+
+        var headCommitProperty = typeof(RepositoryContext).GetProperty("HeadCommit");
+        var headTreeProperty = typeof(RepositoryContext).GetProperty("HeadTree");
+        Assert.NotNull(headCommitProperty);
+        Assert.NotNull(headTreeProperty);
+        Assert.Equal(headCommit, headCommitProperty.GetValue(context));
+        Assert.Equal(headTree, headTreeProperty.GetValue(context));
+        Assert.Contains(context.Limitations, limitation =>
+            limitation.Contains("HEAD", StringComparison.Ordinal) &&
+            limitation.Contains(requestedCommit, StringComparison.Ordinal) &&
+            limitation.Contains(headCommit, StringComparison.Ordinal));
+    }
+
     [Fact]
     public async Task Symlink_segment_work_is_globally_bounded_and_fails_conservatively()
     {
