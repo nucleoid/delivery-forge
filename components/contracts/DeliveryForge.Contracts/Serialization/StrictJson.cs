@@ -1,6 +1,5 @@
 using System.Buffers;
 using System.Globalization;
-using System.Numerics;
 using System.Text;
 using System.Text.Json;
 
@@ -8,8 +7,6 @@ namespace DeliveryForge.Contracts.Serialization;
 
 internal static class StrictJson
 {
-    private static readonly BigInteger MaxSafeInteger = new(9_007_199_254_740_991L);
-
     public static void EnsureValid(ReadOnlySpan<byte> utf8Json)
     {
         try
@@ -42,6 +39,9 @@ internal static class StrictJson
                         }
 
                         break;
+                    case JsonTokenType.String:
+                        _ = reader.GetString();
+                        break;
                     case JsonTokenType.Number:
                         ValidateNumber(reader.HasValueSequence
                             ? reader.ValueSequence.ToArray()
@@ -71,12 +71,6 @@ internal static class StrictJson
         if (!double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) || !double.IsFinite(value))
         {
             throw new ContractJsonException($"Number '{text}' is outside finite IEEE-754 binary64 range.");
-        }
-
-        if (decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var exact) &&
-            decimal.Truncate(exact) == exact && decimal.Abs(exact) > (decimal)MaxSafeInteger)
-        {
-            throw new ContractJsonException($"Integer '{text}' is outside the I-JSON safe integer range.");
         }
     }
 }

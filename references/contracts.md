@@ -11,8 +11,9 @@ alternative wire definition.
 - Unknown versions, kinds, fields, enum values, and missing required fields fail closed. An additive
   minor version is supported only after its complete schema and reader are bundled.
 - Inputs must be strict UTF-8 JSON. Duplicate names at any object depth, comments, trailing commas,
-  invalid UTF-8, non-finite binary64 values, and integers outside `[-9007199254740991,
-  9007199254740991]` are rejected before model binding.
+  invalid UTF-8, and non-finite binary64 values are rejected before model binding. JCS accepts the
+  full finite binary64 domain; schema fields declared as `integer` are additionally bounded to
+  `[-9007199254740991, 9007199254740991]` for interoperable exact values.
 - Portable contracts cannot contain host-private filesystem paths or secrets. A local executor may
   retain those in its own non-portable state, outside these schemas.
 
@@ -46,6 +47,9 @@ present in the same store; replacement is atomic.
 - Git object fields use lowercase hexadecimal object IDs. Gate, review, and publication receipts
   bind `baseCommit`, `headCommit`, and `treeId`; exact-head evidence is never inferred from a
   mutable worktree.
+- Every gate receipt names an immutable evidence-policy identity. A run manifest binds one policy;
+  all listed gates must be PASS receipts for that policy, exact base/head/tree, and every required
+  gate. `NOT_APPLICABLE` is valid only when that immutable policy explicitly allows the gate.
 
 ## State machine and authority
 
@@ -61,7 +65,8 @@ UNDERSTANDING -> PLANNED -> READY -> EXECUTING <-> PAUSED
 Any nonterminal state may enter `BLOCKED`, `FAILED`, or `STOPPED`; these and `MERGED` are terminal.
 Checkpoint sequence numbers strictly increase.
 
-Entering execution requires at least `implement` authority. `PR_AUTHORIZED` requires `pr` authority
+Entering execution requires at least `implement` authority. Receipt-gated authority is capped by
+the immutable evidence policy. `PR_AUTHORIZED` requires `pr` authority
 and a passing independent-review receipt bound to the current head and tree. `PR_PUBLISHED`
 additionally requires that review receipt and a `PR_PUBLISHED` publication receipt.
 `CI_COMPLETE` requires a gate receipt, while `HOST_REVIEW_COMPLETE` uses a distinct hosted-review

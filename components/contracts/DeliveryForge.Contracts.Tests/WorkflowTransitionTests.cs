@@ -63,13 +63,14 @@ public sealed class WorkflowTransitionTests
     [InlineData(WorkflowState.Evaluating, WorkflowState.IndependentReview, "gate")]
     [InlineData(WorkflowState.IndependentReview, WorkflowState.PrAuthorized, "review")]
     [InlineData(WorkflowState.PrAuthorized, WorkflowState.PrPublished, "publication")]
-    [InlineData(WorkflowState.PrPublished, WorkflowState.CiComplete, "gate")]
+    [InlineData(WorkflowState.PrPublished, WorkflowState.CiComplete, "ci")]
     [InlineData(WorkflowState.CiComplete, WorkflowState.HostReviewComplete, "host")]
     public void Receipt_gated_edges_reject_missing_evidence(WorkflowState from, WorkflowState to, string missing)
     {
         var evidence = FullEvidence() with
         {
-            GateReceipt = missing == "gate" ? null : FullEvidence().GateReceipt,
+            GateReceipts = missing == "gate" ? [] : FullEvidence().GateReceipts,
+            CiReceipt = missing == "ci" ? null : FullEvidence().CiReceipt,
             ReviewReceipt = missing == "review" ? null : FullEvidence().ReviewReceipt,
             PublicationReceipt = missing == "publication" ? null : FullEvidence().PublicationReceipt,
             HostReviewReceipt = missing == "host" ? null : FullEvidence().HostReviewReceipt
@@ -91,6 +92,59 @@ public sealed class WorkflowTransitionTests
             WorkflowState.MergeAuthorized, WorkflowState.Merged, FullEvidence() with { PublicationReceipt = wrongAction }));
         Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
             WorkflowState.Evaluating, WorkflowState.IndependentReview, wrongHead));
+
+        var wrongKind = FullEvidence().GateReceipts![0];
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized, FullEvidence() with { ReviewReceipt = wrongKind }));
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+            WorkflowState.Evaluating, WorkflowState.IndependentReview, FullEvidence() with { TreeId = new string('e', 40) }));
+    }
+
+    [Fact]
+    public void Implement_authority_is_required_for_execution()
+    {
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+            WorkflowState.Ready, WorkflowState.Executing, FullEvidence() with { Ceiling = AuthorizationCeiling.Plan }));
+    }
+
+    [Fact]
+    public void Hosted_review_and_ci_require_distinct_evidence()
+    {
+        var evidence = FullEvidence();
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+            WorkflowState.CiComplete, WorkflowState.HostReviewComplete,
+            evidence with { ReviewReceipt = null, HostReviewReceipt = evidence.ReviewReceipt }));
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+            WorkflowState.PrPublished, WorkflowState.CiComplete,
+            evidence with { CiReceipt = evidence.GateReceipts![0] }));
+    }
+
+    [Fact]
+    public void Immutable_policy_limits_authority_and_requires_independent_review()
+    {
+        var implementPolicy = MutatedFixture("evidence-policy.json", node => node["authorizedCeiling"] = "implement");
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized,
+            FullEvidence() with { Policy = implementPolicy }));
+
+        var optionalReviewPolicy = MutatedFixture("evidence-policy.json", node =>
+        {
+            node["authorizedCeiling"] = "merge";
+            node["requireIndependentReview"] = false;
+        });
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized,
+            FullEvidence() with { Policy = optionalReviewPolicy }));
+    }
+
+    [Fact]
+    public void Validated_contract_bytes_are_defensive_copies()
+    {
+        var receipt = ParseFixture("review-receipt.json");
+        var exposed = receipt.CanonicalBytes.ToArray();
+        exposed[0] = (byte)'[';
+
+        Assert.Equal((byte)'{', receipt.CanonicalBytes.Span[0]);
     }
 
     [Fact]
@@ -110,16 +164,33 @@ public sealed class WorkflowTransitionTests
         Assert.Throws<CheckpointSequenceException>(() => CheckpointSequence.EnsureIncreasing(4, 3));
     }
 
-    private static TransitionEvidence FullEvidence(bool merged = false) => new(
-        AuthorizationCeiling.Merge,
-        HeadCommit: "43113d9000000000000000000000000000000000",
-        TreeId: "2222222222222222222222222222222222222222",
-        GateReceipt: ParseFixture("gate-receipt.json"),
-        ReviewReceipt: ParseFixture("review-receipt.json"),
-        PublicationReceipt: merged
-            ? MutatedFixture("publication-receipt.json", node => node["action"] = "MERGED")
-            : ParseFixture("publication-receipt.json"),
-        HostReviewReceipt: MutatedFixture("review-receipt.json", node => node["reviewerFamily"] = "github-hosted"));
+    private static TransitionEvidence FullEvidence(bool merged = false)
+    {
+        var policy = MutatedFixture("evidence-policy.json", node => node["authorizedCeiling"] = "merge");
+        var gates = new[] { "build", "test", "review" }
+            .Select(gateId => GateFixture(policy.Identity, gateId))
+            .ToArray();
+        return new TransitionEvidence(
+            AuthorizationCeiling.Merge,
+            BaseCommit: "6304c90f83df3cdb918dff03f6358dcf4a939d16",
+            HeadCommit: "43113d9000000000000000000000000000000000",
+            TreeId: "2222222222222222222222222222222222222222",
+            Policy: policy,
+            GateReceipts: gates,
+            CiReceipt: GateFixture(policy.Identity, "ci"),
+            ReviewReceipt: ParseFixture("review-receipt.json"),
+            PublicationReceipt: merged
+                ? MutatedFixture("publication-receipt.json", node => node["action"] = "MERGED")
+                : ParseFixture("publication-receipt.json"),
+            HostReviewReceipt: MutatedFixture("review-receipt.json", node => node["reviewerFamily"] = "github-hosted"));
+    }
+
+    private static ValidatedContract GateFixture(string policyIdentity, string gateId) =>
+        MutatedFixture("gate-receipt.json", node =>
+        {
+            node["policyIdentity"] = policyIdentity;
+            node["gateId"] = gateId;
+        });
 
     private static ValidatedContract ParseFixture(string file) => ContractValidator.ParseAndValidate(
         File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "Valid", file)));

@@ -8,18 +8,20 @@ namespace DeliveryForge.Contracts.Validation;
 
 public sealed class ValidatedContract
 {
+    private readonly byte[] _canonicalBytes;
+
     internal ValidatedContract(string schemaName, string schemaVersion, string identity, byte[] canonicalBytes)
     {
         SchemaName = schemaName;
         SchemaVersion = schemaVersion;
         Identity = identity;
-        CanonicalBytes = canonicalBytes;
+        _canonicalBytes = canonicalBytes.ToArray();
     }
 
     public string SchemaName { get; }
     public string SchemaVersion { get; }
     public string Identity { get; }
-    public byte[] CanonicalBytes { get; }
+    public ReadOnlyMemory<byte> CanonicalBytes => _canonicalBytes.ToArray();
 }
 
 public static partial class ContractValidator
@@ -192,7 +194,7 @@ public static partial class ContractValidator
                 var distinct = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var item in value.EnumerateArray())
                 {
-                    if (!distinct.Add(item.GetRawText()))
+                    if (!distinct.Add(Convert.ToBase64String(CanonicalJson.Canonicalize(item, removeTopLevelIdentity: false))))
                     {
                         throw new ContractValidationException($"{path} must contain unique items.");
                     }
@@ -240,6 +242,12 @@ public static partial class ContractValidator
         {
             throw new ContractValidationException($"{path} is below its minimum.");
         }
+
+        if (value.ValueKind == JsonValueKind.Number && schema.TryGetProperty("maximum", out var maximum) &&
+            value.GetDouble() > maximum.GetDouble())
+        {
+            throw new ContractValidationException($"{path} is above its maximum.");
+        }
     }
 
     private static bool MatchesSchema(JsonElement value, JsonElement schema, string path, JsonElement rootSchema)
@@ -274,7 +282,12 @@ public static partial class ContractValidator
         }
 
         string[] annotations = ["$schema", "$id", "title", "x-contract-kind"];
-        string[] supported = ["$ref", "$defs", "type", "additionalProperties", "required", "properties", "const", "enum", "allOf", "if", "then", "minItems", "uniqueItems", "items", "minLength", "pattern", "format", "minimum"];
+        string[] supported = ["$ref", "$defs", "type", "additionalProperties", "required", "properties", "const", "enum", "allOf", "if", "then", "minItems", "uniqueItems", "items", "minLength", "pattern", "format", "minimum", "maximum"];
+        if (schema.TryGetProperty("$ref", out _) && schema.EnumerateObject().Count() != 1)
+        {
+            throw new InvalidOperationException($"JSON Schema references may not have ignored sibling keywords at {path}.");
+        }
+
         foreach (var property in schema.EnumerateObject())
         {
             if (!annotations.Contains(property.Name, StringComparer.Ordinal) &&
@@ -298,6 +311,10 @@ public static partial class ContractValidator
             {
                 EnsureSupportedSchemaGrammar(property.Value, $"{path}.{property.Name}");
             }
+            else if (property.Name == "format" && property.Value.GetString() != "date-time")
+            {
+                throw new InvalidOperationException($"Unsupported JSON Schema format '{property.Value.GetString()}' at {path}.");
+            }
         }
     }
 
@@ -306,7 +323,7 @@ public static partial class ContractValidator
         "object" => value.ValueKind == JsonValueKind.Object,
         "array" => value.ValueKind == JsonValueKind.Array,
         "string" => value.ValueKind == JsonValueKind.String,
-        "integer" => value.ValueKind == JsonValueKind.Number && value.TryGetInt64(out _),
+        "integer" => value.ValueKind == JsonValueKind.Number && value.TryGetDecimal(out var number) && decimal.Truncate(number) == number,
         "number" => value.ValueKind == JsonValueKind.Number,
         "boolean" => value.ValueKind is JsonValueKind.True or JsonValueKind.False,
         "null" => value.ValueKind == JsonValueKind.Null,

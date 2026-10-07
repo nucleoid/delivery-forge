@@ -28,11 +28,13 @@ public sealed class CanonicalJsonTests
         Assert.Equal(expected, Encoding.UTF8.GetString(CanonicalJson.Canonicalize(Utf8(input))));
     }
 
-    [Theory]
-    [InlineData("{\"n\":9007199254740992}")]
-    [InlineData("{\"n\":1e400}")]
-    public void Rejects_numbers_outside_ijson_interoperability(string json) =>
-        Assert.Throws<ContractJsonException>(() => CanonicalJson.Canonicalize(Utf8(json)));
+    [Fact]
+    public void Accepts_finite_binary64_numbers_outside_schema_integer_range() =>
+        Assert.NotEmpty(CanonicalJson.Canonicalize(Utf8("{\"n\":9007199254740992}")));
+
+    [Fact]
+    public void Rejects_numbers_outside_finite_binary64_range() =>
+        Assert.Throws<ContractJsonException>(() => CanonicalJson.Canonicalize(Utf8("{\"n\":1e400}")));
 
     [Fact]
     public void Rejects_invalid_utf8()

@@ -19,7 +19,7 @@ public sealed partial class AppendOnlyContractStore
         if (File.Exists(target))
         {
             var existing = await File.ReadAllBytesAsync(target, cancellationToken).ConfigureAwait(false);
-            if (!existing.AsSpan().SequenceEqual(validated.CanonicalBytes))
+            if (!existing.AsSpan().SequenceEqual(validated.CanonicalBytes.Span))
             {
                 throw new AppendOnlyContractException($"Existing immutable record '{validated.Identity}' has different bytes.");
             }
@@ -38,7 +38,7 @@ public sealed partial class AppendOnlyContractStore
             catch (IOException) when (File.Exists(target))
             {
                 var existing = await File.ReadAllBytesAsync(target, cancellationToken).ConfigureAwait(false);
-                if (!existing.AsSpan().SequenceEqual(validated.CanonicalBytes))
+                if (!existing.AsSpan().SequenceEqual(validated.CanonicalBytes.Span))
                 {
                     throw new AppendOnlyContractException($"Concurrent immutable record '{validated.Identity}' has different bytes.");
                 }

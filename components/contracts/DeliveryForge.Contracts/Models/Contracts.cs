@@ -12,7 +12,7 @@ public sealed record PlanScope(string Outcome, IReadOnlyList<string> Included, I
 
 public sealed record RunManifestContract(
     string SchemaVersion, string Kind, string Identity, string RunId, string Repository,
-    string PlanIdentity, string BaseCommit, string HeadCommit, string TreeId,
+    string PlanIdentity, string PolicyIdentity, string BaseCommit, string HeadCommit, string TreeId,
     string AuthorizationCeiling, string WorkflowState, IReadOnlyList<string> GateReceiptIds,
     DateTimeOffset UpdatedAt) : ContractDocument(SchemaVersion, Kind, Identity);
 

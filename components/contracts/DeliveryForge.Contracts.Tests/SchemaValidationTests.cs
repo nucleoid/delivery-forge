@@ -134,29 +134,64 @@ public sealed class SchemaValidationTests
     {
         var plan = LoadNode("plan.json");
         var policy = LoadNode("evidence-policy.json");
-        var gate = LoadNode("gate-receipt.json");
+        var gates = new[] { "build", "test", "review" }.Select(gateId => GateNode(policy, gateId)).ToArray();
         var manifest = LoadNode("run-manifest.json");
         manifest["planIdentity"] = plan["identity"]!.GetValue<string>();
-        manifest["gateReceiptIds"] = new JsonArray(gate["identity"]!.GetValue<string>());
+        manifest["policyIdentity"] = policy["identity"]!.GetValue<string>();
+        manifest["gateReceiptIds"] = new JsonArray(gates.Select(gate => JsonValue.Create(gate["identity"]!.GetValue<string>())).ToArray());
         SetIdentity(manifest);
 
         var replay = LoadNode("replay-bundle.json");
         replay["runManifestIdentity"] = manifest["identity"]!.GetValue<string>();
-        replay["receiptIdentities"] = new JsonArray(gate["identity"]!.GetValue<string>());
-        replay["contractIdentities"] = new JsonArray(plan["identity"]!.GetValue<string>());
+        replay["receiptIdentities"] = new JsonArray(gates.Select(gate => JsonValue.Create(gate["identity"]!.GetValue<string>())).ToArray());
+        replay["contractIdentities"] = new JsonArray(plan["identity"]!.GetValue<string>(), policy["identity"]!.GetValue<string>());
         SetIdentity(replay);
 
-        ReadOnlyMemory<byte>[] complete = [Bytes(plan), Bytes(policy), Bytes(gate), Bytes(manifest), Bytes(replay)];
+        ReadOnlyMemory<byte>[] complete = [Bytes(plan), Bytes(policy), .. gates.Select(Bytes), Bytes(manifest), Bytes(replay)];
         ContractReferenceValidator.Validate(complete);
 
-        ReadOnlyMemory<byte>[] missingGate = [Bytes(plan), Bytes(policy), Bytes(manifest), Bytes(replay)];
+        ReadOnlyMemory<byte>[] missingGate = [Bytes(plan), Bytes(policy), .. gates.Skip(1).Select(Bytes), Bytes(manifest), Bytes(replay)];
         Assert.Throws<ContractReferenceException>(() => ContractReferenceValidator.Validate(missingGate));
 
-        manifest["planIdentity"] = gate["identity"]!.GetValue<string>();
+        manifest["planIdentity"] = gates[0]["identity"]!.GetValue<string>();
         SetIdentity(manifest);
-        ReadOnlyMemory<byte>[] wrongKind = [Bytes(plan), Bytes(policy), Bytes(gate), Bytes(manifest)];
+        ReadOnlyMemory<byte>[] wrongKind = [Bytes(plan), Bytes(policy), .. gates.Select(Bytes), Bytes(manifest)];
         var error = Assert.Throws<ContractReferenceException>(() => ContractReferenceValidator.Validate(wrongKind));
         Assert.Contains("invalid kind", error.Message);
+    }
+
+    [Fact]
+    public void Receipt_references_must_match_checkpoint_head_and_tree()
+    {
+        var policy = LoadNode("evidence-policy.json");
+        var gate = GateNode(policy, "test");
+        var checkpoint = LoadNode("checkpoint.json");
+        checkpoint["gateReceiptIds"] = new JsonArray(gate["identity"]!.GetValue<string>());
+        checkpoint["headCommit"] = new string('f', 40);
+        SetIdentity(checkpoint);
+
+        ReadOnlyMemory<byte>[] documents = [Bytes(policy), Bytes(gate), Bytes(checkpoint)];
+        var error = Assert.Throws<ContractReferenceException>(() => ContractReferenceValidator.Validate(documents));
+        Assert.Contains("different head or tree", error.Message);
+    }
+
+    [Fact]
+    public void Schema_integer_fields_enforce_safe_interoperable_range()
+    {
+        var checkpoint = LoadNode("checkpoint.json");
+        checkpoint["sequence"] = 9007199254740992m;
+        SetIdentity(checkpoint);
+        Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(Bytes(checkpoint).Span));
+    }
+
+    [Fact]
+    public void Unique_items_compare_decoded_values()
+    {
+        var plan = LoadNode("plan.json");
+        plan["scope"]!["included"] = new JsonArray("build", "build");
+        SetIdentity(plan);
+        var escaped = plan.ToJsonString().Replace("\"build\",\"build\"", "\"build\",\"\\u0062uild\"", StringComparison.Ordinal);
+        Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(Utf8(escaped)));
     }
 
     [Fact]
@@ -182,6 +217,15 @@ public sealed class SchemaValidationTests
 
     private static JsonObject LoadNode(string fixture) =>
         JsonNode.Parse(File.ReadAllText(FixturePath("Valid", fixture)))!.AsObject();
+
+    private static JsonObject GateNode(JsonObject policy, string gateId)
+    {
+        var gate = LoadNode("gate-receipt.json");
+        gate["policyIdentity"] = policy["identity"]!.GetValue<string>();
+        gate["gateId"] = gateId;
+        SetIdentity(gate);
+        return gate;
+    }
 
     private static ReadOnlyMemory<byte> Bytes(JsonObject node) => Utf8(node.ToJsonString());
 

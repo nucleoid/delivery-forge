@@ -35,32 +35,38 @@ public sealed class ContractBehaviorTests
     [Theory]
     [InlineData("9007199254740993.0")]
     [InlineData("9.007199254740993e15")]
-    public void Unsafe_integral_number_forms_are_rejected(string number)
+    [InlineData("1e30")]
+    public void Generic_jcs_numbers_accept_finite_binary64_values(string number)
     {
-        var error = Assert.Throws<ContractJsonException>(() => CanonicalJson.Canonicalize(Utf8($"{{\"n\":{number}}}")));
-        Assert.Contains("safe integer", error.Message);
+        Assert.NotEmpty(CanonicalJson.Canonicalize(Utf8($"{{\"n\":{number}}}")));
     }
 
     [Fact]
-    public void Invalid_surrogate_is_reported_as_contract_validation_error()
+    public void Invalid_surrogate_is_reported_as_contract_json_error()
     {
-        Assert.Throws<ContractValidationException>(() =>
-            ContractValidator.ParseAndValidate(Utf8("{\"schemaVersion\":\"1.0.0\",\"kind\":\"plan\",\"x\":\"\\ud800\"}")));
+        var error = Assert.Throws<ContractJsonException>(() => CanonicalJson.Canonicalize(Utf8("{\"x\":\"\\ud800\"}")));
+        Assert.Contains("strict UTF-8 JSON", error.Message);
     }
 
     [Theory]
     [MemberData(nameof(MalformedUtf8Cases))]
-    public void Malformed_utf8_bom_and_trailing_data_fail_closed(byte[] bytes)
+    public void Malformed_utf8_fails_closed(byte[] bytes)
     {
-        Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(bytes));
+        Assert.Throws<ContractJsonException>(() => CanonicalJson.Canonicalize(bytes));
     }
 
     public static IEnumerable<object[]> MalformedUtf8Cases()
     {
         yield return new object[] { new byte[] { 0xc0, 0xaf } };
         yield return new object[] { new byte[] { 0xed, 0xa0, 0x80 } };
-        yield return new object[] { Encoding.UTF8.GetPreamble().Concat(Utf8("{}")).ToArray() };
-        yield return new object[] { Utf8("{}{}") };
+    }
+
+    [Fact]
+    public void Bom_and_trailing_data_are_rejected_before_contract_validation()
+    {
+        var valid = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "Valid", "plan.json"));
+        Assert.Throws<ContractJsonException>(() => CanonicalJson.Canonicalize(Encoding.UTF8.GetPreamble().Concat(valid).ToArray()));
+        Assert.Throws<ContractJsonException>(() => CanonicalJson.Canonicalize(valid.Concat(valid).ToArray()));
     }
 
     [Fact]
@@ -70,21 +76,15 @@ public sealed class ContractBehaviorTests
         Assert.NotEmpty(CanonicalJson.Canonicalize(Utf8(json)));
     }
 
-    [Fact]
-    public void Unknown_schema_versions_fail_closed()
+    [Theory]
+    [InlineData("9.0.0")]
+    [InlineData("1.1.0")]
+    [InlineData("1.0.1")]
+    public void Unknown_schema_versions_fail_closed(string version)
     {
         var error = Assert.Throws<ContractValidationException>(() =>
-            ContractValidator.ParseAndValidate(Utf8("{\"schemaVersion\":\"9.0.0\",\"kind\":\"plan\"}")));
+            ContractValidator.ParseAndValidate(Utf8($"{{\"schemaVersion\":\"{version}\",\"kind\":\"plan\"}}")));
         Assert.Contains("schemaVersion", error.Message);
-    }
-
-    [Fact]
-    public void Publication_requires_pr_ceiling_and_receipt()
-    {
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
-            WorkflowState.PrAuthorized,
-            WorkflowState.PrPublished,
-            new TransitionEvidence(AuthorizationCeiling.Implement)));
     }
 
     [Fact]
