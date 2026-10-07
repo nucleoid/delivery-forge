@@ -67,6 +67,48 @@ public sealed class GitRepositoryContextTests : IDisposable
     }
 
     [Fact]
+    public async Task Reflog_date_revision_expression_cannot_reconcile_as_a_fresh_branch_ref()
+    {
+        InitializeRepository();
+        Run("git", "branch -M main");
+        File.WriteAllText(Path.Combine(_root, "tracked.txt"), "second commit bytes");
+        Run("git", "add tracked.txt");
+        Run("git", "commit -q -m second");
+        const string historicalExpression = "refs/heads/main@{2000-01-01 00:00:00 +0000}";
+        var reader = new GitRepositoryContextReader();
+        var historical = await reader.ReadAsync(_root, historicalExpression, TestContext.Current.CancellationToken);
+        var exactFile = await reader.ReadFileAsync(historical, "tracked.txt", TestContext.Current.CancellationToken);
+        var evidence = new[] { EvidenceItem.FromRepositoryFile(exactFile, DateTimeOffset.UnixEpoch, []) };
+        var request = new PlanningRequest(
+            "owner/repo", "#4", "implement", "Reject revision expressions as freshness evidence",
+            ["planning"], ["execution"], ["only exact branch refs establish freshness"], "implement");
+        var draft = new PlanDraft(
+            request,
+            historical,
+            evidence,
+            [new("tracked.txt", "content", "update")],
+            [new("root", [], "repository context is exact")],
+            [new("test", "dotnet test", "passes")],
+            new("additive", "none", "none", "none", "none", "none", "tests", "revert", []),
+            [],
+            IntakePlanner.Assess(request, evidence));
+        var frozen = PlanFreezer.Freeze(draft, "revision-reflog-expression", DateTimeOffset.UnixEpoch);
+
+        File.WriteAllText(Path.Combine(_root, "tracked.txt"), "third commit bytes");
+        Run("git", "add tracked.txt");
+        Run("git", "commit -q -m third");
+        var sameHistoricalSnapshot = await reader.ReadAsync(
+            _root,
+            historicalExpression,
+            TestContext.Current.CancellationToken);
+        var currentBranch = await reader.ReadAsync(_root, "refs/heads/main", TestContext.Current.CancellationToken);
+
+        Assert.Equal(historical.Commit, sameHistoricalSnapshot.Commit);
+        Assert.NotEqual(historical.Commit, currentBranch.Commit);
+        Assert.False(frozen.ReconcileBase(sameHistoricalSnapshot).DownstreamReady);
+    }
+
+    [Fact]
     public async Task Verified_imported_context_is_bound_to_the_exact_repository_commit_and_tree()
     {
         InitializeRepository();

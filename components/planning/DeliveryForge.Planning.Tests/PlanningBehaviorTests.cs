@@ -304,6 +304,43 @@ public sealed class PlanningBehaviorTests
             item.Contains("generation classification is generated-by-convention", StringComparison.Ordinal));
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Unsafe_or_generated_required_imports_preserve_minimal_readiness_with_deep_only_caveats(
+        bool unsafeSymlink)
+    {
+        var file = new RepositoryFile(
+            unsafeSymlink ? "unsafe-link" : "Generated.g.cs",
+            new string('c', 40),
+            unsafeSymlink ? "120000" : "100644",
+            Encoding.UTF8.GetBytes("bounded evidence"),
+            isSymlink: unsafeSymlink,
+            escapesWorktree: unsafeSymlink,
+            unsafeSymlink ? "not-detected" : "generated-by-convention",
+            unsafeSymlink ? SymlinkResolution.Escapes : SymlinkResolution.NotSymlink,
+            new string('a', 40),
+            new string('b', 40));
+        var digest = $"sha256:{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(file.Bytes))}";
+        var imported = ImportedContextVerifier.VerifyAgainst(
+            new ImportedContextEntry(
+                "code-index", $"git:{file.Path}", "Verified imported evidence", digest, ObservedAt,
+                CheckoutDigest: digest),
+            file);
+
+        var assessment = IntakePlanner.Assess(
+            Request(),
+            [RepositoryEvidence()],
+            new ImportedContextEnvelope("1.0.0", [imported], [], []),
+            EvidenceRequirement.Required);
+
+        Assert.True(assessment.Ready);
+        Assert.Contains(assessment.Limitations, item =>
+            item.Contains("deep readiness", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(assessment.Limitations, item =>
+            item.Contains("cannot establish readiness", StringComparison.OrdinalIgnoreCase));
+    }
+
     [Fact]
     public void Optional_absent_imported_context_degrades_with_a_limitation()
     {
@@ -1263,8 +1300,27 @@ public sealed class PlanningBehaviorTests
     }
 
     [Theory]
+    [InlineData("make CFLAGS=-I/home/alice/sdk/include")]
+    [InlineData("cc -L/opt/alice/lib app.c")]
+    [InlineData("cl -IC:/Users/alice/sdk/include app.c")]
+    public void Portable_consumers_reject_option_attached_absolute_host_paths(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-option-attached-host-path");
+    }
+
+    [Theory]
+    [InlineData("curl --proxy-user alice:hunter2 https://example.invalid")]
+    [InlineData("curl --proxy-user=alice:hunter2 https://example.invalid")]
+    public void Portable_consumers_reject_curl_proxy_credentials(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-curl-proxy-credential");
+    }
+
+    [Theory]
     [InlineData("dotnet test ./tests/Foo.csproj")]
     [InlineData("dotnet test ../tests/Foo.csproj")]
+    [InlineData("pwsh ..\\tmp\\build.ps1")]
+    [InlineData("pwsh .\\tmp\\build.ps1")]
     public void Portable_plan_accepts_ordinary_relative_gate_paths(string command)
     {
         var draft = Draft() with { Gates = [new("test", command, "all tests pass")] };
@@ -1277,6 +1333,8 @@ public sealed class PlanningBehaviorTests
 
     [Theory]
     [InlineData("curl --user-agent delivery-forge https://example.invalid")]
+    [InlineData("curl -fsS http://auth-user:8080/healthz")]
+    [InlineData("curl -fsS https://example.invalid && docker run -u 1000:1000 image")]
     [InlineData("sk-short")]
     [InlineData("PowerShell exposes $env:APPDATA without revealing a path")]
     public void Portable_consumers_preserve_non_secret_sibling_controls(string portableText)
@@ -1594,6 +1652,27 @@ public sealed class PlanningBehaviorTests
 
     private static EvidenceItem PolicyEvidence(string locator = "policy:planning") => new(
         EvidenceSourceKind.Policy, locator, "sha256:" + new string('c', 64), ObservedAt, []);
+
+    private static void AssertPortableConsumersReject(string privateText, string revision)
+    {
+        var original = Draft();
+        EvidenceItem[] provenance = [RepositoryEvidence(privateText)];
+        var draft = original with
+        {
+            Provenance = provenance,
+            Intake = IntakePlanner.Assess(original.Request, provenance)
+        };
+        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(draft, revision, ObservedAt));
+
+        var json = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            schemaVersion = "1.0.0",
+            entries = new[] { new { kind = "memory", locator = "memory:item-1", summary = privateText, digest = (string?)null, observedAt = "2026-10-07T20:00:00Z" } },
+            conflicts = Array.Empty<string>(),
+            limitations = Array.Empty<string>()
+        }));
+        Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
+    }
 
     private static RepositoryFile RepositoryFileFor(string path) => new(
         path,
