@@ -1044,6 +1044,11 @@ public sealed class PlanningBehaviorTests
     [InlineData("refs/heads/main^")]
     [InlineData("refs/heads/main:path")]
     [InlineData("refs/heads/main..backup")]
+    [InlineData("refs/heads/.hidden")]
+    [InlineData("refs/heads/topic.lock")]
+    [InlineData("refs/heads/topic.")]
+    [InlineData("refs/heads/feature//topic")]
+    [InlineData("refs/heads/feature?topic")]
     public void Non_freshness_bearing_refs_cannot_reconcile_an_unchanged_base(string requestedRef)
     {
         var draft = Draft();
@@ -1072,13 +1077,17 @@ public sealed class PlanningBehaviorTests
         Assert.False(frozen.ReconcileBase(snapshot).DownstreamReady);
     }
 
-    [Fact]
-    public void Same_exact_branch_ref_and_unchanged_base_preserves_downstream_readiness()
+    [Theory]
+    [InlineData("refs/heads/main")]
+    [InlineData("refs/heads/feature/topic")]
+    [InlineData("refs/heads/topic.LOCK")]
+    [InlineData("refs/heads/@")]
+    public void Same_exact_branch_ref_and_unchanged_base_preserves_downstream_readiness(string requestedRef)
     {
         var draft = Draft();
         var branch = RepositoryContext.Create(
             "/portable/display-only",
-            "refs/heads/main",
+            requestedRef,
             draft.Repository.Commit,
             draft.Repository.Tree,
             detachedHead: false,
@@ -1089,7 +1098,7 @@ public sealed class PlanningBehaviorTests
         var frozen = PlanFreezer.Freeze(draft with { Repository = branch }, "revision-1", ObservedAt);
         var sameBranch = RepositoryContext.Create(
             "/portable/display-only",
-            "refs/heads/main",
+            requestedRef,
             frozen.BaseCommit,
             frozen.BaseTree,
             detachedHead: false,
@@ -1345,7 +1354,8 @@ public sealed class PlanningBehaviorTests
         var frozen = PlanFreezer.Freeze(draft, "revision-relative-gate", ObservedAt);
 
         Assert.True(frozen.DownstreamReady);
-        Assert.Contains(command, Encoding.UTF8.GetString(frozen.CanonicalBytes), StringComparison.Ordinal);
+        var serializedCommand = JsonSerializer.Serialize(command)[1..^1];
+        Assert.Contains(serializedCommand, Encoding.UTF8.GetString(frozen.CanonicalBytes), StringComparison.Ordinal);
     }
 
     [Theory]

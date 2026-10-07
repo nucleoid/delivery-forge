@@ -113,15 +113,17 @@ Supplying a predecessor requires matching repository/work-item lineage, rejects 
 declared revision for different stable content, and directly records supersession whenever the
 contract identity changes (including a declared-revision-only change). Frozen-plan properties are
 get-only; base reconciliation accepts only a reader-issued `RepositoryContext` resolving the same
-freshness-bearing mutable ref. An explicit `refs/heads/*` request is reconciled by its resolved commit/tree even when checkout
-HEAD is detached; checkout detachment does not turn that requested branch into a snapshot. A pinned commit, tag, detached `HEAD`
+freshness-bearing mutable ref. Only an exact valid full `refs/heads/*` refname is freshness-bearing;
+`HEAD`, short branch names, pinned objects, and revision/reflog expressions are snapshots for reconciliation purposes.
+An exact full branch ref request is reconciled by its resolved commit/tree even when checkout HEAD is detached;
+checkout detachment does not turn that requested branch into a snapshot. A pinned commit, tag, detached `HEAD`
 snapshot, or differently requested ref cannot prove that the original branch did not drift. Reconciliation returns a new immutable view whose downstream readiness is false
 without permitting identity, base, or readiness to diverge from canonical bytes. Validation proves
 shape and identity only; it is not approval, execution, publication, or merge authority.
 
 ## Platform boundary
 
-Portable gate commands may use ordinary `./` and `../` repository-relative arguments. Absolute POSIX,
+Portable gate commands may use ordinary `./`, `../`, `.\\`, and `..\\` repository-relative arguments. Absolute POSIX,
 Windows, UNC, home-alias, and private host paths remain rejected.
 
 The library targets Linux and Windows through `net10.0`. Local tests establish Linux behavior.

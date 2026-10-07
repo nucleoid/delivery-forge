@@ -419,8 +419,8 @@ public sealed class FrozenPlan
             throw new PlanningException("Base reconciliation requires a reader-issued repository context.");
         }
         if (!string.Equals(BaseReference, current.RequestedRef, StringComparison.Ordinal) ||
-            !IsFreshnessBearingReference(BaseReference, BaseReferenceWasDetached) ||
-            !IsFreshnessBearingReference(current.RequestedRef, current.DetachedHead))
+            !IsFreshnessBearingReference(BaseReference) ||
+            !IsFreshnessBearingReference(current.RequestedRef))
         {
             return WithBaseDrift(
                 $"Base ref freshness could not be established: frozen ref '{BaseReference}' must be reconciled through the same mutable ref; current ref is '{current.RequestedRef}' and detached/pinned snapshots are not freshness evidence.");
@@ -458,7 +458,29 @@ public sealed class FrozenPlan
                 .Order(StringComparer.Ordinal)
                 .ToArray());
 
-    private static bool IsFreshnessBearingReference(string reference, bool checkoutHeadDetached) =>
-        reference.StartsWith("refs/heads/", StringComparison.Ordinal) ||
-        string.Equals(reference, "HEAD", StringComparison.Ordinal) && !checkoutHeadDetached;
+    private static bool IsFreshnessBearingReference(string reference)
+    {
+        if (!reference.StartsWith("refs/heads/", StringComparison.Ordinal) ||
+            reference.EndsWith('/') ||
+            reference.EndsWith('.') ||
+            reference.Contains("//", StringComparison.Ordinal) ||
+            reference.Contains("..", StringComparison.Ordinal) ||
+            reference.Contains("@{", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        foreach (var character in reference)
+        {
+            if (character <= ' ' || character == '\u007f' || character is '~' or '^' or ':' or '?' or '*' or '[' or '\\')
+            {
+                return false;
+            }
+        }
+
+        return reference.Split('/').All(component =>
+            component.Length > 0 &&
+            !component.StartsWith('.') &&
+            !component.EndsWith(".lock", StringComparison.Ordinal));
+    }
 }

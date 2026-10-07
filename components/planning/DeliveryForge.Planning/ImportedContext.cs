@@ -479,12 +479,12 @@ public static class ImportedContextVerifier
         var caveats = new List<string>();
         if (entry.VerifiedSymlinkResolution is not (SymlinkResolution.NotSymlink or SymlinkResolution.InTree))
         {
-            caveats.Add($"Repository symlink safety is {entry.VerifiedSymlinkResolution}; it cannot establish readiness.");
+            caveats.Add($"Repository symlink safety is {entry.VerifiedSymlinkResolution}; it cannot count toward deep readiness.");
         }
         if (entry.VerifiedGenerationClassification is not null &&
             !entry.VerifiedGenerationClassification.StartsWith("not-detected", StringComparison.Ordinal))
         {
-            caveats.Add($"Repository file generation classification is {entry.VerifiedGenerationClassification}; it cannot establish readiness without authoritative generator provenance.");
+            caveats.Add($"Repository file generation classification is {entry.VerifiedGenerationClassification}; it cannot count toward deep readiness without authoritative generator provenance.");
         }
         return caveats;
     }

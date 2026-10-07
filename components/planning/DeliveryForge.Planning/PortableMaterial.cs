@@ -29,6 +29,7 @@ internal static partial class PortableMaterial
         });
         return invalidUrl ||
                HostPath().IsMatch(withoutUrls) ||
+               OptionAttachedHostPath().IsMatch(withoutUrls) ||
                HomeAliasPath().IsMatch(withoutUrls) ||
                SingleBackslashRoot().IsMatch(withoutUrls);
     }
@@ -44,12 +45,17 @@ internal static partial class PortableMaterial
     private static partial Regex HostPath();
 
     [GeneratedRegex(
+        """(?:^|[\s=])-[A-Za-z]+(?:[A-Za-z]:[\\/][^\s`|\[\]{}<>"']+|/(?!/)(?:[^/\s`|\[\]{}<>"']+/)*[^/\s`|\[\]{}<>"']+)""",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex OptionAttachedHostPath();
+
+    [GeneratedRegex(
         """(?<![A-Za-z0-9])(?:~[A-Za-z0-9._-]*|\$HOME|\$\{HOME\}|\$\{?env:(?:USERPROFILE|HOME|HOMEPATH|APPDATA|LOCALAPPDATA)\}?|%(?:USERPROFILE|HOMEPATH|APPDATA|LOCALAPPDATA)%)[\\/][^\s`|\[\]{}<>"']+""",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex HomeAliasPath();
 
     [GeneratedRegex(
-        """(?<![A-Za-z0-9\\])\\(?:Users|Documents and Settings|ProgramData|Windows|home|tmp|var|opt)\\[^\s`|\[\]{}<>"']+""",
+        """(?<![A-Za-z0-9\\.])\\(?:Users|Documents and Settings|ProgramData|Windows|home|tmp|var|opt)\\[^\s`|\[\]{}<>"']+""",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SingleBackslashRoot();
 
@@ -59,7 +65,7 @@ internal static partial class PortableMaterial
     private static partial Regex SchemeUrl();
 
     [GeneratedRegex(
-        """(?:-----BEGIN\s|Bearer\s+\S+|Authorization\s*:\s*(?:Basic|Bearer)\s+\S+|"?(?:api[_-]?key|password|passwd|token|secret|client[_-]?secret|access[_-]?key|aws[_-]?access[_-]?key[_-]?id)"?\s*[:=]\s*"?\S+|--password(?:=|\s+)\S+|\bcurl\b[^\r\n]*(?:-[A-Za-z]*u\s*|--user(?:=|\s+))\S+:\S+|(?:^|[^A-Za-z0-9])(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}))""",
+        """(?:-----BEGIN\s|Bearer\s+\S+|Authorization\s*:\s*(?:Basic|Bearer)\s+\S+|"?(?:api[_-]?key|password|passwd|token|secret|client[_-]?secret|access[_-]?key|aws[_-]?access[_-]?key[_-]?id)"?\s*[:=]\s*"?\S+|--password(?:=|\s+)\S+|\bcurl\b(?:(?![\r\n;&|]).)*(?:(?<!\S)-[A-Za-z]*u\s*|(?<!\S)--(?:proxy-)?user(?:=|\s+))\S+:\S+|(?:^|[^A-Za-z0-9])(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[0-9A-Z]{16}))""",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex Credential();
 
