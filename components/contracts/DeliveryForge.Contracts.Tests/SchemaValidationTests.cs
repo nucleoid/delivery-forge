@@ -133,6 +133,7 @@ public sealed class SchemaValidationTests
     public void Cross_references_must_resolve_to_documents_in_the_bundle()
     {
         var plan = LoadNode("plan.json");
+        var policy = LoadNode("evidence-policy.json");
         var gate = LoadNode("gate-receipt.json");
         var manifest = LoadNode("run-manifest.json");
         manifest["planIdentity"] = plan["identity"]!.GetValue<string>();
@@ -145,17 +146,32 @@ public sealed class SchemaValidationTests
         replay["contractIdentities"] = new JsonArray(plan["identity"]!.GetValue<string>());
         SetIdentity(replay);
 
-        ReadOnlyMemory<byte>[] complete = [Bytes(plan), Bytes(gate), Bytes(manifest), Bytes(replay)];
+        ReadOnlyMemory<byte>[] complete = [Bytes(plan), Bytes(policy), Bytes(gate), Bytes(manifest), Bytes(replay)];
         ContractReferenceValidator.Validate(complete);
 
-        ReadOnlyMemory<byte>[] missingGate = [Bytes(plan), Bytes(manifest), Bytes(replay)];
+        ReadOnlyMemory<byte>[] missingGate = [Bytes(plan), Bytes(policy), Bytes(manifest), Bytes(replay)];
         Assert.Throws<ContractReferenceException>(() => ContractReferenceValidator.Validate(missingGate));
 
         manifest["planIdentity"] = gate["identity"]!.GetValue<string>();
         SetIdentity(manifest);
-        ReadOnlyMemory<byte>[] wrongKind = [Bytes(plan), Bytes(gate), Bytes(manifest)];
+        ReadOnlyMemory<byte>[] wrongKind = [Bytes(plan), Bytes(policy), Bytes(gate), Bytes(manifest)];
         var error = Assert.Throws<ContractReferenceException>(() => ContractReferenceValidator.Validate(wrongKind));
         Assert.Contains("invalid kind", error.Message);
+    }
+
+    [Fact]
+    public void Not_applicable_gate_must_be_allowed_by_its_immutable_policy()
+    {
+        var policy = LoadNode("evidence-policy.json");
+        var gate = LoadNode("gate-receipt.json");
+        gate["gateId"] = "build";
+        gate["outcome"] = "NOT_APPLICABLE";
+        gate["notApplicableRationale"] = "Unavailable on this host";
+        SetIdentity(gate);
+
+        ReadOnlyMemory<byte>[] documents = [Bytes(policy), Bytes(gate)];
+        var error = Assert.Throws<ContractReferenceException>(() => ContractReferenceValidator.Validate(documents));
+        Assert.Contains("does not permit", error.Message);
     }
 
     private static void SetIdentity(JsonObject node)

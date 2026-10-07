@@ -48,6 +48,21 @@ public sealed class ContractBehaviorTests
             ContractValidator.ParseAndValidate(Utf8("{\"schemaVersion\":\"1.0.0\",\"kind\":\"plan\",\"x\":\"\\ud800\"}")));
     }
 
+    [Theory]
+    [MemberData(nameof(MalformedUtf8Cases))]
+    public void Malformed_utf8_bom_and_trailing_data_fail_closed(byte[] bytes)
+    {
+        Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(bytes));
+    }
+
+    public static IEnumerable<object[]> MalformedUtf8Cases()
+    {
+        yield return new object[] { new byte[] { 0xc0, 0xaf } };
+        yield return new object[] { new byte[] { 0xed, 0xa0, 0x80 } };
+        yield return new object[] { Encoding.UTF8.GetPreamble().Concat(Utf8("{}")).ToArray() };
+        yield return new object[] { Utf8("{}{}") };
+    }
+
     [Fact]
     public void Canonicalization_supports_the_same_depth_as_strict_parsing()
     {

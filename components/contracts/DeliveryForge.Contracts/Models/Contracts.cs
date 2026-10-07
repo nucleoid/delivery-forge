@@ -28,7 +28,7 @@ public sealed record CapabilityReportContract(
     : ContractDocument(SchemaVersion, Kind, Identity);
 
 public sealed record GateReceiptContract(
-    string SchemaVersion, string Kind, string Identity, string GateId, string PolicyId,
+    string SchemaVersion, string Kind, string Identity, string GateId, string PolicyIdentity,
     string BaseCommit, string HeadCommit, string TreeId, string Command, DateTimeOffset StartedAt,
     DateTimeOffset CompletedAt, int? ExitCode, string Outcome, string Reason,
     IReadOnlyDictionary<string, string> ArtifactHashes, bool SourceChanged,

@@ -24,7 +24,13 @@ public static class ContractReferenceValidator
                 {
                     case "run-manifest":
                         RequireReference(root.GetProperty("planIdentity").GetString()!, identities, "planIdentity", kind => kind == "plan");
-                        RequireReferences(root.GetProperty("gateReceiptIds"), identities, "gateReceiptIds", kind => kind == "gate-receipt");
+                        RequireReferences(
+                            root.GetProperty("gateReceiptIds"),
+                            identities,
+                            "gateReceiptIds",
+                            kind => kind == "gate-receipt",
+                            root.GetProperty("headCommit").GetString(),
+                            root.GetProperty("treeId").GetString());
                         break;
                     case "checkpoint":
                         RequireReferences(root.GetProperty("gateReceiptIds"), identities, "gateReceiptIds", kind => kind == "gate-receipt");
@@ -33,6 +39,9 @@ public static class ContractReferenceValidator
                         RequireReference(root.GetProperty("runManifestIdentity").GetString()!, identities, "runManifestIdentity", kind => kind == "run-manifest");
                         RequireReferences(root.GetProperty("receiptIdentities"), identities, "receiptIdentities", IsReceipt);
                         RequireReferences(root.GetProperty("contractIdentities"), identities, "contractIdentities", kind => !IsReceipt(kind));
+                        break;
+                    case "gate-receipt":
+                        ValidateGatePolicy(root, identities);
                         break;
                 }
             }
@@ -48,15 +57,34 @@ public static class ContractReferenceValidator
 
     private static bool IsReceipt(string kind) => kind is "gate-receipt" or "review-receipt" or "publication-receipt";
 
+    private static void ValidateGatePolicy(
+        JsonElement gate,
+        IReadOnlyDictionary<string, (ValidatedContract Contract, JsonDocument Document)> identities)
+    {
+        var policyIdentity = gate.GetProperty("policyIdentity").GetString()!;
+        RequireReference(policyIdentity, identities, "policyIdentity", kind => kind == "evidence-policy");
+        if (gate.GetProperty("outcome").GetString() == "NOT_APPLICABLE")
+        {
+            var policy = identities[policyIdentity].Document.RootElement;
+            var gateId = gate.GetProperty("gateId").GetString();
+            if (!policy.GetProperty("allowedNotApplicable").EnumerateArray().Any(item => item.GetString() == gateId))
+            {
+                throw new ContractReferenceException($"Policy '{policyIdentity}' does not permit gate '{gateId}' to be NOT_APPLICABLE.");
+            }
+        }
+    }
+
     private static void RequireReferences(
         JsonElement references,
         IReadOnlyDictionary<string, (ValidatedContract Contract, JsonDocument Document)> identities,
         string field,
-        Func<string, bool> acceptsKind)
+        Func<string, bool> acceptsKind,
+        string? expectedHead = null,
+        string? expectedTree = null)
     {
         foreach (var reference in references.EnumerateArray())
         {
-            RequireReference(reference.GetString()!, identities, field, acceptsKind);
+            RequireReference(reference.GetString()!, identities, field, acceptsKind, expectedHead, expectedTree);
         }
     }
 
@@ -64,7 +92,9 @@ public static class ContractReferenceValidator
         string reference,
         IReadOnlyDictionary<string, (ValidatedContract Contract, JsonDocument Document)> identities,
         string field,
-        Func<string, bool> acceptsKind)
+        Func<string, bool> acceptsKind,
+        string? expectedHead = null,
+        string? expectedTree = null)
     {
         if (!identities.TryGetValue(reference, out var target))
         {
@@ -74,6 +104,16 @@ public static class ContractReferenceValidator
         if (!acceptsKind(target.Contract.SchemaName))
         {
             throw new ContractReferenceException($"{field} references contract '{reference}' of invalid kind '{target.Contract.SchemaName}'.");
+        }
+
+        if (expectedHead is not null && expectedTree is not null)
+        {
+            var root = target.Document.RootElement;
+            if (!string.Equals(root.GetProperty("headCommit").GetString(), expectedHead, StringComparison.Ordinal) ||
+                !string.Equals(root.GetProperty("treeId").GetString(), expectedTree, StringComparison.Ordinal))
+            {
+                throw new ContractReferenceException($"{field} references receipt '{reference}' for a different head or tree.");
+            }
         }
     }
 }
