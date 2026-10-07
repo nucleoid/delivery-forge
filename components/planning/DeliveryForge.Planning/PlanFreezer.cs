@@ -37,6 +37,12 @@ public static class PlanFreezer
 
     private static FrozenPlan FreezeCore(PlanDraft draft, string revision, DateTimeOffset createdAt, FrozenPlan? predecessor)
     {
+        if (predecessor is not null &&
+            (!string.Equals(predecessor.Repository, draft.Request.Repository, StringComparison.Ordinal) ||
+             !string.Equals(predecessor.WorkItem, draft.Request.WorkItem, StringComparison.Ordinal)))
+        {
+            throw new PlanningException("A predecessor must share the same repository and work-item lineage.");
+        }
         var failures = Validate(draft, revision, createdAt);
         if (failures.Count > 0)
         {
@@ -67,6 +73,8 @@ public static class PlanFreezer
             repositoryObservations = new
             {
                 requestedRef = draft.Repository.RequestedRef,
+                draft.Repository.HeadCommit,
+                draft.Repository.HeadTree,
                 draft.Repository.DetachedHead,
                 draft.Repository.Dirty,
                 draft.Repository.Shallow,
@@ -139,7 +147,7 @@ public static class PlanFreezer
         var planRevision = $"{revision}@{contentDigest}";
         var created = FormatUtc(createdAt);
         var contract = BuildAndValidateContract(request, planRevision, draft.Repository.Commit, created, included, excluded, criteria);
-        var supersedes = predecessor is not null && !string.Equals(predecessor.ContentDigest, contentDigest, StringComparison.Ordinal)
+        var supersedes = predecessor is not null && !string.Equals(predecessor.ContractIdentity, contract.Identity, StringComparison.Ordinal)
             ? predecessor.ContractIdentity
             : predecessor?.Supersedes;
         var portable = new
@@ -173,6 +181,8 @@ public static class PlanFreezer
             planRevision,
             contentDigest,
             supersedes,
+            request.Repository,
+            request.WorkItem,
             draft.Repository.Commit,
             draft.Repository.Tree,
             canonical,
@@ -256,6 +266,10 @@ public static class PlanFreezer
         if (draft.Provenance.Count == 0) failures.Add("provenance is required");
         if (draft.Provenance.Any(item => item.Requirement == EvidenceRequirement.Required && !item.IsComplete))
             failures.Add("required provenance is incomplete");
+        if (draft.Provenance.Any(item =>
+                item.SourceKind == EvidenceSourceKind.Repository && item.IsComplete &&
+                !item.IsReaderBoundRepositoryEvidence()))
+            failures.Add("complete repository provenance is not bound to an exact reader-issued file/commit/tree");
         if (draft.Intake.VerifiedRepositoryIdentities.Any(identity =>
                 !string.Equals(identity.Commit, draft.Repository.Commit, StringComparison.Ordinal) ||
                 !string.Equals(identity.Tree, draft.Repository.Tree, StringComparison.Ordinal)))

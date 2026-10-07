@@ -185,18 +185,36 @@ public static class IntakePlanner
         {
             throw new PlanningException($"Planning evidence exceeds the {MaximumEvidenceItems}-item intake limit.");
         }
+        if (!IsConcreteSingleLine(request.UserOwnedDecision) ||
+            !IsConcreteSingleLine(request.RecommendedOption))
+        {
+            throw new PlanningException("User-owned decisions and recommendations must each be one concrete non-blank line.");
+        }
         if (string.IsNullOrWhiteSpace(request.UserOwnedDecision) != string.IsNullOrWhiteSpace(request.RecommendedOption))
         {
             throw new PlanningException("A genuine user-owned decision and its concrete recommended option must be supplied together.");
         }
         var limitations = new List<string>();
-        var ready = evidence.Any(item =>
-            item.SourceKind is EvidenceSourceKind.Repository or EvidenceSourceKind.Policy && item.IsComplete);
-        var verifiedRepositoryIdentities = new List<VerifiedRepositoryIdentity>();
+        var ready = evidence.Any(IsPinnedReadinessEvidence);
+        var verifiedRepositoryIdentities = evidence
+            .Where(item => item.IsComplete && item.IsReaderBoundRepositoryEvidence())
+            .Select(item => new VerifiedRepositoryIdentity(item.Locator, item.RepositoryCommit!, item.RepositoryTree!))
+            .ToList();
 
         foreach (var item in evidence)
         {
             limitations.AddRange(item.Caveats);
+            if (item.IsComplete &&
+                item.SourceKind is EvidenceSourceKind.Repository or EvidenceSourceKind.Policy &&
+                !IsSha256(item.Digest))
+            {
+                limitations.Add($"Readiness evidence at {item.Locator} lacks an immutable sha256 digest.");
+            }
+            else if (item.IsComplete && item.SourceKind == EvidenceSourceKind.Repository &&
+                     !item.IsReaderBoundRepositoryEvidence())
+            {
+                limitations.Add($"Repository readiness evidence at {item.Locator} is not bound to an exact reader-issued file/commit/tree.");
+            }
             if (!item.IsComplete)
             {
                 limitations.Add($"{item.Requirement} evidence at {item.Locator} is incomplete.");
@@ -207,10 +225,13 @@ public static class IntakePlanner
         if (request.Depth == IntakeDepth.Deep)
         {
             var distinctCompleteEvidence = evidence
-                .Where(item => item.IsComplete)
+                .Where(IsPinnedReadinessEvidence)
                 .Select(item => (item.SourceKind, item.Locator))
                 .Distinct()
-                .Count();
+                .Count() + (importedContext?.Entries
+                    .Select(item => (item.Kind, item.Locator))
+                    .Distinct()
+                    .Count() ?? 0);
             if (distinctCompleteEvidence < 2)
             {
                 ready = false;
@@ -277,6 +298,22 @@ public static class IntakePlanner
             importedContextAvailable,
             verifiedRepositoryIdentities,
             ComputeBinding(request, evidence, importedContextRequirement, importedContextAvailable, normalizedLimitations, verifiedRepositoryIdentities));
+    }
+
+    private static bool IsPinnedReadinessEvidence(EvidenceItem item) =>
+        item.IsComplete && IsSha256(item.Digest) &&
+        (item.SourceKind == EvidenceSourceKind.Policy ||
+         item.SourceKind == EvidenceSourceKind.Repository && item.IsReaderBoundRepositoryEvidence());
+
+    private static bool IsSha256(string? value) =>
+        value is { Length: 71 } && value.StartsWith("sha256:", StringComparison.Ordinal) &&
+        value[7..].All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static bool IsConcreteSingleLine(string? value)
+    {
+        if (value is null) return true;
+        if (value.IndexOfAny(['\r', '\n']) >= 0) return false;
+        return !string.IsNullOrWhiteSpace(value.Trim().Trim('.', '?', '!', ':', ';'));
     }
 
     internal static bool IsBoundTo(

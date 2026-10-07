@@ -20,8 +20,9 @@ The JSON envelope is capped at 256 KiB and 256 entries. It accepts only:
   stale/truncated/heuristic flags;
 - conflicts and limitations.
 
-Unknown fields, absolute host paths (including delimiter-adjacent and non-ASCII path segments),
-obvious credential material, malformed/duplicate JSON, and
+Unknown fields, arbitrary absolute POSIX/Windows/UNC or tilde-home paths (including
+delimiter-adjacent and non-ASCII path segments), URL user-info, obvious key/value, JSON, or
+authorization-header credential material, malformed/duplicate JSON, and
 oversized input fail closed. Raw documents, prompts, transcripts, source bodies, credentials, and
 private filesystem locations are outside the envelope.
 

@@ -10,10 +10,12 @@ repository reads.
 Minimal intake is the default. Ordinary engineering choices should be resolved from pinned
 repository or policy evidence. Deep intake is enabled only when the caller explicitly sets
 `IntakeDepth.Deep`; it requires at least one additional distinct complete evidence item beyond
-the evidence sufficient for minimal intake, and the complete intake is capped at 256 items. The
+the evidence sufficient for minimal intake, and counts only pinned repository/policy evidence or
+entries carried in the bounded imported-context envelope. User and raw memory claims do not satisfy
+that threshold. The complete intake is capped at 256 items. The
 host collects that evidence through the same repository, policy, and imported-context contracts;
 the .NET core does not call host tools. A genuine product, scope, risk, or authority choice is
-represented as one user-owned decision paired with a concrete recommended option; assessment
+represented as one single-line, non-blank user-owned decision paired with one single-line concrete recommended option; assessment
 returns one conversational question naming that option and does not pretend the plan is ready.
 The resulting `IntakeAssessment` is a required part of the
 `PlanDraft`; freeze rechecks its deterministic binding to the request, evidence, imported-context
@@ -30,18 +32,21 @@ behavior is absent.
 Every `EvidenceItem` records source kind, locator, immutable digest when available, observation
 time, completeness, an explicit optional/required requirement, caveats, and optional
 supersession. Incomplete optional evidence remains in the plan with its caveats; incomplete
-required evidence blocks both intake and freeze. At least one complete repository or policy item
-is always required for readiness. Raw memory/index content should not be placed in an evidence
-item.
+required evidence blocks both intake and freeze. Readiness requires at least one complete pinned
+policy item or repository item created from an exact `RepositoryFile` with
+`EvidenceItem.FromRepositoryFile`; a digestless item cannot establish readiness. Raw memory/index
+content should not be placed in an evidence item.
 
 `GitRepositoryContextReader` resolves a requested ref to exact commit and tree objects and reads
 file bytes by blob object ID. Dirty state and detached HEAD are immutable snapshots of mutable
-observations. Repository contexts are reader-issued, defensively copied, and bound across commit,
+observations bound to the separately recorded checkout HEAD commit/tree. When requested objects
+differ from checkout HEAD, the context says explicitly that those observations do not describe the
+requested base. Repository contexts are reader-issued, defensively copied, and bound across commit,
 tree, root, requested ref, submodule gitlinks, limitations, and every mutable observation; freeze
 and file reads reject an unbound or altered context. Shallow history and submodules remain explicit
 limitations. Submodule gitlinks are read from the parent commit without launching Git in submodule
 worktrees. Symlink targets are returned as blob bytes; in-tree chains are resolved from committed
-tree/blob objects using both POSIX expansion and conservative Windows text-collapse semantics.
+tree/blob objects using full walks under both POSIX expansion and conservative Windows lexical-collapse semantics.
 Resolution has one wall deadline plus global hop, segment, target-size, and Git-invocation budgets.
 Escape is reported when either platform rule escapes, and cycle, missing, or bound-exceeded outcomes
 are conservatively marked as potentially escaping. Git reads have a finite deadline,
@@ -57,7 +62,9 @@ other files say that generator metadata was not asserted. Missing refs and objec
 than falling back to worktree bytes.
 
 `RepositoryFile` instances are created only by `GitRepositoryContextReader` and carry the exact
-commit and tree from which their blob was read. Imported-context verification binds locator,
+commit and tree from which their blob was read. Repository evidence used for readiness is created
+from that file, binding its `git:` locator, digest, commit, and tree; freeze rejects altered or
+base-mismatched bindings. Imported-context verification binds locator,
 digest, verification status, commit, and tree. The identity is retained in limitations, and freeze
 rejects verified imported context whose commit or tree differs from the draft base.
 
@@ -84,9 +91,10 @@ returns the canonical validated contract bytes for downstream reference validati
 not reconstruct a private projection. The complete `planning-bundle` is independently
 JCS-canonicalized and SHA-256 identified.
 
-Supplying a predecessor rejects reuse of the same declared revision for different stable content
-and records supersession when a new revision changes substance. Frozen-plan properties are
-get-only; base reconciliation returns a new immutable view whose downstream readiness is false
+Supplying a predecessor requires matching repository/work-item lineage, rejects reuse of the same
+declared revision for different stable content, and directly records supersession whenever the
+contract identity changes (including a declared-revision-only change). Frozen-plan properties are
+get-only; base reconciliation accepts only a reader-issued `RepositoryContext` and returns a new immutable view whose downstream readiness is false
 without permitting identity, base, or readiness to diverge from canonical bytes. Validation proves
 shape and identity only; it is not approval, execution, publication, or merge authority.
 

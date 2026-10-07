@@ -32,6 +32,8 @@ public sealed class GitRepositoryContextReader
         await RejectPromisorRepositoryAsync(root, cancellationToken);
         var commit = (await GitTextAsync(root, cancellationToken, "rev-parse", "--verify", "--end-of-options", $"{reference}^{{commit}}")).Trim();
         var tree = (await GitTextAsync(root, cancellationToken, "rev-parse", "--verify", "--end-of-options", $"{commit}^{{tree}}")).Trim();
+        var headCommit = (await GitTextAsync(root, cancellationToken, "rev-parse", "--verify", "HEAD^{commit}")).Trim();
+        var headTree = (await GitTextAsync(root, cancellationToken, "rev-parse", "--verify", $"{headCommit}^{{tree}}")).Trim();
         var status = await GitTextAsync(
             root,
             cancellationToken,
@@ -57,7 +59,9 @@ public sealed class GitRepositoryContextReader
             dirty: !string.IsNullOrEmpty(status),
             shallow,
             submodules,
-            limitations);
+            limitations,
+            headCommit,
+            headTree);
     }
 
     public async Task<RepositoryFile> ReadFileAsync(
@@ -179,13 +183,23 @@ public sealed class GitRepositoryContextReader
         var budget = new ResolutionBudget();
         try
         {
-            return await ResolveTargetAsync(
+            var posix = await ResolveTargetAsync(
                 context,
                 ParentSegments(symlinkPath),
                 target,
                 [],
                 budget,
+                SymlinkSemantics.PosixExpansion,
                 deadline.Token);
+            var windows = await ResolveTargetAsync(
+                context,
+                ParentSegments(symlinkPath),
+                target,
+                [],
+                budget,
+                SymlinkSemantics.WindowsLexicalCollapse,
+                deadline.Token);
+            return CombineResolution(posix, windows);
         }
         catch (ResolutionBoundExceededException)
         {
@@ -203,6 +217,7 @@ public sealed class GitRepositoryContextReader
         string target,
         IReadOnlyList<string> remaining,
         ResolutionBudget budget,
+        SymlinkSemantics semantics,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrEmpty(target) || PortableMaterial.IsAbsolutePath(target))
@@ -213,13 +228,20 @@ public sealed class GitRepositoryContextReader
         {
             return SymlinkResolution.BoundExceeded;
         }
-        if (TextCollapseEscapes(parent, target, budget))
+        List<string> resolved;
+        Queue<string> pending;
+        if (semantics == SymlinkSemantics.WindowsLexicalCollapse)
         {
-            return SymlinkResolution.Escapes;
+            var collapsed = CollapseTarget(parent, target, budget);
+            if (collapsed is null) return SymlinkResolution.Escapes;
+            resolved = [];
+            pending = new Queue<string>(collapsed.Concat(remaining));
         }
-
-        var resolved = parent.ToList();
-        var pending = new Queue<string>(SplitTarget(target, budget).Concat(remaining));
+        else
+        {
+            resolved = parent.ToList();
+            pending = new Queue<string>(SplitTarget(target, budget).Concat(remaining));
+        }
         while (pending.Count > 0)
         {
             budget.VisitSegment();
@@ -254,12 +276,17 @@ public sealed class GitRepositoryContextReader
                 {
                     return SymlinkResolution.BoundExceeded;
                 }
-                if (TextCollapseEscapes(ParentSegments(candidate), nestedTarget, budget))
+                if (semantics == SymlinkSemantics.WindowsLexicalCollapse)
                 {
-                    return SymlinkResolution.Escapes;
+                    var collapsed = CollapseTarget(ParentSegments(candidate), nestedTarget, budget);
+                    if (collapsed is null) return SymlinkResolution.Escapes;
+                    resolved.Clear();
+                    pending = new Queue<string>(collapsed.Concat(pending));
                 }
-
-                pending = new Queue<string>(SplitTarget(nestedTarget, budget).Concat(pending));
+                else
+                {
+                    pending = new Queue<string>(SplitTarget(nestedTarget, budget).Concat(pending));
+                }
                 continue;
             }
 
@@ -284,7 +311,7 @@ public sealed class GitRepositoryContextReader
         return segments;
     }
 
-    private static bool TextCollapseEscapes(
+    private static string[]? CollapseTarget(
         IReadOnlyList<string> parent,
         string target,
         ResolutionBudget budget)
@@ -295,7 +322,7 @@ public sealed class GitRepositoryContextReader
             if (segment is "" or ".") continue;
             if (segment == "..")
             {
-                if (collapsed.Count == 0) return true;
+                if (collapsed.Count == 0) return null;
                 collapsed.RemoveAt(collapsed.Count - 1);
             }
             else
@@ -303,7 +330,24 @@ public sealed class GitRepositoryContextReader
                 collapsed.Add(segment);
             }
         }
-        return false;
+        return collapsed.ToArray();
+    }
+
+    private static SymlinkResolution CombineResolution(
+        SymlinkResolution posix,
+        SymlinkResolution windows)
+    {
+        if (posix == SymlinkResolution.Escapes || windows == SymlinkResolution.Escapes)
+            return SymlinkResolution.Escapes;
+        if (posix == SymlinkResolution.BoundExceeded || windows == SymlinkResolution.BoundExceeded)
+            return SymlinkResolution.BoundExceeded;
+        if (posix == SymlinkResolution.Cycle || windows == SymlinkResolution.Cycle)
+            return SymlinkResolution.Cycle;
+        if (posix == SymlinkResolution.Missing || windows == SymlinkResolution.Missing)
+            return SymlinkResolution.Missing;
+        return posix == SymlinkResolution.InTree && windows == SymlinkResolution.InTree
+            ? SymlinkResolution.InTree
+            : SymlinkResolution.Missing;
     }
 
     private static string[] ParentSegments(string path)
@@ -474,6 +518,7 @@ public sealed class GitRepositoryContextReader
 
     private sealed record GitResult(int ExitCode, byte[] StandardOutput, byte[] StandardError);
     private sealed record TreeEntry(string Mode, string Type, string ObjectId);
+    private enum SymlinkSemantics { PosixExpansion, WindowsLexicalCollapse }
 
     private sealed class ResolutionBudget
     {

@@ -32,7 +32,58 @@ public sealed record EvidenceItem(
     IReadOnlyList<string> Caveats,
     string? Supersedes = null,
     bool IsComplete = true,
-    EvidenceRequirement Requirement = EvidenceRequirement.Optional);
+    EvidenceRequirement Requirement = EvidenceRequirement.Optional)
+{
+    internal string? RepositoryCommit { get; init; }
+    internal string? RepositoryTree { get; init; }
+    internal string? RepositoryBinding { get; init; }
+
+    public static EvidenceItem FromRepositoryFile(
+        RepositoryFile exactFile,
+        DateTimeOffset observedAt,
+        IReadOnlyList<string> caveats,
+        EvidenceRequirement requirement = EvidenceRequirement.Optional)
+    {
+        ArgumentNullException.ThrowIfNull(exactFile);
+        ArgumentNullException.ThrowIfNull(caveats);
+        var item = new EvidenceItem(
+            EvidenceSourceKind.Repository,
+            $"git:{exactFile.Path}",
+            $"sha256:{Convert.ToHexStringLower(SHA256.HashData(exactFile.Bytes))}",
+            observedAt,
+            caveats.ToArray(),
+            Requirement: requirement)
+        {
+            RepositoryCommit = exactFile.Commit,
+            RepositoryTree = exactFile.Tree
+        };
+        return item with { RepositoryBinding = ComputeRepositoryBinding(item) };
+    }
+
+    internal bool IsReaderBoundRepositoryEvidence() =>
+        SourceKind == EvidenceSourceKind.Repository &&
+        RepositoryCommit is not null &&
+        RepositoryTree is not null &&
+        string.Equals(RepositoryBinding, ComputeRepositoryBinding(this), StringComparison.Ordinal);
+
+    private static string ComputeRepositoryBinding(EvidenceItem item)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            item.SourceKind,
+            item.Locator,
+            item.Digest,
+            item.ObservedAt,
+            caveats = item.Caveats.ToArray(),
+            item.Supersedes,
+            item.IsComplete,
+            item.Requirement,
+            item.RepositoryCommit,
+            item.RepositoryTree
+        });
+        return $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
+    }
+}
 
 public sealed record ImportedContextEntry(
     string Kind,
@@ -130,6 +181,7 @@ public sealed class RepositoryContext
     private readonly string[] _submodules;
     private readonly string[] _limitations;
     private readonly string _readerBinding;
+    private const string HeadIdentityPrefix = "Mutable checkout HEAD identity: ";
 
     private RepositoryContext(
         string repositoryRoot,
@@ -153,12 +205,19 @@ public sealed class RepositoryContext
         _submodules = submodules.ToArray();
         _limitations = limitations.ToArray();
         _readerBinding = readerBinding;
+        var headIdentity = _limitations
+            .FirstOrDefault(item => item.StartsWith(HeadIdentityPrefix, StringComparison.Ordinal));
+        var headParts = headIdentity?[HeadIdentityPrefix.Length..].Split('/', 2);
+        HeadCommit = headParts is { Length: 2 } ? headParts[0] : commit;
+        HeadTree = headParts is { Length: 2 } ? headParts[1].Split(';', 2)[0] : tree;
     }
 
     public string RepositoryRoot { get; }
     public string RequestedRef { get; }
     public string Commit { get; }
     public string Tree { get; }
+    public string HeadCommit { get; }
+    public string HeadTree { get; }
     public bool DetachedHead { get; }
     public bool Dirty { get; }
     public bool Shallow { get; }
@@ -174,16 +233,30 @@ public sealed class RepositoryContext
         bool dirty,
         bool shallow,
         IReadOnlyList<string> submodules,
-        IReadOnlyList<string> limitations)
+        IReadOnlyList<string> limitations,
+        string? headCommit = null,
+        string? headTree = null)
     {
         var copiedSubmodules = submodules.ToArray();
-        var copiedLimitations = limitations.ToArray();
+        if ((headCommit is null) != (headTree is null))
+        {
+            throw new PlanningException("Checkout HEAD commit and tree must be supplied together.");
+        }
+        var copiedLimitations = limitations.ToList();
+        if (headCommit is not null && headTree is not null &&
+            (!string.Equals(headCommit, commit, StringComparison.Ordinal) ||
+             !string.Equals(headTree, tree, StringComparison.Ordinal)))
+        {
+            copiedLimitations.Add(
+                $"{HeadIdentityPrefix}{headCommit}/{headTree}; mutable dirty/detached observations apply to checkout HEAD, not requested {commit}/{tree}.");
+        }
+        var normalizedLimitations = copiedLimitations.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
         var binding = ComputeBinding(
             repositoryRoot, requestedRef, commit, tree, detachedHead, dirty, shallow,
-            copiedSubmodules, copiedLimitations);
+            copiedSubmodules, normalizedLimitations);
         return new RepositoryContext(
             repositoryRoot, requestedRef, commit, tree, detachedHead, dirty, shallow,
-            copiedSubmodules, copiedLimitations, binding);
+            copiedSubmodules, normalizedLimitations, binding);
     }
 
     internal bool IsReaderIssued() => string.Equals(
@@ -258,6 +331,8 @@ public sealed class FrozenPlan
         string planRevision,
         string contentDigest,
         string? supersedes,
+        string repository,
+        string workItem,
         string baseCommit,
         string baseTree,
         byte[] canonicalBytes,
@@ -271,6 +346,8 @@ public sealed class FrozenPlan
         PlanRevision = planRevision;
         ContentDigest = contentDigest;
         Supersedes = supersedes;
+        Repository = repository;
+        WorkItem = workItem;
         BaseCommit = baseCommit;
         BaseTree = baseTree;
         _canonicalBytes = canonicalBytes.ToArray();
@@ -285,6 +362,8 @@ public sealed class FrozenPlan
     public string PlanRevision { get; }
     public string ContentDigest { get; }
     public string? Supersedes { get; }
+    public string Repository { get; }
+    public string WorkItem { get; }
     public string BaseCommit { get; }
     public string BaseTree { get; }
     public byte[] CanonicalBytes => _canonicalBytes.ToArray();
@@ -292,10 +371,15 @@ public sealed class FrozenPlan
     public bool DownstreamReady { get; }
     public IReadOnlyList<string> Limitations { get; }
 
-    public FrozenPlan ReconcileBase(string currentCommit, string currentTree)
+    public FrozenPlan ReconcileBase(RepositoryContext current)
     {
-        if (string.Equals(BaseCommit, currentCommit, StringComparison.Ordinal) &&
-            string.Equals(BaseTree, currentTree, StringComparison.Ordinal))
+        ArgumentNullException.ThrowIfNull(current);
+        if (!current.IsReaderIssued())
+        {
+            throw new PlanningException("Base reconciliation requires a reader-issued repository context.");
+        }
+        if (string.Equals(BaseCommit, current.Commit, StringComparison.Ordinal) &&
+            string.Equals(BaseTree, current.Tree, StringComparison.Ordinal))
         {
             return this;
         }
@@ -307,13 +391,15 @@ public sealed class FrozenPlan
             PlanRevision,
             ContentDigest,
             Supersedes,
+            Repository,
+            WorkItem,
             BaseCommit,
             BaseTree,
             _canonicalBytes,
             _planContractBytes,
             downstreamReady: false,
             Limitations
-                .Append($"Base drift detected: frozen {BaseCommit}/{BaseTree}, current {currentCommit}/{currentTree}; reconcile before downstream work.")
+                .Append($"Base drift detected: frozen {BaseCommit}/{BaseTree}, current {current.Commit}/{current.Tree}; reconcile before downstream work.")
                 .Distinct(StringComparer.Ordinal)
                 .Order(StringComparer.Ordinal)
                 .ToArray());

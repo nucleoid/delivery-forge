@@ -485,18 +485,18 @@ public sealed class PlanningBehaviorTests
         var constructor = Assert.Single(typeof(RepositoryContext).GetConstructors(
             BindingFlags.Instance | BindingFlags.NonPublic));
         object ConstructorArgument(ParameterInfo parameter) => parameter.Name switch
-            {
-                "repositoryRoot" => (object)valid.RepositoryRoot,
-                "requestedRef" => valid.RequestedRef,
-                "commit" or "headCommit" => valid.Commit,
-                "tree" or "headTree" => valid.Tree,
-                "detachedHead" => false,
-                "dirty" => false,
-                "shallow" => false,
-                "submodules" or "limitations" => Array.Empty<string>(),
-                "readerBinding" => "sha256:" + new string('0', 64),
-                _ => throw new InvalidOperationException(parameter.Name)
-            };
+        {
+            "repositoryRoot" => (object)valid.RepositoryRoot,
+            "requestedRef" => valid.RequestedRef,
+            "commit" or "headCommit" => valid.Commit,
+            "tree" or "headTree" => valid.Tree,
+            "detachedHead" => false,
+            "dirty" => false,
+            "shallow" => false,
+            "submodules" or "limitations" => Array.Empty<string>(),
+            "readerBinding" => "sha256:" + new string('0', 64),
+            _ => throw new InvalidOperationException(parameter.Name)
+        };
         var arguments = constructor.GetParameters().Select(ConstructorArgument).ToArray();
         var forged = (RepositoryContext)constructor.Invoke(arguments);
         var reconcile = typeof(FrozenPlan).GetMethod(nameof(FrozenPlan.ReconcileBase), [typeof(RepositoryContext)]);
@@ -525,7 +525,7 @@ public sealed class PlanningBehaviorTests
         var file = new RepositoryFile(
             "README.md", new string('c', 40), "100644", Encoding.UTF8.GetBytes("readme"),
             isSymlink: false, escapesWorktree: false, "not-detected", SymlinkResolution.NotSymlink,
-            new string('a', 40), new string('b', 40));
+            new string('d', 40), new string('e', 40));
         var factory = typeof(EvidenceItem).GetMethod(
             "FromRepositoryFile",
             BindingFlags.Public | BindingFlags.Static);
@@ -535,7 +535,30 @@ public sealed class PlanningBehaviorTests
             [file, ObservedAt, Array.Empty<string>(), EvidenceRequirement.Optional]));
 
         Assert.True(IntakePlanner.Assess(Request(), [bound]).Ready);
-        Assert.False(IntakePlanner.Assess(Request(), [RepositoryEvidence()]).Ready);
+        Assert.False(IntakePlanner.Assess(Request(), [new EvidenceItem(
+            EvidenceSourceKind.Repository,
+            "git:README.md",
+            "sha256:" + new string('b', 64),
+            ObservedAt,
+            [])]).Ready);
+
+        EvidenceItem unbound = new(
+            EvidenceSourceKind.Repository,
+            "git:README.md",
+            "sha256:" + new string('b', 64),
+            ObservedAt,
+            []);
+        EvidenceItem[] mixedProvenance = [unbound, PolicyEvidence()];
+        var mixedDraft = Draft();
+        var unboundError = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(
+            mixedDraft with
+            {
+                Provenance = mixedProvenance,
+                Intake = IntakePlanner.Assess(mixedDraft.Request, mixedProvenance)
+            },
+            "revision-unbound-repository-evidence",
+            ObservedAt));
+        Assert.Contains("reader-issued", unboundError.Message, StringComparison.OrdinalIgnoreCase);
 
         var draft = Draft();
         EvidenceItem[] provenance = [bound, PolicyEvidence()];
@@ -868,8 +891,26 @@ public sealed class PlanningBehaviorTests
         "nucleoid/delivery-forge", "#4", "implement", "Build planning core",
         ["planning"], ["execution"], ["Behavior is deterministic"], "implement");
 
-    private static EvidenceItem RepositoryEvidence(string locator = "git:README.md") => new(
-        EvidenceSourceKind.Repository, locator, "sha256:" + new string('b', 64), ObservedAt, []);
+    private static EvidenceItem RepositoryEvidence(string locator = "git:README.md")
+    {
+        if (!locator.StartsWith("git:", StringComparison.Ordinal))
+        {
+            return new EvidenceItem(EvidenceSourceKind.Policy, locator, "sha256:" + new string('b', 64), ObservedAt, []);
+        }
+        var path = locator[4..];
+        var file = new RepositoryFile(
+            path,
+            new string('c', 40),
+            "100644",
+            Encoding.UTF8.GetBytes($"exact bytes for {path}"),
+            isSymlink: false,
+            escapesWorktree: false,
+            "not-detected",
+            SymlinkResolution.NotSymlink,
+            new string('a', 40),
+            new string('b', 40));
+        return EvidenceItem.FromRepositoryFile(file, ObservedAt, []);
+    }
 
     private static EvidenceItem PolicyEvidence(string locator = "policy:planning") => new(
         EvidenceSourceKind.Policy, locator, "sha256:" + new string('c', 64), ObservedAt, []);
