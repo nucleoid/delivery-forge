@@ -25,6 +25,37 @@ public sealed class ContractBehaviorTests
     }
 
     [Fact]
+    public void Escaped_equivalent_duplicate_members_are_rejected()
+    {
+        var error = Assert.Throws<ContractValidationException>(() =>
+            ContractValidator.ParseAndValidate(Utf8("{\"schemaVersion\":\"1.0.0\",\"kind\":\"plan\",\"a\":1,\"\\u0061\":2}")));
+        Assert.Contains("Duplicate", error.Message);
+    }
+
+    [Theory]
+    [InlineData("9007199254740993.0")]
+    [InlineData("9.007199254740993e15")]
+    public void Unsafe_integral_number_forms_are_rejected(string number)
+    {
+        var error = Assert.Throws<ContractJsonException>(() => CanonicalJson.Canonicalize(Utf8($"{{\"n\":{number}}}")));
+        Assert.Contains("safe integer", error.Message);
+    }
+
+    [Fact]
+    public void Invalid_surrogate_is_reported_as_contract_validation_error()
+    {
+        Assert.Throws<ContractValidationException>(() =>
+            ContractValidator.ParseAndValidate(Utf8("{\"schemaVersion\":\"1.0.0\",\"kind\":\"plan\",\"x\":\"\\ud800\"}")));
+    }
+
+    [Fact]
+    public void Canonicalization_supports_the_same_depth_as_strict_parsing()
+    {
+        var json = new string('[', 70) + "0" + new string(']', 70);
+        Assert.NotEmpty(CanonicalJson.Canonicalize(Utf8(json)));
+    }
+
+    [Fact]
     public void Unknown_schema_versions_fail_closed()
     {
         var error = Assert.Throws<ContractValidationException>(() =>

@@ -28,8 +28,38 @@ public sealed class SchemaValidationTests
 
     [Theory]
     [MemberData(nameof(InvalidFixtures))]
-    public void Invalid_contract_fixtures_fail_closed(string path) =>
-        Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(File.ReadAllBytes(path)));
+    public void Invalid_contract_fixtures_fail_for_the_intended_rule(string path)
+    {
+        var node = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        SetIdentity(node);
+
+        var error = Assert.Throws<ContractValidationException>(() =>
+            ContractValidator.ParseAndValidate(Utf8(node.ToJsonString())));
+        var expected = Path.GetFileName(path) switch
+        {
+            "missing-exact-head.json" => "headCommit is required",
+            "not-applicable-without-rationale.json" => "notApplicableRationale is required",
+            "unknown-mode.json" => "unknown enum value",
+            _ => throw new InvalidOperationException("Unmapped invalid fixture.")
+        };
+        Assert.Contains(expected, error.Message);
+    }
+
+    [Fact]
+    public void Every_embedded_schema_has_a_fixture()
+    {
+        var schemaNames = typeof(ContractValidator).Assembly.GetManifestResourceNames()
+            .Where(name => name.EndsWith(".schema.json", StringComparison.Ordinal))
+            .Select(name => name.Split('.')[^3])
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+        var fixtureNames = Directory.EnumerateFiles(FixturePath("Valid"), "*.json")
+            .Select(Path.GetFileNameWithoutExtension)
+            .Order(StringComparer.Ordinal)
+            .ToArray();
+
+        Assert.Equal(schemaNames, fixtureNames);
+    }
 
     [Fact]
     public void Unknown_fields_fail_closed_even_when_identity_is_recomputed()
@@ -46,7 +76,33 @@ public sealed class SchemaValidationTests
     public void Mutation_after_hashing_is_rejected()
     {
         var json = File.ReadAllText(FixturePath("Valid", "plan.json")).Replace("revision-1", "revision-2", StringComparison.Ordinal);
-        Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(Utf8(json)));
+        var error = Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(Utf8(json)));
+        Assert.Contains("Identity mismatch", error.Message);
+    }
+
+    [Theory]
+    [InlineData("plan.json", "baseCommit", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")]
+    [InlineData("review-receipt.json", "patchSha256", "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n")]
+    public void Schema_patterns_reject_trailing_newlines(string fixture, string property, string value)
+    {
+        var node = LoadNode(fixture);
+        node[property] = value;
+        SetIdentity(node);
+
+        Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(Bytes(node).Span));
+    }
+
+    [Theory]
+    [InlineData("2026-10-07 05:00:00Z")]
+    [InlineData("2026-10-07T05:00Z")]
+    [InlineData("2026-13-07T05:00:00Z")]
+    public void Timestamps_require_invariant_rfc3339_utc(string value)
+    {
+        var node = LoadNode("plan.json");
+        node["createdAt"] = value;
+        SetIdentity(node);
+
+        Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(Bytes(node).Span));
     }
 
     [Fact]
@@ -94,6 +150,12 @@ public sealed class SchemaValidationTests
 
         ReadOnlyMemory<byte>[] missingGate = [Bytes(plan), Bytes(manifest), Bytes(replay)];
         Assert.Throws<ContractReferenceException>(() => ContractReferenceValidator.Validate(missingGate));
+
+        manifest["planIdentity"] = gate["identity"]!.GetValue<string>();
+        SetIdentity(manifest);
+        ReadOnlyMemory<byte>[] wrongKind = [Bytes(plan), Bytes(gate), Bytes(manifest)];
+        var error = Assert.Throws<ContractReferenceException>(() => ContractReferenceValidator.Validate(wrongKind));
+        Assert.Contains("invalid kind", error.Message);
     }
 
     private static void SetIdentity(JsonObject node)

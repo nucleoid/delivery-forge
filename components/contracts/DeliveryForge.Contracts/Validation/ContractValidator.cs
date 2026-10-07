@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -5,7 +6,21 @@ using DeliveryForge.Contracts.Serialization;
 
 namespace DeliveryForge.Contracts.Validation;
 
-public sealed record ValidatedContract(string SchemaName, string SchemaVersion, string Identity, byte[] CanonicalBytes);
+public sealed class ValidatedContract
+{
+    internal ValidatedContract(string schemaName, string schemaVersion, string identity, byte[] canonicalBytes)
+    {
+        SchemaName = schemaName;
+        SchemaVersion = schemaVersion;
+        Identity = identity;
+        CanonicalBytes = canonicalBytes;
+    }
+
+    public string SchemaName { get; }
+    public string SchemaVersion { get; }
+    public string Identity { get; }
+    public byte[] CanonicalBytes { get; }
+}
 
 public static partial class ContractValidator
 {
@@ -16,7 +31,7 @@ public static partial class ContractValidator
         try
         {
             StrictJson.EnsureValid(utf8Json);
-            using var document = JsonDocument.Parse(utf8Json.ToArray());
+            using var document = JsonDocument.Parse(utf8Json.ToArray(), new JsonDocumentOptions { MaxDepth = 128 });
             if (document.RootElement.ValueKind != JsonValueKind.Object)
             {
                 throw new ContractValidationException("A contract must be a JSON object.");
@@ -61,7 +76,7 @@ public static partial class ContractValidator
         {
             throw new ContractValidationException(exception.Message, exception);
         }
-        catch (JsonException exception)
+        catch (Exception exception) when (exception is JsonException or InvalidOperationException)
         {
             throw new ContractValidationException("Invalid contract JSON.", exception);
         }
@@ -77,6 +92,7 @@ public static partial class ContractValidator
                 using var stream = assembly.GetManifestResourceStream(name)
                     ?? throw new InvalidOperationException($"Embedded schema '{name}' is missing.");
                 var schema = JsonDocument.Parse(stream);
+                EnsureSupportedSchemaGrammar(schema.RootElement, "$schema");
                 var kind = RequireString(schema.RootElement, "x-contract-kind");
                 var version = schema.RootElement.GetProperty("properties").GetProperty("schemaVersion").GetProperty("const").GetString()!;
                 return (Key: $"{kind}@{version}", Schema: schema);
@@ -96,6 +112,20 @@ public static partial class ContractValidator
 
             ValidateAgainstSchema(value, rootSchema.GetProperty("$defs").GetProperty(refPath[8..]), path, rootSchema);
             return;
+        }
+
+        if (schema.TryGetProperty("allOf", out var allOf))
+        {
+            foreach (var childSchema in allOf.EnumerateArray())
+            {
+                ValidateAgainstSchema(value, childSchema, path, rootSchema);
+            }
+        }
+
+        if (schema.TryGetProperty("if", out var condition) && MatchesSchema(value, condition, path, rootSchema) &&
+            schema.TryGetProperty("then", out var consequence))
+        {
+            ValidateAgainstSchema(value, consequence, path, rootSchema);
         }
 
         if (schema.TryGetProperty("type", out var type))
@@ -187,13 +217,19 @@ public static partial class ContractValidator
                 throw new ContractValidationException($"{path} is too short.");
             }
 
-            if (schema.TryGetProperty("pattern", out var pattern) && !Regex.IsMatch(text, pattern.GetString()!, RegexOptions.CultureInvariant))
+            if (schema.TryGetProperty("pattern", out var pattern) &&
+                !Regex.IsMatch(text, $"(?:{pattern.GetString()!})\\z", RegexOptions.CultureInvariant))
             {
                 throw new ContractValidationException($"{path} does not match its required pattern.");
             }
 
             if (schema.TryGetProperty("format", out var format) && format.GetString() == "date-time" &&
-                (!DateTimeOffset.TryParse(text, out var parsed) || !text.EndsWith('Z') || parsed.Offset != TimeSpan.Zero))
+                (!UtcTimestamp().IsMatch(text) || !DateTimeOffset.TryParseExact(
+                    text,
+                    ["yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'"],
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                    out _)))
             {
                 throw new ContractValidationException($"{path} must be a UTC RFC 3339 date-time ending in Z.");
             }
@@ -203,6 +239,65 @@ public static partial class ContractValidator
             value.GetDouble() < minimum.GetDouble())
         {
             throw new ContractValidationException($"{path} is below its minimum.");
+        }
+    }
+
+    private static bool MatchesSchema(JsonElement value, JsonElement schema, string path, JsonElement rootSchema)
+    {
+        try
+        {
+            ValidateAgainstSchema(value, schema, path, rootSchema);
+            return true;
+        }
+        catch (ContractValidationException)
+        {
+            return false;
+        }
+    }
+
+    private static void EnsureSupportedSchemaGrammar(JsonElement schema, string path)
+    {
+        if (schema.ValueKind == JsonValueKind.Array)
+        {
+            var index = 0;
+            foreach (var child in schema.EnumerateArray())
+            {
+                EnsureSupportedSchemaGrammar(child, $"{path}[{index++}]");
+            }
+
+            return;
+        }
+
+        if (schema.ValueKind != JsonValueKind.Object)
+        {
+            return;
+        }
+
+        string[] annotations = ["$schema", "$id", "title", "x-contract-kind"];
+        string[] supported = ["$ref", "$defs", "type", "additionalProperties", "required", "properties", "const", "enum", "allOf", "if", "then", "minItems", "uniqueItems", "items", "minLength", "pattern", "format", "minimum"];
+        foreach (var property in schema.EnumerateObject())
+        {
+            if (!annotations.Contains(property.Name, StringComparer.Ordinal) &&
+                !supported.Contains(property.Name, StringComparer.Ordinal))
+            {
+                throw new InvalidOperationException($"Unsupported JSON Schema keyword '{property.Name}' at {path}.");
+            }
+
+            if (property.Name is "$defs" or "properties")
+            {
+                foreach (var namedSchema in property.Value.EnumerateObject())
+                {
+                    EnsureSupportedSchemaGrammar(namedSchema.Value, $"{path}.{property.Name}.{namedSchema.Name}");
+                }
+            }
+            else if (property.Name == "additionalProperties" && property.Value.ValueKind == JsonValueKind.Object)
+            {
+                EnsureSupportedSchemaGrammar(property.Value, $"{path}.additionalProperties");
+            }
+            else if (property.Name is "items" or "if" or "then" or "allOf")
+            {
+                EnsureSupportedSchemaGrammar(property.Value, $"{path}.{property.Name}");
+            }
         }
     }
 
@@ -238,11 +333,14 @@ public static partial class ContractValidator
             ? property.GetString()!
             : throw new ContractValidationException($"$.{propertyName} is required and must be a string.");
 
-    [GeneratedRegex("^[0-9]+\\.[0-9]+\\.[0-9]+$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^[0-9]+\\.[0-9]+\\.[0-9]+\\z", RegexOptions.CultureInvariant)]
     private static partial Regex SemVer();
 
-    [GeneratedRegex("^sha256:[0-9a-f]{64}$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex("^sha256:[0-9a-f]{64}\\z", RegexOptions.CultureInvariant)]
     private static partial Regex Identity();
+
+    [GeneratedRegex("^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,7})?Z\\z", RegexOptions.CultureInvariant)]
+    private static partial Regex UtcTimestamp();
 }
 
 public sealed class ContractValidationException : Exception

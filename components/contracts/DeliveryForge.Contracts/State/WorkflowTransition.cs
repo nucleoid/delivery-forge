@@ -1,13 +1,17 @@
+using System.Text.Json;
 using DeliveryForge.Contracts.Models;
+using DeliveryForge.Contracts.Validation;
 
 namespace DeliveryForge.Contracts.State;
 
 public sealed record TransitionEvidence(
     AuthorizationCeiling Ceiling,
-    string? GateReceiptId = null,
-    string? ReviewReceiptId = null,
-    string? PublicationReceiptId = null,
-    string? HostReviewReceiptId = null);
+    string? HeadCommit = null,
+    string? TreeId = null,
+    ValidatedContract? GateReceipt = null,
+    ValidatedContract? ReviewReceipt = null,
+    ValidatedContract? PublicationReceipt = null,
+    ValidatedContract? HostReviewReceipt = null);
 
 public static class WorkflowTransition
 {
@@ -36,6 +40,11 @@ public static class WorkflowTransition
     public static void EnsureAllowed(WorkflowState from, WorkflowState to, TransitionEvidence evidence)
     {
         ArgumentNullException.ThrowIfNull(evidence);
+        if (!Enum.IsDefined(from) || !Enum.IsDefined(to) || !Enum.IsDefined(evidence.Ceiling))
+        {
+            throw new InvalidWorkflowTransitionException("Workflow states and authorization ceiling must be defined enum values.");
+        }
+
         var terminalTransition = !TerminalStates.Contains(from) &&
                                  to is WorkflowState.Blocked or WorkflowState.Failed or WorkflowState.Stopped;
         if (!LinearTransitions.Contains((from, to)) && !terminalTransition)
@@ -48,43 +57,103 @@ public static class WorkflowTransition
             throw new InvalidWorkflowTransitionException($"Transition to {to} requires IMPLEMENT authority.");
         }
 
-        if (to == WorkflowState.IndependentReview && string.IsNullOrWhiteSpace(evidence.GateReceiptId))
+        if (to == WorkflowState.IndependentReview)
         {
-            throw new InvalidWorkflowTransitionException("Independent review requires a gate receipt.");
+            RequireReceipt(evidence.GateReceipt, "gate-receipt", "PASS", action: null, evidence);
         }
 
-        if (to == WorkflowState.PrAuthorized &&
-            (evidence.Ceiling < AuthorizationCeiling.Pr || string.IsNullOrWhiteSpace(evidence.ReviewReceiptId)))
+        if (to == WorkflowState.PrAuthorized)
         {
-            throw new InvalidWorkflowTransitionException("PR authorization requires PR authority and an independent review receipt.");
+            RequireCeiling(evidence, AuthorizationCeiling.Pr, "PR authorization");
+            RequireReceipt(evidence.ReviewReceipt, "review-receipt", "PASS", action: null, evidence);
         }
 
-        if (to == WorkflowState.PrPublished &&
-            (evidence.Ceiling < AuthorizationCeiling.Pr || string.IsNullOrWhiteSpace(evidence.PublicationReceiptId)))
+        if (to == WorkflowState.PrPublished)
         {
-            throw new InvalidWorkflowTransitionException("PR publication requires PR authority and a publication receipt.");
+            RequireCeiling(evidence, AuthorizationCeiling.Pr, "PR publication");
+            RequireReceipt(evidence.ReviewReceipt, "review-receipt", "PASS", action: null, evidence);
+            RequireReceipt(evidence.PublicationReceipt, "publication-receipt", outcome: null, "PR_PUBLISHED", evidence);
         }
 
-        if (to == WorkflowState.CiComplete && string.IsNullOrWhiteSpace(evidence.GateReceiptId))
+        if (to == WorkflowState.CiComplete)
         {
-            throw new InvalidWorkflowTransitionException("CI completion requires a gate receipt.");
+            RequireReceipt(evidence.GateReceipt, "gate-receipt", "PASS", action: null, evidence);
         }
 
-        if (to == WorkflowState.HostReviewComplete && string.IsNullOrWhiteSpace(evidence.HostReviewReceiptId))
+        if (to == WorkflowState.HostReviewComplete)
         {
-            throw new InvalidWorkflowTransitionException("Host review completion requires its distinct receipt.");
+            RequireDistinctHostReview(evidence);
         }
 
-        if (to == WorkflowState.MergeAuthorized &&
-            (evidence.Ceiling < AuthorizationCeiling.Merge || string.IsNullOrWhiteSpace(evidence.HostReviewReceiptId)))
+        if (to == WorkflowState.MergeAuthorized)
         {
-            throw new InvalidWorkflowTransitionException("Merge authorization requires MERGE authority and hosted-review evidence.");
+            RequireCeiling(evidence, AuthorizationCeiling.Merge, "Merge authorization");
+            RequireDistinctHostReview(evidence);
         }
 
-        if (to == WorkflowState.Merged &&
-            (evidence.Ceiling < AuthorizationCeiling.Merge || string.IsNullOrWhiteSpace(evidence.PublicationReceiptId)))
+        if (to == WorkflowState.Merged)
         {
-            throw new InvalidWorkflowTransitionException("Merge requires MERGE authority and a publication receipt.");
+            RequireCeiling(evidence, AuthorizationCeiling.Merge, "Merge");
+            RequireDistinctHostReview(evidence);
+            RequireReceipt(evidence.PublicationReceipt, "publication-receipt", outcome: null, "MERGED", evidence);
+        }
+    }
+
+    private static void RequireCeiling(TransitionEvidence evidence, AuthorizationCeiling minimum, string operation)
+    {
+        if (evidence.Ceiling < minimum)
+        {
+            throw new InvalidWorkflowTransitionException($"{operation} requires {minimum.ToString().ToUpperInvariant()} authority.");
+        }
+    }
+
+    private static void RequireDistinctHostReview(TransitionEvidence evidence)
+    {
+        RequireReceipt(evidence.HostReviewReceipt, "review-receipt", "PASS", action: null, evidence);
+        if (evidence.ReviewReceipt is not null && evidence.HostReviewReceipt is not null &&
+            string.Equals(evidence.ReviewReceipt.Identity, evidence.HostReviewReceipt.Identity, StringComparison.Ordinal))
+        {
+            throw new InvalidWorkflowTransitionException("Hosted review requires a receipt distinct from independent review.");
+        }
+    }
+
+    private static void RequireReceipt(
+        ValidatedContract? receipt,
+        string expectedKind,
+        string? outcome,
+        string? action,
+        TransitionEvidence evidence)
+    {
+        if (receipt is null || !string.Equals(receipt.SchemaName, expectedKind, StringComparison.Ordinal))
+        {
+            throw new InvalidWorkflowTransitionException($"Transition requires a validated {expectedKind}.");
+        }
+
+        if (string.IsNullOrWhiteSpace(evidence.HeadCommit) || string.IsNullOrWhiteSpace(evidence.TreeId))
+        {
+            throw new InvalidWorkflowTransitionException("Receipt-gated transitions require the current head commit and tree identity.");
+        }
+
+        using var document = JsonDocument.Parse(receipt.CanonicalBytes);
+        var root = document.RootElement;
+        if (!string.Equals(root.GetProperty("headCommit").GetString(), evidence.HeadCommit, StringComparison.Ordinal) ||
+            !string.Equals(root.GetProperty("treeId").GetString(), evidence.TreeId, StringComparison.Ordinal))
+        {
+            throw new InvalidWorkflowTransitionException("Receipt does not match the current head commit and tree identity.");
+        }
+
+        if (outcome is not null &&
+            (!root.TryGetProperty("outcome", out var actualOutcome) ||
+             !string.Equals(actualOutcome.GetString(), outcome, StringComparison.Ordinal)))
+        {
+            throw new InvalidWorkflowTransitionException($"{expectedKind} must record outcome {outcome}.");
+        }
+
+        if (action is not null &&
+            (!root.TryGetProperty("action", out var actualAction) ||
+             !string.Equals(actualAction.GetString(), action, StringComparison.Ordinal)))
+        {
+            throw new InvalidWorkflowTransitionException($"{expectedKind} must record action {action}.");
         }
     }
 }

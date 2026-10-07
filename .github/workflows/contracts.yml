@@ -7,6 +7,7 @@ on:
       - "DeliveryForge.slnx"
       - "Directory.*.props"
       - "global.json"
+      - "references/**"
       - ".github/workflows/contracts.yml"
   push:
     branches: [main]
@@ -28,3 +29,4 @@ jobs:
           dotnet-version: 10.0.401
       - run: dotnet restore DeliveryForge.slnx --locked-mode
       - run: dotnet test DeliveryForge.slnx --no-restore --configuration Release
+      - run: dotnet format DeliveryForge.slnx --no-restore --verify-no-changes

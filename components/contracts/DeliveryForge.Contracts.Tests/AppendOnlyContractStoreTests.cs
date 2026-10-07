@@ -1,5 +1,6 @@
 using System.Text.Json;
 using DeliveryForge.Contracts.State;
+using DeliveryForge.Contracts.Validation;
 
 namespace DeliveryForge.Contracts.Tests;
 
@@ -12,18 +13,34 @@ public sealed class AppendOnlyContractStoreTests : IAsyncLifetime
     {
         var cancellationToken = TestContext.Current.CancellationToken;
         var store = new AppendOnlyContractStore(_root);
-        var source = await File.ReadAllBytesAsync(FixturePath("plan.json"), cancellationToken);
+        var source = await File.ReadAllBytesAsync(FixturePath("run-manifest.json"), cancellationToken);
+        var identity = ContractValidator.ParseAndValidate(source).Identity;
 
         var path = await store.WriteImmutableAsync(source, cancellationToken);
         var secondPath = await store.WriteImmutableAsync(source, cancellationToken);
-        await store.UpdateCurrentPointerAsync(Path.GetFileNameWithoutExtension(path), cancellationToken);
+        await store.UpdateCurrentPointerAsync(identity, cancellationToken);
 
         Assert.Equal(path, secondPath);
         Assert.True(File.Exists(path));
+        Assert.DoesNotContain(':', Path.GetFileName(path));
+        Assert.Equal($"sha256-{identity[7..]}.json", Path.GetFileName(path));
         using var pointer = JsonDocument.Parse(await File.ReadAllBytesAsync(
             Path.Combine(_root, "manifest-current.json"), cancellationToken));
-        Assert.Equal(Path.GetFileNameWithoutExtension(path), pointer.RootElement.GetProperty("identity").GetString());
+        Assert.Equal(identity, pointer.RootElement.GetProperty("identity").GetString());
         Assert.Empty(Directory.EnumerateFiles(_root, "*.tmp"));
+    }
+
+    [Fact]
+    public async Task Current_pointer_rejects_non_manifest_records()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        var store = new AppendOnlyContractStore(_root);
+        var source = await File.ReadAllBytesAsync(FixturePath("plan.json"), cancellationToken);
+        var identity = ContractValidator.ParseAndValidate(source).Identity;
+        await store.WriteImmutableAsync(source, cancellationToken);
+
+        await Assert.ThrowsAsync<AppendOnlyContractException>(() =>
+            store.UpdateCurrentPointerAsync(identity, cancellationToken));
     }
 
     [Fact]

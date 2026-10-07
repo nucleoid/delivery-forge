@@ -30,10 +30,11 @@ Validation recomputes identity on every read. All serialized fields other than t
 identity—including timestamps and path-like strings—therefore affect identity. Ambient host facts
 and filesystem metadata do not affect identity unless a schema explicitly serializes them.
 
-Immutable records are stored as `<identity>.json`. Rewriting an existing identity with different
-canonical bytes is corruption. `manifest-current.json` is the sole mutable pointer supported by the
-core and may reference only an immutable record already present in the same store; replacement is
-atomic.
+Immutable records are stored portably as `sha256-<64 lowercase hex>.json`; the wire identity retains
+its `sha256:` prefix. Rewriting an existing identity with different canonical bytes is corruption.
+The immutable bytes are flushed before their atomic rename. `manifest-current.json` is the sole
+mutable pointer supported by the core and may reference only an immutable `run-manifest` already
+present in the same store; replacement is atomic.
 
 ## Canonical values
 
@@ -61,10 +62,12 @@ Any nonterminal state may enter `BLOCKED`, `FAILED`, or `STOPPED`; these and `ME
 Checkpoint sequence numbers strictly increase.
 
 Entering execution requires at least `implement` authority. `PR_AUTHORIZED` requires `pr` authority
-and an independent-review receipt. `PR_PUBLISHED` additionally requires a publication receipt.
+and a passing independent-review receipt bound to the current head and tree. `PR_PUBLISHED`
+additionally requires that review receipt and a `PR_PUBLISHED` publication receipt.
 `CI_COMPLETE` requires a gate receipt, while `HOST_REVIEW_COMPLETE` uses a distinct hosted-review
-receipt. `MERGE_AUTHORIZED` and `MERGED` require `merge` authority and their matching review and
-publication receipts. Credentials, labels, or available tools never raise a ceiling.
+receipt. `MERGE_AUTHORIZED` and `MERGED` require `merge` authority and their matching passing hosted
+review and `MERGED` publication receipts, all bound to the current head and tree. Credentials,
+labels, or available tools never raise a ceiling.
 
 Release and deployment states are deliberately absent from v1.
 

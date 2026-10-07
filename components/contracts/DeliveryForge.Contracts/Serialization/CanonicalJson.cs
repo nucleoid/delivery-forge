@@ -12,14 +12,14 @@ public static class CanonicalJson
     public static byte[] Canonicalize(ReadOnlySpan<byte> utf8Json)
     {
         StrictJson.EnsureValid(utf8Json);
-        using var document = JsonDocument.Parse(utf8Json.ToArray());
+        using var document = JsonDocument.Parse(utf8Json.ToArray(), new JsonDocumentOptions { MaxDepth = 128 });
         return Canonicalize(document.RootElement, removeTopLevelIdentity: false);
     }
 
     public static string ComputeIdentity(ReadOnlySpan<byte> utf8Json)
     {
         StrictJson.EnsureValid(utf8Json);
-        using var document = JsonDocument.Parse(utf8Json.ToArray());
+        using var document = JsonDocument.Parse(utf8Json.ToArray(), new JsonDocumentOptions { MaxDepth = 128 });
         var canonical = Canonicalize(document.RootElement, removeTopLevelIdentity: true);
         return $"sha256:{Convert.ToHexStringLower(SHA256.HashData(canonical))}";
     }

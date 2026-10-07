@@ -59,7 +59,7 @@ internal static class StrictJson
         {
             throw;
         }
-        catch (Exception exception) when (exception is JsonException or DecoderFallbackException or FormatException or OverflowException)
+        catch (Exception exception) when (exception is JsonException or DecoderFallbackException or FormatException or OverflowException or InvalidOperationException)
         {
             throw new ContractJsonException("The document is not strict UTF-8 JSON.", exception);
         }
@@ -73,9 +73,8 @@ internal static class StrictJson
             throw new ContractJsonException($"Number '{text}' is outside finite IEEE-754 binary64 range.");
         }
 
-        if (text.IndexOfAny(['.', 'e', 'E']) < 0 &&
-            BigInteger.TryParse(text, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var integer) &&
-            BigInteger.Abs(integer) > MaxSafeInteger)
+        if (decimal.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var exact) &&
+            decimal.Truncate(exact) == exact && decimal.Abs(exact) > (decimal)MaxSafeInteger)
         {
             throw new ContractJsonException($"Integer '{text}' is outside the I-JSON safe integer range.");
         }
