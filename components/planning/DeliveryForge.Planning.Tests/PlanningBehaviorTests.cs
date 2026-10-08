@@ -1860,7 +1860,7 @@ public sealed class PlanningBehaviorTests
     [InlineData("curl -h --proxy-user proxy:private https://example.invalid")]
     [InlineData("curl --help --oauth2-bearer private-token https://example.invalid")]
     [InlineData("curl --help=all --cookie session=private-value https://example.invalid")]
-    [InlineData("curl --haproxy-clientip --user alice:hunter2 https://example.invalid")]
+    [InlineData("curl --haproxy-clientip 192.0.2.10 --user alice:hunter2 https://example.invalid")]
     [InlineData("curl --output --user alice:hunter2 https://example.invalid")]
     [InlineData("curl --connect-timeout then --user alice:hunter2 https://example.invalid")]
     [InlineData("curl --expand-remote-time --user alice:hunter2 https://example.invalid")]
@@ -1912,7 +1912,7 @@ public sealed class PlanningBehaviorTests
     [InlineData("curl -R https://example.invalid")]
     [InlineData("curl -h auth")]
     [InlineData("curl --help=all")]
-    [InlineData("curl --haproxy-clientip https://example.invalid")]
+    [InlineData("curl --haproxy-clientip 192.0.2.10 https://example.invalid")]
     [InlineData("curl example.invalid:8443/health")]
     [InlineData("curl example.invalid/path")]
     [InlineData("curl --url example.invalid/resource")]
@@ -1929,6 +1929,93 @@ public sealed class PlanningBehaviorTests
     public void Portable_consumers_preserve_round_eighteen_sibling_controls(string portableText)
     {
         AssertPortableConsumersAccept(portableText, "revision-round-eighteen-control");
+    }
+
+    [Theory]
+    [InlineData("curl --no-location alice:hunter2@example.invalid/resource")]
+    [InlineData("curl --no-silent alice:hunter2@example.invalid/resource")]
+    [InlineData("curl --no-fail alice:hunter2@example.invalid/resource")]
+    [InlineData("curl --no-insecure alice:hunter2@example.invalid/resource")]
+    [InlineData("curl --no-compressed alice:hunter2@example.invalid/resource")]
+    public void Portable_consumers_reject_round_nineteen_userinfo_after_no_value_negations(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-nineteen-no-value-negation");
+    }
+
+    [Theory]
+    [InlineData("curl --pass -Zq9secret https://example.invalid")]
+    [InlineData("curl --oauth2-bearer -private-token https://example.invalid")]
+    [InlineData("curl --user -alice:hunter2 https://example.invalid")]
+    [InlineData("curl --output -alice:hunter2@example.invalid https://example.invalid")]
+    [InlineData("curl -o -alice:hunter2@example.invalid https://example.invalid")]
+    [InlineData("curl --help alice:hunter2@example.invalid")]
+    public void Portable_consumers_reject_round_nineteen_credential_values_consumed_by_arity(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-nineteen-consumed-value");
+    }
+
+    [Theory]
+    [InlineData("curl alice:hunter2@[2001:db8::1]/resource")]
+    [InlineData("curl --url alice:hunter2@[2001:db8::1]/resource")]
+    [InlineData("curl alice:hunter2@{api,backup}.example.invalid/resource")]
+    [InlineData("curl --url=alice:hunter2@{api,backup}.example.invalid/resource")]
+    public void Portable_consumers_reject_round_nineteen_bracketed_and_globbed_userinfo(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-nineteen-userinfo-punctuation");
+    }
+
+    [Theory]
+    [InlineData("services:\n  probe:\n    entrypoint: [\"curl\"]\n    healthcheck:\n      test: [\"CMD\", \"echo\", \"healthy\"]\n    command: [\"--pass\", \"private-phrase\", \"https://example.invalid\"]")]
+    [InlineData("containers:\n  - name: probe\n    command: [\"curl\"]\n    livenessProbe:\n      exec:\n        command: [\"true\"]\n    args: [\"--oauth2-bearer\", \"private-token\", \"https://example.invalid\"]")]
+    [InlineData("{\n  \"Config\": {\n    \"Entrypoint\": [\"curl\"],\n    \"Healthcheck\": {\n      \"Test\": [\"CMD\", \"echo\", \"healthy\"]\n    },\n    \"Cmd\": [\"--cookie\", \"session=private-value\", \"https://example.invalid\"]\n  }\n}")]
+    public void Portable_consumers_reject_round_nineteen_parent_commands_across_deeper_exec_fragments(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-nineteen-structured-ancestry");
+    }
+
+    [Fact]
+    public void Portable_consumers_fail_closed_when_round_nineteen_structured_join_exceeds_line_bound()
+    {
+        var privateText = "entrypoint: [\"curl\"]\n" +
+                          string.Join('\n', Enumerable.Range(0, 33).Select(index => $"# bounded metadata {index}")) +
+                          "\ncommand: [\"--pass\", \"private-phrase\", \"https://example.invalid\"]";
+
+        AssertPortableConsumersReject(privateText, "revision-round-nineteen-line-bound");
+    }
+
+    [Fact]
+    public void Portable_consumers_fail_closed_when_round_nineteen_structured_fragment_exceeds_size_bound()
+    {
+        var privateText = "entrypoint: [\"curl\", \"" + new string('a', 8200) +
+                          "\ncommand: [\"--pass\", \"private-phrase\", \"https://example.invalid\"]";
+
+        AssertPortableConsumersReject(privateText, "revision-round-nineteen-size-bound");
+    }
+
+    [Fact]
+    public void Portable_consumers_fail_closed_when_round_nineteen_structured_fragment_is_unbalanced()
+    {
+        const string privateText = "entrypoint: [\n  \"curl\"\ncommand: [\"--pass\", \"private-phrase\", \"https://example.invalid\"]";
+
+        AssertPortableConsumersReject(privateText, "revision-round-nineteen-delimiter-bound");
+    }
+
+    [Theory]
+    [InlineData("curl --no-location https://example.invalid")]
+    [InlineData("curl --no-silent --no-fail --no-insecure --no-compressed https://example.invalid")]
+    [InlineData("curl -G https://example.invalid")]
+    [InlineData("curl -o output.txt https://example.invalid")]
+    [InlineData("curl --haproxy-clientip --user alice:hunter2 https://example.invalid")]
+    [InlineData("curl [2001:db8::1]/health")]
+    [InlineData("curl {api,backup}.example.invalid/health")]
+    [InlineData("curl '<user>:<password>@[2001:db8::1]/resource'")]
+    [InlineData("docker run -u 1000:1000 image && podman run -u 1000:1000 image")]
+    [InlineData("FROM base AS probe\nENTRYPOINT [\"curl\"]\nHEALTHCHECK CMD [\"echo\", \"healthy\"]\nFROM base AS runtime\nCMD [\"--pass\", \"documentation-only\"]")]
+    [InlineData("containers:\n  - name: probe\n    command: [\"curl\"]\n  - name: unrelated\n    args: [\"--pass\", \"documentation-only\"]")]
+    [InlineData("entrypoint: [\"curl\"]\n---\ncommand: [\"--pass\", \"documentation-only\"]")]
+    public void Portable_consumers_preserve_round_nineteen_sibling_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-nineteen-control");
     }
 
     [Theory]
