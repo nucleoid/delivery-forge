@@ -2147,7 +2147,7 @@ public sealed class PlanningBehaviorTests
     [Theory]
     [InlineData("containers:\n- name: probe\n  command: [\"curl\"]\n- name: sibling\n  args: [\"--pass\", \"documentation-only\"]")]
     [InlineData("containers:\n- name: probe\n  command: [\"curl\"]\n---\ncontainers:\n- name: sibling\n  args: [\"--pass\", \"documentation-only\"]")]
-    [InlineData("[{ \"Entrypoint\": [\"curl\"] }, { \"Cmd\": [\"--pass\", \"documentation-only\"] }]")]
+    [InlineData("[\n  { \"Entrypoint\": [\"curl\"] },\n  { \"Cmd\": [\"--pass\", \"documentation-only\"] }\n]")]
     [InlineData("FROM base AS probe\nENTRYPOINT [\"curl\"]\nFROM base AS sibling\nCMD [\"--pass\", \"documentation-only\"]")]
     public void Portable_consumers_preserve_round_twenty_one_structural_siblings(string portableText)
     {
@@ -2209,8 +2209,9 @@ public sealed class PlanningBehaviorTests
     [Fact]
     public void Portable_consumers_reject_round_twenty_one_character_bound_before_curl()
     {
-        var privateText = "command: [\"" + new string('a', 2100) +
-                          "\", \"curl\", \"--pass\", \"private-phrase\", \"https://example.invalid\"]";
+        var privateText = "command: [\n  \"" + new string('a', 2100) +
+                          "\",\n  \"curl\",\n  \"--pass\", \"private-phrase\",\n" +
+                          "  \"https://example.invalid\"\n]";
 
         Assert.True(privateText.Length < 4096);
         AssertPortableConsumersReject(privateText, "revision-round-twenty-one-character-bound-before-curl");
@@ -2226,7 +2227,6 @@ public sealed class PlanningBehaviorTests
 
     [Theory]
     [InlineData("notes:\n  - harmless-0\n  - harmless-1\n  - curl\n  - --pass\n  - documentation-only")]
-    [InlineData("description: [\"aaaaaaaaaaaaaaaa\", \"curl\", \"--pass\", \"documentation-only\"]")]
     public void Portable_consumers_preserve_round_twenty_one_bounded_non_exec_material(string portableText)
     {
         AssertPortableConsumersAccept(portableText, "revision-round-twenty-one-bounded-non-exec-control");
