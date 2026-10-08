@@ -921,7 +921,8 @@ internal static partial class PortableMaterial
 
                         if (sequenceIndent < 0 && !followingLineScalar && !followingLineFlow)
                         {
-                            if (itemIndent <= indent)
+                            if (itemIndent < indent ||
+                                itemIndent == indent && !item.StartsWith("- ", StringComparison.Ordinal))
                             {
                                 break;
                             }
