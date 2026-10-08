@@ -131,14 +131,25 @@ short flags and proxy-taking long options, plus every non-empty `Authorization` 
 preserving noncredential proxy arguments, empty `Authorization` headers, and ordinary headers. Once
 a real bounded `curl` or `curl.exe` executable is identified, credential-shaped userinfo and every
 populated credential-bearing option are rejected, including OAuth bearer, TLS/proxy-TLS passwords,
-`--pass`/`--proxy-pass`, and certificate passphrases. Populated `--cookie`/`-b` values are treated
-as session credentials and rejected; an empty cookie value and the noncredential `--cookie-jar`
-output option remain portable. A centralized option-arity registry consumes supported option values
-before command boundaries are considered. Curl credential scanning is escape-aware and
-command-position-aware: quoted option values do not become prose or later-command boundaries, while
-actual later Docker, Podman, and Kubernetes commands do. Bounded Kubernetes `command`/`args`,
-Compose `healthcheck.test`, Dockerfile `ENTRYPOINT`/`CMD`/`RUN`, OCI/Docker `Cmd`/`Test`,
-and JSON/YAML exec forms are scanned across lines; unrelated structures are never joined. Backslash,
+`--pass`/`--proxy-pass`, and certificate passphrases. Positional and `--url` schemeless URLs reject
+populated `user:password@host`; the explicit documentation placeholders
+`<user>:<password>`, `${USER}:${PASSWORD}`, and `{{user}}:{{password}}` remain portable.
+Populated `--cookie`/`-b` values are treated as session credentials and rejected; an empty cookie
+value and the noncredential `--cookie-jar` output option remain portable.
+
+The option registry records required-value, optional-value, and no-value semantics from the curl
+8.5.0 `--help all` catalogue. No-value flags such as `-R` and `--haproxy-clientip` never consume
+a following option, `-h`/`--help` consume only an explicit non-option subject, and a missing required
+value cannot hide a following credential option. Supported `--expand-*` forms inherit the underlying
+option's classification. Unknown `--no-*` modifier forms are handled conservatively as an optional
+value of the underlying option, so attached or separate credentials fail closed while empty values
+remain portable. Curl credential scanning is escape-aware and command-position-aware: quoted option
+values do not become prose or later-command boundaries, while actual later Docker, Podman, and
+Kubernetes commands do. Bounded Kubernetes `command`/`args`, Compose `entrypoint`/`command` and
+`healthcheck.test`, Dockerfile `ENTRYPOINT`/`CMD`/`RUN`, OCI/Docker `Entrypoint`/`Cmd`/`Test`,
+and JSON/YAML exec forms are grouped in either declaration order within the same bounded
+mapping/container context. Comments and harmless sibling metadata do not split a command; unrelated
+mappings, sibling containers, separate instructions, prose, and later commands are never joined. Backslash,
 PowerShell-backtick, cmd-caret, and doubled-quote key escapes are normalized locally, including
 dotted credential keys. A single-backslash curl alias remains supported without masking drive,
 UNC/rooted, or home-alias private paths.

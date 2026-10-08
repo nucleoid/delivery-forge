@@ -1861,7 +1861,9 @@ public sealed class PlanningBehaviorTests
     [InlineData("curl --help --oauth2-bearer private-token https://example.invalid")]
     [InlineData("curl --help=all --cookie session=private-value https://example.invalid")]
     [InlineData("curl --haproxy-clientip --user alice:hunter2 https://example.invalid")]
+    [InlineData("curl --output --user alice:hunter2 https://example.invalid")]
     [InlineData("curl --connect-timeout then --user alice:hunter2 https://example.invalid")]
+    [InlineData("curl --expand-remote-time --user alice:hunter2 https://example.invalid")]
     public void Portable_consumers_reject_round_eighteen_credentials_after_authoritative_option_arities(string privateText)
     {
         AssertPortableConsumersReject(privateText, "revision-round-eighteen-option-semantics");
@@ -1886,6 +1888,7 @@ public sealed class PlanningBehaviorTests
     [InlineData("curl --expand-cookie session=private-value https://example.invalid")]
     [InlineData("curl --expand-cert client.pem:private-phrase https://example.invalid")]
     [InlineData("curl --no-user=alice:hunter2 https://example.invalid")]
+    [InlineData("curl --no-user alice:hunter2 https://example.invalid")]
     [InlineData("curl --no-cookie session=private-value https://example.invalid")]
     public void Portable_consumers_reject_round_eighteen_modifier_credentials(string privateText)
     {

@@ -19,94 +19,125 @@ internal static partial class PortableMaterial
         Secret,
         UserInfo,
         ProxyUserInfo,
-        Certificate
+        Certificate,
+        Url
     }
 
-    // This is the single arity registry for supported curl options. A listed option always consumes
-    // exactly one value, so words that resemble prose or command boundaries remain option values.
-    private static readonly IReadOnlyDictionary<string, CurlOptionValueKind> CurlLongOptions = BuildCurlLongOptions();
+    private enum CurlOptionArity
+    {
+        NoValue,
+        OptionalValue,
+        RequiredValue
+    }
 
-    private static readonly IReadOnlyDictionary<char, CurlOptionValueKind> CurlShortOptions =
-        new Dictionary<char, CurlOptionValueKind>
-        {
-            ['A'] = CurlOptionValueKind.Ordinary,
-            ['b'] = CurlOptionValueKind.Secret,
-            ['c'] = CurlOptionValueKind.Ordinary,
-            ['C'] = CurlOptionValueKind.Ordinary,
-            ['d'] = CurlOptionValueKind.Ordinary,
-            ['D'] = CurlOptionValueKind.Ordinary,
-            ['e'] = CurlOptionValueKind.Ordinary,
-            ['E'] = CurlOptionValueKind.Certificate,
-            ['F'] = CurlOptionValueKind.Ordinary,
-            ['H'] = CurlOptionValueKind.Ordinary,
-            ['h'] = CurlOptionValueKind.Ordinary,
-            ['K'] = CurlOptionValueKind.Ordinary,
-            ['m'] = CurlOptionValueKind.Ordinary,
-            ['o'] = CurlOptionValueKind.Ordinary,
-            ['P'] = CurlOptionValueKind.Ordinary,
-            ['Q'] = CurlOptionValueKind.Ordinary,
-            ['r'] = CurlOptionValueKind.Ordinary,
-            ['R'] = CurlOptionValueKind.Ordinary,
-            ['T'] = CurlOptionValueKind.Ordinary,
-            ['t'] = CurlOptionValueKind.Ordinary,
-            ['u'] = CurlOptionValueKind.UserInfo,
-            ['U'] = CurlOptionValueKind.UserInfo,
-            ['w'] = CurlOptionValueKind.Ordinary,
-            ['x'] = CurlOptionValueKind.ProxyUserInfo,
-            ['X'] = CurlOptionValueKind.Ordinary,
-            ['y'] = CurlOptionValueKind.Ordinary,
-            ['Y'] = CurlOptionValueKind.Ordinary,
-            ['z'] = CurlOptionValueKind.Ordinary
-        };
+    private readonly record struct CurlOptionSpec(CurlOptionArity Arity, CurlOptionValueKind Kind);
+
+    // Curl 8.5.0's complete --help all catalogue is represented explicitly by arity. Required
+    // values never consume a following option, --help is the sole optional-value form, and
+    // no-value flags remain visible inside short groups.
+    private static readonly IReadOnlyDictionary<string, CurlOptionSpec> CurlLongOptions = BuildCurlLongOptions();
+
+    private static readonly IReadOnlyDictionary<char, CurlOptionSpec> CurlShortOptions =
+        BuildCurlShortOptions();
 
     private static readonly HashSet<string> NetworkSchemes = new(StringComparer.OrdinalIgnoreCase)
     {
         "http", "https", "ssh", "git", "ftp", "ftps"
     };
 
-    private static IReadOnlyDictionary<string, CurlOptionValueKind> BuildCurlLongOptions()
+    private static IReadOnlyDictionary<string, CurlOptionSpec> BuildCurlLongOptions()
     {
-        var options = new Dictionary<string, CurlOptionValueKind>(StringComparer.OrdinalIgnoreCase);
-        const string ordinaryOptions =
+        var options = new Dictionary<string, CurlOptionSpec>(StringComparer.OrdinalIgnoreCase);
+
+        Add(
+            CurlOptionArity.RequiredValue,
+            CurlOptionValueKind.Ordinary,
             "--abstract-unix-socket --alt-svc --aws-sigv4 --cacert --capath --cert-type --ciphers " +
             "--config --connect-timeout --connect-to --continue-at --cookie-jar --create-file-mode --crlfile " +
             "--curves --data --data-ascii --data-binary --data-raw --data-urlencode --delegation " +
             "--dns-interface --dns-ipv4-addr --dns-ipv6-addr --dns-servers --doh-url --dump-header " +
             "--egd-file --engine --etag-compare --etag-save --expect100-timeout --form --form-string " +
             "--ftp-account --ftp-alternative-to-user --ftp-method --ftp-port --ftp-ssl-ccc-mode " +
-            "--happy-eyeballs-timeout-ms --header --help --hostpubmd5 --hostpubsha256 --hsts --interface " +
+            "--happy-eyeballs-timeout-ms --header --hostpubmd5 --hostpubsha256 --hsts --interface " +
             "--ip-tos --ipfs-gateway --json --keepalive-time --key --key-type --krb --libcurl --limit-rate " +
             "--local-port --login-options --mail-auth --mail-from --mail-rcpt --max-filesize --max-redirs " +
-            "--max-time --netrc-file --noproxy " +
-            "--output --output-dir --parallel-max --pinnedpubkey --proto --proto-default --proto-redir " +
-            "--proxy-cacert --proxy-capath --proxy-cert-type --proxy-ciphers --proxy-crlfile --proxy-header " +
-            "--proxy-key --proxy-key-type --proxy-pinnedpubkey --proxy-service-name --proxy-tls13-ciphers " +
-            "--proxy-tlsauthtype --proxy-tlsuser --pubkey --quote --random-file --range --rate --referer " +
-            "--request --request-target --resolve --retry --retry-delay --retry-max-time --sasl-authzid " +
-            "--service-name --socks5-gssapi-service --speed-limit --speed-time --stderr --telnet-option " +
-            "--tftp-blksize --time-cond --tls-max --tls13-ciphers --tlsauthtype --tlsuser --trace " +
-            "--trace-ascii --trace-config --unix-socket --upload-file --url --url-query --user-agent " +
-            "--variable --vlan-priority --write-out";
-        foreach (var option in ordinaryOptions.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-        {
-            options.Add(option, CurlOptionValueKind.Ordinary);
-        }
+            "--max-time --netrc-file --noproxy --output --output-dir --parallel-max --pinnedpubkey --proto " +
+            "--proto-default --proto-redir --proxy-cacert --proxy-capath --proxy-cert-type --proxy-ciphers " +
+            "--proxy-crlfile --proxy-header --proxy-key --proxy-key-type --proxy-pinnedpubkey " +
+            "--proxy-service-name --proxy-tls13-ciphers --proxy-tlsauthtype --proxy-tlsuser --pubkey " +
+            "--quote --random-file --range --rate --referer --request --request-target --resolve --retry " +
+            "--retry-delay --retry-max-time --sasl-authzid --service-name --socks5-gssapi-service " +
+            "--speed-limit --speed-time --stderr --telnet-option --tftp-blksize --time-cond --tls-max " +
+            "--tls13-ciphers --tlsauthtype --tlsuser --trace --trace-ascii --trace-config --unix-socket " +
+            "--upload-file --url-query --user-agent --variable --vlan-priority --write-out");
 
-        foreach (var option in new[] { "--oauth2-bearer", "--pass", "--proxy-pass", "--tlspassword", "--proxy-tlspassword", "--cookie" })
-        {
-            options.Add(option, CurlOptionValueKind.Secret);
-        }
+        Add(
+            CurlOptionArity.NoValue,
+            CurlOptionValueKind.Ordinary,
+            "--anyauth --append --basic --ca-native --cert-status --compressed --compressed-ssh " +
+            "--create-dirs --crlf --digest --disable --disable-eprt --disable-epsv " +
+            "--disallow-username-in-url --doh-cert-status --doh-insecure --fail --fail-early " +
+            "--fail-with-body --false-start --form-escape --ftp-create-dirs --ftp-pasv --ftp-pret " +
+            "--ftp-skip-pasv-ip --ftp-ssl-ccc --ftp-ssl-control --get --globoff --haproxy-clientip " +
+            "--haproxy-protocol --head --http0.9 --http1.0 --http1.1 --http2 --http2-prior-knowledge " +
+            "--http3 --http3-only --ignore-content-length --include --insecure --ipv4 --ipv6 " +
+            "--junk-session-cookies --list-only --location --location-trusted --mail-rcpt-allowfails " +
+            "--manual --metalink --negotiate --netrc --netrc-optional --next --no-alpn --no-buffer " +
+            "--no-clobber --no-keepalive --no-npn --no-progress-meter --no-sessionid --ntlm --ntlm-wb " +
+            "--parallel --parallel-immediate --path-as-is --post301 --post302 --post303 --progress-bar " +
+            "--proxy-anyauth --proxy-basic --proxy-ca-native --proxy-digest --proxy-http2 " +
+            "--proxy-insecure --proxy-negotiate --proxy-ntlm --proxy-ssl-allow-beast " +
+            "--proxy-ssl-auto-client-cert --proxy-tlsv1 --proxytunnel --raw --remote-header-name " +
+            "--remote-name --remote-name-all --remote-time --remove-on-error --retry-all-errors " +
+            "--retry-connrefused --sasl-ir --show-error --silent --socks5-basic --socks5-gssapi " +
+            "--socks5-gssapi-nec --ssl --ssl-allow-beast --ssl-auto-client-cert --ssl-no-revoke " +
+            "--ssl-reqd --ssl-revoke-best-effort --sslv2 --sslv3 --styled-output " +
+            "--suppress-connect-headers --tcp-fastopen --tcp-nodelay --tftp-no-options --tlsv1 " +
+            "--tlsv1.0 --tlsv1.1 --tlsv1.2 --tlsv1.3 --tr-encoding --trace-ids --trace-time " +
+            "--use-ascii --verbose --version --xattr");
 
-        options.Add("--user", CurlOptionValueKind.UserInfo);
-        options.Add("--proxy-user", CurlOptionValueKind.UserInfo);
-        foreach (var option in new[] { "--proxy", "--proxy1.0", "--preproxy", "--socks4", "--socks4a", "--socks5", "--socks5-hostname" })
-        {
-            options.Add(option, CurlOptionValueKind.ProxyUserInfo);
-        }
-
-        options.Add("--cert", CurlOptionValueKind.Certificate);
-        options.Add("--proxy-cert", CurlOptionValueKind.Certificate);
+        Add(CurlOptionArity.OptionalValue, CurlOptionValueKind.Ordinary, "--help");
+        Add(
+            CurlOptionArity.RequiredValue,
+            CurlOptionValueKind.Secret,
+            "--oauth2-bearer --pass --proxy-pass --tlspassword --proxy-tlspassword --cookie");
+        Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.UserInfo, "--user --proxy-user");
+        Add(
+            CurlOptionArity.RequiredValue,
+            CurlOptionValueKind.ProxyUserInfo,
+            "--proxy --proxy1.0 --preproxy --socks4 --socks4a --socks5 --socks5-hostname");
+        Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.Certificate, "--cert --proxy-cert");
+        Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.Url, "--url");
         return options;
+
+        void Add(CurlOptionArity arity, CurlOptionValueKind kind, string names)
+        {
+            foreach (var name in names.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+            {
+                options.Add(name, new CurlOptionSpec(arity, kind));
+            }
+        }
+    }
+
+    private static IReadOnlyDictionary<char, CurlOptionSpec> BuildCurlShortOptions()
+    {
+        var options = new Dictionary<char, CurlOptionSpec>();
+        Add(CurlOptionArity.NoValue, CurlOptionValueKind.Ordinary, "#012346:BJLMNORSZafgIijklnpqsvV");
+        Add(CurlOptionArity.OptionalValue, CurlOptionValueKind.Ordinary, "h");
+        Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.Ordinary, "AcCdDeFHKmPQrTtXwYyz");
+        Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.Secret, "b");
+        Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.UserInfo, "uU");
+        Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.ProxyUserInfo, "x");
+        Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.Certificate, "E");
+        return options;
+
+        void Add(CurlOptionArity arity, CurlOptionValueKind kind, string names)
+        {
+            foreach (var name in names)
+            {
+                options.Add(name, new CurlOptionSpec(arity, kind));
+            }
+        }
     }
 
     public static bool ContainsPrivateMaterial(string value)
@@ -367,6 +398,12 @@ internal static partial class PortableMaterial
                 {
                     break;
                 }
+
+                if (!command[index].StartsWith("-", StringComparison.Ordinal) &&
+                    HasSchemelessUrlUserInfo(command[index]))
+                {
+                    return true;
+                }
             }
         }
 
@@ -400,15 +437,30 @@ internal static partial class PortableMaterial
         {
             var equals = token.IndexOf('=');
             var option = equals >= 0 ? token[..equals] : token;
-            if (!CurlLongOptions.TryGetValue(option, out kind))
+            var noVariant = false;
+            if (!CurlLongOptions.TryGetValue(option, out var spec))
             {
-                value = string.Empty;
-                return false;
+                if (option.StartsWith("--expand-", StringComparison.OrdinalIgnoreCase))
+                {
+                    option = "--" + option["--expand-".Length..];
+                }
+                else if (option.StartsWith("--no-", StringComparison.OrdinalIgnoreCase))
+                {
+                    option = "--" + option["--no-".Length..];
+                    noVariant = true;
+                }
+
+                if (!CurlLongOptions.TryGetValue(option, out spec))
+                {
+                    kind = default;
+                    value = string.Empty;
+                    return false;
+                }
             }
 
-            value = equals >= 0
-                ? token[(equals + 1)..]
-                : index + 1 < command.Count ? command[++index] : string.Empty;
+            kind = spec.Kind;
+            var arity = noVariant ? CurlOptionArity.OptionalValue : spec.Arity;
+            value = ReadCurlOptionValue(command, ref index, token, equals, arity);
             return true;
         }
 
@@ -416,21 +468,61 @@ internal static partial class PortableMaterial
         {
             for (var cursor = 1; cursor < token.Length; cursor++)
             {
-                if (!CurlShortOptions.TryGetValue(token[cursor], out kind))
+                if (!CurlShortOptions.TryGetValue(token[cursor], out var spec))
                 {
                     continue;
                 }
 
+                if (spec.Arity == CurlOptionArity.NoValue)
+                {
+                    continue;
+                }
+
+                kind = spec.Kind;
                 value = cursor + 1 < token.Length
                     ? token[(cursor + 1)..]
-                    : index + 1 < command.Count ? command[++index] : string.Empty;
+                    : ReadSeparateCurlOptionValue(command, ref index, spec.Arity);
                 return true;
             }
+
+            kind = CurlOptionValueKind.Ordinary;
+            value = string.Empty;
+            return true;
         }
 
         kind = default;
         value = string.Empty;
         return false;
+    }
+
+    private static string ReadCurlOptionValue(
+        IReadOnlyList<string> command,
+        ref int index,
+        string token,
+        int equals,
+        CurlOptionArity arity)
+    {
+        if (equals >= 0)
+        {
+            return token[(equals + 1)..];
+        }
+
+        return ReadSeparateCurlOptionValue(command, ref index, arity);
+    }
+
+    private static string ReadSeparateCurlOptionValue(
+        IReadOnlyList<string> command,
+        ref int index,
+        CurlOptionArity arity)
+    {
+        if (arity == CurlOptionArity.NoValue ||
+            index + 1 >= command.Count ||
+            command[index + 1].StartsWith("-", StringComparison.Ordinal))
+        {
+            return string.Empty;
+        }
+
+        return command[++index];
     }
 
     private static bool IsCredentialBearingCurlValue(CurlOptionValueKind kind, string value) =>
@@ -440,6 +532,7 @@ internal static partial class PortableMaterial
             CurlOptionValueKind.UserInfo => HasUserInfo(value, requireAtSign: false),
             CurlOptionValueKind.ProxyUserInfo => HasUserInfo(value, requireAtSign: true),
             CurlOptionValueKind.Certificate => HasCertificatePassphrase(value),
+            CurlOptionValueKind.Url => HasSchemelessUrlUserInfo(value),
             _ => false
         };
 
@@ -518,6 +611,43 @@ internal static partial class PortableMaterial
         var colon = value.AsSpan(0, userInfoEnd).IndexOf(':');
         return colon >= 0 && (colon > 0 || colon + 1 < userInfoEnd);
     }
+
+    private static bool HasSchemelessUrlUserInfo(string value)
+    {
+        var candidate = value.Trim(' ', '\t', '\'', '"', '(', ')', '[', ']', '{', '}', ',', ';');
+        if (candidate.Contains("://", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var atSign = candidate.IndexOf('@');
+        if (atSign <= 0 || atSign + 1 >= candidate.Length)
+        {
+            return false;
+        }
+
+        var userInfo = candidate[..atSign];
+        var colon = userInfo.IndexOf(':');
+        if (colon <= 0 || colon + 1 >= userInfo.Length ||
+            IsDocumentedUserInfoPlaceholder(userInfo))
+        {
+            return false;
+        }
+
+        var host = candidate.AsSpan(atSign + 1);
+        var terminator = host.IndexOfAny('/', '?', '#');
+        if (terminator >= 0)
+        {
+            host = host[..terminator];
+        }
+
+        return !host.IsEmpty && !host.Contains(' ') && !host.Contains('\t');
+    }
+
+    private static bool IsDocumentedUserInfoPlaceholder(string userInfo) =>
+        userInfo.Equals("<user>:<password>", StringComparison.OrdinalIgnoreCase) ||
+        userInfo.Equals("${USER}:${PASSWORD}", StringComparison.OrdinalIgnoreCase) ||
+        userInfo.Equals("{{user}}:{{password}}", StringComparison.OrdinalIgnoreCase);
 
     private static string NormalizeContinuations(string value)
     {
@@ -619,14 +749,23 @@ internal static partial class PortableMaterial
             start = end;
         }
 
-        for (var index = 0; index + 1 < fragments.Count; index++)
+        for (var firstIndex = 0; firstIndex + 1 < fragments.Count; firstIndex++)
         {
-            var first = fragments[index];
-            var second = fragments[index + 1];
-            if (AreJoinableExecFragments(first, second) &&
-                OnlyBlankLinesBetween(lines, first.EndLine, second.StartLine))
+            for (var secondIndex = firstIndex + 1; secondIndex < fragments.Count; secondIndex++)
             {
-                results.Add(first.Text + " " + second.Text);
+                var first = fragments[firstIndex];
+                var second = fragments[secondIndex];
+                if (second.StartLine - first.EndLine >= maximumSequenceLines)
+                {
+                    break;
+                }
+
+                if (AreJoinableExecFragments(first, second) &&
+                    NoExecFragmentBetween(fragments, firstIndex, secondIndex) &&
+                    ShareStructuredContext(lines, first, second))
+                {
+                    results.Add(JoinExecFragments(first, second));
+                }
             }
         }
 
@@ -647,6 +786,12 @@ internal static partial class PortableMaterial
             }
         }
 
+        if (trimmed.StartsWith("- ", StringComparison.Ordinal))
+        {
+            trimmed = trimmed[2..].TrimStart();
+            indent += 2;
+        }
+
         var separator = trimmed.IndexOf(':');
         if (separator < 0)
         {
@@ -658,16 +803,55 @@ internal static partial class PortableMaterial
         return key is "command" or "args" or "entrypoint" or "cmd" or "run" or "test" or "healthcheck.test";
     }
 
-    private static bool AreJoinableExecFragments(ExecFragment first, ExecFragment second) =>
-        first.Indent == second.Indent &&
-        (first.Key == "command" && second.Key == "args" ||
-         first.Key == "entrypoint" && second.Key == "cmd");
-
-    private static bool OnlyBlankLinesBetween(string[] lines, int firstEnd, int secondStart)
+    private static bool AreJoinableExecFragments(ExecFragment first, ExecFragment second)
     {
-        for (var index = firstEnd + 1; index < secondStart; index++)
+        if (first.Indent != second.Indent)
         {
-            if (!string.IsNullOrWhiteSpace(lines[index]))
+            return false;
+        }
+
+        return first.Key switch
+        {
+            "command" => second.Key is "args" or "entrypoint",
+            "args" => second.Key == "command",
+            "entrypoint" => second.Key is "command" or "cmd",
+            "cmd" => second.Key == "entrypoint",
+            _ => false
+        };
+    }
+
+    private static string JoinExecFragments(ExecFragment first, ExecFragment second)
+    {
+        var executable = first.Key is "entrypoint" or "command" &&
+                         second.Key is "args" or "cmd" or "command"
+            ? first
+            : second;
+        var arguments = ReferenceEquals(executable, first) ? second : first;
+        return executable.Text + " " + arguments.Text;
+    }
+
+    private static bool NoExecFragmentBetween(
+        IReadOnlyList<ExecFragment> fragments,
+        int firstIndex,
+        int secondIndex) =>
+        secondIndex == firstIndex + 1;
+
+    private static bool ShareStructuredContext(
+        IReadOnlyList<string> lines,
+        ExecFragment first,
+        ExecFragment second)
+    {
+        for (var index = first.EndLine + 1; index < second.StartLine; index++)
+        {
+            var trimmed = lines[index].Trim();
+            if (trimmed.Length == 0 || trimmed.StartsWith('#'))
+            {
+                continue;
+            }
+
+            var indent = CountLeadingWhitespace(lines[index]);
+            if (indent < first.Indent ||
+                indent == first.Indent && trimmed.StartsWith("- ", StringComparison.Ordinal))
             {
                 return false;
             }
