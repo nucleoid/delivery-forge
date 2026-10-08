@@ -2480,6 +2480,75 @@ public sealed class PlanningBehaviorTests
         AssertPortableConsumersReject(privateText, "revision-round-twenty-three-sequence-scalar-unclosed");
     }
 
+    [Theory]
+    [InlineData("healthcheck:\n  test: &probe >\n    curl -fsS -H\n    'Cookie: session=private'\n    https://example.invalid")]
+    [InlineData("healthcheck:\n  test: !!str |2-\n      curl -fsS --header\n      'Set-Cookie: id=private'\n      https://example.invalid")]
+    [InlineData("args:\n  - !command >-\n    curl -fsS -H\n    'Cookie: session=private'\n    https://example.invalid")]
+    [InlineData("command:\n  &probe [\"curl\", \"-H\",\n    \"Cookie: session=private\", \"https://example.invalid\"]")]
+    [InlineData("command:\n  !!seq &probe [\"curl\", \"--proxy-header\",\n    \"Set-Cookie: id=private\", \"https://example.invalid\"]")]
+    [InlineData("command: &probe >\n  curl -fsS -H 'Authorization: Bearer ***' https://example.invalid")]
+    public void Portable_consumers_reject_round_twenty_four_node_property_structures(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-four-node-property");
+    }
+
+    [Theory]
+    [InlineData("command: !!str >-\n  curl -fsS -H 'Cookie:' https://example.invalid")]
+    [InlineData("args:\n  - !command |\n    curl -fsS -H 'Set-Cookie:   ' https://example.invalid")]
+    [InlineData("command:\n  &probe [\"curl\", \"-H\", \"X-Trace: ordinary\", \"https://example.invalid\"]")]
+    [InlineData("command: &probe echo ordinary")]
+    public void Portable_consumers_preserve_round_twenty_four_node_property_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twenty-four-node-property-control");
+    }
+
+    [Theory]
+    [InlineData("command: curl -fsS --header='\n  Cookie: session=private\n  ' https://example.invalid")]
+    [InlineData("command: curl -fsS --proxy-header=\"\n  Set-Cookie: id=private\n  \" https://example.invalid")]
+    [InlineData("args:\n  - curl -fsS --header=\"\n    Cookie: session=private\n    \" https://example.invalid")]
+    [InlineData("command: curl -fsS --header='\n  Authorization: Bearer ***\n  ' https://example.invalid")]
+    public void Portable_consumers_reject_round_twenty_four_attached_long_option_multiline_headers(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-four-long-option-header");
+    }
+
+    [Theory]
+    [InlineData("command: curl -fsS --header='\n  Cookie:\n  ' https://example.invalid")]
+    [InlineData("command: curl -fsS --proxy-header=\"\n  Set-Cookie:   \n  \" https://example.invalid")]
+    [InlineData("args:\n  - curl -fsS --header=\"\n    X-Trace: ordinary\n    \" https://example.invalid")]
+    [InlineData("command: printf 'Cookie: ordinary prose'")]
+    public void Portable_consumers_preserve_round_twenty_four_attached_long_option_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twenty-four-long-option-control");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_four_next_line_flow_line_limit_without_credentials()
+    {
+        var privateText = "command:\n  [\"curl\",\n" +
+                          string.Join('\n', Enumerable.Range(0, 31).Select(index => $"   \"harmless-{index}\",")) +
+                          "\n   \"https://example.invalid\"]";
+
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-four-next-flow-line-limit");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_four_next_line_flow_character_limit_without_credentials()
+    {
+        var privateText = "command:\n  [\"curl\", \"" + new string('a', 2050) + "\", \"https://example.invalid\"]";
+
+        Assert.True(privateText.Length < 4096);
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-four-next-flow-character-limit");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_four_next_line_flow_unclosed_delimiter_only()
+    {
+        const string privateText = "command:\n  [\"curl\", \"-H\",\n   \"Cookie: session=private]";
+
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-four-next-flow-unclosed");
+    }
+
     [Fact]
     public void Curl_8_5_option_arity_snapshot_audits_every_long_and_short_name()
     {
