@@ -382,11 +382,23 @@ internal static partial class PortableMaterial
 
         foreach (var line in scan.Lines)
         {
-            foreach (var command in TokenizeCommands(NormalizeEscapedQuotes(line)))
+            foreach (var command in TokenizeCommands(line))
             {
                 if (ContainsCurlCredential(command, depth: 0))
                 {
                     return true;
+                }
+            }
+
+            var normalized = NormalizeEscapedQuotes(line);
+            if (!normalized.Equals(line, StringComparison.Ordinal))
+            {
+                foreach (var command in TokenizeCommands(normalized))
+                {
+                    if (ContainsCurlCredential(command, depth: 0))
+                    {
+                        return true;
+                    }
                 }
             }
         }
@@ -884,6 +896,13 @@ internal static partial class PortableMaterial
                 }
                 else
                 {
+                    var sequenceIndent = -1;
+                    var sequenceBlockScalar = false;
+                    var followingLineScalar = false;
+                    var followingLineBlockScalar = false;
+                    var followingLineFlow = false;
+                    var followingLineBracketDepth = 0;
+                    var followingLineBracketQuote = '\0';
                     for (var index = start + 1; index < lines.Length; index++)
                     {
                         if (index - start >= maximumSequenceLines)
@@ -900,7 +919,63 @@ internal static partial class PortableMaterial
                             continue;
                         }
 
-                        if (itemIndent < indent || !item.StartsWith("- ", StringComparison.Ordinal))
+                        if (sequenceIndent < 0 && !followingLineScalar && !followingLineFlow)
+                        {
+                            if (itemIndent <= indent)
+                            {
+                                break;
+                            }
+
+                            if (item.StartsWith("- ", StringComparison.Ordinal))
+                            {
+                                sequenceIndent = itemIndent;
+                                item = item[2..].TrimStart();
+                                sequenceBlockScalar = IsBlockScalarIndicator(item);
+                            }
+                            else if (item[0] is '[' or '{')
+                            {
+                                followingLineFlow = true;
+                                UpdateBracketDepth(item, ref followingLineBracketDepth, ref followingLineBracketQuote);
+                            }
+                            else
+                            {
+                                followingLineScalar = true;
+                                followingLineBlockScalar = IsBlockScalarIndicator(item);
+                            }
+                        }
+                        else if (sequenceIndent >= 0)
+                        {
+                            if (itemIndent < sequenceIndent)
+                            {
+                                break;
+                            }
+
+                            if (itemIndent == sequenceIndent)
+                            {
+                                if (!item.StartsWith("- ", StringComparison.Ordinal))
+                                {
+                                    break;
+                                }
+
+                                item = item[2..].TrimStart();
+                                sequenceBlockScalar = IsBlockScalarIndicator(item);
+                            }
+                            else if (!sequenceBlockScalar && LooksLikeYamlMappingEntry(item))
+                            {
+                                break;
+                            }
+                        }
+                        else if (followingLineFlow)
+                        {
+                            if (followingLineBracketDepth <= 0 || itemIndent <= indent)
+                            {
+                                break;
+                            }
+
+                            UpdateBracketDepth(item, ref followingLineBracketDepth, ref followingLineBracketQuote);
+                        }
+                        else if (itemIndent <= indent ||
+                                 !followingLineBlockScalar && LooksLikeYamlMappingEntry(item))
                         {
                             break;
                         }
@@ -911,8 +986,15 @@ internal static partial class PortableMaterial
                             break;
                         }
 
-                        logical.Append(' ').Append(item[2..]);
+                        logical.Append(' ').Append(item);
                         end = index;
+                    }
+
+                    if (followingLineFlow &&
+                        followingLineBracketDepth != 0 &&
+                        fragmentAbandonment == StructuredAbandonmentReason.None)
+                    {
+                        fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
                     }
                 }
             }
@@ -1255,6 +1337,12 @@ internal static partial class PortableMaterial
                 {
                     quote = '\0';
                 }
+                else if (character is '\\' or '`' or '^' &&
+                         index + 1 < line.Length &&
+                         IsQuote(line[index + 1]))
+                {
+                    token.Append(line[++index]);
+                }
                 else
                 {
                     token.Append(character);
@@ -1343,7 +1431,13 @@ internal static partial class PortableMaterial
 
         for (var index = start + 1; index < quoteIndex; index++)
         {
-            if (!char.IsLetter(value[index]))
+            if (!CurlShortOptions.TryGetValue(value[index], out var spec) ||
+                index + 1 < quoteIndex && spec.Arity != CurlOptionArity.NoValue)
+            {
+                return false;
+            }
+
+            if (index + 1 == quoteIndex && spec.Arity == CurlOptionArity.NoValue)
             {
                 return false;
             }
