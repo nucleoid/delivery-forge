@@ -1615,6 +1615,86 @@ public sealed class PlanningBehaviorTests
     }
 
     [Theory]
+    [InlineData("Don't run curl -u alice:hunter2 https://example.invalid")]
+    [InlineData("It's easiest to run `curl --user alice:hunter2 https://example.invalid`")]
+    [InlineData("The operator's note says: ```sh\ncurl.exe -u alice:hunter2 https://example.invalid\n```")]
+    public void Portable_consumers_reject_round_fifteen_curl_after_prose_apostrophes(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-fifteen-apostrophe-curl");
+    }
+
+    [Theory]
+    [InlineData("sh -c \"curl -u alice:hunter2 https://example.invalid\"")]
+    [InlineData("bash -c 'curl --user alice:hunter2 https://example.invalid'")]
+    [InlineData("docker exec app sh -c \"curl -u alice:hunter2 https://example.invalid\"")]
+    [InlineData("ssh example.invalid 'curl --user alice:hunter2 https://service.invalid'")]
+    [InlineData("HEALTHCHECK CMD [\"curl\", \"-u\", \"alice:hunter2\", \"https://example.invalid\"]")]
+    [InlineData("command: [\"curl.exe\", \"--user=alice:hunter2\", \"https://example.invalid\"]")]
+    public void Portable_consumers_reject_round_fifteen_wrapped_and_exec_array_curl(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-fifteen-wrapped-curl");
+    }
+
+    [Theory]
+    [InlineData("\\curl -u alice:hunter2 https://example.invalid")]
+    [InlineData("./curl --user alice:hunter2 https://example.invalid")]
+    [InlineData(".\\curl.exe -u alice:hunter2 https://example.invalid")]
+    [InlineData("../curl --user=alice:hunter2 https://example.invalid")]
+    [InlineData("..\\curl.exe -ualice:hunter2 https://example.invalid")]
+    public void Portable_consumers_reject_round_fifteen_bounded_curl_paths(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-fifteen-curl-path");
+    }
+
+    [Theory]
+    [InlineData("curl -d \"{\\\"password\\\":\\\"hunter2\\\"}\" https://example.invalid")]
+    [InlineData("curl -d \"{\\\"Authorization\\\":\\\"Basic YWxpY2U6aHVudGVyMg==\\\"}\" https://example.invalid")]
+    [InlineData("curl -d '{`\"password`\": `\"hunter2`\"}' https://example.invalid")]
+    [InlineData("curl -d '{`\"Authorization`\": `\"Basic YWxpY2U6aHVudGVyMg==`\"}' https://example.invalid")]
+    [InlineData("curl -d \"{^\"password^\":^\"hunter2^\"}\" https://example.invalid")]
+    public void Portable_consumers_reject_round_fifteen_escaped_credential_keys(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-fifteen-escaped-key");
+    }
+
+    [Theory]
+    [InlineData("SECRET_KEY=private-value")]
+    [InlineData("MINIO_SECRET_KEY=private-value")]
+    [InlineData("stripe-secret-key: private-value")]
+    [InlineData("privateKey=private-value")]
+    [InlineData("TlsPrivateKey=private-value")]
+    [InlineData("SIGNING_KEY=private-value")]
+    [InlineData("jwtSigningKey=private-value")]
+    [InlineData("encryption-key: private-value")]
+    [InlineData("StorageEncryptionKey=private-value")]
+    public void Portable_consumers_reject_round_fifteen_terminal_credential_key_pairs(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-fifteen-terminal-key-pair");
+    }
+
+    [Theory]
+    [InlineData("The operator's guide says curl accepts authentication options")]
+    [InlineData("It's safe to run `curl https://example.invalid/health`")]
+    [InlineData("sh -c \"curl https://example.invalid/health\"")]
+    [InlineData("HEALTHCHECK CMD [\"curl\", \"-fsS\", \"https://example.invalid/health\"]")]
+    [InlineData("./curl --user-agent delivery-forge https://example.invalid")]
+    [InlineData("\\curl https://example.invalid/health")]
+    [InlineData("curl -d \"{\\\"Authorization\\\":\\\"\\\"}\" https://example.invalid")]
+    [InlineData("curl -d '{`\"password`\": `\"   `\"}' https://example.invalid")]
+    [InlineData("primary_key=id")]
+    [InlineData("sort_key=created_at")]
+    [InlineData("cache_key=planning-v1")]
+    [InlineData("private_key_policy=managed")]
+    [InlineData("signing_key_format=pem")]
+    [InlineData("ENCRYPTION_KEY_POLICY=rotated")]
+    [InlineData("Both curl and docker run -u 1000:1000 image are documented")]
+    [InlineData("docker exec -u 1000:1000 app healthcheck")]
+    public void Portable_consumers_preserve_round_fifteen_sibling_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-fifteen-control");
+    }
+
+    [Theory]
     [InlineData("{\"Authorization\": \"\"}")]
     [InlineData("{'Authorization' = '   '}")]
     [InlineData("Authorization:\nordinary next line")]
