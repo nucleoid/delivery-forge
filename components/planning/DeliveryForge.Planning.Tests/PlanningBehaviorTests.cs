@@ -2621,6 +2621,53 @@ public sealed class PlanningBehaviorTests
         AssertPortableConsumersReject(privateText, "revision-round-twenty-five-sequence-flow-unclosed");
     }
 
+    [Theory]
+    [InlineData("command: [\"curl\", \"-H\", # header follows\n  \"Cookie: session=private\", \"https://example.invalid\"]")]
+    [InlineData("command:\n  [\"curl\", \"--header\",\n  # header follows\n  \"Cookie: session=private\", \"https://example.invalid\"]")]
+    [InlineData("args:\n  - [\"curl\", \"-u\",\n      # user follows\n      \"alice:hunter2\", \"https://example.invalid\"]")]
+    [InlineData("args:\n  -\n    [\"curl\", \"--user\",\n     # user follows\n     \"alice:hunter2\", \"https://example.invalid\"]")]
+    [InlineData("command:\n  - curl\n  - -H # header follows\n  - \"Cookie: session=private\"\n  - https://example.invalid")]
+    [InlineData("command:\n  - curl\n  - --header # header follows\n  - \"Cookie: session=private\"\n  - https://example.invalid")]
+    [InlineData("command:\n  - curl\n  - --user # user follows\n  - alice:hunter2\n  - https://example.invalid")]
+    [InlineData("command:\n  - curl\n  - --pass # password follows\n  - hunter2\n  - https://example.invalid")]
+    public void Portable_consumers_reject_round_twenty_six_yaml_comments_between_curl_options_and_values(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-six-comment-value");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_six_sequence_after_block_scalar_comment()
+    {
+        const string privateText = "command:\n  - >-\n    curl\n  # credentials follow\n  - -u\n  - alice:hunter2\n  - https://example.invalid";
+
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-six-block-comment");
+    }
+
+    [Theory]
+    [InlineData("command: >-\n  curl -fsS -H 'Authorization:\n  Basic YWxhZGRpbjpvcGVuc2VzYW1l' https://example.invalid")]
+    [InlineData("command: >-\n  curl -fsS --header 'Proxy-Authorization:\n  Digest username=alice,response=private' https://example.invalid")]
+    [InlineData("command:\n  [\"curl\", \"--proxy-header\", \"Proxy-Authorization:\n  Negotiate private-ticket\", \"https://example.invalid\"]")]
+    public void Portable_consumers_reject_round_twenty_six_assembled_authorization_headers(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-six-authorization");
+    }
+
+    [Theory]
+    [InlineData("command: [\"curl\", \"-H\", \"Cookie:\", \"https://example.invalid\"]")]
+    [InlineData("command: [\"curl\", \"-H\", \"Authorization:   \", \"https://example.invalid\"]")]
+    [InlineData("command: [\"curl\", \"--proxy-header\", \"X-Trace: ordinary\", \"https://example.invalid\"]")]
+    [InlineData("Authorization:\nordinary next line")]
+    [InlineData("command: [\"curl\", \"-H\", \"X-Trace: value # retained\", \"https://example.invalid\"]")]
+    [InlineData("command: >-\n  printf '# retained block data'\n  && curl -H 'Authorization:' https://example.invalid")]
+    [InlineData("command:\n  - >-\n    curl -H 'Authorization:' https://example.invalid\n  # genuine comment after block scalar\n  - echo ordinary")]
+    [InlineData("command:\n  - curl\n  # genuine comment between items\n  - -H\n  - \"X-Trace: ordinary\"\n  - ./scripts/check.sh")]
+    [InlineData("dotnet test ../tests/Foo.csproj")]
+    public void Portable_consumers_preserve_round_twenty_six_comment_and_header_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twenty-six-control");
+    }
+
+
     [Fact]
     public void Curl_8_5_option_arity_snapshot_audits_every_long_and_short_name()
     {
