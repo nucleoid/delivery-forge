@@ -2361,6 +2361,7 @@ public sealed class PlanningBehaviorTests
     [Theory]
     [InlineData("healthcheck:\n  test: \"curl -fsS --header\n    'Cookie: session=private'\n    https://example.invalid\"")]
     [InlineData("args:\n  - \"curl -fsS -H\n    'Set-Cookie: id=private' https://example.invalid\"")]
+    [InlineData("command: curl -fsS -H'\n  Cookie: session=private\n  ' https://example.invalid")]
     [InlineData("command: > # probe\n  curl -fsS -H\n  'Cookie: session=private'\n  https://example.invalid")]
     [InlineData("command: >2\n    curl -fsS -H\n    'Cookie: session=private'\n    https://example.invalid")]
     [InlineData("command: |2-\n    curl -fsS -H\n    'Set-Cookie: id=private'\n    https://example.invalid")]

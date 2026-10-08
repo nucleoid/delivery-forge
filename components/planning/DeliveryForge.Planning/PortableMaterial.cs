@@ -1254,7 +1254,8 @@ internal static partial class PortableMaterial
                 (index == 0 ||
                  char.IsWhiteSpace(value[index - 1]) ||
                  IsCommandSeparator(value[index - 1]) ||
-                 value[index - 1] is '[' or '{' or ',' or ':'))
+                 value[index - 1] is '[' or '{' or ',' or ':' ||
+                 IsAttachedShortOptionQuote(value, index)))
             {
                 quote = character;
             }
