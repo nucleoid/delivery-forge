@@ -1482,6 +1482,65 @@ public sealed class PlanningBehaviorTests
     }
 
     [Theory]
+    [InlineData("curl -d \"password=hunter2\" https://example.invalid")]
+    [InlineData("curl --data-urlencode 'token=private-value' https://example.invalid")]
+    [InlineData("curl -F \"client_secret=private-value\" https://example.invalid")]
+    [InlineData("curl --form-string 'api_key=private-value' https://example.invalid")]
+    [InlineData("curl -d \\\"access_token=private-value\\\" https://example.invalid")]
+    [InlineData("payload='DB_PASSWORD=private-value'")]
+    public void Portable_consumers_reject_quote_adjacent_credential_assignments(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-quote-adjacent-credential");
+    }
+
+    [Theory]
+    [InlineData("Proxy-Authorization: Basic private-value")]
+    [InlineData("X-API-Key: private-value")]
+    [InlineData("apiKey=private-value")]
+    [InlineData("clientSecret: private-value")]
+    [InlineData("accessToken=private-value")]
+    [InlineData("DB_PASSWORD=private-value")]
+    [InlineData("PGPASSWORD=private-value")]
+    [InlineData("NPM_TOKEN=private-value")]
+    [InlineData("AWS_SECRET_ACCESS_KEY=private-value")]
+    public void Portable_consumers_reject_compound_and_environment_credential_keys(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-compound-credential-key");
+    }
+
+    [Theory]
+    [InlineData("env MODE=test curl -u alice:hunter2 https://example.invalid")]
+    [InlineData("sudo curl.exe --user alice:hunter2 https://example.invalid")]
+    [InlineData("$ curl -u alice:hunter2 https://example.invalid")]
+    [InlineData("PS> curl.exe --user=alice:hunter2 https://example.invalid")]
+    [InlineData("$(curl -u alice:hunter2 https://example.invalid )")]
+    [InlineData("(curl.exe --user alice:hunter2 https://example.invalid )")]
+    [InlineData("Run `curl -u alice:hunter2 https://example.invalid` to verify")]
+    [InlineData("```sh\ncurl.exe --user alice:hunter2 https://example.invalid\n```")]
+    public void Portable_consumers_reject_credentials_on_supported_embedded_curl_executables(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-embedded-curl-executable");
+    }
+
+    [Theory]
+    [InlineData("The quoted prose 'password policy' remains portable")]
+    [InlineData("Proxy-Authorization headers are described in the manual")]
+    [InlineData("X-API-Key is the documented header name")]
+    [InlineData("passwordPolicy=strict")]
+    [InlineData("tokenizer=bounded")]
+    [InlineData("secretary=available")]
+    [InlineData("DB_PASSWORD_POLICY=twelve-characters")]
+    [InlineData("NPM_TOKEN_FORMAT=opaque")]
+    [InlineData("Read https://example.invalid/docs/curl-u-example")]
+    [InlineData("The curl.exe -u option accepts a user name and password")]
+    [InlineData("docker run -u 1000:1000 curl-image")]
+    [InlineData("env MODE=test curl --user-agent delivery-forge https://example.invalid")]
+    public void Portable_consumers_preserve_round_thirteen_sibling_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-thirteen-control");
+    }
+
+    [Theory]
     [InlineData("{\"Authorization\": \"\"}")]
     [InlineData("{'Authorization' = '   '}")]
     [InlineData("Authorization:\nordinary next line")]
