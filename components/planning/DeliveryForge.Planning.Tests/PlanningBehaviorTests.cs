@@ -1415,6 +1415,89 @@ public sealed class PlanningBehaviorTests
     }
 
     [Theory]
+    [InlineData("{\"Authorization\": \"Basic abc123\"}")]
+    [InlineData("{'Authorization': 'Bearer abc123'}")]
+    [InlineData("@{ Authorization = 'Digest abc123' }")]
+    [InlineData("@{ 'Authorization' = \"Token abc123\" }")]
+    [InlineData("Authorization = Basic abc123")]
+    [InlineData("\"Authorization\": \"Basic abc123")]
+    [InlineData("'Authorization' = 'Bearer abc123")]
+    public void Portable_consumers_reject_populated_authorization_maps(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-authorization-map");
+    }
+
+    [Theory]
+    [InlineData("curl \\\n        --user alice: https://example.invalid")]
+    [InlineData("curl `\n        --user :hunter2 https://example.invalid")]
+    [InlineData("curl ^\r\n        -U proxy-user: https://example.invalid")]
+    [InlineData("curl \\\n        --proxy-user :proxy-password https://example.invalid")]
+    [InlineData("curl -fsu \\\n        alice: https://example.invalid")]
+    [InlineData("curl -x \\\n        :proxy-password@proxy.example:3128 https://example.invalid")]
+    public void Portable_consumers_reject_curl_credentials_across_explicit_continuations(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-curl-continuation");
+    }
+
+    [Theory]
+    [InlineData("curl -u alice: https://example.invalid")]
+    [InlineData("curl -u :hunter2 https://example.invalid")]
+    [InlineData("curl -ualice: https://example.invalid")]
+    [InlineData("curl -fsu:hunter2 https://example.invalid")]
+    [InlineData("curl --user=alice: https://example.invalid")]
+    [InlineData("curl --user :hunter2 https://example.invalid")]
+    [InlineData("curl -U proxy-user: https://example.invalid")]
+    [InlineData("curl -fsU:proxy-password https://example.invalid")]
+    [InlineData("curl --proxy-user=proxy-user: https://example.invalid")]
+    [InlineData("curl --proxy-user :proxy-password https://example.invalid")]
+    [InlineData("curl --proxy=:proxy-password@proxy.example:3128 https://example.invalid")]
+    [InlineData("curl -xproxy-user:@proxy.example:3128 https://example.invalid")]
+    public void Portable_consumers_reject_one_sided_curl_userinfo(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-one-sided-curl-userinfo");
+    }
+
+    [Theory]
+    [InlineData("'api_key' = 'private-value'")]
+    [InlineData("'api-key': 'private-value'")]
+    [InlineData("'password' = 'private-value'")]
+    [InlineData("'passwd': 'private-value'")]
+    [InlineData("'token' = 'private-value'")]
+    [InlineData("'secret': 'private-value'")]
+    [InlineData("'client_secret' = 'private-value'")]
+    [InlineData("'client-secret': 'private-value'")]
+    [InlineData("'access_key' = 'private-value'")]
+    [InlineData("'access-key': 'private-value'")]
+    [InlineData("'aws_access_key_id' = 'private-value'")]
+    [InlineData("'aws-access-key-id': 'private-value'")]
+    [InlineData("\"api_key\" = \"private-value\"")]
+    [InlineData("\"password\": \"private-value\"")]
+    [InlineData("\"token\" = \"private-value\"")]
+    [InlineData("\"client-secret\": \"private-value\"")]
+    [InlineData("\"access-key\" = \"private-value\"")]
+    [InlineData("\"aws-access-key-id\": \"private-value\"")]
+    public void Portable_consumers_reject_quoted_credential_assignment_keys(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-quoted-credential-key");
+    }
+
+    [Theory]
+    [InlineData("{\"Authorization\": \"\"}")]
+    [InlineData("{'Authorization' = '   '}")]
+    [InlineData("Authorization:\nordinary next line")]
+    [InlineData("curl \\\n        --user-agent delivery-forge https://example.invalid")]
+    [InlineData("curl https://example.invalid/path?user=alice:8080")]
+    [InlineData("The curl -u option accepts a user name and password")]
+    [InlineData("curl -x proxy.example:3128 https://example.invalid")]
+    [InlineData("docker run -u 1000:1000 image")]
+    [InlineData("curl https://example.invalid && docker run -u 1000:1000 image")]
+    [InlineData("dotnet test ../tests/Foo.csproj")]
+    public void Portable_consumers_preserve_round_twelve_sibling_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twelve-control");
+    }
+
+    [Theory]
     [InlineData("dotnet test ./tests/Foo.csproj")]
     [InlineData("dotnet test ../tests/Foo.csproj")]
     [InlineData("pwsh ..\\tmp\\build.ps1")]
@@ -1786,6 +1869,29 @@ public sealed class PlanningBehaviorTests
             limitations = Array.Empty<string>()
         }));
         Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
+    }
+
+    private static void AssertPortableConsumersAccept(string portableText, string revision)
+    {
+        var original = Draft();
+        EvidenceItem[] provenance = [RepositoryEvidence(portableText)];
+        var draft = original with
+        {
+            Provenance = provenance,
+            Intake = IntakePlanner.Assess(original.Request, provenance)
+        };
+        var frozen = PlanFreezer.Freeze(draft, revision, ObservedAt);
+
+        var json = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        {
+            schemaVersion = "1.0.0",
+            entries = new[] { new { kind = "memory", locator = "memory:item-1", summary = portableText, digest = (string?)null, observedAt = "2026-10-07T20:00:00Z" } },
+            conflicts = Array.Empty<string>(),
+            limitations = Array.Empty<string>()
+        }));
+
+        Assert.True(frozen.DownstreamReady);
+        Assert.Single(ImportedContextEnvelope.Parse(json).Entries);
     }
 
     private static RepositoryFile RepositoryFileFor(string path) => new(
