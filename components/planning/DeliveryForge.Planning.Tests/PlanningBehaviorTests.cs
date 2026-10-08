@@ -2119,6 +2119,119 @@ public sealed class PlanningBehaviorTests
         AssertPortableConsumersAccept(portableText, "revision-round-twenty-control");
     }
 
+    [Theory]
+    [InlineData("command: [\n  \"curl\", # documentation closes with ]\n  \"--pass\", \"private-phrase\",\n  \"https://example.invalid\"\n]")]
+    [InlineData("command: [\n  \"curl\", # escaped URL https://example.invalid/a#b and ]\n  \"--user\", \"alice:hunter2\",\n  \"https://example.invalid\"\n]")]
+    public void Portable_consumers_reject_round_twenty_one_flow_comments(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-one-flow-comment");
+    }
+
+    [Theory]
+    [InlineData("command: [\"curl\", \"https://example.invalid/a#b]c\"]")]
+    [InlineData("command: [\"curl\", 'https://example.invalid/a#b]c']")]
+    public void Portable_consumers_preserve_round_twenty_one_quoted_flow_comment_markers(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twenty-one-flow-comment-control");
+    }
+
+    [Theory]
+    [InlineData("containers:\n- name: probe\n  command: [\"curl\"]\n  env:\n  - name: MODE\n    value: probe\n  args: [\"--user\", \"alice:hunter2\", \"https://example.invalid\"]")]
+    [InlineData("containers:\n- name: probe\n  command: [\"curl\"]\n  ports:\n  - containerPort: 8080\n  volumeMounts:\n  - name: cache\n    mountPath: relative/cache\n  args: [\"--pass\", \"private-phrase\", \"https://example.invalid\"]")]
+    [InlineData("containers:\n- name: probe\n  command: [\"curl\"]\n  readinessProbe:\n    httpGet:\n      path: /ready\n      port: 8080\n  args: [\"--cookie\", \"session=private\", \"https://example.invalid\"]")]
+    public void Portable_consumers_reject_round_twenty_one_compact_child_collections(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-one-compact-child");
+    }
+
+    [Theory]
+    [InlineData("containers:\n- name: probe\n  command: [\"curl\"]\n- name: sibling\n  args: [\"--pass\", \"documentation-only\"]")]
+    [InlineData("containers:\n- name: probe\n  command: [\"curl\"]\n---\ncontainers:\n- name: sibling\n  args: [\"--pass\", \"documentation-only\"]")]
+    [InlineData("[{ \"Entrypoint\": [\"curl\"] }, { \"Cmd\": [\"--pass\", \"documentation-only\"] }]")]
+    [InlineData("FROM base AS probe\nENTRYPOINT [\"curl\"]\nFROM base AS sibling\nCMD [\"--pass\", \"documentation-only\"]")]
+    public void Portable_consumers_preserve_round_twenty_one_structural_siblings(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twenty-one-structural-control");
+    }
+
+    [Theory]
+    [InlineData("command: >\n  curl -fsS\n  --user alice:hunter2\n  https://example.invalid")]
+    [InlineData("command: >-\n  curl -fsS\n    --pass private-phrase\n  https://example.invalid")]
+    [InlineData("command: >+\n  curl -fsS\n  --cookie session=private\n  https://example.invalid")]
+    [InlineData("command: |\n  curl -fsS\n  -H\"Cookie: session=private\"\n  https://example.invalid")]
+    [InlineData("command: curl -fsS\n  --user alice:hunter2\n  https://example.invalid")]
+    [InlineData("args: >\n  curl -fsS\n  --pass private-phrase\n  https://example.invalid")]
+    [InlineData("healthcheck:\n  test: >-\n    curl -fsS\n    --user alice:hunter2\n    https://example.invalid")]
+    public void Portable_consumers_reject_round_twenty_one_multiline_exec_scalars(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-one-multiline-scalar");
+    }
+
+    [Theory]
+    [InlineData("description: >\n  curl is named in prose\n  --pass is documented separately")]
+    [InlineData("command: >\n  curl -fsS https://example.invalid\nlabels:\n  note: --pass documentation-only")]
+    [InlineData("healthcheck:\n  test: curl -fsS https://example.invalid\n  interval: 30s\nother: --pass documentation-only")]
+    public void Portable_consumers_preserve_round_twenty_one_multiline_boundaries(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twenty-one-multiline-control");
+    }
+
+    [Theory]
+    [InlineData("curl -H\"Cookie: session=private-value\" https://example.invalid")]
+    [InlineData("curl -H'Cookie: session=private-value' https://example.invalid")]
+    [InlineData("curl -sSH\"Cookie: session=private-value\" https://example.invalid")]
+    [InlineData("curl -sSH'Set-Cookie: id=private' https://example.invalid")]
+    public void Portable_consumers_reject_round_twenty_one_attached_quoted_cookie_headers(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-one-attached-header");
+    }
+
+    [Theory]
+    [InlineData("curl -H\"Cookie:\" https://example.invalid")]
+    [InlineData("curl -sSH'Set-Cookie:   ' https://example.invalid")]
+    [InlineData("curl -H\"X-Trace: ordinary\" https://example.invalid")]
+    [InlineData("curl -sS 'Cookie: session=ordinary-argument' https://example.invalid")]
+    public void Portable_consumers_preserve_round_twenty_one_attached_header_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twenty-one-attached-header-control");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_one_line_bound_before_curl()
+    {
+        var privateText = "command:\n" +
+                          string.Join('\n', Enumerable.Range(0, 32).Select(index => $"  - harmless-{index}")) +
+                          "\n  - curl\n  - --pass\n  - private-phrase\n  - https://example.invalid";
+
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-one-line-bound-before-curl");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_one_character_bound_before_curl()
+    {
+        var privateText = "command: [\"" + new string('a', 2100) +
+                          "\", \"curl\", \"--pass\", \"private-phrase\", \"https://example.invalid\"]";
+
+        Assert.True(privateText.Length < 4096);
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-one-character-bound-before-curl");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_one_unclosed_delimiter_reason()
+    {
+        const string privateText = "command: [\n  \"harmless\",\n  \"curl\",\n  \"--pass\", \"private-phrase\"";
+
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-one-unclosed-delimiter");
+    }
+
+    [Theory]
+    [InlineData("notes:\n  - harmless-0\n  - harmless-1\n  - curl\n  - --pass\n  - documentation-only")]
+    [InlineData("description: [\"aaaaaaaaaaaaaaaa\", \"curl\", \"--pass\", \"documentation-only\"]")]
+    public void Portable_consumers_preserve_round_twenty_one_bounded_non_exec_material(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twenty-one-bounded-non-exec-control");
+    }
+
     [Fact]
     public void Curl_8_5_option_arity_snapshot_audits_every_long_and_short_name()
     {
