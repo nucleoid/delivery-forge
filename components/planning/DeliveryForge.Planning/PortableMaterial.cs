@@ -940,6 +940,7 @@ internal static partial class PortableMaterial
                     var sequenceFlow = false;
                     var sequenceBracketDepth = 0;
                     var sequenceBracketQuote = '\0';
+                    var sequenceNodePending = false;
                     var followingLineScalar = false;
                     var followingLineBlockScalar = false;
                     var followingLineFlow = false;
@@ -956,7 +957,18 @@ internal static partial class PortableMaterial
 
                         var itemIndent = CountLeadingWhitespace(lines[index]);
                         var item = lines[index].TrimStart();
-                        if (item.Length == 0 || item.StartsWith('#'))
+                        if (item.Length == 0)
+                        {
+                            end = index;
+                            continue;
+                        }
+
+                        var structuredContentActive = sequenceBlockScalar ||
+                                                      followingLineBlockScalar ||
+                                                      scalarQuote != '\0' ||
+                                                      sequenceFlow && sequenceBracketDepth > 0 ||
+                                                      followingLineFlow && followingLineBracketDepth > 0;
+                        if (item.StartsWith('#') && !structuredContentActive)
                         {
                             end = index;
                             continue;
@@ -965,35 +977,39 @@ internal static partial class PortableMaterial
                         if (sequenceIndent < 0 && !followingLineScalar && !followingLineFlow)
                         {
                             if (itemIndent < indent ||
-                                itemIndent == indent && !item.StartsWith("- ", StringComparison.Ordinal))
+                                itemIndent == indent && !IsYamlSequenceMarker(item))
                             {
                                 break;
                             }
 
-                            if (item.StartsWith("- ", StringComparison.Ordinal))
+                            if (IsYamlSequenceMarker(item))
                             {
                                 sequenceIndent = itemIndent;
-                                item = item[2..].TrimStart();
-                                var sequenceProperties = ParseYamlNodeProperties(item, out var sequenceValue);
-                                item = sequenceValue;
-                                if (sequenceProperties == YamlNodePropertiesKind.Invalid)
+                                item = ReadYamlSequenceValue(item);
+                                sequenceNodePending = item.Length == 0;
+                                if (!sequenceNodePending)
                                 {
-                                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
-                                }
+                                    var sequenceProperties = ParseYamlNodeProperties(item, out var sequenceValue);
+                                    item = sequenceValue;
+                                    if (sequenceProperties == YamlNodePropertiesKind.Invalid)
+                                    {
+                                        fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                    }
 
-                                var sequenceBlockHeader = ParseBlockScalarHeader(item);
-                                sequenceBlockScalar = sequenceBlockHeader == BlockScalarHeaderKind.Valid;
-                                sequenceFlow = sequenceProperties != YamlNodePropertiesKind.Invalid &&
-                                               item.Length > 0 &&
-                                               item[0] is '[' or '{';
-                                if (sequenceFlow)
-                                {
-                                    UpdateBracketDepth(item, ref sequenceBracketDepth, ref sequenceBracketQuote);
-                                }
+                                    var sequenceBlockHeader = ParseBlockScalarHeader(item);
+                                    sequenceBlockScalar = sequenceBlockHeader == BlockScalarHeaderKind.Valid;
+                                    sequenceFlow = sequenceProperties != YamlNodePropertiesKind.Invalid &&
+                                                   item.Length > 0 &&
+                                                   item[0] is '[' or '{';
+                                    if (sequenceFlow)
+                                    {
+                                        UpdateBracketDepth(item, ref sequenceBracketDepth, ref sequenceBracketQuote);
+                                    }
 
-                                if (sequenceBlockHeader == BlockScalarHeaderKind.Invalid)
-                                {
-                                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                    if (sequenceBlockHeader == BlockScalarHeaderKind.Invalid)
+                                    {
+                                        fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                    }
                                 }
                             }
                             else
@@ -1030,25 +1046,9 @@ internal static partial class PortableMaterial
                                 break;
                             }
 
-                            if (itemIndent == sequenceIndent)
+                            if (sequenceNodePending && itemIndent > sequenceIndent)
                             {
-                                if (sequenceFlow && sequenceBracketDepth != 0)
-                                {
-                                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
-                                }
-
-                                if (scalarQuote != '\0')
-                                {
-                                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
-                                    break;
-                                }
-
-                                if (!item.StartsWith("- ", StringComparison.Ordinal))
-                                {
-                                    break;
-                                }
-
-                                item = item[2..].TrimStart();
+                                sequenceNodePending = false;
                                 var sequenceProperties = ParseYamlNodeProperties(item, out var sequenceValue);
                                 item = sequenceValue;
                                 if (sequenceProperties == YamlNodePropertiesKind.Invalid)
@@ -1061,8 +1061,6 @@ internal static partial class PortableMaterial
                                 sequenceFlow = sequenceProperties != YamlNodePropertiesKind.Invalid &&
                                                item.Length > 0 &&
                                                item[0] is '[' or '{';
-                                sequenceBracketDepth = 0;
-                                sequenceBracketQuote = '\0';
                                 if (sequenceFlow)
                                 {
                                     UpdateBracketDepth(item, ref sequenceBracketDepth, ref sequenceBracketQuote);
@@ -1071,6 +1069,55 @@ internal static partial class PortableMaterial
                                 if (sequenceBlockHeader == BlockScalarHeaderKind.Invalid)
                                 {
                                     fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                }
+                            }
+                            else if (itemIndent == sequenceIndent)
+                            {
+                                if (sequenceFlow && sequenceBracketDepth != 0)
+                                {
+                                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                }
+
+                                if (scalarQuote != '\0')
+                                {
+                                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                    break;
+                                }
+
+                                if (!IsYamlSequenceMarker(item))
+                                {
+                                    break;
+                                }
+
+                                item = ReadYamlSequenceValue(item);
+                                sequenceNodePending = item.Length == 0;
+                                sequenceBlockScalar = false;
+                                sequenceFlow = false;
+                                sequenceBracketDepth = 0;
+                                sequenceBracketQuote = '\0';
+                                if (!sequenceNodePending)
+                                {
+                                    var sequenceProperties = ParseYamlNodeProperties(item, out var sequenceValue);
+                                    item = sequenceValue;
+                                    if (sequenceProperties == YamlNodePropertiesKind.Invalid)
+                                    {
+                                        fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                    }
+
+                                    var sequenceBlockHeader = ParseBlockScalarHeader(item);
+                                    sequenceBlockScalar = sequenceBlockHeader == BlockScalarHeaderKind.Valid;
+                                    sequenceFlow = sequenceProperties != YamlNodePropertiesKind.Invalid &&
+                                                   item.Length > 0 &&
+                                                   item[0] is '[' or '{';
+                                    if (sequenceFlow)
+                                    {
+                                        UpdateBracketDepth(item, ref sequenceBracketDepth, ref sequenceBracketQuote);
+                                    }
+
+                                    if (sequenceBlockHeader == BlockScalarHeaderKind.Invalid)
+                                    {
+                                        fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                    }
                                 }
                             }
                             else if (sequenceFlow && sequenceBracketDepth > 0)
@@ -1231,6 +1278,13 @@ internal static partial class PortableMaterial
     private static bool IsYamlCommentStart(string value, int index) =>
         !IsEscaped(value, index) &&
         (index == 0 || char.IsWhiteSpace(value[index - 1]));
+
+    private static bool IsYamlSequenceMarker(string value) =>
+        value.Length > 0 &&
+        value[0] == '-' &&
+        (value.Length == 1 || char.IsWhiteSpace(value[1]));
+
+    private static string ReadYamlSequenceValue(string value) => value[1..].TrimStart();
 
     private static string ReadExecValue(string line, string key)
     {
