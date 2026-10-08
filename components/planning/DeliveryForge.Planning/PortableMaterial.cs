@@ -614,7 +614,7 @@ internal static partial class PortableMaterial
         kind switch
         {
             CurlOptionValueKind.Secret => !string.IsNullOrWhiteSpace(value),
-            CurlOptionValueKind.Header => HasPopulatedCookieHeader(value),
+            CurlOptionValueKind.Header => HasPopulatedCredentialHeader(value),
             CurlOptionValueKind.UserInfo => HasUserInfo(value, requireAtSign: false),
             CurlOptionValueKind.ProxyUserInfo => HasUserInfo(value, requireAtSign: true),
             CurlOptionValueKind.Certificate => HasCertificatePassphrase(value),
@@ -622,7 +622,7 @@ internal static partial class PortableMaterial
             _ => false
         };
 
-    private static bool HasPopulatedCookieHeader(string value)
+    private static bool HasPopulatedCredentialHeader(string value)
     {
         var separator = value.IndexOfAny(':', '=');
         if (separator < 0)
@@ -632,7 +632,9 @@ internal static partial class PortableMaterial
 
         var key = value[..separator].Trim(' ', '\t', '\'', '"');
         return (key.Equals("Cookie", StringComparison.OrdinalIgnoreCase) ||
-                key.Equals("Set-Cookie", StringComparison.OrdinalIgnoreCase)) &&
+                key.Equals("Set-Cookie", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("Authorization", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("Proxy-Authorization", StringComparison.OrdinalIgnoreCase)) &&
                HasPopulatedValue(value.AsSpan(separator + 1));
     }
 
@@ -834,7 +836,7 @@ internal static partial class PortableMaterial
                 continue;
             }
 
-            var logical = new StringBuilder(lines[start]);
+            var logical = new StringBuilder(StripUnquotedYamlComment(lines[start], '\0'));
             var end = start;
             var fragmentAbandonment = logical.Length > maximumSequenceCharacters
                 ? StructuredAbandonmentReason.CharacterLimit
@@ -859,14 +861,15 @@ internal static partial class PortableMaterial
                         break;
                     }
 
-                    if (logical.Length + lines[index].Length + 1 > maximumSequenceCharacters)
+                    var continuation = StripUnquotedYamlComment(lines[index], bracketQuote);
+                    if (logical.Length + continuation.Length + 1 > maximumSequenceCharacters)
                     {
                         fragmentAbandonment |= StructuredAbandonmentReason.CharacterLimit;
                         break;
                     }
 
-                    logical.Append(' ').Append(lines[index]);
-                    UpdateBracketDepth(lines[index], ref bracketDepth, ref bracketQuote);
+                    logical.Append(' ').Append(continuation);
+                    UpdateBracketDepth(continuation, ref bracketDepth, ref bracketQuote);
                     end = index;
                 }
 
@@ -963,8 +966,12 @@ internal static partial class PortableMaterial
                             continue;
                         }
 
-                        var structuredContentActive = sequenceBlockScalar ||
-                                                      followingLineBlockScalar ||
+                        var sequenceBlockScalarContent = sequenceBlockScalar &&
+                                                         itemIndent > sequenceIndent;
+                        var followingLineBlockScalarContent = followingLineBlockScalar &&
+                                                              itemIndent > indent;
+                        var structuredContentActive = sequenceBlockScalarContent ||
+                                                      followingLineBlockScalarContent ||
                                                       scalarQuote != '\0' ||
                                                       sequenceFlow && sequenceBracketDepth > 0 ||
                                                       followingLineFlow && followingLineBracketDepth > 0;
@@ -972,6 +979,14 @@ internal static partial class PortableMaterial
                         {
                             end = index;
                             continue;
+                        }
+
+                        if (!sequenceBlockScalarContent && !followingLineBlockScalarContent)
+                        {
+                            var yamlQuote = sequenceFlow
+                                ? sequenceBracketQuote
+                                : followingLineFlow ? followingLineBracketQuote : scalarQuote;
+                            item = StripUnquotedYamlComment(item, yamlQuote);
                         }
 
                         if (sequenceIndent < 0 && !followingLineScalar && !followingLineFlow)
@@ -1278,6 +1293,35 @@ internal static partial class PortableMaterial
     private static bool IsYamlCommentStart(string value, int index) =>
         !IsEscaped(value, index) &&
         (index == 0 || char.IsWhiteSpace(value[index - 1]));
+
+    private static string StripUnquotedYamlComment(string value, char quote)
+    {
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (quote == '\0' && character == '#' && IsYamlCommentStart(value, index))
+            {
+                return value[..index].TrimEnd();
+            }
+
+            if (quote != '\0')
+            {
+                if (character == quote && !IsEscaped(value, index))
+                {
+                    quote = '\0';
+                }
+
+                continue;
+            }
+
+            if (IsQuote(character) && !IsEscaped(value, index))
+            {
+                quote = character;
+            }
+        }
+
+        return value;
+    }
 
     private static bool IsYamlSequenceMarker(string value) =>
         value.Length > 0 &&

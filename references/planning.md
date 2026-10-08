@@ -155,8 +155,15 @@ Compose `entrypoint`/`command` and `healthcheck.test`, Dockerfile `ENTRYPOINT`/`
 `Entrypoint`/`Cmd`/`Test`, and JSON/YAML exec forms are grouped in either declaration order within the
 same bounded mapping/container ancestry. Deeper probe/healthcheck fragments do not split a parent
 command, while unrelated mappings, sibling containers, YAML documents, Dockerfile stages, separate
-instructions, prose, and later commands are never joined. Confirmed curl sequences that cannot be
-represented within the line, character, or delimiter bounds fail closed. Backslash,
+instructions, prose, and later commands are never joined. In supported YAML command structures,
+unquoted comment suffixes are removed before curl tokenization; hashes inside quoted values and block
+scalar bodies remain data. Sequence block-scalar bodies end when indentation returns to the owning
+sequence level, so comments and later items remain visible. Populated `Authorization` and
+`Proxy-Authorization` values assembled across structured lines are rejected for curl `-H`/`--header`
+and `--proxy-header`, while line-local prose and empty header values remain portable. Confirmed curl
+sequences that cannot be represented within the line, character, or delimiter bounds fail closed.
+This is a bounded deterministic contract for the documented structures, not comprehensive secret
+detection for arbitrary host syntax. Backslash,
 PowerShell-backtick, cmd-caret, and doubled-quote key escapes are normalized locally, including
 dotted credential keys. A single-backslash curl alias remains supported without masking drive,
 UNC/rooted, or home-alias private paths.
