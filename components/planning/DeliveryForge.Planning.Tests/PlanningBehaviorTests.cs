@@ -2486,6 +2486,7 @@ public sealed class PlanningBehaviorTests
     [InlineData("args:\n  - !command >-\n    curl -fsS -H\n    'Cookie: session=private'\n    https://example.invalid")]
     [InlineData("command:\n  &probe [\"curl\", \"-H\",\n    \"Cookie: session=private\", \"https://example.invalid\"]")]
     [InlineData("command:\n  !!seq &probe [\"curl\", \"--proxy-header\",\n    \"Set-Cookie: id=private\", \"https://example.invalid\"]")]
+    [InlineData("args:\n  - &probe [\"curl\", \"-H\",\n      \"Cookie: session=private\", \"https://example.invalid\"]")]
     [InlineData("command: &probe >\n  curl -fsS -H 'Authorization: Bearer ***' https://example.invalid")]
     public void Portable_consumers_reject_round_twenty_four_node_property_structures(string privateText)
     {
@@ -2497,9 +2498,21 @@ public sealed class PlanningBehaviorTests
     [InlineData("args:\n  - !command |\n    curl -fsS -H 'Set-Cookie:   ' https://example.invalid")]
     [InlineData("command:\n  &probe [\"curl\", \"-H\", \"X-Trace: ordinary\", \"https://example.invalid\"]")]
     [InlineData("command: &probe echo ordinary")]
+    [InlineData("command: !command &probe echo ordinary")]
     public void Portable_consumers_preserve_round_twenty_four_node_property_controls(string portableText)
     {
         AssertPortableConsumersAccept(portableText, "revision-round-twenty-four-node-property-control");
+    }
+
+    [Theory]
+    [InlineData("command: & >\n  echo harmless")]
+    [InlineData("command: ! >\n  echo harmless")]
+    [InlineData("command: &first &second echo harmless")]
+    [InlineData("command: !first !!second echo harmless")]
+    [InlineData("command: &probe")]
+    public void Portable_consumers_reject_round_twenty_four_unsupported_node_properties(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-four-node-property-invalid");
     }
 
     [Theory]

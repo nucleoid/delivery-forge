@@ -796,6 +796,13 @@ internal static partial class PortableMaterial
         Invalid
     }
 
+    private enum YamlNodePropertiesKind
+    {
+        None,
+        Valid,
+        Invalid
+    }
+
     private sealed record ExecFragment(
         string Key,
         string Text,
@@ -832,10 +839,17 @@ internal static partial class PortableMaterial
             var fragmentAbandonment = logical.Length > maximumSequenceCharacters
                 ? StructuredAbandonmentReason.CharacterLimit
                 : StructuredAbandonmentReason.None;
+            var execValue = ReadExecValue(lines[start], key);
+            var nodeProperties = ParseYamlNodeProperties(execValue, out var structuredValue);
+            if (nodeProperties == YamlNodePropertiesKind.Invalid)
+            {
+                fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+            }
+
             var bracketDepth = 0;
             var bracketQuote = '\0';
-            UpdateBracketDepth(lines[start], ref bracketDepth, ref bracketQuote);
-            if (bracketDepth > 0)
+            UpdateBracketDepth(structuredValue, ref bracketDepth, ref bracketQuote);
+            if (nodeProperties != YamlNodePropertiesKind.Invalid && bracketDepth > 0)
             {
                 for (var index = start + 1; bracketDepth > 0 && index < lines.Length; index++)
                 {
@@ -861,14 +875,13 @@ internal static partial class PortableMaterial
                     fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
                 }
             }
-            else
+            else if (nodeProperties != YamlNodePropertiesKind.Invalid)
             {
-                var execValue = ReadExecValue(lines[start], key);
-                var blockHeader = ParseBlockScalarHeader(execValue);
+                var blockHeader = ParseBlockScalarHeader(structuredValue);
                 var blockScalar = blockHeader == BlockScalarHeaderKind.Valid;
-                var plainScalar = execValue.Length > 0 &&
-                                  execValue[0] != '[' &&
-                                  execValue[0] != '{';
+                var plainScalar = structuredValue.Length > 0 &&
+                                  structuredValue[0] != '[' &&
+                                  structuredValue[0] != '{';
                 if (blockHeader == BlockScalarHeaderKind.Invalid)
                 {
                     fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
@@ -879,7 +892,7 @@ internal static partial class PortableMaterial
                     var scalarQuote = '\0';
                     if (!blockScalar)
                     {
-                        UpdateScalarQuoteState(execValue, ref scalarQuote);
+                        UpdateScalarQuoteState(structuredValue, ref scalarQuote);
                     }
 
                     for (var index = start + 1; index < lines.Length; index++)
@@ -924,6 +937,9 @@ internal static partial class PortableMaterial
                 {
                     var sequenceIndent = -1;
                     var sequenceBlockScalar = false;
+                    var sequenceFlow = false;
+                    var sequenceBracketDepth = 0;
+                    var sequenceBracketQuote = '\0';
                     var followingLineScalar = false;
                     var followingLineBlockScalar = false;
                     var followingLineFlow = false;
@@ -958,26 +974,52 @@ internal static partial class PortableMaterial
                             {
                                 sequenceIndent = itemIndent;
                                 item = item[2..].TrimStart();
+                                var sequenceProperties = ParseYamlNodeProperties(item, out var sequenceValue);
+                                item = sequenceValue;
+                                if (sequenceProperties == YamlNodePropertiesKind.Invalid)
+                                {
+                                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                }
+
                                 var sequenceBlockHeader = ParseBlockScalarHeader(item);
                                 sequenceBlockScalar = sequenceBlockHeader == BlockScalarHeaderKind.Valid;
+                                sequenceFlow = sequenceProperties != YamlNodePropertiesKind.Invalid &&
+                                               item.Length > 0 &&
+                                               item[0] is '[' or '{';
+                                if (sequenceFlow)
+                                {
+                                    UpdateBracketDepth(item, ref sequenceBracketDepth, ref sequenceBracketQuote);
+                                }
+
                                 if (sequenceBlockHeader == BlockScalarHeaderKind.Invalid)
                                 {
                                     fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
                                 }
                             }
-                            else if (item[0] is '[' or '{')
-                            {
-                                followingLineFlow = true;
-                                UpdateBracketDepth(item, ref followingLineBracketDepth, ref followingLineBracketQuote);
-                            }
                             else
                             {
-                                followingLineScalar = true;
-                                var followingLineBlockHeader = ParseBlockScalarHeader(item);
-                                followingLineBlockScalar = followingLineBlockHeader == BlockScalarHeaderKind.Valid;
-                                if (followingLineBlockHeader == BlockScalarHeaderKind.Invalid)
+                                var followingLineProperties = ParseYamlNodeProperties(item, out var followingLineValue);
+                                item = followingLineValue;
+                                if (followingLineProperties == YamlNodePropertiesKind.Invalid)
                                 {
                                     fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                }
+
+                                if (followingLineProperties != YamlNodePropertiesKind.Invalid &&
+                                    item[0] is '[' or '{')
+                                {
+                                    followingLineFlow = true;
+                                    UpdateBracketDepth(item, ref followingLineBracketDepth, ref followingLineBracketQuote);
+                                }
+                                else
+                                {
+                                    followingLineScalar = true;
+                                    var followingLineBlockHeader = ParseBlockScalarHeader(item);
+                                    followingLineBlockScalar = followingLineBlockHeader == BlockScalarHeaderKind.Valid;
+                                    if (followingLineBlockHeader == BlockScalarHeaderKind.Invalid)
+                                    {
+                                        fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                    }
                                 }
                             }
                         }
@@ -990,6 +1032,11 @@ internal static partial class PortableMaterial
 
                             if (itemIndent == sequenceIndent)
                             {
+                                if (sequenceFlow && sequenceBracketDepth != 0)
+                                {
+                                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                }
+
                                 if (scalarQuote != '\0')
                                 {
                                     fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
@@ -1002,12 +1049,33 @@ internal static partial class PortableMaterial
                                 }
 
                                 item = item[2..].TrimStart();
+                                var sequenceProperties = ParseYamlNodeProperties(item, out var sequenceValue);
+                                item = sequenceValue;
+                                if (sequenceProperties == YamlNodePropertiesKind.Invalid)
+                                {
+                                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                }
+
                                 var sequenceBlockHeader = ParseBlockScalarHeader(item);
                                 sequenceBlockScalar = sequenceBlockHeader == BlockScalarHeaderKind.Valid;
+                                sequenceFlow = sequenceProperties != YamlNodePropertiesKind.Invalid &&
+                                               item.Length > 0 &&
+                                               item[0] is '[' or '{';
+                                sequenceBracketDepth = 0;
+                                sequenceBracketQuote = '\0';
+                                if (sequenceFlow)
+                                {
+                                    UpdateBracketDepth(item, ref sequenceBracketDepth, ref sequenceBracketQuote);
+                                }
+
                                 if (sequenceBlockHeader == BlockScalarHeaderKind.Invalid)
                                 {
                                     fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
                                 }
+                            }
+                            else if (sequenceFlow && sequenceBracketDepth > 0)
+                            {
+                                UpdateBracketDepth(item, ref sequenceBracketDepth, ref sequenceBracketQuote);
                             }
                             else if (!sequenceBlockScalar && scalarQuote == '\0' && LooksLikeYamlMappingEntry(item))
                             {
@@ -1038,7 +1106,7 @@ internal static partial class PortableMaterial
                         }
 
                         logical.Append(' ').Append(item);
-                        if (!followingLineFlow)
+                        if (!followingLineFlow && !sequenceFlow)
                         {
                             UpdateScalarQuoteState(item, ref scalarQuote);
                         }
@@ -1047,6 +1115,13 @@ internal static partial class PortableMaterial
 
                     if (followingLineFlow &&
                         followingLineBracketDepth != 0 &&
+                        fragmentAbandonment == StructuredAbandonmentReason.None)
+                    {
+                        fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                    }
+
+                    if (sequenceFlow &&
+                        sequenceBracketDepth != 0 &&
                         fragmentAbandonment == StructuredAbandonmentReason.None)
                     {
                         fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
@@ -1177,6 +1252,62 @@ internal static partial class PortableMaterial
         return whitespace < 0 ? string.Empty : trimmed[(whitespace + 1)..].Trim();
     }
 
+    private static YamlNodePropertiesKind ParseYamlNodeProperties(string value, out string nodeValue)
+    {
+        var remaining = value.AsSpan().Trim();
+        if (remaining.IsEmpty || remaining[0] is not ('&' or '!'))
+        {
+            nodeValue = remaining.ToString();
+            return YamlNodePropertiesKind.None;
+        }
+
+        var hasAnchor = false;
+        var hasTag = false;
+        var propertyCount = 0;
+        while (!remaining.IsEmpty && remaining[0] is '&' or '!')
+        {
+            var separator = remaining.IndexOfAny(' ', '\t');
+            var property = separator < 0 ? remaining : remaining[..separator];
+            propertyCount++;
+
+            var anchor = property[0] == '&';
+            var duplicate = anchor ? hasAnchor : hasTag;
+            if (propertyCount > 2 || duplicate || !IsSupportedYamlNodeProperty(property))
+            {
+                nodeValue = string.Empty;
+                return YamlNodePropertiesKind.Invalid;
+            }
+
+            hasAnchor |= anchor;
+            hasTag |= !anchor;
+            remaining = separator < 0 ? [] : remaining[(separator + 1)..].TrimStart();
+        }
+
+        nodeValue = remaining.ToString();
+        return remaining.IsEmpty || remaining[0] == '#'
+            ? YamlNodePropertiesKind.Invalid
+            : YamlNodePropertiesKind.Valid;
+    }
+
+    private static bool IsSupportedYamlNodeProperty(ReadOnlySpan<char> property)
+    {
+        var prefixLength = property[0] == '!' && property.Length > 1 && property[1] == '!' ? 2 : 1;
+        if (property.Length == prefixLength)
+        {
+            return false;
+        }
+
+        foreach (var character in property[prefixLength..])
+        {
+            if (!char.IsLetterOrDigit(character) && character is not '_' and not '-' and not '.' and not ':' and not '/')
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private static BlockScalarHeaderKind ParseBlockScalarHeader(string value)
     {
         var header = value.AsSpan().Trim();
@@ -1249,13 +1380,7 @@ internal static partial class PortableMaterial
                 continue;
             }
 
-            if (IsQuote(character) &&
-                !IsEscaped(value, index) &&
-                (index == 0 ||
-                 char.IsWhiteSpace(value[index - 1]) ||
-                 IsCommandSeparator(value[index - 1]) ||
-                 value[index - 1] is '[' or '{' or ',' or ':' ||
-                 IsAttachedShortOptionQuote(value, index)))
+            if (IsQuoteOpeningCandidate(value, index))
             {
                 quote = character;
             }
@@ -1574,10 +1699,13 @@ internal static partial class PortableMaterial
     private static bool IsCommandSeparator(char value) => value is ';' or '&' or '|' or '(' or ')';
 
     private static bool IsQuoteOpening(string value, int index) =>
+        IsQuoteOpeningCandidate(value, index) &&
+        FindUnescapedQuote(value, index + 1, value[index]) >= 0;
+
+    private static bool IsQuoteOpeningCandidate(string value, int index) =>
         IsQuote(value[index]) &&
         !IsEscaped(value, index) &&
-        (index == 0 || !char.IsLetterOrDigit(value[index - 1]) || IsAttachedShortOptionQuote(value, index)) &&
-        FindUnescapedQuote(value, index + 1, value[index]) >= 0;
+        (index == 0 || !char.IsLetterOrDigit(value[index - 1]) || IsAttachedShortOptionQuote(value, index));
 
     private static bool IsAttachedShortOptionQuote(string value, int quoteIndex)
     {
