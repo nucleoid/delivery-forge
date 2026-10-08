@@ -382,7 +382,7 @@ internal static partial class PortableMaterial
 
         foreach (var line in scan.Lines)
         {
-            foreach (var command in TokenizeCommands(line))
+            foreach (var command in TokenizeCommandInterpretations(line))
             {
                 if (ContainsCurlCredential(command, depth: 0))
                 {
@@ -393,7 +393,7 @@ internal static partial class PortableMaterial
             var normalized = NormalizeEscapedQuotes(line);
             if (!normalized.Equals(line, StringComparison.Ordinal))
             {
-                foreach (var command in TokenizeCommands(normalized))
+                foreach (var command in TokenizeCommandInterpretations(normalized))
                 {
                     if (ContainsCurlCredential(command, depth: 0))
                     {
@@ -444,7 +444,7 @@ internal static partial class PortableMaterial
 
         foreach (var token in command.Where(token => token.Any(char.IsWhiteSpace)))
         {
-            foreach (var nested in TokenizeCommands(token))
+            foreach (var nested in TokenizeCommandInterpretations(token))
             {
                 if (ContainsCurlCredential(nested, depth + 1))
                 {
@@ -789,6 +789,13 @@ internal static partial class PortableMaterial
         UnclosedDelimiter = 4
     }
 
+    private enum BlockScalarHeaderKind
+    {
+        NotBlock,
+        Valid,
+        Invalid
+    }
+
     private sealed record ExecFragment(
         string Key,
         string Text,
@@ -857,12 +864,24 @@ internal static partial class PortableMaterial
             else
             {
                 var execValue = ReadExecValue(lines[start], key);
-                var blockScalar = IsBlockScalarIndicator(execValue);
+                var blockHeader = ParseBlockScalarHeader(execValue);
+                var blockScalar = blockHeader == BlockScalarHeaderKind.Valid;
                 var plainScalar = execValue.Length > 0 &&
                                   execValue[0] != '[' &&
                                   execValue[0] != '{';
+                if (blockHeader == BlockScalarHeaderKind.Invalid)
+                {
+                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                }
+
                 if (blockScalar || plainScalar)
                 {
+                    var scalarQuote = '\0';
+                    if (!blockScalar)
+                    {
+                        UpdateScalarQuoteState(execValue, ref scalarQuote);
+                    }
+
                     for (var index = start + 1; index < lines.Length; index++)
                     {
                         if (index - start >= maximumSequenceLines)
@@ -879,7 +898,8 @@ internal static partial class PortableMaterial
                             continue;
                         }
 
-                        if (itemIndent <= indent || !blockScalar && LooksLikeYamlMappingEntry(item))
+                        if (itemIndent <= indent ||
+                            !blockScalar && scalarQuote == '\0' && LooksLikeYamlMappingEntry(item))
                         {
                             break;
                         }
@@ -891,7 +911,13 @@ internal static partial class PortableMaterial
                         }
 
                         logical.Append(' ').Append(item);
+                        UpdateScalarQuoteState(item, ref scalarQuote);
                         end = index;
+                    }
+
+                    if (scalarQuote != '\0')
+                    {
+                        fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
                     }
                 }
                 else
@@ -903,6 +929,7 @@ internal static partial class PortableMaterial
                     var followingLineFlow = false;
                     var followingLineBracketDepth = 0;
                     var followingLineBracketQuote = '\0';
+                    var scalarQuote = '\0';
                     for (var index = start + 1; index < lines.Length; index++)
                     {
                         if (index - start >= maximumSequenceLines)
@@ -931,7 +958,12 @@ internal static partial class PortableMaterial
                             {
                                 sequenceIndent = itemIndent;
                                 item = item[2..].TrimStart();
-                                sequenceBlockScalar = IsBlockScalarIndicator(item);
+                                var sequenceBlockHeader = ParseBlockScalarHeader(item);
+                                sequenceBlockScalar = sequenceBlockHeader == BlockScalarHeaderKind.Valid;
+                                if (sequenceBlockHeader == BlockScalarHeaderKind.Invalid)
+                                {
+                                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                }
                             }
                             else if (item[0] is '[' or '{')
                             {
@@ -941,7 +973,12 @@ internal static partial class PortableMaterial
                             else
                             {
                                 followingLineScalar = true;
-                                followingLineBlockScalar = IsBlockScalarIndicator(item);
+                                var followingLineBlockHeader = ParseBlockScalarHeader(item);
+                                followingLineBlockScalar = followingLineBlockHeader == BlockScalarHeaderKind.Valid;
+                                if (followingLineBlockHeader == BlockScalarHeaderKind.Invalid)
+                                {
+                                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                }
                             }
                         }
                         else if (sequenceIndent >= 0)
@@ -953,15 +990,26 @@ internal static partial class PortableMaterial
 
                             if (itemIndent == sequenceIndent)
                             {
+                                if (scalarQuote != '\0')
+                                {
+                                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                    break;
+                                }
+
                                 if (!item.StartsWith("- ", StringComparison.Ordinal))
                                 {
                                     break;
                                 }
 
                                 item = item[2..].TrimStart();
-                                sequenceBlockScalar = IsBlockScalarIndicator(item);
+                                var sequenceBlockHeader = ParseBlockScalarHeader(item);
+                                sequenceBlockScalar = sequenceBlockHeader == BlockScalarHeaderKind.Valid;
+                                if (sequenceBlockHeader == BlockScalarHeaderKind.Invalid)
+                                {
+                                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                                }
                             }
-                            else if (!sequenceBlockScalar && LooksLikeYamlMappingEntry(item))
+                            else if (!sequenceBlockScalar && scalarQuote == '\0' && LooksLikeYamlMappingEntry(item))
                             {
                                 break;
                             }
@@ -976,7 +1024,9 @@ internal static partial class PortableMaterial
                             UpdateBracketDepth(item, ref followingLineBracketDepth, ref followingLineBracketQuote);
                         }
                         else if (itemIndent <= indent ||
-                                 !followingLineBlockScalar && LooksLikeYamlMappingEntry(item))
+                                 !followingLineBlockScalar &&
+                                 scalarQuote == '\0' &&
+                                 LooksLikeYamlMappingEntry(item))
                         {
                             break;
                         }
@@ -988,12 +1038,21 @@ internal static partial class PortableMaterial
                         }
 
                         logical.Append(' ').Append(item);
+                        if (!followingLineFlow)
+                        {
+                            UpdateScalarQuoteState(item, ref scalarQuote);
+                        }
                         end = index;
                     }
 
                     if (followingLineFlow &&
                         followingLineBracketDepth != 0 &&
                         fragmentAbandonment == StructuredAbandonmentReason.None)
+                    {
+                        fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
+                    }
+
+                    if (scalarQuote != '\0')
                     {
                         fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
                     }
@@ -1118,8 +1177,89 @@ internal static partial class PortableMaterial
         return whitespace < 0 ? string.Empty : trimmed[(whitespace + 1)..].Trim();
     }
 
-    private static bool IsBlockScalarIndicator(string value) =>
-        value is ">" or ">-" or ">+" or "|" or "|-" or "|+";
+    private static BlockScalarHeaderKind ParseBlockScalarHeader(string value)
+    {
+        var header = value.AsSpan().Trim();
+        if (header.IsEmpty || header[0] is not ('>' or '|'))
+        {
+            return BlockScalarHeaderKind.NotBlock;
+        }
+
+        var index = 1;
+        var hasChomping = false;
+        var hasIndent = false;
+        for (var indicator = 0; indicator < 2 && index < header.Length; indicator++)
+        {
+            if (!hasChomping && header[index] is '+' or '-')
+            {
+                hasChomping = true;
+                index++;
+                continue;
+            }
+
+            if (!hasIndent && header[index] is >= '1' and <= '9')
+            {
+                hasIndent = true;
+                index++;
+                continue;
+            }
+
+            break;
+        }
+
+        if (index == header.Length)
+        {
+            return BlockScalarHeaderKind.Valid;
+        }
+
+        if (!char.IsWhiteSpace(header[index]))
+        {
+            return BlockScalarHeaderKind.Invalid;
+        }
+
+        while (index < header.Length && char.IsWhiteSpace(header[index]))
+        {
+            index++;
+        }
+
+        return index == header.Length || header[index] == '#'
+            ? BlockScalarHeaderKind.Valid
+            : BlockScalarHeaderKind.Invalid;
+    }
+
+    private static void UpdateScalarQuoteState(string value, ref char quote)
+    {
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (quote != '\0')
+            {
+                if (character == quote && !IsEscaped(value, index))
+                {
+                    if (index + 1 < value.Length && value[index + 1] == quote)
+                    {
+                        index++;
+                    }
+                    else
+                    {
+                        quote = '\0';
+                    }
+                }
+
+                continue;
+            }
+
+            if (IsQuote(character) &&
+                !IsEscaped(value, index) &&
+                (index == 0 ||
+                 char.IsWhiteSpace(value[index - 1]) ||
+                 IsCommandSeparator(value[index - 1]) ||
+                 value[index - 1] is '[' or '{' or ',' or ':'))
+            {
+                quote = character;
+            }
+        }
+    }
 
     private static bool LooksLikeYamlMappingEntry(string value)
     {
@@ -1148,7 +1288,7 @@ internal static partial class PortableMaterial
         return true;
     }
     private static bool ContainsCurlExecutable(string text) =>
-        TokenizeCommands(text).Any(command => FindCurlExecutable(command) >= 0);
+        TokenizeCommandInterpretations(text).Any(command => FindCurlExecutable(command) >= 0);
 
     private static bool TryReadExecKey(string line, out string key, out int indent)
     {
@@ -1297,7 +1437,20 @@ internal static partial class PortableMaterial
 
     private static int Count(string value, char character) => value.Count(candidate => candidate == character);
 
-    private static IEnumerable<IReadOnlyList<string>> TokenizeCommands(string line)
+    private static IEnumerable<IReadOnlyList<string>> TokenizeCommandInterpretations(string line)
+    {
+        foreach (var command in TokenizeCommands(line, doubledQuoteEscapes: false))
+        {
+            yield return command;
+        }
+
+        foreach (var command in TokenizeCommands(line, doubledQuoteEscapes: true))
+        {
+            yield return command;
+        }
+    }
+
+    private static IEnumerable<IReadOnlyList<string>> TokenizeCommands(string line, bool doubledQuoteEscapes)
     {
         var command = new List<string>();
         var token = new StringBuilder();
@@ -1334,7 +1487,16 @@ internal static partial class PortableMaterial
             var character = line[index];
             if (quote != '\0')
             {
-                if (character == quote && !IsEscaped(line, index))
+                if (doubledQuoteEscapes &&
+                    character == quote &&
+                    !IsEscaped(line, index) &&
+                    index + 1 < line.Length &&
+                    line[index + 1] == quote)
+                {
+                    token.Append(character);
+                    index++;
+                }
+                else if (character == quote && !IsEscaped(line, index))
                 {
                     quote = '\0';
                 }
