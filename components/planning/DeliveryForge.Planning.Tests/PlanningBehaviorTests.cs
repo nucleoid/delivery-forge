@@ -1618,6 +1618,8 @@ public sealed class PlanningBehaviorTests
     [InlineData("Don't run curl -u alice:hunter2 https://example.invalid")]
     [InlineData("It's easiest to run `curl --user alice:hunter2 https://example.invalid`")]
     [InlineData("The operator's note says: ```sh\ncurl.exe -u alice:hunter2 https://example.invalid\n```")]
+    [InlineData("The operators' note says run curl -u alice:hunter2 https://example.invalid")]
+    [InlineData("The 6\" pipe note says run `curl -u alice:hunter2 https://example.invalid`")]
     public void Portable_consumers_reject_round_fifteen_curl_after_prose_apostrophes(string privateText)
     {
         AssertPortableConsumersReject(privateText, "revision-round-fifteen-apostrophe-curl");
@@ -1628,6 +1630,7 @@ public sealed class PlanningBehaviorTests
     [InlineData("bash -c 'curl --user alice:hunter2 https://example.invalid'")]
     [InlineData("docker exec app sh -c \"curl -u alice:hunter2 https://example.invalid\"")]
     [InlineData("ssh example.invalid 'curl --user alice:hunter2 https://service.invalid'")]
+    [InlineData("pwsh -Command \"curl.exe --user alice:hunter2 https://example.invalid\"")]
     [InlineData("HEALTHCHECK CMD [\"curl\", \"-u\", \"alice:hunter2\", \"https://example.invalid\"]")]
     [InlineData("command: [\"curl.exe\", \"--user=alice:hunter2\", \"https://example.invalid\"]")]
     public void Portable_consumers_reject_round_fifteen_wrapped_and_exec_array_curl(string privateText)
@@ -1641,6 +1644,7 @@ public sealed class PlanningBehaviorTests
     [InlineData(".\\curl.exe -u alice:hunter2 https://example.invalid")]
     [InlineData("../curl --user=alice:hunter2 https://example.invalid")]
     [InlineData("..\\curl.exe -ualice:hunter2 https://example.invalid")]
+    [InlineData("../../curl --user alice:hunter2 https://example.invalid")]
     public void Portable_consumers_reject_round_fifteen_bounded_curl_paths(string privateText)
     {
         AssertPortableConsumersReject(privateText, "revision-round-fifteen-curl-path");
@@ -1652,6 +1656,7 @@ public sealed class PlanningBehaviorTests
     [InlineData("curl -d '{`\"password`\": `\"hunter2`\"}' https://example.invalid")]
     [InlineData("curl -d '{`\"Authorization`\": `\"Basic YWxpY2U6aHVudGVyMg==`\"}' https://example.invalid")]
     [InlineData("curl -d \"{^\"password^\":^\"hunter2^\"}\" https://example.invalid")]
+    [InlineData("curl -d \"{\\'secret_key\\':\\'private-value\\'}\" https://example.invalid")]
     public void Portable_consumers_reject_round_fifteen_escaped_credential_keys(string privateText)
     {
         AssertPortableConsumersReject(privateText, "revision-round-fifteen-escaped-key");
@@ -1674,6 +1679,8 @@ public sealed class PlanningBehaviorTests
 
     [Theory]
     [InlineData("The operator's guide says curl accepts authentication options")]
+    [InlineData("The operators' guide says curl accepts authentication options")]
+    [InlineData("The 6\" pipe guide says curl accepts authentication options")]
     [InlineData("It's safe to run `curl https://example.invalid/health`")]
     [InlineData("sh -c \"curl https://example.invalid/health\"")]
     [InlineData("HEALTHCHECK CMD [\"curl\", \"-fsS\", \"https://example.invalid/health\"]")]
@@ -1689,9 +1696,20 @@ public sealed class PlanningBehaviorTests
     [InlineData("ENCRYPTION_KEY_POLICY=rotated")]
     [InlineData("Both curl and docker run -u 1000:1000 image are documented")]
     [InlineData("docker exec -u 1000:1000 app healthcheck")]
+    [InlineData("Both curl and podman run --user 1000:1000 image are documented")]
     public void Portable_consumers_preserve_round_fifteen_sibling_controls(string portableText)
     {
         AssertPortableConsumersAccept(portableText, "revision-round-fifteen-control");
+    }
+
+    [Theory]
+    [InlineData("C:\\private\\curl.exe --user-agent delivery-forge https://example.invalid")]
+    [InlineData("/private/tools/curl --user-agent delivery-forge https://example.invalid")]
+    [InlineData("\\curl\\private.txt")]
+    [InlineData("\\\\server\\share\\curl.exe --user-agent delivery-forge https://example.invalid")]
+    public void Portable_consumers_still_reject_round_fifteen_private_curl_paths(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-fifteen-private-curl-path");
     }
 
     [Theory]

@@ -119,7 +119,7 @@ public sealed record ImportedContextEnvelope(
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > 4096 || value.IndexOf('\0') >= 0 ||
             PortableMaterial.ContainsPrivateMaterial(value) ||
-            PortableMaterial.IsAbsolutePath(value))
+            PortableMaterial.IsAbsolutePath(value) && !PortableMaterial.IsSingleBackslashCurlCommand(value))
         {
             throw new PlanningException($"Imported context field '{field}' is not portable or may contain private/secret material.");
         }

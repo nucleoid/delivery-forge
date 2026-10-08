@@ -53,17 +53,19 @@ internal static partial class PortableMaterial
 
             return "portable-url";
         });
+        var withoutCurlAliases = SingleBackslashCurl().Replace(withoutUrls, "curl");
         return invalidUrl ||
-               HostPath().IsMatch(withoutUrls) ||
-               OptionAttachedHostPath().IsMatch(withoutUrls) ||
-               HomeAliasPath().IsMatch(withoutUrls) ||
-               SingleBackslashRoot().IsMatch(withoutUrls);
+               HostPath().IsMatch(withoutCurlAliases) ||
+               OptionAttachedHostPath().IsMatch(withoutCurlAliases) ||
+               HomeAliasPath().IsMatch(withoutCurlAliases) ||
+               SingleBackslashRoot().IsMatch(withoutCurlAliases);
     }
 
     private static bool ContainsCredentialAssignment(string value)
     {
-        foreach (var line in PhysicalLines(value))
+        foreach (var physicalLine in PhysicalLines(value))
         {
+            var line = NormalizeEscapedQuotes(physicalLine);
             for (var separator = 0; separator < line.Length; separator++)
             {
                 if (line[separator] is not (':' or '=') ||
@@ -160,7 +162,7 @@ internal static partial class PortableMaterial
         var words = normalized.Split('_', StringSplitOptions.RemoveEmptyEntries);
         return words.Length > 1 &&
                (words[^1] is "password" or "passwd" or "token" or "secret" or "authorization" ||
-                words.Length > 2 && words[^2] is ("access" or "api") && words[^1] == "key");
+                words[^1] == "key" && words[^2] is "access" or "api" or "secret" or "private" or "signing" or "encryption");
     }
 
     private static string NormalizeCredentialKey(string key)
@@ -196,8 +198,9 @@ internal static partial class PortableMaterial
     private static bool ContainsPopulatedAuthorization(string value)
     {
         const string key = "Authorization";
-        foreach (var line in PhysicalLines(value))
+        foreach (var physicalLine in PhysicalLines(value))
         {
+            var line = NormalizeEscapedQuotes(physicalLine);
             var searchFrom = 0;
             while (searchFrom < line.Length)
             {
@@ -263,6 +266,11 @@ internal static partial class PortableMaterial
                 for (var index = executable + 1; index < command.Count; index++)
                 {
                     var token = command[index];
+                    if (IsCurlScanBoundary(token))
+                    {
+                        break;
+                    }
+
                     if (TryReadLongOption(command, ref index, token, CurlUserOptions, out var userValue) &&
                         HasUserInfo(userValue, requireAtSign: false))
                     {
@@ -297,9 +305,7 @@ internal static partial class PortableMaterial
     {
         for (var index = 0; index < command.Count; index++)
         {
-            var executable = command[index];
-            if (!string.Equals(executable, "curl", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(executable, "curl.exe", StringComparison.OrdinalIgnoreCase))
+            if (!IsCurlExecutable(command[index]))
             {
                 continue;
             }
@@ -309,6 +315,39 @@ internal static partial class PortableMaterial
 
         return -1;
     }
+
+    private static bool IsCurlExecutable(string token)
+    {
+        var executable = token.Trim('[', ']', '{', '}', ',', ':');
+        if (string.Equals(executable, "curl", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(executable, "curl.exe", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(executable, "\\curl", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(executable, "\\curl.exe", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        var normalized = executable.Replace('\\', '/');
+        if (!normalized.StartsWith("./", StringComparison.Ordinal) &&
+            !normalized.StartsWith("../", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return segments.Length > 1 &&
+               segments[..^1].All(segment => segment is "." or "..") &&
+               (string.Equals(segments[^1], "curl", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(segments[^1], "curl.exe", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsCurlScanBoundary(string token) =>
+        token.Equals("and", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("but", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("then", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("docker", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("podman", StringComparison.OrdinalIgnoreCase) ||
+        token.Equals("kubectl", StringComparison.OrdinalIgnoreCase);
 
     private static bool TryReadLongOption(
         IReadOnlyList<string> command,
@@ -450,6 +489,18 @@ internal static partial class PortableMaterial
                 {
                     quote = '\0';
                 }
+                else if (char.IsWhiteSpace(character) || character is ',' or '[' or ']' or '{' or '}')
+                {
+                    CompleteToken();
+                }
+                else if (IsCommandSeparator(character) && !IsEscaped(line, index))
+                {
+                    var completed = CompleteCommand();
+                    if (completed is not null)
+                    {
+                        yield return completed;
+                    }
+                }
                 else
                 {
                     token.Append(character);
@@ -458,7 +509,7 @@ internal static partial class PortableMaterial
                 continue;
             }
 
-            if (IsQuote(character))
+            if (IsQuoteOpening(line, index))
             {
                 quote = character;
             }
@@ -466,13 +517,17 @@ internal static partial class PortableMaterial
             {
                 CompleteToken();
             }
-            else if (character is ';' or '&' or '|' or '(' or ')' or '`')
+            else if (IsCommandSeparator(character) || character == '`')
             {
                 var completed = CompleteCommand();
                 if (completed is not null)
                 {
                     yield return completed;
                 }
+            }
+            else if (character is ',' or '[' or ']' or '{' or '}')
+            {
+                CompleteToken();
             }
             else
             {
@@ -485,6 +540,32 @@ internal static partial class PortableMaterial
         {
             yield return final;
         }
+    }
+
+    private static bool IsCommandSeparator(char value) => value is ';' or '&' or '|' or '(' or ')';
+
+    private static bool IsQuoteOpening(string value, int index) =>
+        IsQuote(value[index]) &&
+        !IsEscaped(value, index) &&
+        (index == 0 || !char.IsLetterOrDigit(value[index - 1]));
+
+    private static string NormalizeEscapedQuotes(string value)
+    {
+        var normalized = new StringBuilder(value.Length);
+        for (var index = 0; index < value.Length; index++)
+        {
+            if (value[index] is '\\' or '`' or '^' &&
+                index + 1 < value.Length &&
+                IsQuote(value[index + 1]))
+            {
+                normalized.Append(value[++index]);
+                continue;
+            }
+
+            normalized.Append(value[index]);
+        }
+
+        return normalized.ToString();
     }
 
     private static int FindUnescapedQuote(string value, int start, char quote)
@@ -558,6 +639,12 @@ internal static partial class PortableMaterial
         value.StartsWith('\\') ||
         WindowsDrivePath().IsMatch(value);
 
+    public static bool IsSingleBackslashCurlCommand(string value)
+    {
+        var match = SingleBackslashCurl().Match(value);
+        return match.Success && match.Index == 0;
+    }
+
     [GeneratedRegex(
         """(?:(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/]|[\\/]{2}[^\\/\s]+[\\/][^\\/\s]+|~[\\/](?:[^\\/\s]+[\\/])*[^\\/\s]+)|(?<![A-Za-z0-9.])/(?!/)(?:[^/\s`|\[\]{}<>"']+/)+[^/\s`|\[\]{}<>"']+)""",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
@@ -577,6 +664,11 @@ internal static partial class PortableMaterial
         """(?<![A-Za-z0-9.\\])\\(?![\\/.])(?:[^\\/\s`|\[\]{}<>"']+\\)+[^\\/\s`|\[\]{}<>"']+""",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SingleBackslashRoot();
+
+    [GeneratedRegex(
+        @"(?<![A-Za-z0-9.\\])\\curl(?:\.exe)?(?=\s|$)",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex SingleBackslashCurl();
 
     [GeneratedRegex(
         """[a-z][a-z0-9+.-]*:(?://|\\\\)[^\s`|\[\]{}<>"']+""",
