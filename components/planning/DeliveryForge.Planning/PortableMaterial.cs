@@ -39,6 +39,7 @@ internal static partial class PortableMaterial
             ['E'] = CurlOptionValueKind.Certificate,
             ['F'] = CurlOptionValueKind.Ordinary,
             ['H'] = CurlOptionValueKind.Ordinary,
+            ['h'] = CurlOptionValueKind.Ordinary,
             ['K'] = CurlOptionValueKind.Ordinary,
             ['m'] = CurlOptionValueKind.Ordinary,
             ['o'] = CurlOptionValueKind.Ordinary,
@@ -47,13 +48,15 @@ internal static partial class PortableMaterial
             ['r'] = CurlOptionValueKind.Ordinary,
             ['R'] = CurlOptionValueKind.Ordinary,
             ['T'] = CurlOptionValueKind.Ordinary,
+            ['t'] = CurlOptionValueKind.Ordinary,
             ['u'] = CurlOptionValueKind.UserInfo,
             ['U'] = CurlOptionValueKind.UserInfo,
             ['w'] = CurlOptionValueKind.Ordinary,
             ['x'] = CurlOptionValueKind.ProxyUserInfo,
             ['X'] = CurlOptionValueKind.Ordinary,
             ['y'] = CurlOptionValueKind.Ordinary,
-            ['Y'] = CurlOptionValueKind.Ordinary
+            ['Y'] = CurlOptionValueKind.Ordinary,
+            ['z'] = CurlOptionValueKind.Ordinary
         };
 
     private static readonly HashSet<string> NetworkSchemes = new(StringComparer.OrdinalIgnoreCase)
@@ -71,15 +74,18 @@ internal static partial class PortableMaterial
             "--dns-interface --dns-ipv4-addr --dns-ipv6-addr --dns-servers --doh-url --dump-header " +
             "--egd-file --engine --etag-compare --etag-save --expect100-timeout --form --form-string " +
             "--ftp-account --ftp-alternative-to-user --ftp-method --ftp-port --ftp-ssl-ccc-mode " +
-            "--happy-eyeballs-timeout-ms --header --hostpubmd5 --hsts --interface --ip-tos --json " +
-            "--keepalive-time --key --key-type --krb --libcurl --limit-rate --local-port --login-options " +
-            "--mail-auth --mail-from --mail-rcpt --max-filesize --max-redirs --max-time --noproxy " +
+            "--happy-eyeballs-timeout-ms --header --help --hostpubmd5 --hostpubsha256 --hsts --interface " +
+            "--ip-tos --ipfs-gateway --json --keepalive-time --key --key-type --krb --libcurl --limit-rate " +
+            "--local-port --login-options --mail-auth --mail-from --mail-rcpt --max-filesize --max-redirs " +
+            "--max-time --netrc-file --noproxy " +
             "--output --output-dir --parallel-max --pinnedpubkey --proto --proto-default --proto-redir " +
             "--proxy-cacert --proxy-capath --proxy-cert-type --proxy-ciphers --proxy-crlfile --proxy-header " +
-            "--proxy-key --proxy-key-type --proxy-service-name --proxy-tls13-ciphers --proxy-tlsauthtype " +
-            "--pubkey --quote --range --referer --request --request-target --resolve --retry --retry-delay " +
-            "--retry-max-time --sasl-authzid --service-name --speed-limit --speed-time --tls-max " +
-            "--tls13-ciphers --tlsauthtype --unix-socket --upload-file --url --url-query --user-agent " +
+            "--proxy-key --proxy-key-type --proxy-pinnedpubkey --proxy-service-name --proxy-tls13-ciphers " +
+            "--proxy-tlsauthtype --proxy-tlsuser --pubkey --quote --random-file --range --rate --referer " +
+            "--request --request-target --resolve --retry --retry-delay --retry-max-time --sasl-authzid " +
+            "--service-name --socks5-gssapi-service --speed-limit --speed-time --stderr --telnet-option " +
+            "--tftp-blksize --time-cond --tls-max --tls13-ciphers --tlsauthtype --tlsuser --trace " +
+            "--trace-ascii --trace-config --unix-socket --upload-file --url --url-query --user-agent " +
             "--variable --vlan-priority --write-out";
         foreach (var option in ordinaryOptions.Split(' ', StringSplitOptions.RemoveEmptyEntries))
         {
