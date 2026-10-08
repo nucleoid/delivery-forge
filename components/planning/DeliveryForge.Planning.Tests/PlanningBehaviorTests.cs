@@ -1713,6 +1713,75 @@ public sealed class PlanningBehaviorTests
     }
 
     [Theory]
+    [InlineData("Run C:\\curl.exe -u alice:hunter2 https://example.invalid")]
+    [InlineData("%USERPROFILE%\\curl.exe --version")]
+    [InlineData("~\\curl.exe -u alice:hunter2 https://example.invalid")]
+    [InlineData("${HOME}\\curl --user alice:hunter2 https://example.invalid")]
+    [InlineData("\\\\server\\share\\curl.exe -u alice:hunter2 https://example.invalid")]
+    public void Portable_consumers_reject_round_sixteen_private_curl_alias_boundaries(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-sixteen-private-curl-alias");
+    }
+
+    [Theory]
+    [InlineData("Use \"`curl -u alice:hunter2 https://example.invalid`\" for checks")]
+    [InlineData("The `curl`'s manual shows `curl -u alice:hunter2 https://example.invalid`")]
+    [InlineData("The operator said \"use this later: `curl --user alice:hunter2 https://example.invalid`")]
+    [InlineData("The operators' notes say ```sh\ncurl.exe -u alice:hunter2 https://example.invalid\n```")]
+    public void Portable_consumers_reject_round_sixteen_curl_after_local_prose_punctuation(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-sixteen-local-prose-punctuation");
+    }
+
+    [Theory]
+    [InlineData("curl -d 'status=built and tested' -u ci:hunter2 https://hooks.example.invalid")]
+    [InlineData("curl --data \"status=ready then shipped\" --user ci:hunter2 https://hooks.example.invalid")]
+    [InlineData("curl -A docker -u alice:hunter2 https://registry.example.invalid")]
+    [InlineData("curl --user-agent podman --user alice:hunter2 https://registry.example.invalid")]
+    [InlineData("curl -H 'X-Tool: kubectl' -u alice:hunter2 https://example.invalid")]
+    public void Portable_consumers_reject_round_sixteen_credentials_after_curl_option_values(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-sixteen-curl-option-arity");
+    }
+
+    [Theory]
+    [InlineData("{\n  \"command\": [\n    \"curl\",\n    \"-u\",\n    \"alice:hunter2\",\n    \"https://example.invalid\"\n  ]\n}")]
+    [InlineData("command:\n- curl\n- -u\n- alice:hunter2\n- https://example.invalid")]
+    [InlineData("command:\n  - curl.exe\n  - --user=alice:hunter2\n  - https://example.invalid")]
+    [InlineData("HEALTHCHECK CMD [\n  \"curl\",\n  \"--user\",\n  \"alice:hunter2\",\n  \"https://example.invalid\"\n]")]
+    public void Portable_consumers_reject_round_sixteen_multiline_exec_sequence_credentials(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-sixteen-multiline-exec");
+    }
+
+    [Theory]
+    [InlineData("curl.exe -d \"{\"\"password\"\":\"\"hunter2\"\"}\" https://example.invalid")]
+    [InlineData("curl.exe -d \"{\"\"Authorization\"\":\"\"Basic YWxpY2U6aHVudGVyMg==\"\"}\" https://example.invalid")]
+    [InlineData("curl.exe -d '{''secret_key'':''private-value''}' https://example.invalid")]
+    public void Portable_consumers_reject_round_sixteen_doubled_quote_credential_keys(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-sixteen-doubled-quote-key");
+    }
+
+    [Theory]
+    [InlineData(".\\curl.exe --user-agent delivery-forge https://example.invalid")]
+    [InlineData("The operator's guide says `curl https://example.invalid/health`")]
+    [InlineData("Use \"quoted prose and punctuation without a closing quote")]
+    [InlineData("curl -d 'status=built and tested' https://hooks.example.invalid")]
+    [InlineData("curl -A docker https://registry.example.invalid")]
+    [InlineData("curl https://example.invalid and docker run -u 1000:1000 image")]
+    [InlineData("curl https://example.invalid then podman run --user 1000:1000 image")]
+    [InlineData("curl https://example.invalid; kubectl exec pod -- id -u")]
+    [InlineData("{\n  \"command\": [\n    \"curl\",\n    \"--user-agent\",\n    \"delivery-forge\",\n    \"https://example.invalid\"\n  ]\n}")]
+    [InlineData("The command is curl.\nThe separate example uses -u 1000:1000 for a container.")]
+    [InlineData("curl.exe -d \"{\"\"password\"\":\"\"\"\"}\" https://example.invalid")]
+    [InlineData("curl.exe -d \"{\"\"Authorization\"\":\"\"   \"\"}\" https://example.invalid")]
+    public void Portable_consumers_preserve_round_sixteen_sibling_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-sixteen-control");
+    }
+
+    [Theory]
     [InlineData("{\"Authorization\": \"\"}")]
     [InlineData("{'Authorization' = '   '}")]
     [InlineData("Authorization:\nordinary next line")]
