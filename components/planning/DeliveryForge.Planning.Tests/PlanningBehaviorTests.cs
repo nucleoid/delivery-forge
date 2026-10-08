@@ -1534,6 +1534,8 @@ public sealed class PlanningBehaviorTests
     [InlineData("Read https://example.invalid/docs/curl-u-example")]
     [InlineData("The curl.exe -u option accepts a user name and password")]
     [InlineData("docker run -u 1000:1000 curl-image")]
+    [InlineData("curl -H \"Proxy-Authorization:\" https://example.invalid")]
+    [InlineData("curl -H 'X-API-Key:   ' https://example.invalid")]
     [InlineData("env MODE=test curl --user-agent delivery-forge https://example.invalid")]
     public void Portable_consumers_preserve_round_thirteen_sibling_controls(string portableText)
     {

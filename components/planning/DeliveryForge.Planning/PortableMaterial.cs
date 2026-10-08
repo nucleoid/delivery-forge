@@ -1,16 +1,17 @@
-using System.Text.RegularExpressions;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace DeliveryForge.Planning;
 
 internal static partial class PortableMaterial
 {
-    private static readonly string[] CredentialKeys =
-    [
-        "api_key", "api-key", "password", "passwd", "token", "secret",
-        "client_secret", "client-secret", "access_key", "access-key",
-        "aws_access_key_id", "aws-access-key-id"
-    ];
+    private static readonly HashSet<string> CredentialKeys = new(StringComparer.Ordinal)
+    {
+        "api_key", "apikey", "authorization", "client_secret", "clientsecret",
+        "access_key", "accesskey", "access_token", "accesstoken", "password",
+        "passwd", "pgpassword", "proxy_authorization", "secret", "token",
+        "aws_access_key_id", "aws_secret_access_key", "x_api_key"
+    };
 
     private static readonly HashSet<string> CurlUserOptions = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -63,48 +64,111 @@ internal static partial class PortableMaterial
     {
         foreach (var line in PhysicalLines(value))
         {
-            foreach (var key in CredentialKeys)
+            for (var separator = 0; separator < line.Length; separator++)
             {
-                var searchFrom = 0;
-                while (searchFrom < line.Length)
+                if (line[separator] is not (':' or '=') ||
+                    !TryReadAssignmentKey(line, separator, out var key) ||
+                    !IsCredentialKey(key) ||
+                    !HasPopulatedAssignmentValue(line, separator))
                 {
-                    var keyIndex = line.IndexOf(key, searchFrom, StringComparison.OrdinalIgnoreCase);
-                    if (keyIndex < 0)
-                    {
-                        break;
-                    }
-
-                    searchFrom = keyIndex + key.Length;
-                    if ((keyIndex > 0 && IsKeyCharacter(line[keyIndex - 1])) ||
-                        (searchFrom < line.Length && IsKeyCharacter(line[searchFrom])))
-                    {
-                        continue;
-                    }
-
-                    var quote = keyIndex > 0 && IsQuote(line[keyIndex - 1]) ? line[keyIndex - 1] : '\0';
-                    var cursor = searchFrom;
-                    if (quote != '\0')
-                    {
-                        if (cursor >= line.Length || line[cursor] != quote)
-                        {
-                            continue;
-                        }
-
-                        cursor++;
-                    }
-
-                    SkipHorizontalWhitespace(line, ref cursor);
-                    if (cursor < line.Length && (line[cursor] == ':' || line[cursor] == '=') &&
-                        HasPopulatedValue(line.AsSpan(cursor + 1)))
-                    {
-                        return true;
-                    }
+                    continue;
                 }
+
+                return true;
             }
         }
 
         return false;
     }
+
+    private static bool HasPopulatedAssignmentValue(string line, int separator)
+    {
+        var value = line.AsSpan(separator + 1);
+        while (!value.IsEmpty && value[0] is ' ' or '\t')
+        {
+            value = value[1..];
+        }
+
+        if (!value.IsEmpty && IsQuote(value[0]) &&
+            line.AsSpan(0, separator).Count(value[0]) % 2 != 0)
+        {
+            return false;
+        }
+
+        return HasPopulatedValue(value);
+    }
+
+    private static bool TryReadAssignmentKey(string line, int separator, out string key)
+    {
+        var end = separator;
+        while (end > 0 && line[end - 1] is ' ' or '\t')
+        {
+            end--;
+        }
+
+        if (end > 0 && IsQuote(line[end - 1]))
+        {
+            end--;
+        }
+
+        var start = end;
+        while (start > 0 && IsKeyCharacter(line[start - 1]))
+        {
+            start--;
+        }
+
+        key = line[start..end];
+        return key.Length > 0;
+    }
+
+    private static bool IsCredentialKey(string key)
+    {
+        var normalized = NormalizeCredentialKey(key);
+        if (CredentialKeys.Contains(normalized))
+        {
+            return true;
+        }
+
+        if (!IsEnvironmentStyleKey(key))
+        {
+            return false;
+        }
+
+        var words = normalized.Split('_', StringSplitOptions.RemoveEmptyEntries);
+        return words.Length > 1 &&
+               (words[^1] is "password" or "passwd" or "token" or "secret" or "authorization" ||
+                words.Length > 2 && words[^2] is ("access" or "api") && words[^1] == "key");
+    }
+
+    private static string NormalizeCredentialKey(string key)
+    {
+        var normalized = new StringBuilder(key.Length + 4);
+        for (var index = 0; index < key.Length; index++)
+        {
+            var character = key[index];
+            if (character is '-' or '_')
+            {
+                if (normalized.Length > 0 && normalized[^1] != '_')
+                {
+                    normalized.Append('_');
+                }
+            }
+            else
+            {
+                if (char.IsUpper(character) && index > 0 && char.IsLower(key[index - 1]) && normalized[^1] != '_')
+                {
+                    normalized.Append('_');
+                }
+
+                normalized.Append(char.ToLowerInvariant(character));
+            }
+        }
+
+        return normalized.ToString();
+    }
+
+    private static bool IsEnvironmentStyleKey(string key) =>
+        key.All(character => char.IsUpper(character) || char.IsDigit(character) || character is '_' or '-');
 
     private static bool ContainsPopulatedAuthorization(string value)
     {
@@ -167,12 +231,13 @@ internal static partial class PortableMaterial
         {
             foreach (var command in TokenizeCommands(line))
             {
-                if (command.Count == 0 || !string.Equals(command[0], "curl", StringComparison.OrdinalIgnoreCase))
+                var executable = FindCurlExecutable(command);
+                if (executable < 0)
                 {
                     continue;
                 }
 
-                for (var index = 1; index < command.Count; index++)
+                for (var index = executable + 1; index < command.Count; index++)
                 {
                     var token = command[index];
                     if (TryReadLongOption(command, ref index, token, CurlUserOptions, out var userValue) &&
@@ -203,6 +268,54 @@ internal static partial class PortableMaterial
         }
 
         return false;
+    }
+
+    private static int FindCurlExecutable(IReadOnlyList<string> command)
+    {
+        for (var index = 0; index < command.Count; index++)
+        {
+            var token = command[index];
+            var executable = token.Trim('(', ')', '$', '`');
+            if (!string.Equals(executable, "curl", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(executable, "curl.exe", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (index == 0 || token[0] is '(' or '$' or '`' || IsSupportedCommandPrefix(command, index))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static bool IsSupportedCommandPrefix(IReadOnlyList<string> command, int executable)
+    {
+        if (executable == 1 && (command[0] == "$" || command[0].EndsWith('>')))
+        {
+            return true;
+        }
+
+        var wrapper = command[0];
+        if (!string.Equals(wrapper, "env", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(wrapper, "sudo", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(wrapper, "command", StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(wrapper, "nohup", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        for (var index = 1; index < executable; index++)
+        {
+            if (!command[index].StartsWith('-') && !command[index].Contains('='))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool TryReadLongOption(
