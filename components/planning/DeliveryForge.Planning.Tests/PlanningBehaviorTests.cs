@@ -2131,6 +2131,7 @@ public sealed class PlanningBehaviorTests
     [InlineData("command: [\"curl\", \"https://example.invalid/a#b]c\"]")]
     [InlineData("command: [\"curl\", 'https://example.invalid/a#b]c']")]
     public void Portable_consumers_preserve_round_twenty_one_quoted_flow_comment_markers(string portableText)
+    [InlineData("command: [\"curl\", https://example.invalid/a#fragment]")]
     {
         AssertPortableConsumersAccept(portableText, "revision-round-twenty-one-flow-comment-control");
     }
