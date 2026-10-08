@@ -84,18 +84,46 @@ internal static partial class PortableMaterial
     private static bool HasPopulatedAssignmentValue(string line, int separator)
     {
         var value = line.AsSpan(separator + 1);
+        var outerQuote = FindOuterAssignmentQuote(line, separator);
+        if (outerQuote != '\0')
+        {
+            var closingQuote = FindUnescapedQuote(line, separator + 1, outerQuote);
+            if (closingQuote >= 0)
+            {
+                value = line.AsSpan(separator + 1, closingQuote - separator - 1);
+            }
+        }
+
         while (!value.IsEmpty && value[0] is ' ' or '\t')
         {
             value = value[1..];
         }
 
-        if (!value.IsEmpty && IsQuote(value[0]) &&
-            line.AsSpan(0, separator).Count(value[0]) % 2 != 0)
+        return HasPopulatedValue(value);
+    }
+
+    private static char FindOuterAssignmentQuote(string line, int separator)
+    {
+        var end = separator;
+        while (end > 0 && line[end - 1] is ' ' or '\t')
         {
-            return false;
+            end--;
         }
 
-        return HasPopulatedValue(value);
+        if (end > 0 && IsQuote(line[end - 1]))
+        {
+            return '\0';
+        }
+
+        var start = end;
+        while (start > 0 && IsKeyCharacter(line[start - 1]))
+        {
+            start--;
+        }
+
+        return start > 0 && IsQuote(line[start - 1]) && !IsEscaped(line, start - 1)
+            ? line[start - 1]
+            : '\0';
     }
 
     private static bool TryReadAssignmentKey(string line, int separator, out string key)
@@ -129,11 +157,6 @@ internal static partial class PortableMaterial
             return true;
         }
 
-        if (!IsEnvironmentStyleKey(key))
-        {
-            return false;
-        }
-
         var words = normalized.Split('_', StringSplitOptions.RemoveEmptyEntries);
         return words.Length > 1 &&
                (words[^1] is "password" or "passwd" or "token" or "secret" or "authorization" ||
@@ -155,7 +178,10 @@ internal static partial class PortableMaterial
             }
             else
             {
-                if (char.IsUpper(character) && index > 0 && char.IsLower(key[index - 1]) && normalized[^1] != '_')
+                if (char.IsUpper(character) && index > 0 &&
+                    (char.IsLower(key[index - 1]) ||
+                     char.IsUpper(key[index - 1]) && index + 1 < key.Length && char.IsLower(key[index + 1])) &&
+                    normalized[^1] != '_')
                 {
                     normalized.Append('_');
                 }
@@ -166,9 +192,6 @@ internal static partial class PortableMaterial
 
         return normalized.ToString();
     }
-
-    private static bool IsEnvironmentStyleKey(string key) =>
-        key.All(character => char.IsUpper(character) || char.IsDigit(character) || character is '_' or '-');
 
     private static bool ContainsPopulatedAuthorization(string value)
     {
@@ -274,48 +297,17 @@ internal static partial class PortableMaterial
     {
         for (var index = 0; index < command.Count; index++)
         {
-            var token = command[index];
-            var executable = token.Trim('(', ')', '$', '`');
+            var executable = command[index];
             if (!string.Equals(executable, "curl", StringComparison.OrdinalIgnoreCase) &&
                 !string.Equals(executable, "curl.exe", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
-            if (index == 0 || token[0] is '(' or '$' or '`' || IsSupportedCommandPrefix(command, index))
-            {
-                return index;
-            }
+            return index;
         }
 
         return -1;
-    }
-
-    private static bool IsSupportedCommandPrefix(IReadOnlyList<string> command, int executable)
-    {
-        if (executable == 1 && (command[0] == "$" || command[0].EndsWith('>')))
-        {
-            return true;
-        }
-
-        var wrapper = command[0];
-        if (!string.Equals(wrapper, "env", StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(wrapper, "sudo", StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(wrapper, "command", StringComparison.OrdinalIgnoreCase) &&
-            !string.Equals(wrapper, "nohup", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
-        for (var index = 1; index < executable; index++)
-        {
-            if (!command[index].StartsWith('-') && !command[index].Contains('='))
-            {
-                return false;
-            }
-        }
-
-        return true;
     }
 
     private static bool TryReadLongOption(
@@ -436,11 +428,25 @@ internal static partial class PortableMaterial
             token.Clear();
         }
 
-        foreach (var character in line)
+        IReadOnlyList<string>? CompleteCommand()
         {
+            CompleteToken();
+            if (command.Count == 0)
+            {
+                return null;
+            }
+
+            var completed = command.ToArray();
+            command.Clear();
+            return completed;
+        }
+
+        for (var index = 0; index < line.Length; index++)
+        {
+            var character = line[index];
             if (quote != '\0')
             {
-                if (character == quote)
+                if (character == quote && !IsEscaped(line, index))
                 {
                     quote = '\0';
                 }
@@ -460,13 +466,12 @@ internal static partial class PortableMaterial
             {
                 CompleteToken();
             }
-            else if (character is ';' or '&' or '|')
+            else if (character is ';' or '&' or '|' or '(' or ')' or '`')
             {
-                CompleteToken();
-                if (command.Count > 0)
+                var completed = CompleteCommand();
+                if (completed is not null)
                 {
-                    yield return command.ToArray();
-                    command.Clear();
+                    yield return completed;
                 }
             }
             else
@@ -475,11 +480,36 @@ internal static partial class PortableMaterial
             }
         }
 
-        CompleteToken();
-        if (command.Count > 0)
+        var final = CompleteCommand();
+        if (final is not null)
         {
-            yield return command;
+            yield return final;
         }
+    }
+
+    private static int FindUnescapedQuote(string value, int start, char quote)
+    {
+        for (var index = start; index < value.Length; index++)
+        {
+            if (value[index] == quote && !IsEscaped(value, index))
+            {
+                return index;
+            }
+        }
+
+        return -1;
+    }
+
+    private static bool IsEscaped(string value, int index)
+    {
+        var escapeCount = 0;
+        for (var cursor = index - 1; cursor >= 0 && value[cursor] == '\\'; cursor--)
+        {
+            escapeCount++;
+        }
+
+        return escapeCount % 2 != 0 ||
+               index > 0 && value[index - 1] is '`' or '^';
     }
 
     private static IEnumerable<string> PhysicalLines(string value) =>
