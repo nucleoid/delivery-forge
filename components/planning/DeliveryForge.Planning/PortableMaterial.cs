@@ -375,7 +375,7 @@ internal static partial class PortableMaterial
     private static bool ContainsCurlCredential(string value)
     {
         var scan = CurlScanLines(NormalizeContinuations(value));
-        if (scan.AbandonedConfirmedCurlSequence)
+        if (scan.AbandonedExecStructure)
         {
             return true;
         }
@@ -789,7 +789,7 @@ internal static partial class PortableMaterial
         IReadOnlyList<string> Lines,
         StructuredAbandonmentReason AbandonmentReasons)
     {
-        public bool AbandonedConfirmedCurlSequence => AbandonmentReasons != StructuredAbandonmentReason.None;
+        public bool AbandonedExecStructure => AbandonmentReasons != StructuredAbandonmentReason.None;
     }
 
     private static CurlScanResult CurlScanLines(string value)
@@ -844,35 +844,76 @@ internal static partial class PortableMaterial
             }
             else
             {
-                for (var index = start + 1; index < lines.Length; index++)
+                var execValue = ReadExecValue(lines[start], key);
+                var blockScalar = IsBlockScalarIndicator(execValue);
+                var plainScalar = execValue.Length > 0 &&
+                                  execValue[0] != '[' &&
+                                  execValue[0] != '{';
+                if (blockScalar || plainScalar)
                 {
-                    if (index - start >= maximumSequenceLines)
+                    for (var index = start + 1; index < lines.Length; index++)
                     {
-                        fragmentAbandonment |= StructuredAbandonmentReason.LineLimit;
-                        break;
-                    }
+                        if (index - start >= maximumSequenceLines)
+                        {
+                            fragmentAbandonment |= StructuredAbandonmentReason.LineLimit;
+                            break;
+                        }
 
-                    var itemIndent = CountLeadingWhitespace(lines[index]);
-                    var item = lines[index].TrimStart();
-                    if (item.Length == 0 || item.StartsWith('#'))
-                    {
+                        var itemIndent = CountLeadingWhitespace(lines[index]);
+                        var item = lines[index].TrimStart();
+                        if (item.Length == 0)
+                        {
+                            end = index;
+                            continue;
+                        }
+
+                        if (itemIndent <= indent || !blockScalar && LooksLikeYamlMappingEntry(item))
+                        {
+                            break;
+                        }
+
+                        if (logical.Length + lines[index].Length + 1 > maximumSequenceCharacters)
+                        {
+                            fragmentAbandonment |= StructuredAbandonmentReason.CharacterLimit;
+                            break;
+                        }
+
+                        logical.Append(' ').Append(item);
                         end = index;
-                        continue;
                     }
-
-                    if (itemIndent < indent || !item.StartsWith("- ", StringComparison.Ordinal))
+                }
+                else
+                {
+                    for (var index = start + 1; index < lines.Length; index++)
                     {
-                        break;
-                    }
+                        if (index - start >= maximumSequenceLines)
+                        {
+                            fragmentAbandonment |= StructuredAbandonmentReason.LineLimit;
+                            break;
+                        }
 
-                    if (logical.Length + lines[index].Length + 1 > maximumSequenceCharacters)
-                    {
-                        fragmentAbandonment |= StructuredAbandonmentReason.CharacterLimit;
-                        break;
-                    }
+                        var itemIndent = CountLeadingWhitespace(lines[index]);
+                        var item = lines[index].TrimStart();
+                        if (item.Length == 0 || item.StartsWith('#'))
+                        {
+                            end = index;
+                            continue;
+                        }
 
-                    logical.Append(' ').Append(item[2..]);
-                    end = index;
+                        if (itemIndent < indent || !item.StartsWith("- ", StringComparison.Ordinal))
+                        {
+                            break;
+                        }
+
+                        if (logical.Length + lines[index].Length + 1 > maximumSequenceCharacters)
+                        {
+                            fragmentAbandonment |= StructuredAbandonmentReason.CharacterLimit;
+                            break;
+                        }
+
+                        logical.Append(' ').Append(item[2..]);
+                        end = index;
+                    }
                 }
             }
 
@@ -882,7 +923,7 @@ internal static partial class PortableMaterial
             {
                 results.Add(fragment.Text);
             }
-            else if (ContainsCurlExecutable(fragment.Text))
+            else
             {
                 abandonmentReasons |= fragmentAbandonment;
             }
@@ -940,6 +981,11 @@ internal static partial class PortableMaterial
         for (var index = 0; index < value.Length; index++)
         {
             var character = value[index];
+            if (quote == '\0' && character == '#' && IsYamlCommentStart(value, index))
+            {
+                break;
+            }
+
             if (quote != '\0')
             {
                 if (character == quote && !IsEscaped(value, index))
@@ -965,6 +1011,59 @@ internal static partial class PortableMaterial
         }
     }
 
+    private static bool IsYamlCommentStart(string value, int index) =>
+        !IsEscaped(value, index) &&
+        (index == 0 || char.IsWhiteSpace(value[index - 1]));
+
+    private static string ReadExecValue(string line, string key)
+    {
+        var trimmed = line.Trim();
+        if (trimmed.StartsWith("- ", StringComparison.Ordinal))
+        {
+            trimmed = trimmed[2..].TrimStart();
+        }
+
+        var separator = trimmed.IndexOf(':');
+        if (separator >= 0 &&
+            trimmed[..separator].Trim(' ', '\t', '{', ',', '\'', '"')
+                .Equals(key, StringComparison.OrdinalIgnoreCase))
+        {
+            return trimmed[(separator + 1)..].Trim();
+        }
+
+        var whitespace = trimmed.IndexOfAny(' ', '\t');
+        return whitespace < 0 ? string.Empty : trimmed[(whitespace + 1)..].Trim();
+    }
+
+    private static bool IsBlockScalarIndicator(string value) =>
+        value is ">" or ">-" or ">+" or "|" or "|-" or "|+";
+
+    private static bool LooksLikeYamlMappingEntry(string value)
+    {
+        var separator = value.IndexOf(':');
+        if (separator <= 0 ||
+            separator + 1 < value.Length && !char.IsWhiteSpace(value[separator + 1]))
+        {
+            return false;
+        }
+
+        var key = value.AsSpan(0, separator).Trim().Trim('\'').Trim('"');
+        if (key.IsEmpty)
+        {
+            return false;
+        }
+
+        foreach (var character in key)
+        {
+            if (!char.IsLetterOrDigit(character) && character is not '_' and not '-' and not '.')
+            {
+                return false;
+
+            }
+        }
+
+        return true;
+    }
     private static bool ContainsCurlExecutable(string text) =>
         TokenizeCommands(text).Any(command => FindCurlExecutable(command) >= 0);
 
@@ -1093,8 +1192,7 @@ internal static partial class PortableMaterial
             }
 
             var indent = CountLeadingWhitespace(lines[index]);
-            if (indent < first.Indent ||
-                indent == first.Indent && trimmed.StartsWith("- ", StringComparison.Ordinal))
+            if (indent < first.Indent)
             {
                 return false;
             }
@@ -1226,8 +1324,33 @@ internal static partial class PortableMaterial
     private static bool IsQuoteOpening(string value, int index) =>
         IsQuote(value[index]) &&
         !IsEscaped(value, index) &&
-        (index == 0 || !char.IsLetterOrDigit(value[index - 1])) &&
+        (index == 0 || !char.IsLetterOrDigit(value[index - 1]) || IsAttachedShortOptionQuote(value, index)) &&
         FindUnescapedQuote(value, index + 1, value[index]) >= 0;
+
+    private static bool IsAttachedShortOptionQuote(string value, int quoteIndex)
+    {
+        var start = quoteIndex - 1;
+        while (start >= 0 && !char.IsWhiteSpace(value[start]) && !IsCommandSeparator(value[start]))
+        {
+            start--;
+        }
+
+        start++;
+        if (quoteIndex - start < 2 || value[start] != '-' || value[start + 1] == '-')
+        {
+            return false;
+        }
+
+        for (var index = start + 1; index < quoteIndex; index++)
+        {
+            if (!char.IsLetter(value[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private static string NormalizeEscapedQuotes(string value)
     {
