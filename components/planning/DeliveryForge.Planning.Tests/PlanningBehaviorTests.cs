@@ -1855,6 +1855,80 @@ public sealed class PlanningBehaviorTests
     }
 
     [Theory]
+    [InlineData("curl -R -u alice:hunter2 https://example.invalid")]
+    [InlineData("curl -RsS --user alice:hunter2 https://example.invalid")]
+    [InlineData("curl -h --proxy-user proxy:private https://example.invalid")]
+    [InlineData("curl --help --oauth2-bearer private-token https://example.invalid")]
+    [InlineData("curl --help=all --cookie session=private-value https://example.invalid")]
+    [InlineData("curl --haproxy-clientip --user alice:hunter2 https://example.invalid")]
+    [InlineData("curl --connect-timeout then --user alice:hunter2 https://example.invalid")]
+    public void Portable_consumers_reject_round_eighteen_credentials_after_authoritative_option_arities(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-eighteen-option-semantics");
+    }
+
+    [Theory]
+    [InlineData("curl alice:hunter2@example.invalid")]
+    [InlineData("curl -fsS alice:hunter2@example.invalid/path")]
+    [InlineData("curl --url alice:hunter2@example.invalid/resource")]
+    [InlineData("curl --url=alice:hunter2@example.invalid/resource")]
+    [InlineData("curl --expand-url 'alice:hunter2@example.invalid/{{path}}'")]
+    public void Portable_consumers_reject_round_eighteen_schemeless_url_userinfo(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-eighteen-schemeless-userinfo");
+    }
+
+    [Theory]
+    [InlineData("curl --expand-user alice:hunter2 https://example.invalid")]
+    [InlineData("curl --expand-user=alice:hunter2 https://example.invalid")]
+    [InlineData("curl --expand-proxy-user proxy:private https://example.invalid")]
+    [InlineData("curl --expand-proxy http://proxy:private@proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --expand-cookie session=private-value https://example.invalid")]
+    [InlineData("curl --expand-cert client.pem:private-phrase https://example.invalid")]
+    [InlineData("curl --no-user=alice:hunter2 https://example.invalid")]
+    [InlineData("curl --no-cookie session=private-value https://example.invalid")]
+    public void Portable_consumers_reject_round_eighteen_modifier_credentials(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-eighteen-modifier-credential");
+    }
+
+    [Theory]
+    [InlineData("args:\n  - --user\n  - alice:hunter2\ncommand:\n  - curl\n  - https://example.invalid")]
+    [InlineData("entrypoint: [\"curl\"]\nimage: curlimages/curl:8.5.0\ncommand: [\"--user\", \"alice:hunter2\", \"https://example.invalid\"]")]
+    [InlineData("command: [\"--oauth2-bearer\", \"private-token\", \"https://example.invalid\"]\n# entrypoint is intentionally declared later\nentrypoint: [\"curl\"]")]
+    [InlineData("{\n  \"Config\": {\n    \"Cmd\": [\"--cookie\", \"session=private-value\", \"https://example.invalid\"],\n    \"Image\": \"curlimages/curl:8.5.0\",\n    \"Entrypoint\": [\"curl\"]\n  }\n}")]
+    [InlineData("{\n  \"Config\": {\n    \"Entrypoint\": [\"curl\"],\n    \"WorkingDir\": \"/workspace\",\n    \"Cmd\": [\"--pass\", \"private-phrase\", \"https://example.invalid\"]\n  }\n}")]
+    [InlineData("containers:\n  - command: [\"curl\"]\n    name: probe\n    args: [\"--proxy-user\", \"proxy:private\", \"https://example.invalid\"]")]
+    [InlineData("services:\n  probe:\n    entrypoint:\n      - curl\n    restart: on-failure\n    command:\n      - --cert\n      - client.pem:private-phrase\n      - https://example.invalid")]
+    public void Portable_consumers_reject_round_eighteen_context_grouped_structured_commands(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-eighteen-structured-context");
+    }
+
+    [Theory]
+    [InlineData("curl -R https://example.invalid")]
+    [InlineData("curl -h auth")]
+    [InlineData("curl --help=all")]
+    [InlineData("curl --haproxy-clientip https://example.invalid")]
+    [InlineData("curl example.invalid:8443/health")]
+    [InlineData("curl example.invalid/path")]
+    [InlineData("curl --url example.invalid/resource")]
+    [InlineData("curl --url '<user>:<password>@example.invalid/resource'")]
+    [InlineData("curl '${USER}:${PASSWORD}@example.invalid/resource'")]
+    [InlineData("curl --expand-user '' https://example.invalid")]
+    [InlineData("curl --expand-cookie= https://example.invalid")]
+    [InlineData("curl --no-user='' https://example.invalid")]
+    [InlineData("command: [\"curl\", \"https://example.invalid\"]\nmetadata:\n  args: [\"--user\", \"documentation-only\"]")]
+    [InlineData("containers:\n  - name: probe\n    command: [\"curl\"]\n  - name: unrelated\n    args: [\"--user\", \"documentation-only\"]")]
+    [InlineData("{\n  \"one\": { \"Entrypoint\": [\"curl\"] },\n  \"two\": { \"Cmd\": [\"--user\", \"documentation-only\"] }\n}")]
+    [InlineData("entrypoint: [\"curl\", \"https://example.invalid\"]\ncommand: [\"echo\", \"healthy\"]\nLater run docker run -u 1000:1000 image")]
+    [InlineData("The prose example says command: curl, while args: --user documentation-only appears later.")]
+    public void Portable_consumers_preserve_round_eighteen_sibling_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-eighteen-control");
+    }
+
+    [Theory]
     [InlineData("{\"Authorization\": \"\"}")]
     [InlineData("{'Authorization' = '   '}")]
     [InlineData("Authorization:\nordinary next line")]
