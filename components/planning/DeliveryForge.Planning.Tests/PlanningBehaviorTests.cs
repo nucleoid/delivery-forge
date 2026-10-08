@@ -1782,6 +1782,79 @@ public sealed class PlanningBehaviorTests
     }
 
     [Theory]
+    [InlineData("`\"curl.exe`\" --oauth2-bearer private-token https://example.invalid")]
+    [InlineData("^\"curl^\" --pass private-phrase https://example.invalid")]
+    [InlineData("\\\"curl.exe\\\" --proxy-pass private-phrase https://example.invalid")]
+    [InlineData("'curl' --tlspassword private-phrase https://example.invalid")]
+    [InlineData("\"curl.exe\" --proxy-tlspassword private-phrase https://example.invalid")]
+    public void Portable_consumers_reject_round_seventeen_quoted_and_escaped_curl_executables(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-seventeen-quoted-curl");
+    }
+
+    [Theory]
+    [InlineData("command:\n  - curl\nargs:\n  - --oauth2-bearer\n  - private-token\n  - https://example.invalid")]
+    [InlineData("spec:\n  command: [\n    \"curl.exe\"\n  ]\n  args: [\n    \"--pass\",\n    \"private-phrase\",\n    \"https://example.invalid\"\n  ]")]
+    [InlineData("healthcheck:\n  test:\n    - CMD\n    - curl\n    - --proxy-pass\n    - private-phrase\n    - https://example.invalid")]
+    [InlineData("ENTRYPOINT [\n  \"curl\"\n]\nCMD [\n  \"--oauth2-bearer\",\n  \"private-token\",\n  \"https://example.invalid\"\n]")]
+    [InlineData("RUN [\n  \"curl\",\n  \"--pass\",\n  \"private-phrase\",\n  \"https://example.invalid\"\n]")]
+    [InlineData("{\n  \"Cmd\": [\n    \"curl\",\n    \"--cert\",\n    \"client.pem:private-phrase\",\n    \"https://example.invalid\"\n  ]\n}")]
+    [InlineData("{\n  \"Test\": [\n    \"CMD\",\n    \"curl\",\n    \"--cookie\",\n    \"session=private-value\",\n    \"https://example.invalid\"\n  ]\n}")]
+    public void Portable_consumers_reject_round_seventeen_bounded_structured_curl_commands(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-seventeen-structured-curl");
+    }
+
+    [Theory]
+    [InlineData("curl --output-dir docker --oauth2-bearer private-token https://example.invalid")]
+    [InlineData("curl --request-target then --pass private-phrase https://example.invalid")]
+    [InlineData("curl --proxy-cert-type kubectl --proxy-pass private-phrase https://example.invalid")]
+    [InlineData("curl --url-query podman --tlspassword private-phrase https://example.invalid")]
+    public void Portable_consumers_reject_round_seventeen_credentials_after_consumed_option_values(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-seventeen-option-arity");
+    }
+
+    [Theory]
+    [InlineData("curl --oauth2-bearer private-token https://example.invalid")]
+    [InlineData("curl --pass private-phrase https://example.invalid")]
+    [InlineData("curl --proxy-pass=private-phrase https://example.invalid")]
+    [InlineData("curl --tlspassword private-phrase https://example.invalid")]
+    [InlineData("curl --proxy-tlspassword=private-phrase https://example.invalid")]
+    [InlineData("curl --cert client.pem:private-phrase https://example.invalid")]
+    [InlineData("curl --proxy-cert=client.pem:private-phrase https://example.invalid")]
+    [InlineData("curl --cookie session=private-value https://example.invalid")]
+    [InlineData("curl -bsession=private-value https://example.invalid")]
+    public void Portable_consumers_reject_round_seventeen_fail_closed_curl_credentials(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-seventeen-fail-closed-curl");
+    }
+
+    [Theory]
+    [InlineData("curl.exe -d \"{\"\"db.password\"\":\"\"hunter2\"\"}\" https://example.invalid")]
+    [InlineData("curl.exe -d \"{\"\"spring.datasource.password\"\":\"\"hunter2\"\"}\" https://example.invalid")]
+    [InlineData("curl.exe -d \"{\"\"x.api_key\"\":\"\"private-value\"\"}\" https://example.invalid")]
+    public void Portable_consumers_reject_round_seventeen_dotted_doubled_quote_keys(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-seventeen-dotted-key");
+    }
+
+    [Theory]
+    [InlineData("The quoted prose `\"curl\" accepts OAuth options` remains portable")]
+    [InlineData("curl --oauth2-bearer '' https://example.invalid")]
+    [InlineData("curl --pass= https://example.invalid")]
+    [InlineData("curl --cookie '' https://example.invalid")]
+    [InlineData("curl --cookie-jar cookies.txt https://example.invalid")]
+    [InlineData("curl --output-dir docker https://example.invalid and docker run -u 1000:1000 image")]
+    [InlineData("command:\n  - curl\nargs:\n  - --user-agent\n  - delivery-forge\n  - https://example.invalid")]
+    [InlineData("command:\n  - curl\nunrelated:\n  args:\n    - --oauth2-bearer\n    - documentation-only")]
+    [InlineData("ENTRYPOINT [\"curl\", \"https://example.invalid\"]\nRUN docker run -u 1000:1000 image")]
+    public void Portable_consumers_preserve_round_seventeen_false_positive_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-seventeen-control");
+    }
+
+    [Theory]
     [InlineData("{\"Authorization\": \"\"}")]
     [InlineData("{'Authorization' = '   '}")]
     [InlineData("Authorization:\nordinary next line")]
@@ -2159,7 +2232,8 @@ public sealed class PlanningBehaviorTests
             Provenance = provenance,
             Intake = IntakePlanner.Assess(original.Request, provenance)
         };
-        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(draft, revision, ObservedAt));
+        var planError = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(draft, revision, ObservedAt));
+        Assert.Contains("host path or credential-like private material", planError.Message, StringComparison.OrdinalIgnoreCase);
 
         var json = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
         {
@@ -2168,7 +2242,8 @@ public sealed class PlanningBehaviorTests
             conflicts = Array.Empty<string>(),
             limitations = Array.Empty<string>()
         }));
-        Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
+        var importedError = Assert.Throws<PlanningException>(() => ImportedContextEnvelope.Parse(json));
+        Assert.Contains("not portable or may contain private/secret material", importedError.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     private static void AssertPortableConsumersAccept(string portableText, string revision)
