@@ -2079,8 +2079,14 @@ public sealed class PlanningBehaviorTests
     [Theory]
     [InlineData("curl --oauth2 abc.def.ghi https://api.example.invalid")]
     [InlineData("curl --tlspass private-phrase https://example.invalid")]
+    [InlineData("curl --proxy-tlsp private-phrase https://example.invalid")]
     [InlineData("curl --proxy-us alice:hunter2 --proxy proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --user alice:hunter2 https://example.invalid")]
+    [InlineData("curl --cook https://example.invalid")]
     [InlineData("curl --proxy-tls https://example.invalid")]
+    [InlineData("curl --globof :hunter2@example.invalid/resource")]
+    [InlineData("curl --hel :hunter2@example.invalid/resource")]
+    [InlineData("curl --url-q alice:hunter2@example.invalid/resource https://example.invalid")]
     [InlineData("curl --future-auth private-phrase https://example.invalid")]
     public void Portable_consumers_reject_round_twenty_unique_ambiguous_and_unknown_long_options(string privateText)
     {
@@ -2102,6 +2108,11 @@ public sealed class PlanningBehaviorTests
     [InlineData("curl :@example.invalid/resource")]
     [InlineData("curl --url '<user>:<password>@example.invalid/resource'")]
     [InlineData("curl --future-flag && docker run -u 1000:1000 image")]
+    [InlineData("curl --globof https://example.invalid")]
+    [InlineData("curl --hel all https://example.invalid")]
+    [InlineData("curl --url-q name=value https://example.invalid")]
+    [InlineData("curl --haproxy-clienti 192.0.2.10 https://example.invalid")]
+    [InlineData("curl --proxy-tlsu ordinary-name https://example.invalid")]
     [InlineData("FROM base AS probe\nENTRYPOINT [\"curl\"]\nFROM base AS runtime\nCMD [\"--pass\", \"documentation-only\"]")]
     public void Portable_consumers_preserve_round_twenty_sibling_controls(string portableText)
     {
