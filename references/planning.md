@@ -128,7 +128,13 @@ Portable gate commands may use ordinary `./`, `../`, `.\\`, and `..\\` repositor
 Windows, UNC, home-alias, arbitrary rooted-Windows, and option-attached private host paths remain rejected.
 Portable plan and imported-context text also reject schemeless curl proxy userinfo across grouped
 short flags and proxy-taking long options, plus every non-empty `Authorization` header value, while
-preserving noncredential proxy arguments, empty `Authorization` headers, and ordinary headers.
+preserving noncredential proxy arguments, empty `Authorization` headers, and ordinary headers. Curl
+credential scanning is escape-aware and command-position-aware: quoted option values do not become
+prose or later-command boundaries, while actual later Docker, Podman, and Kubernetes commands do.
+Bounded JSON exec arrays and YAML/Docker/Kubernetes command sequences are scanned across lines; text
+outside those explicit structures is never joined. Backslash, PowerShell-backtick, cmd-caret, and
+doubled-quote key escapes are normalized only within their physical line. A single-backslash curl
+alias remains supported without masking drive, UNC/rooted, or home-alias private paths.
 
 The library targets Linux and Windows through `net10.0`. Local tests establish Linux behavior.
 Windows support is a hosted-CI claim only after that lane passes. macOS is not claimed for v1.

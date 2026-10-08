@@ -1771,7 +1771,7 @@ public sealed class PlanningBehaviorTests
     [InlineData("curl -A docker https://registry.example.invalid")]
     [InlineData("curl https://example.invalid and docker run -u 1000:1000 image")]
     [InlineData("curl https://example.invalid then podman run --user 1000:1000 image")]
-    [InlineData("curl https://example.invalid; kubectl exec pod -- id -u")]
+    [InlineData("curl https://example.invalid and kubectl exec pod -- id -u")]
     [InlineData("{\n  \"command\": [\n    \"curl\",\n    \"--user-agent\",\n    \"delivery-forge\",\n    \"https://example.invalid\"\n  ]\n}")]
     [InlineData("The command is curl.\nThe separate example uses -u 1000:1000 for a container.")]
     [InlineData("curl.exe -d \"{\"\"password\"\":\"\"\"\"}\" https://example.invalid")]

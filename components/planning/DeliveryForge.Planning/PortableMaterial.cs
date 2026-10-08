@@ -24,6 +24,30 @@ internal static partial class PortableMaterial
         "--socks5", "--socks5-hostname"
     };
 
+    private static readonly HashSet<string> CurlLongOptionsWithValues = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "--abstract-unix-socket", "--alt-svc", "--aws-sigv4", "--cacert", "--capath",
+        "--cert", "--cert-type", "--ciphers", "--connect-timeout", "--connect-to", "--cookie",
+        "--cookie-jar", "--create-file-mode", "--data", "--data-ascii", "--data-binary",
+        "--data-raw", "--data-urlencode", "--delegation", "--dns-interface", "--dns-ipv4-addr",
+        "--dns-ipv6-addr", "--dns-servers", "--doh-url", "--dump-header", "--egd-file",
+        "--engine", "--etag-compare", "--etag-save", "--expect100-timeout", "--form",
+        "--form-string", "--ftp-account", "--ftp-alternative-to-user", "--ftp-method",
+        "--ftp-port", "--ftp-ssl-ccc-mode", "--happy-eyeballs-timeout-ms", "--header",
+        "--hostpubmd5", "--hsts", "--interface", "--key", "--key-type", "--krb",
+        "--libcurl", "--limit-rate", "--local-port", "--login-options", "--mail-auth",
+        "--mail-from", "--mail-rcpt", "--max-filesize", "--max-redirs", "--max-time",
+        "--noproxy", "--oauth2-bearer", "--output", "--pass", "--pinnedpubkey", "--proto",
+        "--proto-default", "--proto-redir", "--pubkey", "--quote", "--range", "--referer",
+        "--request", "--resolve", "--retry", "--retry-delay", "--retry-max-time",
+        "--sasl-authzid", "--service-name", "--speed-limit", "--speed-time", "--tls-max",
+        "--tls13-ciphers", "--unix-socket", "--upload-file", "--url", "--user-agent",
+        "--write-out"
+    };
+
+    private static readonly HashSet<char> CurlShortOptionsWithValues =
+        ['A', 'b', 'c', 'd', 'D', 'e', 'E', 'F', 'H', 'K', 'm', 'o', 'P', 'Q', 'r', 'R', 'T', 'w', 'X', 'y', 'Y'];
+
     private static readonly HashSet<string> NetworkSchemes = new(StringComparer.OrdinalIgnoreCase)
     {
         "http", "https", "ssh", "git", "ftp", "ftps"
@@ -53,12 +77,11 @@ internal static partial class PortableMaterial
 
             return "portable-url";
         });
-        var withoutCurlAliases = SingleBackslashCurl().Replace(withoutUrls, "curl");
         return invalidUrl ||
-               HostPath().IsMatch(withoutCurlAliases) ||
-               OptionAttachedHostPath().IsMatch(withoutCurlAliases) ||
-               HomeAliasPath().IsMatch(withoutCurlAliases) ||
-               SingleBackslashRoot().IsMatch(withoutCurlAliases);
+               HostPath().IsMatch(withoutUrls) ||
+               OptionAttachedHostPath().IsMatch(withoutUrls) ||
+               HomeAliasPath().IsMatch(withoutUrls) ||
+               SingleBackslashRoot().IsMatch(withoutUrls);
     }
 
     private static bool ContainsCredentialAssignment(string value)
@@ -253,49 +276,120 @@ internal static partial class PortableMaterial
 
     private static bool ContainsCurlCredential(string value)
     {
-        foreach (var line in PhysicalLines(NormalizeContinuations(value)))
+        foreach (var line in CurlScanLines(NormalizeContinuations(value)))
         {
             foreach (var command in TokenizeCommands(line))
             {
-                var executable = FindCurlExecutable(command);
-                if (executable < 0)
+                if (ContainsCurlCredential(command, depth: 0))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ContainsCurlCredential(IReadOnlyList<string> command, int depth)
+    {
+        var executable = FindCurlExecutable(command);
+        if (executable >= 0)
+        {
+            for (var index = executable + 1; index < command.Count; index++)
+            {
+                var token = command[index];
+                if (TryReadLongOption(command, ref index, token, CurlUserOptions, out var userValue) &&
+                    HasUserInfo(userValue, requireAtSign: false))
+                {
+                    return true;
+                }
+
+                if (TryReadLongOption(command, ref index, token, CurlProxyOptions, out var proxyValue) &&
+                    HasUserInfo(proxyValue, requireAtSign: true))
+                {
+                    return true;
+                }
+
+                if (TryReadShortOption(command, ref index, token, ['u', 'U'], out userValue) &&
+                    HasUserInfo(userValue, requireAtSign: false))
+                {
+                    return true;
+                }
+
+                if (TryReadShortOption(command, ref index, token, ['x'], out proxyValue) &&
+                    HasUserInfo(proxyValue, requireAtSign: true))
+                {
+                    return true;
+                }
+
+                if (TrySkipCurlOptionValue(command, ref index, token))
                 {
                     continue;
                 }
 
-                for (var index = executable + 1; index < command.Count; index++)
+                if (IsCurlScanBoundary(token))
                 {
-                    var token = command[index];
-                    if (IsCurlScanBoundary(token))
-                    {
-                        break;
-                    }
-
-                    if (TryReadLongOption(command, ref index, token, CurlUserOptions, out var userValue) &&
-                        HasUserInfo(userValue, requireAtSign: false))
-                    {
-                        return true;
-                    }
-
-                    if (TryReadLongOption(command, ref index, token, CurlProxyOptions, out var proxyValue) &&
-                        HasUserInfo(proxyValue, requireAtSign: true))
-                    {
-                        return true;
-                    }
-
-                    if (TryReadShortOption(command, ref index, token, ['u', 'U'], out userValue) &&
-                        HasUserInfo(userValue, requireAtSign: false))
-                    {
-                        return true;
-                    }
-
-                    if (TryReadShortOption(command, ref index, token, ['x'], out proxyValue) &&
-                        HasUserInfo(proxyValue, requireAtSign: true))
-                    {
-                        return true;
-                    }
+                    break;
                 }
             }
+        }
+
+        if (depth >= 2)
+        {
+            return false;
+        }
+
+        foreach (var token in command.Where(token => token.Any(char.IsWhiteSpace)))
+        {
+            foreach (var nested in TokenizeCommands(token))
+            {
+                if (ContainsCurlCredential(nested, depth + 1))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TrySkipCurlOptionValue(IReadOnlyList<string> command, ref int index, string token)
+    {
+        if (token.StartsWith("--", StringComparison.Ordinal))
+        {
+            var equals = token.IndexOf('=');
+            var option = equals >= 0 ? token[..equals] : token;
+            if (!CurlLongOptionsWithValues.Contains(option))
+            {
+                return false;
+            }
+
+            if (equals < 0 && index + 1 < command.Count)
+            {
+                index++;
+            }
+
+            return true;
+        }
+
+        if (token.Length < 2 || token[0] != '-' || token[1] == '-')
+        {
+            return false;
+        }
+
+        for (var cursor = 1; cursor < token.Length; cursor++)
+        {
+            if (!CurlShortOptionsWithValues.Contains(token[cursor]))
+            {
+                continue;
+            }
+
+            if (cursor == token.Length - 1 && index + 1 < command.Count)
+            {
+                index++;
+            }
+
+            return true;
         }
 
         return false;
@@ -450,6 +544,89 @@ internal static partial class PortableMaterial
         return normalized.ToString();
     }
 
+    private static IEnumerable<string> CurlScanLines(string value)
+    {
+        var lines = PhysicalLines(value).ToArray();
+        foreach (var line in lines)
+        {
+            yield return line;
+        }
+
+        const int maximumSequenceLines = 32;
+        const int maximumSequenceCharacters = 8192;
+        for (var start = 0; start < lines.Length; start++)
+        {
+            var trimmed = lines[start].Trim();
+            if (IsExecArrayStart(trimmed))
+            {
+                var logical = new StringBuilder(lines[start]);
+                var bracketDepth = Count(trimmed, '[') - Count(trimmed, ']');
+                for (var index = start + 1;
+                     bracketDepth > 0 && index < lines.Length && index - start < maximumSequenceLines;
+                     index++)
+                {
+                    if (logical.Length + lines[index].Length + 1 > maximumSequenceCharacters)
+                    {
+                        break;
+                    }
+
+                    logical.Append(' ').Append(lines[index]);
+                    bracketDepth += Count(lines[index], '[') - Count(lines[index], ']');
+                    if (bracketDepth == 0)
+                    {
+                        yield return logical.ToString();
+                        start = index;
+                    }
+                }
+
+                continue;
+            }
+
+            if (!IsExecSequenceKey(trimmed))
+            {
+                continue;
+            }
+
+            var sequence = new StringBuilder(lines[start]);
+            var last = start;
+            for (var index = start + 1;
+                 index < lines.Length && index - start < maximumSequenceLines;
+                 index++)
+            {
+                var item = lines[index].TrimStart();
+                if (!item.StartsWith("- ", StringComparison.Ordinal))
+                {
+                    break;
+                }
+
+                if (sequence.Length + lines[index].Length + 1 > maximumSequenceCharacters)
+                {
+                    break;
+                }
+
+                sequence.Append(' ').Append(item[2..]);
+                last = index;
+            }
+
+            if (last > start)
+            {
+                yield return sequence.ToString();
+                start = last;
+            }
+        }
+    }
+
+    private static bool IsExecArrayStart(string line) =>
+        line.Contains('[', StringComparison.Ordinal) &&
+        (line.StartsWith("HEALTHCHECK", StringComparison.OrdinalIgnoreCase) ||
+         line.StartsWith("CMD", StringComparison.OrdinalIgnoreCase) ||
+         line.StartsWith("ENTRYPOINT", StringComparison.OrdinalIgnoreCase) ||
+         ExecSequenceKey().IsMatch(line));
+
+    private static bool IsExecSequenceKey(string line) => ExecSequenceKey().IsMatch(line);
+
+    private static int Count(string value, char character) => value.Count(candidate => candidate == character);
+
     private static IEnumerable<IReadOnlyList<string>> TokenizeCommands(string line)
     {
         var command = new List<string>();
@@ -488,18 +665,6 @@ internal static partial class PortableMaterial
                 if (character == quote && !IsEscaped(line, index))
                 {
                     quote = '\0';
-                }
-                else if (char.IsWhiteSpace(character) || character is ',' or '[' or ']' or '{' or '}')
-                {
-                    CompleteToken();
-                }
-                else if (IsCommandSeparator(character) && !IsEscaped(line, index))
-                {
-                    var completed = CompleteCommand();
-                    if (completed is not null)
-                    {
-                        yield return completed;
-                    }
                 }
                 else
                 {
@@ -547,11 +712,13 @@ internal static partial class PortableMaterial
     private static bool IsQuoteOpening(string value, int index) =>
         IsQuote(value[index]) &&
         !IsEscaped(value, index) &&
-        (index == 0 || !char.IsLetterOrDigit(value[index - 1]));
+        (index == 0 || !char.IsLetterOrDigit(value[index - 1])) &&
+        FindUnescapedQuote(value, index + 1, value[index]) >= 0;
 
     private static string NormalizeEscapedQuotes(string value)
     {
         var normalized = new StringBuilder(value.Length);
+        var collapseDoubledQuotes = DoubledQuotedKey().IsMatch(value);
         for (var index = 0; index < value.Length; index++)
         {
             if (value[index] is '\\' or '`' or '^' &&
@@ -559,6 +726,16 @@ internal static partial class PortableMaterial
                 IsQuote(value[index + 1]))
             {
                 normalized.Append(value[++index]);
+                continue;
+            }
+
+            if (collapseDoubledQuotes &&
+                IsQuote(value[index]) &&
+                index + 1 < value.Length &&
+                value[index + 1] == value[index])
+            {
+                normalized.Append(value[index]);
+                index++;
                 continue;
             }
 
@@ -669,6 +846,16 @@ internal static partial class PortableMaterial
         @"(?<![A-Za-z0-9.\\])\\curl(?:\.exe)?(?=\s|$)",
         RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
     private static partial Regex SingleBackslashCurl();
+
+    [GeneratedRegex(
+        """^(?:[\"']?(?:command|args|entrypoint)[\"']?\s*:|(?:HEALTHCHECK\s+)?(?:CMD|ENTRYPOINT)\b)""",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
+    private static partial Regex ExecSequenceKey();
+
+    [GeneratedRegex(
+        """(?:\"\"[A-Za-z][A-Za-z0-9_-]*\"\"|''[A-Za-z][A-Za-z0-9_-]*'')\s*[:=]""",
+        RegexOptions.CultureInvariant)]
+    private static partial Regex DoubledQuotedKey();
 
     [GeneratedRegex(
         """[a-z][a-z0-9+.-]*:(?://|\\\\)[^\s`|\[\]{}<>"']+""",
