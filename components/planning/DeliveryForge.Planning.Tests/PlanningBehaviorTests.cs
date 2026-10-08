@@ -2338,6 +2338,147 @@ public sealed class PlanningBehaviorTests
         AssertPortableConsumersReject(privateText, "revision-round-twenty-two-flow-line-bound");
     }
 
+    [Theory]
+    [InlineData("command: ['sh', '-c', 'curl -H ''Cookie: session=private'' https://example.invalid']")]
+    [InlineData("command: ['sh', '-c', 'curl -H''Set-Cookie: id=private'' https://example.invalid']")]
+    [InlineData("pwsh -Command \"curl.exe -H \"\"Cookie: session=private\"\" https://example.invalid\"")]
+    [InlineData("cmd /c \"curl.exe -H\"\"Set-Cookie: id=private\"\" https://example.invalid\"")]
+    public void Portable_consumers_reject_round_twenty_three_doubled_quote_headers(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-three-doubled-header");
+    }
+
+    [Theory]
+    [InlineData("command: ['sh', '-c', 'curl -H ''Cookie:'' https://example.invalid']")]
+    [InlineData("pwsh -Command \"curl.exe -H \"\"Set-Cookie:   \"\" https://example.invalid\"")]
+    [InlineData("cmd /c \"curl.exe -H \"\"X-Trace: ordinary\"\" https://example.invalid\"")]
+    [InlineData("pwsh -Command \"Write-Output \"\"Cookie: ordinary prose\"\"\"")]
+    public void Portable_consumers_preserve_round_twenty_three_doubled_quote_header_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twenty-three-doubled-header-control");
+    }
+
+    [Theory]
+    [InlineData("healthcheck:\n  test: \"curl -fsS --header\n    'Cookie: session=private'\n    https://example.invalid\"")]
+    [InlineData("args:\n  - \"curl -fsS -H\n    'Set-Cookie: id=private' https://example.invalid\"")]
+    [InlineData("command: > # probe\n  curl -fsS -H\n  'Cookie: session=private'\n  https://example.invalid")]
+    [InlineData("command: >2\n    curl -fsS -H\n    'Cookie: session=private'\n    https://example.invalid")]
+    [InlineData("command: |2-\n    curl -fsS -H\n    'Set-Cookie: id=private'\n    https://example.invalid")]
+    [InlineData("command: >-2 # probe\n    curl -fsS -H\n    'Cookie: session=private'\n    https://example.invalid")]
+    public void Portable_consumers_reject_round_twenty_three_quoted_multiline_and_block_headers(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-three-multiline-header");
+    }
+
+    [Theory]
+    [InlineData("healthcheck:\n  test: \"curl -fsS -H\n    'X-Trace: ordinary'\n    https://example.invalid\"")]
+    [InlineData("command: >2\n    curl -fsS https://example.invalid\nsibling:\n  note: Cookie: documentation-only")]
+    [InlineData("command: |2- # probe\n    curl -fsS -H 'Cookie:' https://example.invalid")]
+    [InlineData("command: >-2\n    printf 'Cookie: ordinary prose'")]
+    public void Portable_consumers_preserve_round_twenty_three_multiline_header_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twenty-three-multiline-header-control");
+    }
+
+    [Theory]
+    [InlineData("command: >--\n  curl -fsS --pass private-phrase")]
+    [InlineData("command: |0\n  curl -fsS --pass private-phrase")]
+    [InlineData("command: >2 trailing\n  curl -fsS --pass private-phrase")]
+    public void Portable_consumers_reject_round_twenty_three_malformed_block_headers(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-three-malformed-block-header");
+    }
+
+    [Theory]
+    [InlineData("command: >2\n  sibling: harmless\nother:\n  --pass private-phrase")]
+    [InlineData("command: |2-\n  harmless\n---\ncommand: --pass private-phrase")]
+    [InlineData("FROM base AS probe\nRUN >2\n  echo harmless\nFROM base AS sibling\nRUN --pass private-phrase")]
+    public void Portable_consumers_preserve_round_twenty_three_block_scalar_boundaries(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twenty-three-block-boundary-control");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_three_next_line_plain_line_limit()
+    {
+        var privateText = "command:\n  curl -fsS \"" +
+                          string.Join('\n', Enumerable.Range(0, 31).Select(index => $"  harmless-{index}")) +
+                          "\n  Cookie: session=private\"";
+
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-three-next-plain-line-limit");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_three_next_line_plain_character_limit()
+    {
+        var privateText = "command:\n  curl -fsS \"" + new string('a', 2050) + "\n  Cookie: session=private\"";
+
+        Assert.True(privateText.Length < 4096);
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-three-next-plain-character-limit");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_three_next_line_plain_unclosed_delimiter()
+    {
+        const string privateText = "command:\n  \"curl -fsS -H\n    Cookie: session=private";
+
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-three-next-plain-unclosed");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_three_next_line_flow_line_limit()
+    {
+        var privateText = "command:\n  [\"curl\",\n" +
+                          string.Join('\n', Enumerable.Range(0, 31).Select(index => $"   \"harmless-{index}\",")) +
+                          "\n   \"--pass\", \"private-phrase\"]";
+
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-three-next-flow-line-limit");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_three_next_line_flow_character_limit()
+    {
+        var privateText = "command:\n  [\"curl\", \"" + new string('a', 2050) + "\", \"--pass\", \"private-phrase\"]";
+
+        Assert.True(privateText.Length < 4096);
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-three-next-flow-character-limit");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_three_next_line_flow_unclosed_delimiter()
+    {
+        const string privateText = "command:\n  [\"curl\", \"--pass\", \"private-phrase\"";
+
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-three-next-flow-unclosed");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_three_sequence_block_scalar_line_limit()
+    {
+        var privateText = "args:\n  - >-\n    curl -fsS \"" +
+                          string.Join('\n', Enumerable.Range(0, 30).Select(index => $"    harmless-{index}")) +
+                          "\n    Cookie: session=private\"";
+
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-three-sequence-scalar-line-limit");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_three_sequence_block_scalar_character_limit()
+    {
+        var privateText = "args:\n  - >-\n    curl -fsS \"" + new string('a', 2050) + "\n    Cookie: session=private\"";
+
+        Assert.True(privateText.Length < 4096);
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-three-sequence-scalar-character-limit");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_three_sequence_block_scalar_unclosed_delimiter()
+    {
+        const string privateText = "args:\n  - >-\n    \"curl -fsS -H\n    Cookie: session=private";
+
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-three-sequence-scalar-unclosed");
+    }
+
     [Fact]
     public void Curl_8_5_option_arity_snapshot_audits_every_long_and_short_name()
     {
