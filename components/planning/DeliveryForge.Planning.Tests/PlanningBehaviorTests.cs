@@ -1861,7 +1861,7 @@ public sealed class PlanningBehaviorTests
     [InlineData("curl --help --oauth2-bearer private-token https://example.invalid")]
     [InlineData("curl --help=all --cookie session=private-value https://example.invalid")]
     [InlineData("curl --haproxy-clientip 192.0.2.10 --user alice:hunter2 https://example.invalid")]
-    [InlineData("curl --output --user alice:hunter2 https://example.invalid")]
+    [InlineData("curl --output result.txt --user alice:hunter2 https://example.invalid")]
     [InlineData("curl --connect-timeout then --user alice:hunter2 https://example.invalid")]
     [InlineData("curl --expand-remote-time --user alice:hunter2 https://example.invalid")]
     public void Portable_consumers_reject_round_eighteen_credentials_after_authoritative_option_arities(string privateText)
