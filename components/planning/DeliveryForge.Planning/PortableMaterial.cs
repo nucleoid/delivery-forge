@@ -17,6 +17,7 @@ internal static partial class PortableMaterial
     {
         Ordinary,
         Secret,
+        Header,
         UserInfo,
         ProxyUserInfo,
         Certificate,
@@ -108,6 +109,8 @@ internal static partial class PortableMaterial
             "--proxy --proxy1.0 --preproxy --socks4 --socks4a --socks5 --socks5-hostname");
         Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.Certificate, "--cert --proxy-cert");
         Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.Url, "--url");
+        options["--header"] = new CurlOptionSpec(CurlOptionArity.RequiredValue, CurlOptionValueKind.Header);
+        options["--proxy-header"] = new CurlOptionSpec(CurlOptionArity.RequiredValue, CurlOptionValueKind.Header);
         return options;
 
         void Add(CurlOptionArity arity, CurlOptionValueKind kind, string names)
@@ -129,6 +132,7 @@ internal static partial class PortableMaterial
         Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.UserInfo, "uU");
         Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.ProxyUserInfo, "x");
         Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.Certificate, "E");
+        options['H'] = new CurlOptionSpec(CurlOptionArity.RequiredValue, CurlOptionValueKind.Header);
         return options;
 
         void Add(CurlOptionArity arity, CurlOptionValueKind kind, string names)
@@ -452,7 +456,7 @@ internal static partial class PortableMaterial
             var equals = token.IndexOf('=');
             var option = equals >= 0 ? token[..equals] : token;
             var noVariant = false;
-            if (!CurlLongOptions.TryGetValue(option, out var spec))
+            if (!TryResolveCurlLongOption(option, out var spec, out var ambiguous))
             {
                 if (option.StartsWith("--expand-", StringComparison.OrdinalIgnoreCase))
                 {
@@ -464,11 +468,13 @@ internal static partial class PortableMaterial
                     noVariant = true;
                 }
 
-                if (!CurlLongOptions.TryGetValue(option, out spec))
+                if (!TryResolveCurlLongOption(option, out spec, out ambiguous))
                 {
-                    kind = default;
-                    value = string.Empty;
-                    return false;
+                    kind = CurlOptionValueKind.Secret;
+                    value = ambiguous
+                        ? token
+                        : ReadUnknownCurlOptionValue(command, ref index, token, equals);
+                    return true;
                 }
             }
 
@@ -511,6 +517,53 @@ internal static partial class PortableMaterial
         return false;
     }
 
+    private static bool TryResolveCurlLongOption(
+        string option,
+        out CurlOptionSpec spec,
+        out bool ambiguous)
+    {
+        if (CurlLongOptions.TryGetValue(option, out spec))
+        {
+            ambiguous = false;
+            return true;
+        }
+
+        var matches = CurlLongOptions
+            .Where(candidate => candidate.Key.StartsWith(option, StringComparison.OrdinalIgnoreCase))
+            .Take(2)
+            .ToArray();
+        ambiguous = matches.Length > 1;
+        if (matches.Length == 1)
+        {
+            spec = matches[0].Value;
+            return true;
+        }
+
+        spec = default;
+        return false;
+    }
+
+    private static string ReadUnknownCurlOptionValue(
+        IReadOnlyList<string> command,
+        ref int index,
+        string token,
+        int equals)
+    {
+        if (equals >= 0)
+        {
+            return token[(equals + 1)..];
+        }
+
+        if (index + 1 >= command.Count ||
+            command[index + 1].StartsWith("-", StringComparison.Ordinal) ||
+            IsCurlScanBoundary(command, index + 1))
+        {
+            return string.Empty;
+        }
+
+        return command[++index];
+    }
+
     private static string ReadCurlOptionValue(
         IReadOnlyList<string> command,
         ref int index,
@@ -549,12 +602,27 @@ internal static partial class PortableMaterial
         kind switch
         {
             CurlOptionValueKind.Secret => !string.IsNullOrWhiteSpace(value),
+            CurlOptionValueKind.Header => HasPopulatedCookieHeader(value),
             CurlOptionValueKind.UserInfo => HasUserInfo(value, requireAtSign: false),
             CurlOptionValueKind.ProxyUserInfo => HasUserInfo(value, requireAtSign: true),
             CurlOptionValueKind.Certificate => HasCertificatePassphrase(value),
             CurlOptionValueKind.Url => HasSchemelessUrlUserInfo(value),
             _ => false
         };
+
+    private static bool HasPopulatedCookieHeader(string value)
+    {
+        var separator = value.IndexOfAny(':', '=');
+        if (separator < 0)
+        {
+            return false;
+        }
+
+        var key = value[..separator].Trim(' ', '\t', '\'', '"');
+        return (key.Equals("Cookie", StringComparison.OrdinalIgnoreCase) ||
+                key.Equals("Set-Cookie", StringComparison.OrdinalIgnoreCase)) &&
+               HasPopulatedValue(value.AsSpan(separator + 1));
+    }
 
     private static bool HasCertificatePassphrase(string value)
     {
@@ -634,21 +702,22 @@ internal static partial class PortableMaterial
 
     private static bool HasSchemelessUrlUserInfo(string value)
     {
-        var candidate = value.Trim(' ', '\t', '\'', '"', '(', ')', '[', ']', '{', '}', ',', ';');
-        if (candidate.Contains("://", StringComparison.Ordinal))
+        var candidate = value.Trim(' ', '\t', '\'', '"', '(', ')', ',', ';');
+        var scheme = candidate.IndexOf("://", StringComparison.Ordinal);
+        if (scheme >= 0)
         {
-            return false;
+            candidate = candidate[(scheme + 3)..];
         }
 
         var atSign = candidate.IndexOf('@');
-        if (atSign <= 0 || atSign + 1 >= candidate.Length)
+        if (atSign < 0 || atSign + 1 >= candidate.Length)
         {
             return false;
         }
 
         var userInfo = candidate[..atSign];
         var colon = userInfo.IndexOf(':');
-        if (colon <= 0 || colon + 1 >= userInfo.Length ||
+        if (colon < 0 || colon == 0 && colon + 1 >= userInfo.Length ||
             IsDocumentedUserInfoPlaceholder(userInfo))
         {
             return false;
@@ -699,20 +768,38 @@ internal static partial class PortableMaterial
         return normalized.ToString();
     }
 
-    private sealed record ExecFragment(string Key, string Text, int StartLine, int EndLine, int Indent);
+    [Flags]
+    private enum StructuredAbandonmentReason
+    {
+        None = 0,
+        LineLimit = 1,
+        CharacterLimit = 2,
+        UnclosedDelimiter = 4
+    }
+
+    private sealed record ExecFragment(
+        string Key,
+        string Text,
+        int StartLine,
+        int EndLine,
+        int Indent,
+        StructuredAbandonmentReason AbandonmentReason);
 
     private sealed record CurlScanResult(
         IReadOnlyList<string> Lines,
-        bool AbandonedConfirmedCurlSequence);
+        StructuredAbandonmentReason AbandonmentReasons)
+    {
+        public bool AbandonedConfirmedCurlSequence => AbandonmentReasons != StructuredAbandonmentReason.None;
+    }
 
     private static CurlScanResult CurlScanLines(string value)
     {
         var lines = PhysicalLines(value).ToArray();
         var results = new List<string>(lines);
         var fragments = new List<ExecFragment>();
-        var abandonedConfirmedCurlSequence = false;
+        var abandonmentReasons = StructuredAbandonmentReason.None;
         const int maximumSequenceLines = 32;
-        const int maximumSequenceCharacters = 8192;
+        const int maximumSequenceCharacters = 2048;
 
         for (var start = 0; start < lines.Length; start++)
         {
@@ -723,37 +810,56 @@ internal static partial class PortableMaterial
 
             var logical = new StringBuilder(lines[start]);
             var end = start;
-            var bracketDepth = Count(lines[start], '[') - Count(lines[start], ']');
+            var fragmentAbandonment = logical.Length > maximumSequenceCharacters
+                ? StructuredAbandonmentReason.CharacterLimit
+                : StructuredAbandonmentReason.None;
+            var bracketDepth = 0;
+            var bracketQuote = '\0';
+            UpdateBracketDepth(lines[start], ref bracketDepth, ref bracketQuote);
             if (bracketDepth > 0)
             {
-                for (var index = start + 1;
-                     bracketDepth > 0 && index < lines.Length && index - start < maximumSequenceLines;
-                     index++)
+                for (var index = start + 1; bracketDepth > 0 && index < lines.Length; index++)
                 {
+                    if (index - start >= maximumSequenceLines)
+                    {
+                        fragmentAbandonment |= StructuredAbandonmentReason.LineLimit;
+                        break;
+                    }
+
                     if (logical.Length + lines[index].Length + 1 > maximumSequenceCharacters)
                     {
+                        fragmentAbandonment |= StructuredAbandonmentReason.CharacterLimit;
                         break;
                     }
 
                     logical.Append(' ').Append(lines[index]);
-                    bracketDepth += Count(lines[index], '[') - Count(lines[index], ']');
+                    UpdateBracketDepth(lines[index], ref bracketDepth, ref bracketQuote);
                     end = index;
                 }
 
-                if (bracketDepth != 0)
+                if (bracketDepth != 0 && fragmentAbandonment == StructuredAbandonmentReason.None)
                 {
-                    abandonedConfirmedCurlSequence |= ContainsCurlExecutable(logical.ToString());
-                    continue;
+                    fragmentAbandonment |= StructuredAbandonmentReason.UnclosedDelimiter;
                 }
             }
             else
             {
-                for (var index = start + 1;
-                     index < lines.Length && index - start < maximumSequenceLines;
-                     index++)
+                for (var index = start + 1; index < lines.Length; index++)
                 {
+                    if (index - start >= maximumSequenceLines)
+                    {
+                        fragmentAbandonment |= StructuredAbandonmentReason.LineLimit;
+                        break;
+                    }
+
                     var itemIndent = CountLeadingWhitespace(lines[index]);
                     var item = lines[index].TrimStart();
+                    if (item.Length == 0 || item.StartsWith('#'))
+                    {
+                        end = index;
+                        continue;
+                    }
+
                     if (itemIndent < indent || !item.StartsWith("- ", StringComparison.Ordinal))
                     {
                         break;
@@ -761,6 +867,7 @@ internal static partial class PortableMaterial
 
                     if (logical.Length + lines[index].Length + 1 > maximumSequenceCharacters)
                     {
+                        fragmentAbandonment |= StructuredAbandonmentReason.CharacterLimit;
                         break;
                     }
 
@@ -769,9 +876,17 @@ internal static partial class PortableMaterial
                 }
             }
 
-            var fragment = new ExecFragment(key, logical.ToString(), start, end, indent);
+            var fragment = new ExecFragment(key, logical.ToString(), start, end, indent, fragmentAbandonment);
             fragments.Add(fragment);
-            results.Add(fragment.Text);
+            if (fragmentAbandonment == StructuredAbandonmentReason.None)
+            {
+                results.Add(fragment.Text);
+            }
+            else if (ContainsCurlExecutable(fragment.Text))
+            {
+                abandonmentReasons |= fragmentAbandonment;
+            }
+
             start = end;
         }
 
@@ -781,13 +896,15 @@ internal static partial class PortableMaterial
             {
                 var first = fragments[firstIndex];
                 var second = fragments[secondIndex];
+                var joinable = AreJoinableExecFragments(first, second) &&
+                               NoExecFragmentBetween(lines, fragments, firstIndex, secondIndex) &&
+                               ShareStructuredContext(lines, first, second);
+                var containsCurl = ContainsCurlExecutable(first.Text) || ContainsCurlExecutable(second.Text);
                 if (second.StartLine - first.EndLine >= maximumSequenceLines)
                 {
-                    if (AreJoinableExecFragments(first, second) &&
-                        ShareStructuredContext(lines, first, second) &&
-                        (ContainsCurlExecutable(first.Text) || ContainsCurlExecutable(second.Text)))
+                    if (joinable && containsCurl)
                     {
-                        abandonedConfirmedCurlSequence = true;
+                        abandonmentReasons |= StructuredAbandonmentReason.LineLimit;
                     }
 
                     break;
@@ -795,27 +912,57 @@ internal static partial class PortableMaterial
 
                 if (first.Text.Length + second.Text.Length + 1 > maximumSequenceCharacters)
                 {
-                    if (AreJoinableExecFragments(first, second) &&
-                        NoExecFragmentBetween(fragments, firstIndex, secondIndex) &&
-                        ShareStructuredContext(lines, first, second) &&
-                        (ContainsCurlExecutable(first.Text) || ContainsCurlExecutable(second.Text)))
+                    if (joinable && containsCurl)
                     {
-                        abandonedConfirmedCurlSequence = true;
+                        abandonmentReasons |= StructuredAbandonmentReason.CharacterLimit;
                     }
 
                     continue;
                 }
 
-                if (AreJoinableExecFragments(first, second) &&
-                    NoExecFragmentBetween(fragments, firstIndex, secondIndex) &&
-                    ShareStructuredContext(lines, first, second))
+                var fragmentAbandonment = first.AbandonmentReason | second.AbandonmentReason;
+                if (joinable && fragmentAbandonment != StructuredAbandonmentReason.None && containsCurl)
+                {
+                    abandonmentReasons |= fragmentAbandonment;
+                }
+                else if (joinable)
                 {
                     results.Add(JoinExecFragments(first, second));
                 }
             }
         }
 
-        return new CurlScanResult(results, abandonedConfirmedCurlSequence);
+        return new CurlScanResult(results, abandonmentReasons);
+    }
+
+    private static void UpdateBracketDepth(string value, ref int depth, ref char quote)
+    {
+        for (var index = 0; index < value.Length; index++)
+        {
+            var character = value[index];
+            if (quote != '\0')
+            {
+                if (character == quote && !IsEscaped(value, index))
+                {
+                    quote = '\0';
+                }
+
+                continue;
+            }
+
+            if (IsQuote(character) && !IsEscaped(value, index))
+            {
+                quote = character;
+            }
+            else if (character == '[')
+            {
+                depth++;
+            }
+            else if (character == ']')
+            {
+                depth--;
+            }
+        }
     }
 
     private static bool ContainsCurlExecutable(string text) =>
@@ -880,11 +1027,20 @@ internal static partial class PortableMaterial
     }
 
     private static bool NoExecFragmentBetween(
+        IReadOnlyList<string> lines,
         IReadOnlyList<ExecFragment> fragments,
         int firstIndex,
         int secondIndex)
     {
-        var parentIndent = fragments[firstIndex].Indent;
+        var first = fragments[firstIndex];
+        var second = fragments[secondIndex];
+        var firstStage = DockerfileStageAt(lines, first.StartLine);
+        if (firstStage >= 0 && firstStage == DockerfileStageAt(lines, second.StartLine))
+        {
+            return true;
+        }
+
+        var parentIndent = first.Indent;
         for (var index = firstIndex + 1; index < secondIndex; index++)
         {
             if (fragments[index].Indent <= parentIndent)
@@ -896,11 +1052,32 @@ internal static partial class PortableMaterial
         return true;
     }
 
+    private static int DockerfileStageAt(IReadOnlyList<string> lines, int line)
+    {
+        var stage = -1;
+        for (var index = 0; index <= line; index++)
+        {
+            if (lines[index].TrimStart().StartsWith("FROM ", StringComparison.OrdinalIgnoreCase))
+            {
+                stage++;
+            }
+        }
+
+        return stage;
+    }
+
     private static bool ShareStructuredContext(
         IReadOnlyList<string> lines,
         ExecFragment first,
         ExecFragment second)
     {
+        var secondTrimmed = lines[second.StartLine].TrimStart();
+        if (secondTrimmed.StartsWith("- ", StringComparison.Ordinal) ||
+            secondTrimmed.StartsWith('{'))
+        {
+            return false;
+        }
+
         for (var index = first.EndLine + 1; index < second.StartLine; index++)
         {
             var trimmed = lines[index].Trim();
@@ -1007,7 +1184,8 @@ internal static partial class PortableMaterial
             }
             else if (character is ',' or '[' or ']' or '{' or '}')
             {
-                if (token.ToString().Contains('@'))
+                if (token.ToString().Contains('@') ||
+                    RemainderBeforeWhitespaceContainsAt(line, index))
                 {
                     token.Append(character);
                 }
@@ -1028,6 +1206,19 @@ internal static partial class PortableMaterial
         {
             yield return final;
         }
+    }
+
+    private static bool RemainderBeforeWhitespaceContainsAt(string value, int start)
+    {
+        for (var index = start; index < value.Length && !char.IsWhiteSpace(value[index]); index++)
+        {
+            if (value[index] == '@')
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static bool IsCommandSeparator(char value) => value is ';' or '&' or '|' or '(' or ')';
