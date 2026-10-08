@@ -1543,6 +1543,75 @@ public sealed class PlanningBehaviorTests
     }
 
     [Theory]
+    [InlineData("RESPONSE=$(curl -u alice:hunter2 https://example.invalid/health)")]
+    [InlineData("sudo -u deploy curl -u alice:hunter2 https://example.invalid/health")]
+    [InlineData("$ sudo curl -u alice:hunter2 https://example.invalid/health")]
+    [InlineData("user@host:~$ curl -u alice:hunter2 https://example.invalid/health")]
+    [InlineData("# curl.exe --user alice:hunter2 https://example.invalid/health")]
+    [InlineData("- curl -u alice:hunter2 https://example.invalid/health")]
+    [InlineData("* curl.exe --user=alice:hunter2 https://example.invalid/health")]
+    [InlineData("if curl -u alice:hunter2 https://example.invalid/health; then echo healthy; fi")]
+    [InlineData("time curl -u alice:hunter2 https://example.invalid/health")]
+    [InlineData("timeout 5 curl -u alice:hunter2 https://example.invalid/health")]
+    [InlineData("exec curl -u alice:hunter2 https://example.invalid/health")]
+    [InlineData("xargs curl -u alice:hunter2 https://example.invalid/health")]
+    [InlineData("env -u CURL_HOME MODE=test curl.exe --user alice:hunter2 https://example.invalid/health")]
+    [InlineData("command -- curl -u alice:hunter2 https://example.invalid/health")]
+    public void Portable_consumers_reject_round_fourteen_curl_executable_positions(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-fourteen-curl-position");
+    }
+
+    [Theory]
+    [InlineData("Don't commit DB_PASSWORD='hunter2'")]
+    [InlineData("It's configured as password: 'hunter2'")]
+    [InlineData("{\"size\":\"6\\\" pipe\",\"password\":\"hunter2\"}")]
+    [InlineData("The note \\\"quoted\\\" earlier says authToken='private-value'")]
+    public void Portable_consumers_reject_round_fourteen_locally_quoted_assignments(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-fourteen-local-quote");
+    }
+
+    [Theory]
+    [InlineData("db_password: private-value")]
+    [InlineData("db-password=private-value")]
+    [InlineData("dbPassword=private-value")]
+    [InlineData("DbPassword=private-value")]
+    [InlineData("\"refresh_token\": \"private-value\"")]
+    [InlineData("authToken=private-value")]
+    [InlineData("aws_session_token = private-value")]
+    [InlineData("AWS_SESSION_TOKEN=private-value")]
+    [InlineData("{\"SecretAccessKey\": \"private-value\"}")]
+    [InlineData("{\"SessionToken\": \"private-value\"}")]
+    [InlineData("aws-secret-access-key: private-value")]
+    public void Portable_consumers_reject_round_fourteen_terminal_credential_words(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-fourteen-terminal-word");
+    }
+
+    [Theory]
+    [InlineData("Use `curl` for health checks and `docker run -u 1000:1000 image` for the job")]
+    [InlineData("Use `curl https://example.invalid/health` then `docker run -u 1000:1000 image`")]
+    [InlineData("$(curl https://example.invalid/health) && docker run -u 1000:1000 image")]
+    [InlineData("RESULT=$(curl https://example.invalid/health); docker run -u 1000:1000 image")]
+    [InlineData("The scurl-helper -u 1000:1000 example is prose")]
+    [InlineData("passwordPolicy=strict")]
+    [InlineData("tokenizer=bounded")]
+    [InlineData("secretary=available")]
+    [InlineData("DB_PASSWORD_POLICY=twelve-characters")]
+    [InlineData("NPM_TOKEN_FORMAT=opaque")]
+    [InlineData("aws_session_token_format=opaque")]
+    [InlineData("secret_access_key_policy=rotated")]
+    [InlineData("{\"Authorization\": \"\"}")]
+    [InlineData("{'Authorization' = '   '}")]
+    [InlineData("curl -H \"Proxy-Authorization:\" https://example.invalid")]
+    [InlineData("curl -H 'X-API-Key:   ' https://example.invalid")]
+    public void Portable_consumers_preserve_round_fourteen_scope_and_key_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-fourteen-control");
+    }
+
+    [Theory]
     [InlineData("{\"Authorization\": \"\"}")]
     [InlineData("{'Authorization' = '   '}")]
     [InlineData("Authorization:\nordinary next line")]
