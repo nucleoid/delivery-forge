@@ -2017,6 +2017,97 @@ public sealed class PlanningBehaviorTests
         AssertPortableConsumersAccept(portableText, "revision-round-nineteen-control");
     }
 
+    [Theory]
+    [InlineData("command:\n  - curl\n  # auth follows\n  - --pass\n  - private-phrase\n  - https://example.invalid")]
+    [InlineData("command:\n  - curl\n\n  - --user\n  - alice:hunter2\n  - https://example.invalid")]
+    [InlineData("entrypoint: [\"curl\"]\ncommand: [\n  \"--pass\",\n  \"private-phrase\"")]
+    [InlineData("command: [\n  \"curl\",\n  \"--data\", \"]\",\n  \"--pass\", \"private-phrase\",\n  \"https://example.invalid\"\n]")]
+    public void Portable_consumers_reject_round_twenty_abandoned_structured_arrays(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-structured-abandonment");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_block_sequence_line_bound()
+    {
+        var privateText = "command:\n  - curl\n" +
+                          string.Join('\n', Enumerable.Range(0, 32).Select(index => $"  - harmless-{index}")) +
+                          "\n  - --pass\n  - private-phrase\n  - https://example.invalid";
+
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-block-line-bound");
+    }
+
+    [Fact]
+    public void Portable_consumers_reject_round_twenty_privacy_character_bound_below_import_limit()
+    {
+        var privateText = "command: [\"curl\", \"" + new string('a', 2200) +
+                          "\"]";
+
+        Assert.True(privateText.Length < 4096);
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-character-bound");
+    }
+
+    [Theory]
+    [InlineData("FROM curlimages/curl:8.5.0\nENTRYPOINT [\"curl\"]\nHEALTHCHECK CMD [\"true\"]\nCMD [\"--pass\", \"private-phrase\", \"https://example.invalid\"]")]
+    [InlineData("FROM curlimages/curl:8.5.0\nENTRYPOINT [\"curl\"]\nRUN echo preparing\n# harmless metadata\nLABEL purpose=probe\nCMD [\"--user\", \"alice:hunter2\", \"https://example.invalid\"]")]
+    public void Portable_consumers_reject_round_twenty_same_stage_dockerfile_fragments(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-dockerfile-stage");
+    }
+
+    [Theory]
+    [InlineData("curl :hunter2@example.invalid/resource")]
+    [InlineData("curl --url :hunter2@example.invalid/resource")]
+    [InlineData("curl 'https://deploy{1,2}:hunter2@example.invalid/'")]
+    [InlineData("curl https://deploy{1,2}:hunter2@example.invalid/")]
+    [InlineData("curl --url 'https://deploy[1-2]:hunter2@example.invalid/'")]
+    [InlineData("curl --url=https://deploy[1-2]:hunter2@example.invalid/")]
+    public void Portable_consumers_reject_round_twenty_password_only_and_globbed_userinfo(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-userinfo");
+    }
+
+    [Theory]
+    [InlineData("curl -H 'Cookie: session=private-value' https://example.invalid")]
+    [InlineData("curl --header 'Set-Cookie: session=private-value' https://example.invalid")]
+    [InlineData("curl --proxy-header='Cookie: session=private-value' https://example.invalid")]
+    public void Portable_consumers_reject_round_twenty_cookie_headers(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-cookie-header");
+    }
+
+    [Theory]
+    [InlineData("curl --oauth2 abc.def.ghi https://api.example.invalid")]
+    [InlineData("curl --tlspass private-phrase https://example.invalid")]
+    [InlineData("curl --proxy-us alice:hunter2 --proxy proxy.example:3128 https://example.invalid")]
+    [InlineData("curl --proxy-tls https://example.invalid")]
+    [InlineData("curl --future-auth private-phrase https://example.invalid")]
+    public void Portable_consumers_reject_round_twenty_unique_ambiguous_and_unknown_long_options(string privateText)
+    {
+        AssertPortableConsumersReject(privateText, "revision-round-twenty-long-option-resolution");
+    }
+
+    [Theory]
+    [InlineData("containers:\n  - name: a\n    command: [\"curl\", \"-fsS\", \"http://localhost/health\"]\n  - args: [\"-u\", \"1000:1000\"]")]
+    [InlineData("[\n  { \"Entrypoint\": [\"curl\"] },\n  { \"Cmd\": [\"--pass\", \"documentation-only\"] }\n]")]
+    public void Portable_consumers_preserve_round_twenty_sibling_structural_parents(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twenty-structural-parent-control");
+    }
+
+    [Theory]
+    [InlineData("curl -H 'Cookie:' https://example.invalid")]
+    [InlineData("curl --header 'Set-Cookie:   ' https://example.invalid")]
+    [InlineData("curl --proxy-header 'X-Trace: ordinary' https://example.invalid")]
+    [InlineData("curl :@example.invalid/resource")]
+    [InlineData("curl --url '<user>:<password>@example.invalid/resource'")]
+    [InlineData("curl --future-flag && docker run -u 1000:1000 image")]
+    [InlineData("FROM base AS probe\nENTRYPOINT [\"curl\"]\nFROM base AS runtime\nCMD [\"--pass\", \"documentation-only\"]")]
+    public void Portable_consumers_preserve_round_twenty_sibling_controls(string portableText)
+    {
+        AssertPortableConsumersAccept(portableText, "revision-round-twenty-control");
+    }
+
     [Fact]
     public void Curl_8_5_option_arity_snapshot_audits_every_long_and_short_name()
     {
