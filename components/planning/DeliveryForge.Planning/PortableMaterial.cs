@@ -32,9 +32,9 @@ internal static partial class PortableMaterial
 
     private readonly record struct CurlOptionSpec(CurlOptionArity Arity, CurlOptionValueKind Kind);
 
-    // Curl 8.5.0's complete --help all catalogue is represented explicitly by arity. Required
-    // values never consume a following option, --help is the sole optional-value form, and
-    // no-value flags remain visible inside short groups.
+    // Curl 8.5.0's complete option catalogue is represented explicitly by arity. Required
+    // values consume their following argument even when it starts with '-', --help is the sole
+    // optional-value form, and no-value flags remain visible inside short groups.
     private static readonly IReadOnlyDictionary<string, CurlOptionSpec> CurlLongOptions = BuildCurlLongOptions();
 
     private static readonly IReadOnlyDictionary<char, CurlOptionSpec> CurlShortOptions =
@@ -58,8 +58,8 @@ internal static partial class PortableMaterial
             "--dns-interface --dns-ipv4-addr --dns-ipv6-addr --dns-servers --doh-url --dump-header " +
             "--egd-file --engine --etag-compare --etag-save --expect100-timeout --form --form-string " +
             "--ftp-account --ftp-alternative-to-user --ftp-method --ftp-port --ftp-ssl-ccc-mode " +
-            "--happy-eyeballs-timeout-ms --header --hostpubmd5 --hostpubsha256 --hsts --interface " +
-            "--ip-tos --ipfs-gateway --json --keepalive-time --key --key-type --krb --libcurl --limit-rate " +
+            "--happy-eyeballs-timeout-ms --haproxy-clientip --header --hostpubmd5 --hostpubsha256 --hsts --interface " +
+            "--ipfs-gateway --json --keepalive-time --key --key-type --krb --libcurl --limit-rate " +
             "--local-port --login-options --mail-auth --mail-from --mail-rcpt --max-filesize --max-redirs " +
             "--max-time --netrc-file --noproxy --output --output-dir --parallel-max --pinnedpubkey --proto " +
             "--proto-default --proto-redir --proxy-cacert --proxy-capath --proxy-cert-type --proxy-ciphers " +
@@ -69,7 +69,7 @@ internal static partial class PortableMaterial
             "--retry-delay --retry-max-time --sasl-authzid --service-name --socks5-gssapi-service " +
             "--speed-limit --speed-time --stderr --telnet-option --tftp-blksize --time-cond --tls-max " +
             "--tls13-ciphers --tlsauthtype --tlsuser --trace --trace-ascii --trace-config --unix-socket " +
-            "--upload-file --url-query --user-agent --variable --vlan-priority --write-out");
+            "--upload-file --url-query --user-agent --variable --write-out");
 
         Add(
             CurlOptionArity.NoValue,
@@ -78,7 +78,7 @@ internal static partial class PortableMaterial
             "--create-dirs --crlf --digest --disable --disable-eprt --disable-epsv " +
             "--disallow-username-in-url --doh-cert-status --doh-insecure --fail --fail-early " +
             "--fail-with-body --false-start --form-escape --ftp-create-dirs --ftp-pasv --ftp-pret " +
-            "--ftp-skip-pasv-ip --ftp-ssl-ccc --ftp-ssl-control --get --globoff --haproxy-clientip " +
+            "--ftp-skip-pasv-ip --ftp-ssl-ccc --ftp-ssl-control --get --globoff " +
             "--haproxy-protocol --head --http0.9 --http1.0 --http1.1 --http2 --http2-prior-knowledge " +
             "--http3 --http3-only --ignore-content-length --include --insecure --ipv4 --ipv6 " +
             "--junk-session-cookies --list-only --location --location-trusted --mail-rcpt-allowfails " +
@@ -122,9 +122,9 @@ internal static partial class PortableMaterial
     private static IReadOnlyDictionary<char, CurlOptionSpec> BuildCurlShortOptions()
     {
         var options = new Dictionary<char, CurlOptionSpec>();
-        Add(CurlOptionArity.NoValue, CurlOptionValueKind.Ordinary, "#012346:BJLMNORSZafgIijklnpqsvV");
+        Add(CurlOptionArity.NoValue, CurlOptionValueKind.Ordinary, "#012346:BGIJLMNORSVZafgijklnpqsv");
         Add(CurlOptionArity.OptionalValue, CurlOptionValueKind.Ordinary, "h");
-        Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.Ordinary, "AcCdDeFHKmPQrTtXwYyz");
+        Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.Ordinary, "ACDFHKPQTXYcdemortwyz");
         Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.Secret, "b");
         Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.UserInfo, "uU");
         Add(CurlOptionArity.RequiredValue, CurlOptionValueKind.ProxyUserInfo, "x");
@@ -139,6 +139,13 @@ internal static partial class PortableMaterial
             }
         }
     }
+
+    internal static IReadOnlyList<string> CurlOptionArityAudit() =>
+        CurlLongOptions
+            .Select(option => $"long {option.Key} {option.Value.Arity}")
+            .Concat(CurlShortOptions.Select(option => $"short -{option.Key} {option.Value.Arity}"))
+            .Order(StringComparer.Ordinal)
+            .ToArray();
 
     public static bool ContainsPrivateMaterial(string value)
     {
@@ -363,7 +370,13 @@ internal static partial class PortableMaterial
 
     private static bool ContainsCurlCredential(string value)
     {
-        foreach (var line in CurlScanLines(NormalizeContinuations(value)))
+        var scan = CurlScanLines(NormalizeContinuations(value));
+        if (scan.AbandonedConfirmedCurlSequence)
+        {
+            return true;
+        }
+
+        foreach (var line in scan.Lines)
         {
             foreach (var command in TokenizeCommands(NormalizeEscapedQuotes(line)))
             {
@@ -386,7 +399,8 @@ internal static partial class PortableMaterial
             {
                 if (TryReadCurlOption(command, ref index, out var kind, out var optionValue))
                 {
-                    if (IsCredentialBearingCurlValue(kind, optionValue))
+                    if (IsCredentialBearingCurlValue(kind, optionValue) ||
+                        HasSchemelessUrlUserInfo(optionValue))
                     {
                         return true;
                     }
@@ -459,7 +473,9 @@ internal static partial class PortableMaterial
             }
 
             kind = spec.Kind;
-            var arity = noVariant ? CurlOptionArity.OptionalValue : spec.Arity;
+            var arity = noVariant && spec.Arity != CurlOptionArity.NoValue
+                ? CurlOptionArity.OptionalValue
+                : spec.Arity;
             value = ReadCurlOptionValue(command, ref index, token, equals, arity);
             return true;
         }
@@ -515,8 +531,12 @@ internal static partial class PortableMaterial
         ref int index,
         CurlOptionArity arity)
     {
-        if (arity == CurlOptionArity.NoValue ||
-            index + 1 >= command.Count ||
+        if (arity == CurlOptionArity.NoValue || index + 1 >= command.Count)
+        {
+            return string.Empty;
+        }
+
+        if (arity == CurlOptionArity.OptionalValue &&
             command[index + 1].StartsWith("-", StringComparison.Ordinal))
         {
             return string.Empty;
@@ -681,11 +701,16 @@ internal static partial class PortableMaterial
 
     private sealed record ExecFragment(string Key, string Text, int StartLine, int EndLine, int Indent);
 
-    private static IEnumerable<string> CurlScanLines(string value)
+    private sealed record CurlScanResult(
+        IReadOnlyList<string> Lines,
+        bool AbandonedConfirmedCurlSequence);
+
+    private static CurlScanResult CurlScanLines(string value)
     {
         var lines = PhysicalLines(value).ToArray();
         var results = new List<string>(lines);
         var fragments = new List<ExecFragment>();
+        var abandonedConfirmedCurlSequence = false;
         const int maximumSequenceLines = 32;
         const int maximumSequenceCharacters = 8192;
 
@@ -717,6 +742,7 @@ internal static partial class PortableMaterial
 
                 if (bracketDepth != 0)
                 {
+                    abandonedConfirmedCurlSequence |= ContainsCurlExecutable(logical.ToString());
                     continue;
                 }
             }
@@ -757,7 +783,27 @@ internal static partial class PortableMaterial
                 var second = fragments[secondIndex];
                 if (second.StartLine - first.EndLine >= maximumSequenceLines)
                 {
+                    if (AreJoinableExecFragments(first, second) &&
+                        ShareStructuredContext(lines, first, second) &&
+                        (ContainsCurlExecutable(first.Text) || ContainsCurlExecutable(second.Text)))
+                    {
+                        abandonedConfirmedCurlSequence = true;
+                    }
+
                     break;
+                }
+
+                if (first.Text.Length + second.Text.Length + 1 > maximumSequenceCharacters)
+                {
+                    if (AreJoinableExecFragments(first, second) &&
+                        NoExecFragmentBetween(fragments, firstIndex, secondIndex) &&
+                        ShareStructuredContext(lines, first, second) &&
+                        (ContainsCurlExecutable(first.Text) || ContainsCurlExecutable(second.Text)))
+                    {
+                        abandonedConfirmedCurlSequence = true;
+                    }
+
+                    continue;
                 }
 
                 if (AreJoinableExecFragments(first, second) &&
@@ -769,8 +815,11 @@ internal static partial class PortableMaterial
             }
         }
 
-        return results;
+        return new CurlScanResult(results, abandonedConfirmedCurlSequence);
     }
+
+    private static bool ContainsCurlExecutable(string text) =>
+        TokenizeCommands(text).Any(command => FindCurlExecutable(command) >= 0);
 
     private static bool TryReadExecKey(string line, out string key, out int indent)
     {
@@ -833,8 +882,19 @@ internal static partial class PortableMaterial
     private static bool NoExecFragmentBetween(
         IReadOnlyList<ExecFragment> fragments,
         int firstIndex,
-        int secondIndex) =>
-        secondIndex == firstIndex + 1;
+        int secondIndex)
+    {
+        var parentIndent = fragments[firstIndex].Indent;
+        for (var index = firstIndex + 1; index < secondIndex; index++)
+        {
+            if (fragments[index].Indent <= parentIndent)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     private static bool ShareStructuredContext(
         IReadOnlyList<string> lines,
@@ -847,6 +907,12 @@ internal static partial class PortableMaterial
             if (trimmed.Length == 0 || trimmed.StartsWith('#'))
             {
                 continue;
+            }
+
+            if (trimmed is "---" or "..." ||
+                trimmed.StartsWith("FROM ", StringComparison.OrdinalIgnoreCase))
+            {
+                return false;
             }
 
             var indent = CountLeadingWhitespace(lines[index]);
@@ -941,7 +1007,14 @@ internal static partial class PortableMaterial
             }
             else if (character is ',' or '[' or ']' or '{' or '}')
             {
-                CompleteToken();
+                if (token.ToString().Contains('@'))
+                {
+                    token.Append(character);
+                }
+                else
+                {
+                    CompleteToken();
+                }
             }
             else
             {

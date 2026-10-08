@@ -1986,8 +1986,7 @@ public sealed class PlanningBehaviorTests
     [Fact]
     public void Portable_consumers_fail_closed_when_round_nineteen_structured_fragment_exceeds_size_bound()
     {
-        var privateText = "entrypoint: [\"curl\", \"" + new string('a', 8200) +
-                          "\ncommand: [\"--pass\", \"private-phrase\", \"https://example.invalid\"]";
+        var privateText = "entrypoint: [\"curl\"]\ncommand: [\"" + new string('a', 8200) + "\"]";
 
         AssertPortableConsumersReject(privateText, "revision-round-nineteen-size-bound");
     }
@@ -2016,6 +2015,24 @@ public sealed class PlanningBehaviorTests
     public void Portable_consumers_preserve_round_nineteen_sibling_controls(string portableText)
     {
         AssertPortableConsumersAccept(portableText, "revision-round-nineteen-control");
+    }
+
+    [Fact]
+    public void Curl_8_5_option_arity_snapshot_audits_every_long_and_short_name()
+    {
+        var audit = PortableMaterial.CurlOptionArityAudit();
+        var canonical = string.Join('\n', audit);
+        var digest = Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(canonical)))
+            .ToLowerInvariant();
+
+        Assert.Equal(317, audit.Count);
+        Assert.Equal(audit.Count, audit.Distinct(StringComparer.Ordinal).Count());
+        Assert.Contains("long --haproxy-clientip RequiredValue", audit);
+        Assert.Contains("long --get NoValue", audit);
+        Assert.Contains("short -o RequiredValue", audit);
+        Assert.Contains("short -G NoValue", audit);
+        Assert.Equal("462fbb5609e72add17436ee0f0f91439627335a7d487b00d7fcba07d2dcd9256", digest);
     }
 
     [Theory]

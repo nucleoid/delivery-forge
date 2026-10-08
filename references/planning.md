@@ -137,19 +137,26 @@ populated `user:password@host`; the explicit documentation placeholders
 Populated `--cookie`/`-b` values are treated as session credentials and rejected; an empty cookie
 value and the noncredential `--cookie-jar` output option remain portable.
 
-The option registry records required-value, optional-value, and no-value semantics from the curl
-8.5.0 `--help all` catalogue. No-value flags such as `-R` and `--haproxy-clientip` never consume
-a following option, `-h`/`--help` consume only an explicit non-option subject, and a missing required
-value cannot hide a following credential option. Supported `--expand-*` forms inherit the underlying
-option's classification. Unknown `--no-*` modifier forms are handled conservatively as an optional
-value of the underlying option, so attached or separate credentials fail closed while empty values
-remain portable. Curl credential scanning is escape-aware and command-position-aware: quoted option
-values do not become prose or later-command boundaries, while actual later Docker, Podman, and
-Kubernetes commands do. Bounded Kubernetes `command`/`args`, Compose `entrypoint`/`command` and
-`healthcheck.test`, Dockerfile `ENTRYPOINT`/`CMD`/`RUN`, OCI/Docker `Entrypoint`/`Cmd`/`Test`,
-and JSON/YAML exec forms are grouped in either declaration order within the same bounded
-mapping/container context. Comments and harmless sibling metadata do not split a command; unrelated
-mappings, sibling containers, separate instructions, prose, and later commands are never joined. Backslash,
+The option registry records all 258 long and 59 short names with required-value, optional-value, or
+no-value semantics from the curl 8.5.0 catalogue and manual. In particular, `-o` requires a value,
+`-G` consumes none, and `--haproxy-clientip` requires an IP argument despite the abbreviated 8.5.0
+`--help all` line omitting its placeholder. Required values consume the next argument even when it
+starts with `-`; secret/user-info classification still applies, and every consumed ordinary or
+optional value is independently checked for schemeless URL user-info. `-h`/`--help` consumes only an
+explicit non-option subject. No-value flags and their real `--no-*` negations never consume the next
+token. Supported `--expand-*` forms inherit the underlying option's classification. Unknown `--no-*`
+modifier forms for value-taking options are handled conservatively as optional-value forms, so
+attached or separate credentials fail closed while empty values remain portable. Curl credential
+scanning is escape-aware and command-position-aware: quoted option values do not become prose or
+later-command boundaries, while actual later Docker, Podman, and Kubernetes commands do. Brackets,
+braces, and commas in schemeless IPv6/glob hosts remain part of the URL-like token so user-info cannot
+be hidden by punctuation; documented placeholders remain portable. Bounded Kubernetes `command`/`args`,
+Compose `entrypoint`/`command` and `healthcheck.test`, Dockerfile `ENTRYPOINT`/`CMD`/`RUN`, OCI/Docker
+`Entrypoint`/`Cmd`/`Test`, and JSON/YAML exec forms are grouped in either declaration order within the
+same bounded mapping/container ancestry. Deeper probe/healthcheck fragments do not split a parent
+command, while unrelated mappings, sibling containers, YAML documents, Dockerfile stages, separate
+instructions, prose, and later commands are never joined. Confirmed curl sequences that cannot be
+represented within the line, character, or delimiter bounds fail closed. Backslash,
 PowerShell-backtick, cmd-caret, and doubled-quote key escapes are normalized locally, including
 dotted credential keys. A single-backslash curl alias remains supported without masking drive,
 UNC/rooted, or home-alias private paths.
