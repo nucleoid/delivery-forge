@@ -93,6 +93,27 @@ internal sealed class SequenceRepositoryIdentityReader(params RepositoryIdentity
         Task.FromResult(identities[Math.Min(_index++, identities.Length - 1)]);
 }
 
+internal sealed class ThrowingRepositoryIdentityReader : IRepositoryIdentityReader
+{
+    public Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken) =>
+        throw new EvidenceRepositoryException("fixture repository failure");
+}
+
+internal sealed class FirstThenThrowRepositoryIdentityReader(RepositoryIdentity identity)
+    : IRepositoryIdentityReader
+{
+    private bool _read;
+
+    public Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken)
+    {
+        if (_read)
+            throw new EvidenceRepositoryException("fixture repository failure");
+
+        _read = true;
+        return Task.FromResult(identity);
+    }
+}
+
 internal sealed class TempDirectory : IDisposable
 {
     public TempDirectory()
@@ -119,7 +140,6 @@ internal sealed class TempDirectory : IDisposable
                 var attributes = File.GetAttributes(entry);
                 if (attributes.HasFlag(FileAttributes.ReparsePoint))
                 {
-                    File.SetAttributes(entry, FileAttributes.Normal);
                     if (attributes.HasFlag(FileAttributes.Directory))
                         Directory.Delete(entry);
                     else

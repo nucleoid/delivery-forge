@@ -30,7 +30,18 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
         }
         var gateDirectory = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
 
-        var before = await repository.ReadAsync(cancellationToken).ConfigureAwait(false);
+        RepositoryIdentity before;
+        try
+        {
+            before = await repository.ReadAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, request.ExpectedRepository, request.ExpectedRepository,
+                NormalizedEvidence.Error($"Repository identity could not be read: {exception.Message}"),
+                CancellationToken.None).ConfigureAwait(false);
+        }
         if (!before.IsClean || before != request.ExpectedRepository)
         {
             return await PersistWithoutExecutionAsync(
@@ -40,11 +51,36 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
         }
 
         Directory.CreateDirectory(gateDirectory);
-        var execution = await executor.ExecuteAsync(request.Invocation, request.Timeout, cancellationToken)
-            .ConfigureAwait(false);
+        CommandResult execution;
+        try
+        {
+            execution = await executor.ExecuteAsync(request.Invocation, request.Timeout, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            var now = DateTimeOffset.UtcNow;
+            execution = new CommandResult(null, string.Empty, "Command execution was cancelled.", false, true, now, now);
+        }
+        catch (Exception exception)
+        {
+            var now = DateTimeOffset.UtcNow;
+            execution = new CommandResult(
+                null, string.Empty, $"Command execution failed: {exception.Message}", false, false, now, now);
+        }
         var artifactHashes = await WriteArtifactsAsync(gateDirectory, execution, CancellationToken.None).ConfigureAwait(false);
-        var after = await repository.ReadAsync(CancellationToken.None).ConfigureAwait(false);
-        var sourceChanged = before != after || !after.IsClean;
+        RepositoryIdentity after;
+        var identityReadFailed = false;
+        try
+        {
+            after = await repository.ReadAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch
+        {
+            after = before;
+            identityReadFailed = true;
+        }
+        var sourceChanged = identityReadFailed || before != after || !after.IsClean;
 
         NormalizedEvidence normalized;
         try
@@ -59,7 +95,9 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
         {
             normalized = NormalizedEvidence.Error($"Evidence normalizer failed: {exception.Message}");
         }
-        if (sourceChanged)
+        if (identityReadFailed)
+            normalized = NormalizedEvidence.Error("Repository identity could not be read after evaluation.");
+        else if (sourceChanged)
             normalized = NormalizedEvidence.Error("Repository source/index/status identity changed during evaluation.");
         else if (execution.TimedOut)
             normalized = NormalizedEvidence.Incomplete("Tool timed out before complete evidence was produced.");

@@ -3,6 +3,25 @@ namespace DeliveryForge.Evidence.Tests;
 public sealed class GateRunnerTests
 {
     [Fact]
+    public void Temp_cleanup_does_not_change_a_reparse_point_target()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+
+        using var target = new TempDirectory();
+        var targetFile = System.IO.Path.Combine(target.Path, "target.txt");
+        File.WriteAllText(targetFile, "outside");
+        File.SetUnixFileMode(targetFile, UnixFileMode.UserRead);
+        var mode = File.GetUnixFileMode(targetFile);
+
+        using (var cleanupRoot = new TempDirectory())
+            File.CreateSymbolicLink(System.IO.Path.Combine(cleanupRoot.Path, "link.txt"), targetFile);
+
+        Assert.True(File.Exists(targetFile));
+        Assert.Equal(mode, File.GetUnixFileMode(targetFile));
+    }
+
+    [Fact]
     public async Task Captures_immutable_argv_artifacts_and_source_identity()
     {
         using var temp = new TempDirectory();
@@ -90,5 +109,54 @@ public sealed class GateRunnerTests
 
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.True(File.Exists(result.ReceiptPath));
+    }
+
+    [Fact]
+    public async Task Repository_preflight_failure_is_recorded_as_error_receipt()
+    {
+        using var temp = new TempDirectory();
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new ThrowingRepositoryIdentityReader());
+
+        var result = await runner.RunAsync(
+            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.True(File.Exists(result.ReceiptPath));
+        Assert.Contains("could not be read", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Unexpected_executor_failure_is_recorded_as_error_receipt()
+    {
+        using var temp = new TempDirectory();
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()));
+
+        var result = await runner.RunAsync(
+            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.True(File.Exists(result.ReceiptPath));
+        Assert.Null(result.Execution.ExitCode);
+    }
+
+    [Fact]
+    public async Task Repository_postflight_failure_is_recorded_as_error_receipt()
+    {
+        using var temp = new TempDirectory();
+        var runner = new GateRunner(
+            new StubCommandExecutor(TestEvidence.CommandResult()),
+            new FirstThenThrowRepositoryIdentityReader(TestEvidence.Repository()));
+
+        var result = await runner.RunAsync(
+            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.True(result.SourceChanged);
+        Assert.True(File.Exists(result.ReceiptPath));
+        Assert.Contains("after evaluation", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 }
