@@ -222,7 +222,7 @@ public sealed class CoordinationContractTests
     public async Task Inspect_masks_foreign_holder_and_validates_owned_details()
     {
         var transport = new RecordingTransport(CoordinationContractFixture.Capabilities());
-        transport.InspectResults.Enqueue(InspectTransportResult.HeldByOther("leaked-id", "99"));
+        transport.InspectResults.Enqueue(InspectTransportResult.HeldByOther());
         transport.InspectResults.Enqueue(InspectTransportResult.HeldByCaller("lease-a", "7", ServerNow, ServerNow.AddMinutes(5)));
         var adapter = await CreateAdapterAsync(transport);
 
@@ -677,7 +677,7 @@ public sealed class CoordinationContractTests
     public static TheoryData<InspectTransportResult> NotOwnedInspections => new()
     {
         InspectTransportResult.Available(),
-        InspectTransportResult.HeldByOther("replacement", "99"),
+        InspectTransportResult.HeldByOther(),
         InspectTransportResult.HeldByCaller("different-lease", "99", ServerNow, ServerNow.AddMinutes(5)),
     };
 
@@ -690,6 +690,7 @@ public sealed class CoordinationContractTests
         new InspectTransportResult(TransportOutcome.Inspected, true, true, "lease-a", "1", null, ServerNow.AddMinutes(5), "missing server time"),
         new InspectTransportResult(TransportOutcome.Inspected, true, true, "lease-a", "1", ServerNow, null, "missing expiry"),
         new InspectTransportResult(TransportOutcome.Inspected, false, false, "leaked", null, null, null, "available leaked identity"),
+        new InspectTransportResult(TransportOutcome.Inspected, true, false, "leaked", "9", ServerNow, ServerNow.AddMinutes(1), "foreign leaked identity"),
     };
 
     [Theory]
@@ -733,6 +734,23 @@ public sealed class CoordinationContractTests
         Assert.Single(transport.ReleaseRequests);
         Assert.Single(transport.InspectRequests);
         Assert.Equal("lease-a", transport.ReleaseRequests.Single().LeaseId);
+    }
+
+    [Fact]
+    public async Task Cleanup_inspection_accepts_a_valid_partial_remaining_lifetime()
+    {
+        var transport = SingleLeaseTransport();
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.LeaseLost());
+        transport.InspectResults.Enqueue(InspectTransportResult.HeldByCaller(
+            "different-lease", "99", ServerNow.AddMinutes(1), ServerNow.AddMinutes(4)));
+        var adapter = await CreateAdapterAsync(transport);
+        var acquired = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+
+        var cleanup = await adapter.ReleaseAllAsync(acquired.Authority!, TestContext.Current.CancellationToken);
+
+        Assert.Equal(CoordinationLifecyclePhase.Closed, cleanup.Snapshot.Phase);
+        Assert.Equal(LeaseReleaseState.NotOwned, cleanup.Leases.Single().State);
     }
 
     [Fact]
@@ -1043,6 +1061,49 @@ public sealed class CoordinationContractTests
             lifecycleId, Owner, [Issue(6)], "single-use-proof", TestContext.Current.CancellationToken));
     }
 
+    [Fact]
+    public async Task Late_checkpoint_append_is_reconciled_in_place_before_any_rpc_or_new_slot()
+    {
+        var barrier = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var checkpoints = new FixtureCheckpointStore { DelayNextAppend = barrier };
+        var transport = SingleLeaseTransport();
+        var adapter = await CreateAdapterAsync(transport, rollbackTimeout: TimeSpan.FromMilliseconds(20),
+            checkpoints: checkpoints);
+
+        var uncertain = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+        Assert.Empty(transport.AcquireRequests);
+        barrier.SetResult();
+        await checkpoints.DelayedAppendCompleted.Task.WaitAsync(
+            TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+
+        var reconciled = await adapter.ReconcileAcquireAsync(
+            uncertain.AcquireContinuation!, TestContext.Current.CancellationToken);
+
+        Assert.Single(transport.AcquireRequests);
+        Assert.NotNull(reconciled.ReleaseContinuation);
+        Assert.Equal(Enumerable.Range(1, checkpoints.Records.Count).Select(value => (long)value),
+            checkpoints.Records.Select(record => record.RecordSequence));
+    }
+
+    [Fact]
+    public async Task Rejected_same_adapter_recovery_does_not_claim_or_fence_the_live_writer()
+    {
+        var checkpoints = new FixtureCheckpointStore();
+        var transport = SingleLeaseTransport();
+        var adapter = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var held = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        var lifecycleId = checkpoints.Records[0].Prepared!.LifecycleId;
+
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() => adapter.RecoverForCleanupAsync(
+            lifecycleId, Owner, [Issue(6)], "must-not-be-consumed", TestContext.Current.CancellationToken));
+        var released = await adapter.ReleaseAllAsync(held.Authority!, TestContext.Current.CancellationToken);
+
+        Assert.Equal(CoordinationLifecyclePhase.Closed, released.Snapshot.Phase);
+        Assert.Single(transport.ReleaseRequests);
+    }
+
     private static readonly DateTimeOffset ServerNow = new(2026, 10, 9, 0, 0, 0, TimeSpan.Zero);
     private static readonly LeaseOwner Owner = new("principal-1", "run-1");
 
@@ -1074,7 +1135,7 @@ public sealed class CoordinationContractTests
         source ??= new RecordingQuiescenceSource(clock, [true, true, true, true]);
         return ContinuumCoordinationAdapter.CreateForContractTestsAsync(
             transport, source, TestContext.Current.CancellationToken, clock, rollbackTimeout, checkpoints,
-            maximumClockUncertainty);
+            maximumClockUncertainty ?? TimeSpan.Zero);
     }
 
     private sealed class FakeMonotonicClock(string domainId) : IMonotonicClock

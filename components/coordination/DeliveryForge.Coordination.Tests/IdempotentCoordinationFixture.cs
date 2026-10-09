@@ -95,7 +95,7 @@ internal sealed class IdempotentCoordinationFixture(Func<DateTimeOffset> serverN
             return InspectTransportResult.Available();
         return current.Owner == request.Owner
             ? InspectTransportResult.HeldByCaller(current.LeaseId, current.Fence, now, current.ExpiresAt)
-            : InspectTransportResult.HeldByOther("masked-by-adapter", "masked-by-adapter");
+            : InspectTransportResult.HeldByOther();
     }
 
     private ReleaseTransportResult Release(ReleaseRequest request)
@@ -159,6 +159,9 @@ internal sealed class FixtureCheckpointStore : ICoordinationCheckpointStore
     public bool FailAfterNextAppend { get; set; }
     public bool ReverseReads { get; set; }
     public Action<CoordinationCheckpointRecord>? AfterAppend { get; set; }
+    public TaskCompletionSource? DelayNextAppend { get; set; }
+    public TaskCompletionSource DelayedAppendCompleted { get; } =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
     public IReadOnlyList<CoordinationCheckpointRecord> Records => _records.Select(RoundTrip).ToArray();
 
     public Task<CoordinationWriterClaim> ClaimWriterAsync(
@@ -184,17 +187,36 @@ internal sealed class FixtureCheckpointStore : ICoordinationCheckpointStore
         CoordinationWriterClaim claim, long expectedRecordSequence, CoordinationCheckpointRecord record,
         CancellationToken cancellationToken = default)
     {
+        if (DelayNextAppend is { } barrier)
+        {
+            DelayNextAppend = null;
+            return AppendAfterBarrierAsync(barrier.Task, claim, expectedRecordSequence, record);
+        }
+        return AppendCore(claim, expectedRecordSequence, record);
+    }
+
+    private async Task AppendAfterBarrierAsync(
+        Task barrier, CoordinationWriterClaim claim, long expectedRecordSequence, CoordinationCheckpointRecord record)
+    {
+        await barrier.ConfigureAwait(false);
+        await AppendCore(claim, expectedRecordSequence, record).ConfigureAwait(false);
+        DelayedAppendCompleted.TrySetResult();
+    }
+
+    private Task AppendCore(
+        CoordinationWriterClaim claim, long expectedRecordSequence, CoordinationCheckpointRecord record)
+    {
         lock (_records)
         {
             if (record.Prepared is not null && FailNextPrepare)
             {
                 FailNextPrepare = false;
-                throw new IOException("fixture-prepare-failure");
+                throw new CoordinationCheckpointNotWrittenException("fixture-prepare-failure");
             }
             if (record.Progress is not null && FailNextProgress)
             {
                 FailNextProgress = false;
-                throw new IOException("fixture-progress-failure");
+                throw new CoordinationCheckpointNotWrittenException("fixture-progress-failure");
             }
             if (!_epochs.TryGetValue(claim.LifecycleId, out var epoch) || epoch != claim.WriterEpoch ||
                 record.WriterEpoch != epoch)

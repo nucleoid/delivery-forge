@@ -321,3 +321,4 @@ public class CoordinationException(string message, Exception? inner = null) : Ex
 public sealed class CoordinationUnavailableException(string message, Exception? inner = null) : CoordinationException(message, inner);
 public sealed class CoordinationUncertainException(string message, Exception? inner = null) : CoordinationException(message, inner);
 public sealed class CoordinationProtocolException(string message, Exception? inner = null) : CoordinationException(message, inner);
+public sealed class CoordinationCheckpointNotWrittenException(string message) : CoordinationException(message);
