@@ -1,58 +1,43 @@
 # Memory and code-intelligence boundary
 
-Memory and code-intelligence systems are optional advisory inputs to planning. They are never
-execution authority, publication authority, or substitutes for checkout bytes.
+Memory and code-intelligence results are bounded local advisory input. They are never execution,
+approval, or publication authority and never substitute for exact checkout bytes.
 
-## Host responsibility
+The host owns capability detection, authentication, search limits, tool calls, and conversion into
+`ImportedContextEnvelope`. The planning library has no host-provider integration.
 
-The future host integration owns capability detection, tool calls, authentication, search limits,
-and conversion into the host-neutral `ImportedContextEnvelope`. `DeliveryForge.Planning` itself
-does not know OpenClaw, Engram, MCP, provider IDs, host paths, credentials, or private skill text.
-Explicit deep intake asks the host for additional bounded evidence, but transports it through the
-same repository/policy evidence items and imported-context envelope; no host capability or provider
-contract enters the planning library.
+## Local advisory envelope
 
-The JSON envelope is capped at 256 KiB and 256 entries. It accepts only:
+The JSON envelope is capped at 256 KiB and 256 entries. An entry contains kind, local locator, raw
+advisory summary, optional summary and checkout digests, UTC observation time, stale/truncated/
+heuristic flags, optional/required status, and an optional typed distilled-meaning code. Conflicts
+and limitations are also retained as bounded local-only strings. Unknown fields, duplicate keys,
+invalid digests/timestamps, NUL and disallowed control characters, and oversized input fail closed.
 
-- schema version;
-- bounded entries containing kind, opaque portable locator, advisory summary, optional summary
-  digest, optional claimed checkout-byte digest, observed invariant UTC `Z` time, and
-  stale/truncated/heuristic flags;
-- conflicts and limitations.
+Private paths, credentials, internal identifiers, and private prose may exist in this local envelope;
+that is why none of those raw strings is a portable/public value. A caller-provided source label or
+public-looking locator does not sanitize them.
 
-Unknown fields, arbitrary absolute POSIX/Windows/UNC or tilde/named-home paths, shell/PowerShell/
-percent-environment home aliases, single-backslash Windows roots (including
-delimiter-adjacent and non-ASCII path segments), URL user-info, obvious key/value, JSON, or
-authorization-header credential material (including common secret, password/passwd, and access-key
-assignments, general current hyphenated `sk-` API-key forms, `--password`, and curl `--user`, attached `-u`,
-or grouped short-option credentials), malformed/duplicate JSON, and
-oversized input fail closed. Raw documents, prompts, transcripts, source bodies, credentials, and
-private filesystem locations are outside the envelope.
+## Portable projection
 
-## Evidence semantics
+Frozen plans receive only typed fixed sentences, exact repository facts, digests, and public or
+opaque evidence locators. Raw summaries, conflicts, limitations, and local locators are never copied.
+Required meaning without a safe typed distillation blocks readiness. Optional undistilled meaning is
+represented by a fixed caveat. Typed distillation records categories such as caller relationship,
+policy constraint, repository conflict, or additional repository evidence; it does not reproduce the
+private explanation.
 
-- An empty search means only that the bounded search returned no matches. It degrades honestly
-  when optional and blocks readiness when the caller declares imported context required.
-- Stale, truncated, heuristic, or conflicting results retain those caveats.
-- Deep-intake threshold accounting deduplicates both locators and canonical bound identities/digests
-  across evidence and imported context. Only
-  non-memory imported entries verified against exact checkout bytes, with no stale, truncated, or
-  heuristic flags, can satisfy the additional-evidence threshold.
-- Imported JSON cannot assert checkout-verification state. Repository claims must carry a
-  forward-slash `git:<repository-relative-path>` locator and be checked against the matching exact Git blob with
-  `ImportedContextVerifier.VerifyAgainst`; otherwise they remain labeled unverified. Verification
-  binds every meaning-bearing entry field (kind, locator, summary, both digests, observed time, and
-  stale/truncated/heuristic flags) plus the reader-supplied exact commit, tree, symlink disposition, and generated-file
-  classification. Unsafe/unresolved symlinks and conventionally generated files retain matching safety caveats and cannot
-  satisfy deep readiness. Post-verification
-  mutation downgrades the record to unverified. The commit/tree are retained as a limitation, and
-  freeze rejects a verified identity that differs from the draft base. A claimed checkout-byte
-  digest or locator mismatch is retained as a conflict and blocks readiness.
-- Missing optional context degrades with a recorded limitation.
-- Missing context declared required by plan/policy blocks readiness.
-- `digest` identifies the imported summary when supplied. `checkoutDigest` is a separate claim used
-  only for local exact-byte comparison; neither proves the source system was complete, fresh, or
-  authoritative.
+An empty search means only that the bounded search returned no matches. Optional absence degrades
+honestly; required absence blocks. Stale, truncated, heuristic, and checkout-conflicting states render
+fixed deterministic caveats.
 
-Portable frozen plans contain distilled evidence metadata and caveats, not raw private context.
-Local host state may retain private retrieval details outside Git and outside public artifacts.
+## Checkout verification
+
+Imported JSON cannot assert verification. A `git:<repository-relative-path>` claim is checked against
+the matching reader-issued blob by `ImportedContextVerifier.VerifyAgainst`. Verification binds every
+entry field, exact commit/tree, symlink disposition, and generated-file classification. Locator or
+digest mismatch becomes conflict. Unsafe links and generated files cannot satisfy deep readiness.
+Mutation after verification downgrades the entry to unverified.
+
+Envelope validity, typed projection, and bounded scanning do not imply completeness, freshness,
+approval, intake acceptance, or publication authority.

@@ -13,7 +13,7 @@ public sealed record ImportedContextEnvelope(
 {
     private const int MaximumEnvelopeBytes = 256 * 1024;
     private static readonly HashSet<string> EnvelopeFields = ["schemaVersion", "entries", "conflicts", "limitations"];
-    private static readonly HashSet<string> EntryFields = ["kind", "locator", "summary", "digest", "checkoutDigest", "observedAt", "stale", "truncated", "heuristic"];
+    private static readonly HashSet<string> EntryFields = ["kind", "locator", "summary", "digest", "checkoutDigest", "observedAt", "stale", "truncated", "heuristic", "requirement", "distilledMeaning"];
     private static readonly string[] UtcTimestampFormats = ["yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'"];
 
     public static ImportedContextEnvelope Parse(ReadOnlySpan<byte> json)
@@ -67,19 +67,19 @@ public sealed record ImportedContextEnvelope(
     {
         RequireObject(item, "Imported context entry");
         RejectUnknownFields(item, EntryFields);
-        var kind = PortableText(RequireString(item, "kind"), "kind");
-        var locator = PortableText(RequireString(item, "locator"), "locator");
+        var kind = BoundedAdvisoryText(RequireString(item, "kind"), "kind");
+        var locator = BoundedAdvisoryText(RequireString(item, "locator"), "locator");
         if (locator.StartsWith("git:", StringComparison.Ordinal) && locator.Contains('\\'))
         {
             throw new PlanningException("Imported context git: locators must use forward slashes; backslash aliases are not accepted.");
         }
-        var summary = PortableText(RequireString(item, "summary"), "summary");
+        var summary = BoundedAdvisoryText(RequireString(item, "summary"), "summary");
         var digest = item.TryGetProperty("digest", out var digestElement) && digestElement.ValueKind != JsonValueKind.Null
-            ? PortableText(digestElement.GetString() ?? string.Empty, "digest")
+            ? BoundedAdvisoryText(digestElement.GetString() ?? string.Empty, "digest")
             : null;
         ValidateDigest(digest, "digest");
         var checkoutDigest = item.TryGetProperty("checkoutDigest", out var checkoutDigestElement) && checkoutDigestElement.ValueKind != JsonValueKind.Null
-            ? PortableText(checkoutDigestElement.GetString() ?? string.Empty, "checkoutDigest")
+            ? BoundedAdvisoryText(checkoutDigestElement.GetString() ?? string.Empty, "checkoutDigest")
             : null;
         ValidateDigest(checkoutDigest, "checkoutDigest");
         if (!DateTimeOffset.TryParseExact(
@@ -92,6 +92,13 @@ public sealed record ImportedContextEnvelope(
             throw new PlanningException("Imported context observedAt must be an explicit UTC timestamp.");
         }
 
+        var requirement = item.TryGetProperty("requirement", out var requirementElement)
+            ? ParseEnum<EvidenceRequirement>(requirementElement, "requirement")
+            : EvidenceRequirement.Optional;
+        ImportedMeaningCode? distilledMeaning = item.TryGetProperty("distilledMeaning", out var meaningElement) && meaningElement.ValueKind != JsonValueKind.Null
+            ? ParseEnum<ImportedMeaningCode>(meaningElement, "distilledMeaning")
+            : null;
+
         return new ImportedContextEntry(
             kind,
             locator,
@@ -102,7 +109,9 @@ public sealed record ImportedContextEnvelope(
             OptionalBoolean(item, "truncated"),
             OptionalBoolean(item, "heuristic"),
             CheckoutVerification.Unverified,
-            checkoutDigest);
+            checkoutDigest,
+            requirement,
+            distilledMeaning);
     }
 
     private static void ValidateDigest(string? digest, string field)
@@ -115,13 +124,12 @@ public sealed record ImportedContextEnvelope(
         }
     }
 
-    private static string PortableText(string value, string field)
+    private static string BoundedAdvisoryText(string value, string field)
     {
         if (string.IsNullOrWhiteSpace(value) || value.Length > 4096 || value.IndexOf('\0') >= 0 ||
-            PortableMaterial.ContainsPrivateMaterial(value) ||
-            PortableMaterial.IsAbsolutePath(value) && !PortableMaterial.IsSingleBackslashCurlCommand(value))
+            value.Any(character => char.IsControl(character) && character is not '\t' and not '\n' and not '\r'))
         {
-            throw new PlanningException($"Imported context field '{field}' is not portable or may contain private/secret material.");
+            throw new PlanningException($"Imported context field '{field}' is not a bounded advisory value.");
         }
 
         return value;
@@ -159,7 +167,7 @@ public sealed record ImportedContextEnvelope(
     private static IReadOnlyList<string> ReadStrings(JsonElement element, string property) =>
         RequireArray(element, property).EnumerateArray()
             .Select(item => item.ValueKind == JsonValueKind.String
-                ? PortableText(item.GetString() ?? string.Empty, property)
+                ? BoundedAdvisoryText(item.GetString() ?? string.Empty, property)
                 : throw new PlanningException($"Imported context '{property}' must contain strings."))
             .Distinct(StringComparer.Ordinal)
             .Order(StringComparer.Ordinal)
@@ -169,6 +177,17 @@ public sealed record ImportedContextEnvelope(
         !element.TryGetProperty(property, out var value) ? false : value.ValueKind is JsonValueKind.True or JsonValueKind.False
             ? value.GetBoolean()
             : throw new PlanningException($"Imported context '{property}' must be boolean.");
+
+    private static T ParseEnum<T>(JsonElement element, string property) where T : struct, Enum
+    {
+        if (element.ValueKind != JsonValueKind.String ||
+            !Enum.TryParse<T>(element.GetString(), ignoreCase: true, out var value) ||
+            !Enum.IsDefined(value))
+        {
+            throw new PlanningException($"Imported context '{property}' is not recognized.");
+        }
+        return value;
+    }
 }
 
 public static class IntakePlanner
@@ -206,7 +225,7 @@ public static class IntakePlanner
 
         foreach (var item in evidence)
         {
-            limitations.AddRange(item.Caveats);
+            limitations.AddRange(item.Caveats.Select(CaveatText));
             if (!item.HasConsistentSourceLocator())
             {
                 limitations.Add($"Evidence source kind at {item.Locator} is inconsistent with its locator scheme.");
@@ -225,7 +244,9 @@ public static class IntakePlanner
             }
             if (!item.IsComplete)
             {
-                limitations.Add($"{item.Requirement} evidence at {item.Locator} is incomplete.");
+                limitations.Add(item.Requirement == EvidenceRequirement.Required
+                    ? "Required typed evidence is incomplete."
+                    : "Optional typed evidence is incomplete.");
                 if (item.Requirement == EvidenceRequirement.Required) ready = false;
             }
         }
@@ -254,16 +275,27 @@ public static class IntakePlanner
         }
         if (importedContext is not null)
         {
-            limitations.AddRange(importedContext.Limitations);
-            limitations.AddRange(importedContext.Conflicts.Select(conflict => $"Imported-context conflict: {conflict}"));
+            if (importedContext.Limitations.Count > 0)
+                limitations.Add(NoticeText(PlanningNoticeCode.PrivateAdvisoryLimitationReported));
+            if (importedContext.Conflicts.Count > 0)
+                limitations.Add(NoticeText(PlanningNoticeCode.PrivateAdvisoryConflictReported));
             foreach (var entry in importedContext.Entries)
             {
-                if (entry.Stale) limitations.Add($"Imported context at {entry.Locator} is stale.");
-                if (entry.Truncated) limitations.Add($"Imported context at {entry.Locator} is truncated.");
-                if (entry.Heuristic) limitations.Add($"Imported context at {entry.Locator} is heuristic.");
+                if (entry.Stale) limitations.Add(CaveatText(EvidenceCaveatCode.Stale));
+                if (entry.Truncated) limitations.Add(CaveatText(EvidenceCaveatCode.Truncated));
+                if (entry.Heuristic) limitations.Add(CaveatText(EvidenceCaveatCode.Heuristic));
+                if (entry.DistilledMeaning is not null)
+                    limitations.Add(MeaningText(entry.DistilledMeaning.Value));
+                else if (entry.Requirement == EvidenceRequirement.Required)
+                {
+                    limitations.Add(CaveatText(EvidenceCaveatCode.RequiredMeaningNotDistillable));
+                    ready = false;
+                }
+                else
+                    limitations.Add(NoticeText(PlanningNoticeCode.OptionalPrivateMeaningNotExported));
                 var verification = ImportedContextVerifier.GetEffectiveVerification(entry);
                 if (verification == CheckoutVerification.Unverified)
-                    limitations.Add($"Imported context at {entry.Locator} is unverified against exact checkout bytes.");
+                    limitations.Add(CaveatText(EvidenceCaveatCode.UnverifiedCheckout));
                 if (verification == CheckoutVerification.Verified)
                 {
                     limitations.AddRange(ImportedContextVerifier.GetReaderSafetyCaveats(entry));
@@ -271,12 +303,12 @@ public static class IntakePlanner
                     if (identity is not null)
                     {
                         verifiedRepositoryIdentities.Add(identity);
-                        limitations.Add($"Imported context at {entry.Locator} was verified against exact checkout bytes at commit {identity.Commit}, tree {identity.Tree}.");
+                        limitations.Add($"Imported repository evidence was verified against exact checkout bytes at commit {identity.Commit}, tree {identity.Tree}.");
                     }
                 }
                 if (verification == CheckoutVerification.Conflict)
                 {
-                    limitations.Add($"Imported context at {entry.Locator} conflicts with exact checkout bytes.");
+                    limitations.Add(CaveatText(EvidenceCaveatCode.CheckoutConflict));
                     ready = false;
                 }
             }
@@ -303,6 +335,7 @@ public static class IntakePlanner
 
     private static bool IsPinnedReadinessEvidence(EvidenceItem item) =>
         item.IsComplete && item.HasConsistentSourceLocator() && IsSha256(item.Digest) &&
+        item.ProducerKind != EvidenceProducerKind.PrivateAdvisory &&
         (item.SourceKind == EvidenceSourceKind.Policy ||
          item.SourceKind == EvidenceSourceKind.Repository && item.IsReaderBoundRepositoryEvidence());
 
@@ -359,6 +392,38 @@ public static class IntakePlanner
         return !string.IsNullOrWhiteSpace(value.Trim().Trim('.', '?', '!', ':', ';'));
     }
 
+    internal static string CaveatText(EvidenceCaveatCode code) => code switch
+    {
+        EvidenceCaveatCode.Stale => "Private advisory evidence is stale.",
+        EvidenceCaveatCode.Truncated => "Private advisory evidence is truncated.",
+        EvidenceCaveatCode.Heuristic => "Private advisory evidence is heuristic.",
+        EvidenceCaveatCode.Incomplete => "Typed evidence is incomplete.",
+        EvidenceCaveatCode.UnverifiedCheckout => "Private advisory evidence is unverified against exact checkout bytes.",
+        EvidenceCaveatCode.CheckoutConflict => "Private advisory evidence conflicts with exact checkout bytes.",
+        EvidenceCaveatCode.UnsafeSymlink => "Repository evidence has an unsafe or unresolved symlink boundary and cannot establish readiness.",
+        EvidenceCaveatCode.GeneratedFile => "Repository evidence is generated and cannot establish readiness without authoritative generator provenance.",
+        EvidenceCaveatCode.OptionalEvidenceUnavailable => "Optional evidence is unavailable.",
+        EvidenceCaveatCode.RequiredMeaningNotDistillable => "Required private advisory meaning cannot be safely distilled; readiness is blocked.",
+        _ => throw new PlanningException("Evidence caveat code is not recognized.")
+    };
+
+    private static string MeaningText(ImportedMeaningCode code) => code switch
+    {
+        ImportedMeaningCode.AdditionalRepositoryEvidence => "Private advisory intake identified additional repository evidence.",
+        ImportedMeaningCode.RepositoryConflict => "Private advisory intake identified a repository conflict.",
+        ImportedMeaningCode.PolicyConstraint => "Private advisory intake identified a policy constraint.",
+        ImportedMeaningCode.CallerRelationship => "Private advisory intake identified a caller relationship.",
+        _ => throw new PlanningException("Imported meaning code is not recognized.")
+    };
+
+    private static string NoticeText(PlanningNoticeCode code) => code switch
+    {
+        PlanningNoticeCode.PrivateAdvisoryConflictReported => "Private advisory intake reported a conflict; raw details remain local-only.",
+        PlanningNoticeCode.PrivateAdvisoryLimitationReported => "Private advisory intake reported one or more limitations; raw details remain local-only.",
+        PlanningNoticeCode.OptionalPrivateMeaningNotExported => "Optional private advisory meaning was not exported.",
+        _ => throw new PlanningException("Planning notice code is not recognized.")
+    };
+
     internal static bool IsBoundTo(
         IntakeAssessment assessment,
         PlanningRequest request,
@@ -407,7 +472,7 @@ public static class IntakePlanner
                     item.Locator,
                     item.Digest,
                     observedAt = item.ObservedAt.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture),
-                    caveats = item.Caveats.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+                    caveats = item.Caveats.Distinct().Order().ToArray(),
                     item.Supersedes,
                     item.IsComplete,
                     requirement = item.Requirement.ToString().ToLowerInvariant(),
@@ -518,6 +583,8 @@ public static class ImportedContextVerifier
             entry.Truncated,
             entry.Heuristic,
             entry.CheckoutDigest,
+            entry.Requirement,
+            entry.DistilledMeaning,
             verification,
             entry.VerifiedCommit,
             entry.VerifiedTree,

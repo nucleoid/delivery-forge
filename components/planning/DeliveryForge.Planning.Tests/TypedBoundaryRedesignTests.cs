@@ -43,7 +43,7 @@ public sealed class TypedBoundaryRedesignTests
             provenance,
             [new("components/planning/Core.cs", "PlanFreezer", "freeze plans")],
             [new("contracts", [], "issue #3 is integrated")],
-            [new("test", "dotnet test", "all tests pass")],
+            [new("test", new PlanCommand("dotnet", [PlanCommandArgument.Literal("test")]), "all tests pass")],
             new("additive", "none", "none", "none", "none", "none", "test results", "revert commit", []),
             [],
             IntakePlanner.Assess(request, provenance));

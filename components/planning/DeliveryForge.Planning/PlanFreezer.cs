@@ -95,10 +95,14 @@ public static class PlanFreezer
                 .Select(item => new
                 {
                     sourceKind = item.SourceKind.ToString().ToLowerInvariant(),
-                    item.Locator,
+                    producerKind = ProducerWireValue(item.ProducerKind),
+                    locatorKind = item.LocatorKind.ToString().ToLowerInvariant(),
+                    locator = item.ProducerKind == EvidenceProducerKind.PrivateAdvisory
+                        ? item.Locator
+                        : item.Locator,
                     item.Digest,
                     observedAt = FormatUtc(item.ObservedAt),
-                    caveats = Sorted(item.Caveats),
+                    caveats = item.Caveats.Order().Select(IntakePlanner.CaveatText).ToArray(),
                     item.Supersedes,
                     item.IsComplete,
                     requirement = item.Requirement.ToString().ToLowerInvariant(),
@@ -122,7 +126,21 @@ public static class PlanFreezer
                 .Select(item => new { item.Id, dependsOn = Sorted(item.DependsOn), item.IntegrationCondition }).ToArray(),
             gates = draft.Gates
                 .OrderBy(item => item.Id, StringComparer.Ordinal)
-                .Select(item => new { item.Id, item.Command, item.ExpectedOutcome }).ToArray(),
+                .Select(item => new
+                {
+                    item.Id,
+                    command = new
+                    {
+                        item.Command.Executable,
+                        arguments = item.Command.Arguments.Select(argument => new
+                        {
+                            kind = ArgumentWireValue(argument.Kind),
+                            argument.Value
+                        }).ToArray()
+                    },
+                    displayCommand = item.Command.Render(),
+                    item.ExpectedOutcome
+                }).ToArray(),
             rollout = new
             {
                 draft.Rollout.Compatibility,
@@ -332,8 +350,9 @@ public static class PlanFreezer
         foreach (var gate in draft.Gates)
         {
             Required(gate.Id, "gate ID", failures);
-            Required(gate.Command, "gate command", failures);
             Required(gate.ExpectedOutcome, "gate expected outcome", failures);
+            try { CommandRenderer.Validate(gate.Command); }
+            catch (PlanningException exception) { failures.Add(exception.Message); }
         }
         Required(draft.Rollout.Compatibility, "rollout compatibility", failures);
         Required(draft.Rollout.Configuration, "rollout configuration", failures);
@@ -407,14 +426,26 @@ public static class PlanFreezer
          .Concat(draft.Repository.Submodules)
          .Concat(draft.Repository.Limitations)
          .Concat(draft.Intake.Limitations)
-         .Concat(draft.Provenance.SelectMany(item => new[] { item.Locator, item.Supersedes ?? string.Empty }.Concat(item.Caveats)))
+         .Concat(draft.Provenance.Where(item => item.ProducerKind != EvidenceProducerKind.PrivateAdvisory)
+             .SelectMany(item => new[] { item.Locator, item.Supersedes ?? string.Empty }))
          .Concat(draft.ChangeMap.SelectMany(item => new[] { item.Path, item.Symbol, item.Effect }))
          .Concat(draft.Dependencies.SelectMany(item => new[] { item.Id, item.IntegrationCondition }.Concat(item.DependsOn)))
-         .Concat(draft.Gates.SelectMany(item => new[] { item.Id, item.Command, item.ExpectedOutcome }))
+         .Concat(draft.Gates.SelectMany(item => new[] { item.Id, item.Command.Executable, item.Command.Render(), item.ExpectedOutcome }))
          .Concat(draft.Rollout.OperatorActions)
          .Concat(draft.Unknowns.SelectMany(item => new[] { item.Description, item.Owner }));
         if (portableText.Any(PortableMaterial.ContainsPrivateMaterial))
             failures.Add("plan contains a host path or credential-like private material");
+
+        foreach (var evidence in draft.Provenance.Where(item => item.ProducerKind == EvidenceProducerKind.PrivateAdvisory))
+        {
+            if (evidence.LocatorKind != EvidenceLocatorKind.Opaque ||
+                !evidence.Locator.StartsWith("opaque:", StringComparison.Ordinal) ||
+                evidence.Locator.Length > 135 ||
+                !PortableMaterial.IsSafeIdentifier(evidence.Locator[7..]))
+            {
+                failures.Add("private advisory provenance requires a bounded opaque locator");
+            }
+        }
     }
 
     private static void ValidateUnique<T>(IReadOnlyList<T> values, Func<T, string> key, string name, List<string> failures)
@@ -448,4 +479,21 @@ public static class PlanFreezer
 
     private static string[] Sorted(IEnumerable<string> values) =>
         values.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+
+    private static string ProducerWireValue(EvidenceProducerKind value) => value switch
+    {
+        EvidenceProducerKind.ExplicitUserPublic => "explicit-user-public",
+        EvidenceProducerKind.RepositoryAtBase => "repository-at-base",
+        EvidenceProducerKind.DeterministicGenerated => "deterministic-generated",
+        EvidenceProducerKind.PrivateAdvisory => "private-advisory",
+        _ => throw new PlanningException("Evidence producer kind is not recognized.")
+    };
+
+    private static string ArgumentWireValue(CommandArgumentKind value) => value switch
+    {
+        CommandArgumentKind.Literal => "literal",
+        CommandArgumentKind.Placeholder => "placeholder",
+        CommandArgumentKind.SecretReference => "secret-reference",
+        _ => throw new PlanningException("Command argument kind is not recognized.")
+    };
 }

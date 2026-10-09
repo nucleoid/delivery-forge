@@ -88,7 +88,7 @@ public sealed class GitRepositoryContextTests : IDisposable
             evidence,
             [new("tracked.txt", "content", "update")],
             [new("root", [], "repository context is exact")],
-            [new("test", "dotnet test", "passes")],
+            [new("test", new PlanCommand("dotnet", [PlanCommandArgument.Literal("test")]), "passes")],
             new("additive", "none", "none", "none", "none", "none", "tests", "revert", []),
             [],
             IntakePlanner.Assess(request, evidence));
@@ -150,7 +150,7 @@ public sealed class GitRepositoryContextTests : IDisposable
             evidence,
             [new("tracked.txt", "content", "update")],
             [new("root", [], "repository context is exact")],
-            [new("test", "dotnet test", "passes")],
+            [new("test", new PlanCommand("dotnet", [PlanCommandArgument.Literal("test")]), "passes")],
             new("additive", "none", "none", "none", "none", "none", "tests", "revert", []),
             [],
             IntakePlanner.Assess(request, evidence));
@@ -200,7 +200,7 @@ public sealed class GitRepositoryContextTests : IDisposable
         Run("git", "commit -q -m second");
         var second = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
         var request = new PlanningRequest("owner/repo", "#4", "implement", "Bind repository identity", ["planning"], ["execution"], ["identity is exact"], "implement");
-        EvidenceItem[] evidence = [new(EvidenceSourceKind.Repository, "git:tracked.txt", digest, DateTimeOffset.UnixEpoch, [])];
+        EvidenceItem[] evidence = [new(EvidenceSourceKind.Repository, EvidenceProducerKind.RepositoryAtBase, EvidenceLocatorKind.Public, "git:tracked.txt", digest, DateTimeOffset.UnixEpoch, [])];
         var envelope = new ImportedContextEnvelope("1.0.0", [imported], [], []);
         var assessment = IntakePlanner.Assess(request, evidence, envelope, EvidenceRequirement.Required);
         var draft = new PlanDraft(
@@ -209,7 +209,7 @@ public sealed class GitRepositoryContextTests : IDisposable
             evidence,
             [new("tracked.txt", "content", "update")],
             [new("root", [], "repository context is exact")],
-            [new("test", "dotnet test", "passes")],
+            [new("test", new PlanCommand("dotnet", [PlanCommandArgument.Literal("test")]), "passes")],
             new("additive", "none", "none", "none", "none", "none", "tests", "revert", []),
             [],
             assessment);
@@ -399,7 +399,7 @@ public sealed class GitRepositoryContextTests : IDisposable
             ["unsafe imports do not establish readiness"], "implement", IntakeDepth.Deep);
         EvidenceItem[] evidence =
         [
-            new(EvidenceSourceKind.Policy, "policy:planning", "sha256:" + new string('a', 64), DateTimeOffset.UnixEpoch, [])
+            new(EvidenceSourceKind.Policy, EvidenceProducerKind.DeterministicGenerated, EvidenceLocatorKind.Public, "policy:planning", "sha256:" + new string('a', 64), DateTimeOffset.UnixEpoch, [])
         ];
 
         var assessment = IntakePlanner.Assess(

@@ -8,6 +8,28 @@ public sealed class PlanningException(string message) : Exception(message);
 public enum IntakeDepth { Minimal, Deep }
 public enum EvidenceRequirement { Optional, Required }
 public enum EvidenceSourceKind { User, Repository, Policy, Memory, CodeIntelligence, Imported }
+public enum EvidenceProducerKind { ExplicitUserPublic, RepositoryAtBase, DeterministicGenerated, PrivateAdvisory }
+public enum EvidenceLocatorKind { Public, Opaque }
+public enum EvidenceCaveatCode
+{
+    Stale,
+    Truncated,
+    Heuristic,
+    Incomplete,
+    UnverifiedCheckout,
+    CheckoutConflict,
+    UnsafeSymlink,
+    GeneratedFile,
+    OptionalEvidenceUnavailable,
+    RequiredMeaningNotDistillable
+}
+public enum ImportedMeaningCode { AdditionalRepositoryEvidence, RepositoryConflict, PolicyConstraint, CallerRelationship }
+public enum PlanningNoticeCode
+{
+    PrivateAdvisoryConflictReported,
+    PrivateAdvisoryLimitationReported,
+    OptionalPrivateMeaningNotExported
+}
 public enum CheckoutVerification { Unverified, Verified, Conflict }
 public enum SymlinkResolution { NotSymlink, InTree, Escapes, Cycle, Missing, BoundExceeded }
 
@@ -26,10 +48,12 @@ public sealed record PlanningRequest(
 
 public sealed record EvidenceItem(
     EvidenceSourceKind SourceKind,
+    EvidenceProducerKind ProducerKind,
+    EvidenceLocatorKind LocatorKind,
     string Locator,
     string? Digest,
     DateTimeOffset ObservedAt,
-    IReadOnlyList<string> Caveats,
+    IReadOnlyList<EvidenceCaveatCode> Caveats,
     string? Supersedes = null,
     bool IsComplete = true,
     EvidenceRequirement Requirement = EvidenceRequirement.Optional)
@@ -44,7 +68,7 @@ public sealed record EvidenceItem(
     public static EvidenceItem FromRepositoryFile(
         RepositoryFile exactFile,
         DateTimeOffset observedAt,
-        IReadOnlyList<string> caveats,
+        IReadOnlyList<EvidenceCaveatCode> caveats,
         EvidenceRequirement requirement = EvidenceRequirement.Optional)
     {
         ArgumentNullException.ThrowIfNull(exactFile);
@@ -53,15 +77,17 @@ public sealed record EvidenceItem(
         var generated = !exactFile.GenerationClassification.StartsWith("not-detected", StringComparison.Ordinal);
         var safetyCaveats = caveats
             .Concat(unsafeSymlink
-                ? [$"Repository symlink safety is {exactFile.SymlinkResolution}; it cannot establish readiness."]
+                ? [EvidenceCaveatCode.UnsafeSymlink]
                 : [])
             .Concat(generated
-                ? [$"Repository file generation classification is {exactFile.GenerationClassification}; it cannot establish readiness without authoritative generator provenance."]
+                ? [EvidenceCaveatCode.GeneratedFile]
                 : [])
-            .Distinct(StringComparer.Ordinal)
+            .Distinct()
             .ToArray();
         var item = new EvidenceItem(
             EvidenceSourceKind.Repository,
+            EvidenceProducerKind.RepositoryAtBase,
+            EvidenceLocatorKind.Public,
             $"git:{exactFile.Path}",
             $"sha256:{Convert.ToHexStringLower(SHA256.HashData(exactFile.Bytes))}",
             observedAt,
@@ -86,8 +112,13 @@ public sealed record EvidenceItem(
 
     internal bool HasConsistentSourceLocator()
     {
+        if (ProducerKind == EvidenceProducerKind.PrivateAdvisory && LocatorKind != EvidenceLocatorKind.Opaque)
+            return false;
+        if (ProducerKind == EvidenceProducerKind.RepositoryAtBase && SourceKind != EvidenceSourceKind.Repository)
+            return false;
         if (Locator.StartsWith("git:", StringComparison.Ordinal))
-            return SourceKind == EvidenceSourceKind.Repository && !Locator.Contains('\\');
+            return SourceKind == EvidenceSourceKind.Repository && ProducerKind == EvidenceProducerKind.RepositoryAtBase &&
+                   LocatorKind == EvidenceLocatorKind.Public && !Locator.Contains('\\');
         if (SourceKind == EvidenceSourceKind.Repository)
             return false;
         if (Locator.StartsWith("policy:", StringComparison.Ordinal))
@@ -100,6 +131,8 @@ public sealed record EvidenceItem(
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new
         {
             item.SourceKind,
+            item.ProducerKind,
+            item.LocatorKind,
             item.Locator,
             item.Digest,
             item.ObservedAt,
@@ -127,7 +160,9 @@ public sealed record ImportedContextEntry(
     bool Truncated = false,
     bool Heuristic = false,
     CheckoutVerification CheckoutVerification = CheckoutVerification.Unverified,
-    string? CheckoutDigest = null)
+    string? CheckoutDigest = null,
+    EvidenceRequirement Requirement = EvidenceRequirement.Optional,
+    ImportedMeaningCode? DistilledMeaning = null)
 {
     internal string? VerificationBinding { get; init; }
     internal string? VerifiedCommit { get; init; }
@@ -361,7 +396,21 @@ public sealed class RepositoryContext
 
 public sealed record ChangeTarget(string Path, string Symbol, string Effect);
 public sealed record DependencyNode(string Id, IReadOnlyList<string> DependsOn, string IntegrationCondition);
-public sealed record PlanGate(string Id, string Command, string ExpectedOutcome);
+public enum CommandArgumentKind { Literal, Placeholder, SecretReference }
+
+public sealed record PlanCommandArgument(CommandArgumentKind Kind, string Value)
+{
+    public static PlanCommandArgument Literal(string value) => new(CommandArgumentKind.Literal, value);
+    public static PlanCommandArgument Placeholder(string name) => new(CommandArgumentKind.Placeholder, name);
+    public static PlanCommandArgument SecretReference(string name) => new(CommandArgumentKind.SecretReference, name);
+}
+
+public sealed record PlanCommand(string Executable, IReadOnlyList<PlanCommandArgument> Arguments)
+{
+    public string Render() => CommandRenderer.Render(this);
+}
+
+public sealed record PlanGate(string Id, PlanCommand Command, string ExpectedOutcome);
 public sealed record RolloutPlan(
     string Compatibility,
     string Configuration,
