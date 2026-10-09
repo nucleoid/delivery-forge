@@ -33,7 +33,10 @@ public sealed record ToolCapability(
     string FormatVersion,
     bool Supported,
     bool Fixture,
-    IReadOnlyList<string>? Limitations = null)
+    IReadOnlyList<string>? Limitations = null,
+    string? ExecutablePath = null,
+    string? ExecutableIdentity = null,
+    IReadOnlyList<string>? Operations = null)
 {
     public static ToolCapability Unsupported(string tool, string limitation) =>
         new(tool, "unavailable", "unavailable", false, false, [limitation]);

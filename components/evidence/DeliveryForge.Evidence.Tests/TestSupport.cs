@@ -7,6 +7,8 @@ internal static class TestEvidence
 {
     public static string Identity(char value) => $"sha256:{new string(value, 64)}";
     public static string Commit(char value) => new(value, 40);
+    public static DateTimeOffset Time(int seconds) =>
+        DateTimeOffset.Parse("2026-10-09T00:00:00Z").AddSeconds(seconds);
 
     public static PolicyCandidate PolicyCandidate(bool fixture = false) =>
         new(Identity('1'), Identity('2'), Commit('a'), fixture, 0m, ["build", "test", "coverage"]);
@@ -69,6 +71,15 @@ internal static class TestEvidence
         _ => NormalizedEvidence.Pass("complete test evidence", true));
 }
 
+internal sealed class QueueCommandExecutor(params CommandResult[] results) : ICommandExecutor
+{
+    private readonly Queue<CommandResult> _results = new(results);
+
+    public Task<CommandResult> ExecuteAsync(
+        CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken) =>
+        Task.FromResult(_results.Dequeue());
+}
+
 internal sealed class StubCommandExecutor(CommandResult result) : ICommandExecutor
 {
     public Task<CommandResult> ExecuteAsync(
@@ -94,9 +105,42 @@ internal sealed class TempDirectory : IDisposable
 
     public void Dispose()
     {
-        if (!Directory.Exists(Path)) return;
-        foreach (var file in Directory.EnumerateFiles(Path, "*", SearchOption.AllDirectories))
-            File.SetAttributes(file, FileAttributes.Normal);
+        if (!Directory.Exists(Path))
+            return;
+
+        var pending = new Stack<string>();
+        var directories = new List<string>();
+        pending.Push(Path);
+        directories.Add(Path);
+        while (pending.TryPop(out var directory))
+        {
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+            {
+                var attributes = File.GetAttributes(entry);
+                if (attributes.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    File.SetAttributes(entry, FileAttributes.Normal);
+                    if (attributes.HasFlag(FileAttributes.Directory))
+                        Directory.Delete(entry);
+                    else
+                        File.Delete(entry);
+                    continue;
+                }
+
+                if (attributes.HasFlag(FileAttributes.Directory))
+                {
+                    pending.Push(entry);
+                    directories.Add(entry);
+                }
+                else
+                {
+                    File.SetAttributes(entry, FileAttributes.Normal);
+                }
+            }
+        }
+
+        foreach (var directory in directories.OrderByDescending(value => value.Length))
+            File.SetAttributes(directory, FileAttributes.Normal);
         Directory.Delete(Path, true);
     }
 }

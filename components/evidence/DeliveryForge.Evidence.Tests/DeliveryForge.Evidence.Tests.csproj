@@ -9,4 +9,8 @@
     <PackageReference Include="xunit.runner.visualstudio" />
     <ProjectReference Include="../DeliveryForge.Evidence/DeliveryForge.Evidence.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Fixtures/**/*.cs" />
+    <None Include="Fixtures/**/*" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>
