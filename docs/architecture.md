@@ -2,6 +2,9 @@
 
 ## System boundary
 
+The generic coding-agent adapter direction and issue #5–#12 plan overrides are operative in
+[Operative coding-agent architecture](operative-agent-architecture.md).
+
 Delivery Forge is a harness around existing agents and engineering tools, not another autonomous agent runtime.
 
 ```text

@@ -61,6 +61,7 @@ This skeleton is planned, not yet implemented or installed.
 ## Documents
 
 - [Architecture](docs/architecture.md)
+- [Operative coding-agent architecture](docs/operative-agent-architecture.md)
 - [Plan and execution contracts](docs/plan-contract.md)
 - [Quality gates and evidence receipts](docs/quality-gates.md)
 - [Recovery and publication](docs/recovery-publication.md)
