@@ -44,7 +44,8 @@ public sealed class CoordinationContractTests
         var source = new RecordingQuiescenceSource(clock, [true]);
         var transport = SingleLeaseTransport();
         var adapter = await CreateAdapterAsync(transport, clock, source);
-        var acquisition = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl);
+        var acquisition = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
         var foreignAdapter = await CreateAdapterAsync(SingleLeaseTransport(), new FakeMonotonicClock("process-clock-b"),
             new RecordingQuiescenceSource(new FakeMonotonicClock("process-clock-b"), [true]));
 
@@ -56,7 +57,7 @@ public sealed class CoordinationContractTests
         Assert.Empty(typeof(DispatchAuthority).GetConstructors());
 
         source.BeforeObservation = () => Assert.False(adapter.MayDispatch(acquisition.Authority!));
-        var released = await adapter.ReleaseAllAsync(acquisition.Authority!);
+        var released = await adapter.ReleaseAllAsync(acquisition.Authority!, TestContext.Current.CancellationToken);
 
         Assert.Equal(LeaseOwnership.Released, released.Snapshot.Ownership);
         Assert.False(adapter.MayDispatch(acquisition.Authority!));
@@ -69,15 +70,18 @@ public sealed class CoordinationContractTests
         var transport = SingleLeaseTransport();
         transport.RenewResults.Enqueue(RenewTransportResult.Renewed(ServerNow, ServerNow.AddMinutes(5)));
         var adapter = await CreateAdapterAsync(transport, clock, new RecordingQuiescenceSource(clock, [true]));
-        var acquisition = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl);
+        var acquisition = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
 
-        var renewal = await adapter.RenewAllAsync(acquisition.Authority!);
+        var renewal = await adapter.RenewAllAsync(acquisition.Authority!, TestContext.Current.CancellationToken);
 
         Assert.False(adapter.MayDispatch(acquisition.Authority!));
         Assert.NotNull(renewal.Authority);
         Assert.True(adapter.MayDispatch(renewal.Authority!));
         clock.Advance(TimeSpan.FromSeconds(300));
         Assert.False(adapter.MayDispatch(renewal.Authority!));
+        var cleanup = await adapter.ReleaseAllAsync(renewal.Authority!, TestContext.Current.CancellationToken);
+        Assert.Equal(LeaseOwnership.Released, cleanup.Snapshot.Ownership);
     }
 
     [Fact]
@@ -88,7 +92,8 @@ public sealed class CoordinationContractTests
         transport.AcquireExceptions.Enqueue(new TimeoutException("response lost"));
         var adapter = await CreateAdapterAsync(transport);
 
-        var uncertain = await adapter.AcquireAllAsync([Issue(6), Issue(7)], Owner, ContinuumCoordinationAdapter.DefaultTtl);
+        var uncertain = await adapter.AcquireAllAsync([Issue(6), Issue(7)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
 
         Assert.Equal(LeaseOwnership.Uncertain, uncertain.Snapshot.Ownership);
         Assert.NotNull(uncertain.AcquireContinuation);
@@ -99,11 +104,38 @@ public sealed class CoordinationContractTests
         Assert.Equal(LeaseReleaseState.Released, uncertain.ReleaseProgress[0].State);
 
         transport.AcquireResults.Enqueue(AcquireTransportResult.Acquired("lease-b", "2", ServerNow, ServerNow.AddMinutes(5)));
-        var reconciled = await adapter.ReconcileAcquireAsync(uncertain.AcquireContinuation!);
+        transport.AcquireResults.Enqueue(AcquireTransportResult.Acquired("lease-a2", "3", ServerNow, ServerNow.AddMinutes(5)));
+        var reconciled = await adapter.ReconcileAcquireAsync(
+            uncertain.AcquireContinuation!, TestContext.Current.CancellationToken);
 
         Assert.Equal(transport.AcquireRequests[1].RequestId, transport.AcquireRequests[2].RequestId);
+        Assert.NotEqual(transport.AcquireRequests[0].RequestId, transport.AcquireRequests[3].RequestId);
         Assert.Equal(LeaseOwnership.Held, reconciled.Snapshot.Ownership);
         Assert.True(adapter.MayDispatch(reconciled.Authority!));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Cancelled_or_malformed_acquire_retains_same_id_reconciliation(bool cancelled)
+    {
+        var transport = new RecordingTransport(CoordinationContractFixture.Capabilities());
+        if (cancelled) transport.AcquireExceptions.Enqueue(new OperationCanceledException("response may have been lost"));
+        else transport.AcquireResults.Enqueue(AcquireTransportResult.Acquired("", "007", ServerNow, ServerNow.AddMinutes(5)));
+        var adapter = await CreateAdapterAsync(transport);
+
+        var uncertain = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        var originalRequestId = transport.AcquireRequests.Single().RequestId;
+        transport.AcquireResults.Enqueue(AcquireTransportResult.Acquired("lease-a", "1", ServerNow, ServerNow.AddMinutes(5)));
+
+        var reconciled = await adapter.ReconcileAcquireAsync(
+            uncertain.AcquireContinuation!, TestContext.Current.CancellationToken);
+
+        Assert.Equal(LeaseOwnership.Uncertain, uncertain.Snapshot.Ownership);
+        Assert.Equal(originalRequestId, uncertain.Uncertainty!.RequestId);
+        Assert.Equal(originalRequestId, transport.AcquireRequests.Last().RequestId);
+        Assert.Equal(LeaseOwnership.Held, reconciled.Snapshot.Ownership);
     }
 
     [Fact]
@@ -116,8 +148,9 @@ public sealed class CoordinationContractTests
         transport.ReleaseHandler = (_, _) => hungRelease.Task;
         var adapter = await CreateAdapterAsync(transport, rollbackTimeout: TimeSpan.FromMilliseconds(20));
 
-        var result = await adapter.AcquireAllAsync([Issue(6), Issue(7)], Owner, ContinuumCoordinationAdapter.DefaultTtl)
-            .WaitAsync(TimeSpan.FromSeconds(1));
+        var result = await adapter.AcquireAllAsync([Issue(6), Issue(7)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+                TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
 
         Assert.Equal(LeaseOwnership.Uncertain, result.Snapshot.Ownership);
         Assert.NotNull(result.ReleaseContinuation);
@@ -133,10 +166,11 @@ public sealed class CoordinationContractTests
         transport.ReleaseResults.Enqueue(ReleaseTransportResult.Released());
         transport.ReleaseResults.Enqueue(ReleaseTransportResult.Uncertain("lost response"));
         var clock = new FakeMonotonicClock("clock");
-        var adapter = await CreateAdapterAsync(transport, clock, new RecordingQuiescenceSource(clock, [true, true, true]));
-        var acquisition = await adapter.AcquireAllAsync([Issue(6), Issue(7)], Owner, ContinuumCoordinationAdapter.DefaultTtl);
+        var adapter = await CreateAdapterAsync(transport, clock, new RecordingQuiescenceSource(clock, [true, true, true, true]));
+        var acquisition = await adapter.AcquireAllAsync([Issue(6), Issue(7)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
 
-        var partial = await adapter.ReleaseAllAsync(acquisition.Authority!);
+        var partial = await adapter.ReleaseAllAsync(acquisition.Authority!, TestContext.Current.CancellationToken);
 
         Assert.Equal(LeaseOwnership.Uncertain, partial.Snapshot.Ownership);
         Assert.Equal(2, partial.Leases.Count);
@@ -146,13 +180,13 @@ public sealed class CoordinationContractTests
         var firstRequestIds = transport.ReleaseRequests.ToDictionary(request => request.LeaseId, request => request.RequestId);
 
         transport.ReleaseResults.Enqueue(ReleaseTransportResult.LeaseLost());
-        var stillUnknown = await adapter.ContinueReleaseAsync(partial.Continuation!);
+        var stillUnknown = await adapter.ContinueReleaseAsync(partial.Continuation!, TestContext.Current.CancellationToken);
         Assert.Equal(LeaseOwnership.Uncertain, stillUnknown.Snapshot.Ownership);
         Assert.Equal(firstRequestIds[unknown.LeaseId], transport.ReleaseRequests.Last().RequestId);
         Assert.Equal(3, transport.ReleaseRequests.Count);
 
         transport.ReleaseResults.Enqueue(ReleaseTransportResult.Released());
-        var complete = await adapter.ContinueReleaseAsync(stillUnknown.Continuation!);
+        var complete = await adapter.ContinueReleaseAsync(stillUnknown.Continuation!, TestContext.Current.CancellationToken);
         Assert.Equal(LeaseOwnership.Released, complete.Snapshot.Ownership);
         Assert.Equal(4, transport.ReleaseRequests.Count);
         Assert.Equal(firstRequestIds[unknown.LeaseId], transport.ReleaseRequests.Last().RequestId);
@@ -166,8 +200,8 @@ public sealed class CoordinationContractTests
         transport.InspectResults.Enqueue(InspectTransportResult.HeldByCaller("lease-a", "7", ServerNow, ServerNow.AddMinutes(5)));
         var adapter = await CreateAdapterAsync(transport);
 
-        var foreign = await adapter.InspectAsync(Issue(6), Owner);
-        var own = await adapter.InspectAsync(Issue(6), Owner);
+        var foreign = await adapter.InspectAsync(Issue(6), Owner, TestContext.Current.CancellationToken);
+        var own = await adapter.InspectAsync(Issue(6), Owner, TestContext.Current.CancellationToken);
 
         Assert.Equal(InspectionState.HeldByOther, foreign.State);
         Assert.Null(foreign.OwnedLease);
@@ -187,7 +221,8 @@ public sealed class CoordinationContractTests
         else transport.InspectResults.Enqueue(InspectTransportResult.HeldByCaller("", "007", ServerNow, ServerNow));
         var adapter = await CreateAdapterAsync(transport);
 
-        await Assert.ThrowsAsync<CoordinationUncertainException>(() => adapter.InspectAsync(Issue(6), Owner));
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() =>
+            adapter.InspectAsync(Issue(6), Owner, TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -198,14 +233,26 @@ public sealed class CoordinationContractTests
         var transport = TwoLeaseTransport();
         transport.ReleaseResults.Enqueue(ReleaseTransportResult.Released());
         var adapter = await CreateAdapterAsync(transport, clock, source);
-        var acquisition = await adapter.AcquireAllAsync([Issue(6), Issue(7)], Owner, ContinuumCoordinationAdapter.DefaultTtl);
+        var acquisition = await adapter.AcquireAllAsync([Issue(6), Issue(7)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
 
-        var result = await adapter.ReleaseAllAsync(acquisition.Authority!);
+        var result = await adapter.ReleaseAllAsync(acquisition.Authority!, TestContext.Current.CancellationToken);
 
         Assert.Equal(2, source.Observations);
         Assert.Single(transport.ReleaseRequests);
         Assert.Equal(LeaseOwnership.Uncertain, result.Snapshot.Ownership);
         Assert.NotNull(result.Continuation);
+    }
+
+    [Fact]
+    public async Task Unknown_quiescence_bounds_fail_adapter_construction()
+    {
+        var clock = new FakeMonotonicClock("clock-domain");
+        var source = new RecordingQuiescenceSource(clock, [true], boundsKnown: false);
+
+        await Assert.ThrowsAsync<CoordinationUnavailableException>(() =>
+            ContinuumCoordinationAdapter.CreateForContractTestsAsync(
+                SingleLeaseTransport(), source, TestContext.Current.CancellationToken, clock));
     }
 
     [Fact]
@@ -221,14 +268,15 @@ public sealed class CoordinationContractTests
                 : RenewTransportResult.Uncertain("second renewal uncertain"));
         };
         var adapter = await CreateAdapterAsync(transport, clock, new RecordingQuiescenceSource(clock, [true]));
-        var acquisition = await adapter.AcquireAllAsync([Issue(6), Issue(7)], Owner, ContinuumCoordinationAdapter.DefaultTtl);
+        var acquisition = await adapter.AcquireAllAsync([Issue(6), Issue(7)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
 
-        var partial = await adapter.RenewAllAsync(acquisition.Authority!);
+        var partial = await adapter.RenewAllAsync(acquisition.Authority!, TestContext.Current.CancellationToken);
 
         Assert.Null(partial.Authority);
         Assert.NotNull(partial.ReleaseContinuation);
         Assert.False(adapter.MayDispatch(acquisition.Authority!));
-        Assert.Equal(TimeSpan.FromSeconds(302), partial.Snapshot.Leases[0].SafeDeadline);
+        Assert.Equal(TimeSpan.FromSeconds(300), partial.Snapshot.Leases[0].SafeDeadline);
     }
 
     [Fact]
@@ -243,8 +291,9 @@ public sealed class CoordinationContractTests
             var transport = SingleLeaseTransport();
             transport.RenewResults.Enqueue(response());
             var adapter = await CreateAdapterAsync(transport);
-            var held = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl);
-            var failed = await adapter.RenewAllAsync(held.Authority!);
+            var held = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+                TestContext.Current.CancellationToken);
+            var failed = await adapter.RenewAllAsync(held.Authority!, TestContext.Current.CancellationToken);
             Assert.Null(failed.Authority);
             Assert.NotNull(failed.ReleaseContinuation);
         }
@@ -252,8 +301,9 @@ public sealed class CoordinationContractTests
         var throwing = SingleLeaseTransport();
         throwing.RenewExceptions.Enqueue(new TimeoutException("renew timeout"));
         var throwingAdapter = await CreateAdapterAsync(throwing);
-        var acquisition = await throwingAdapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl);
-        var uncertain = await throwingAdapter.RenewAllAsync(acquisition.Authority!);
+        var acquisition = await throwingAdapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        var uncertain = await throwingAdapter.RenewAllAsync(acquisition.Authority!, TestContext.Current.CancellationToken);
         Assert.Null(uncertain.Authority);
         Assert.NotNull(uncertain.ReleaseContinuation);
     }
@@ -301,12 +351,12 @@ public sealed class CoordinationContractTests
         private readonly FakeMonotonicClock _clock;
         private readonly Queue<bool> _observations;
 
-        public RecordingQuiescenceSource(FakeMonotonicClock clock, IEnumerable<bool> observations)
+        public RecordingQuiescenceSource(FakeMonotonicClock clock, IEnumerable<bool> observations, bool boundsKnown = true)
         {
             _clock = clock;
             _observations = new Queue<bool>(observations);
             Binding = new QuiescenceSourceBinding("test-issuer", "test-source", clock.DomainId,
-                TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), true);
+                TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(5), boundsKnown);
         }
 
         public QuiescenceSourceBinding Binding { get; }
