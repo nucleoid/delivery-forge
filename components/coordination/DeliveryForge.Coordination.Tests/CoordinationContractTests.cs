@@ -470,9 +470,98 @@ public sealed class CoordinationContractTests
             TestContext.Current.CancellationToken);
 
         Assert.Empty(transport.AcquireRequests);
-        Assert.Equal(CoordinationLifecyclePhase.Cleaning, result.Snapshot.Phase);
-        Assert.NotNull(result.AcquireContinuation);
-        Assert.NotNull(result.ReleaseContinuation);
+        Assert.Equal(CoordinationLifecyclePhase.Closed, result.Snapshot.Phase);
+        Assert.Null(result.AcquireContinuation);
+        Assert.Null(result.ReleaseContinuation);
+        Assert.Null(result.Uncertainty);
+    }
+
+    [Fact]
+    public async Task Replayed_nonauthoritative_renew_does_not_block_release_or_closure()
+    {
+        var transport = SingleLeaseTransport();
+        transport.RenewResults.Enqueue(RenewTransportResult.Uncertain("first-response-lost"));
+        transport.RenewResults.Enqueue(RenewTransportResult.Uncertain("same-id-not-renewed"));
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.Released());
+        var adapter = await CreateAdapterAsync(transport);
+        var held = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+
+        var renewal = await adapter.RenewAllAsync(held.Authority!, TestContext.Current.CancellationToken);
+        var cleaned = await adapter.ContinueReleaseAsync(renewal.ReleaseContinuation!, TestContext.Current.CancellationToken);
+
+        Assert.Equal(CoordinationLifecyclePhase.Closed, cleaned.Snapshot.Phase);
+        Assert.Null(cleaned.Continuation);
+        Assert.Equal(2, transport.RenewRequests.Count);
+        Assert.Equal(transport.RenewRequests[0].RequestId, transport.RenewRequests[1].RequestId);
+        Assert.Single(transport.ReleaseRequests);
+    }
+
+    [Fact]
+    public async Task Recovery_reuses_prepared_release_identity_and_can_close()
+    {
+        var transport = SingleLeaseTransport();
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.Uncertain("response-lost"));
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.Released());
+        var checkpoints = new FixtureCheckpointStore();
+        var first = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var held = await first.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        var partial = await first.ReleaseAllAsync(held.Authority!, TestContext.Current.CancellationToken);
+        var preparedRelease = Assert.Single(checkpoints.Records,
+            record => record.Prepared?.Kind == CoordinationIntentKind.Release).Prepared!;
+        var lifecycleId = Assert.Single(checkpoints.Records,
+            record => record.Prepared?.Kind == CoordinationIntentKind.Acquire).Prepared!.LifecycleId;
+
+        var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var recovered = await restarted.RecoverForCleanupAsync(lifecycleId, Owner, [Issue(6)],
+            TestContext.Current.CancellationToken);
+        var cleaned = await restarted.ContinueReleaseAsync(recovered.Continuation!, TestContext.Current.CancellationToken);
+
+        Assert.Equal(CoordinationLifecyclePhase.Closed, cleaned.Snapshot.Phase);
+        Assert.Null(cleaned.Continuation);
+        Assert.Equal(preparedRelease.RequestId, transport.ReleaseRequests.Last().RequestId);
+        Assert.Equal(partial.Leases.Single().RequestId, transport.ReleaseRequests.Last().RequestId);
+    }
+
+    [Fact]
+    public async Task Release_rejects_quiescence_observed_before_the_call_started()
+    {
+        var clock = new FakeMonotonicClock("clock");
+        clock.Advance(TimeSpan.FromSeconds(10));
+        var source = new RecordingQuiescenceSource(clock, [true])
+        {
+            ObservedAtOffset = TimeSpan.FromSeconds(-1),
+        };
+        var transport = SingleLeaseTransport();
+        var adapter = await CreateAdapterAsync(transport, clock, source);
+        var held = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+
+        var cleanup = await adapter.ReleaseAllAsync(held.Authority!, TestContext.Current.CancellationToken);
+
+        Assert.Equal(CoordinationLifecyclePhase.Cleaning, cleanup.Snapshot.Phase);
+        Assert.Empty(transport.ReleaseRequests);
+        Assert.NotNull(cleanup.Continuation);
+    }
+
+    [Fact]
+    public async Task Expired_authority_cannot_be_renewed_and_remains_releasable()
+    {
+        var clock = new FakeMonotonicClock("clock");
+        var transport = SingleLeaseTransport();
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.Released());
+        var adapter = await CreateAdapterAsync(transport, clock, new RecordingQuiescenceSource(clock, [true]));
+        var held = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        clock.Advance(ContinuumCoordinationAdapter.DefaultTtl);
+
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() =>
+            adapter.RenewAllAsync(held.Authority!, TestContext.Current.CancellationToken));
+        var cleanup = await adapter.ReleaseAllAsync(held.Authority!, TestContext.Current.CancellationToken);
+
+        Assert.Empty(transport.RenewRequests);
+        Assert.Equal(CoordinationLifecyclePhase.Closed, cleanup.Snapshot.Phase);
     }
 
     [Fact]
@@ -714,6 +803,7 @@ public sealed class CoordinationContractTests
         public QuiescenceSourceBinding Binding { get; set; }
         public int Observations { get; private set; }
         public Action? BeforeObservation { get; set; }
+        public TimeSpan ObservedAtOffset { get; set; }
 
         public Task<QuiescenceEvidence> ObserveAsync(LeaseOwner owner, CancellationToken cancellationToken = default)
         {
@@ -721,7 +811,7 @@ public sealed class CoordinationContractTests
             Observations++;
             var quiet = _observations.Count > 0 && _observations.Dequeue();
             return Task.FromResult(new QuiescenceEvidence(owner, Binding.IssuerId, Binding.SourceId,
-                Binding.ClockDomainId, _clock.Elapsed, $"evidence-{Observations}", quiet));
+                Binding.ClockDomainId, _clock.Elapsed + ObservedAtOffset, $"evidence-{Observations}", quiet));
         }
     }
 
