@@ -15,6 +15,9 @@ public sealed record WorktreeObservation(
 
 public sealed class WorktreeManager
 {
+    internal bool IsSameDirectory(string left, string right) =>
+        string.Equals(CanonicalPath(left), CanonicalPath(right), PathComparison());
+
     public void ValidateDestination(string parentCheckout, string destination)
     {
         var parent = CanonicalPath(parentCheckout);

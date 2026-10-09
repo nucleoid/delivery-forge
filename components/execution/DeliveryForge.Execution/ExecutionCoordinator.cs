@@ -195,7 +195,7 @@ public sealed class ExecutionCoordinator : IDisposable
         var observation = new ResumeObservation(
             durable,
             actual,
-            SamePath(actual.RootPath, prepared.Request.Worktree),
+            _worktrees.IsSameDirectory(actual.RootPath, prepared.Request.Worktree),
             writerOwnershipConfirmed,
             actualFacts.RequiredArtifactPaths.All(File.Exists),
             OwnedFactsEqual(actualFacts, durable.OwnedFacts),
@@ -431,10 +431,6 @@ public sealed class ExecutionCoordinator : IDisposable
         }
         return state;
     }
-
-    private static bool SamePath(string left, string right) =>
-        string.Equals(Path.GetFullPath(left), Path.GetFullPath(right),
-            OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
     private async Task<ExecutionOwnedFacts> ObserveOwnedFactsAsync(
         AgentRequest request, WorktreeObservation worktree, bool requireFrozenMatch, CancellationToken cancellationToken)

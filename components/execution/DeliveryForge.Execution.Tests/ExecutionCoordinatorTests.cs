@@ -230,6 +230,29 @@ public sealed class ExecutionCoordinatorTests
     }
 
     [Fact]
+    public async Task Windows_short_path_worker_can_pause_and_resume()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        var shortPath = WindowsPathAlias.TryGetShortPath(repository.Path);
+        if (shortPath is null || string.Equals(shortPath, repository.Path, StringComparison.OrdinalIgnoreCase)) return;
+        using var directories = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        using var coordinator = CreateCoordinator(directories.Path, processes);
+        var plan = Plan(repository, directories.Path, "run-short-path-resume") with { Worktree = shortPath };
+        var (request, _) = await coordinator.PrepareWorkerAsync(plan, cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
+
+        var paused = await coordinator.PauseAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
+        var resumed = await coordinator.ResumeAsync(request.RunId, cancellationToken);
+
+        Assert.True(paused.Quiescent);
+        Assert.Equal(ReconciliationAction.ResumeDispatch, resumed.Reconciliation.Action);
+        Assert.Equal("resumed", resumed.Record!.Kind);
+    }
+
+    [Fact]
     public async Task Orderly_dispose_preserves_durable_writer_identity_for_restart_resume()
     {
         var cancellationToken = TestContext.Current.CancellationToken;
