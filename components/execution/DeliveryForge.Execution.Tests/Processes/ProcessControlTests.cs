@@ -17,6 +17,8 @@ public sealed class ProcessControlTests
         var child = control.StartOwned(launch);
         var mismatch = child.Identity with { ArgumentDigest = new string('0', 64) };
 
+        Assert.True(System.IO.Path.IsPathFullyQualified(child.Identity.ExecutablePath));
+        Assert.True(File.Exists(child.Identity.ExecutablePath));
         Assert.Equal(ProcessControlOutcome.LiveOwned, control.Observe(child.Identity).Outcome);
 
         var refused = await control.QuiesceAsync(mismatch, TimeSpan.FromMilliseconds(100), cancellationToken);

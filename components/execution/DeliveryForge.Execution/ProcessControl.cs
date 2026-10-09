@@ -27,9 +27,11 @@ public sealed class ProcessControl : IAsyncDisposable
         var process = Process.Start(start) ?? throw new InvalidOperationException("The child process did not start.");
         try
         {
-            var executable = Path.GetFullPath(process.MainModule?.FileName ?? launch.Executable);
-            var identity = new ProcessIdentity(process.Id, process.StartTime.ToUniversalTime().Ticks, executable,
-                Digest(executable, launch.Arguments));
+            var observed = ReadLiveIdentity(process);
+            if (observed.State != IdentityReadState.Live)
+                throw new InvalidOperationException("The child process identity could not be established while it was live.");
+            var identity = new ProcessIdentity(process.Id, observed.PlatformStartIdentity, observed.ExecutablePath,
+                Digest(observed.ExecutablePath, launch.Arguments));
             var owned = new OwnedProcess(process, identity, runId);
             if (!_owned.TryAdd(process.Id, owned))
                 throw new InvalidOperationException("A process with the same PID is already registered in this controller.");
@@ -55,22 +57,16 @@ public sealed class ProcessControl : IAsyncDisposable
     {
         if (!_owned.TryGetValue(expected.ProcessId, out var owned) || owned.Identity != expected)
             return new ProcessControlResult(ProcessControlOutcome.IdentityUnknown, "PID is not registered with the exact start/executable/argv identity in this executor lifetime.");
-        try
-        {
-            if (owned.Process.HasExited) return new ProcessControlResult(ProcessControlOutcome.AlreadyExited, "Owned child already exited.");
-            var observedExecutable = owned.Process.MainModule?.FileName;
-            if (string.IsNullOrWhiteSpace(observedExecutable))
-                return new ProcessControlResult(ProcessControlOutcome.IdentityUnknown, "Live process executable could not be observed safely.");
-            var executable = Path.GetFullPath(observedExecutable);
-            if (owned.Process.StartTime.ToUniversalTime().Ticks != expected.PlatformStartIdentity ||
-                !string.Equals(executable, expected.ExecutablePath, PlatformPathComparison()))
-                return new ProcessControlResult(ProcessControlOutcome.IdentityUnknown, "Live PID no longer matches its platform start identity or executable.");
-            return new ProcessControlResult(ProcessControlOutcome.LiveOwned, "Identity positively matched and the registered process remains live.");
-        }
-        catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or ArgumentException)
-        {
+        var observed = ReadLiveIdentity(owned.Process);
+        if (observed.State == IdentityReadState.Exited)
+            return new ProcessControlResult(ProcessControlOutcome.AlreadyExited, "Owned child already exited.");
+        if (observed.State == IdentityReadState.Unknown)
             return new ProcessControlResult(ProcessControlOutcome.IdentityUnknown, "Process identity could not be observed safely.");
-        }
+        if (observed.PlatformStartIdentity != expected.PlatformStartIdentity)
+            return new ProcessControlResult(ProcessControlOutcome.IdentityUnknown, "Live PID no longer matches its platform start identity.");
+        if (!string.Equals(observed.ExecutablePath, expected.ExecutablePath, PlatformPathComparison()))
+            return new ProcessControlResult(ProcessControlOutcome.IdentityUnknown, "Live PID no longer matches its executable identity.");
+        return new ProcessControlResult(ProcessControlOutcome.LiveOwned, "Identity positively matched and the registered process remains live.");
     }
 
     public async Task<ProcessControlResult> QuiesceAsync(ProcessIdentity expected, TimeSpan gracefulDeadline, CancellationToken cancellationToken = default)
@@ -151,6 +147,34 @@ public sealed class ProcessControl : IAsyncDisposable
         catch (InvalidOperationException) { }
     }
 
+    private static IdentityRead ReadLiveIdentity(Process process)
+    {
+        const int attempts = 3;
+        for (var attempt = 0; attempt < attempts; attempt++)
+        {
+            try
+            {
+                process.Refresh();
+                if (process.HasExited) return new IdentityRead(IdentityReadState.Exited, 0, "");
+                var executable = process.MainModule?.FileName;
+                if (!string.IsNullOrWhiteSpace(executable))
+                    return new IdentityRead(IdentityReadState.Live, process.StartTime.ToUniversalTime().Ticks,
+                        Path.GetFullPath(executable));
+            }
+            catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or ArgumentException)
+            {
+                if (attempt == attempts - 1) break;
+            }
+
+            if (attempt < attempts - 1) Thread.Sleep(10);
+        }
+
+        return new IdentityRead(IdentityReadState.Unknown, 0, "");
+    }
+
     private static StringComparison PlatformPathComparison() => OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
     [DllImport("libc", SetLastError = true)] private static extern int kill(int pid, int signal);
+
+    private enum IdentityReadState { Live, Exited, Unknown }
+    private sealed record IdentityRead(IdentityReadState State, long PlatformStartIdentity, string ExecutablePath);
 }
