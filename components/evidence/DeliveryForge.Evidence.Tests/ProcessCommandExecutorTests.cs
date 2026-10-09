@@ -89,22 +89,35 @@ public sealed class ProcessCommandExecutorTests
     {
         using var temp = new TempDirectory();
         var request = LongRunningRequest(temp.Path);
+        Task? drainTask = null;
         var executor = new ProcessCommandExecutor(
             killTree: process => process.Kill(entireProcessTree: false),
             hasExited: process => process.HasExited,
-            waitForDrain: (_, _) => throw new TimeoutException("simulated pipe drain hang"),
+            waitForDrain: (task, _) =>
+            {
+                drainTask = task;
+                throw new TimeoutException("simulated pipe drain hang");
+            },
             waitTimeout: TimeSpan.FromMilliseconds(250));
         var stopwatch = Stopwatch.StartNew();
 
-        var result = await executor.ExecuteAsync(
-            request.Invocation, request.Timeout, TestContext.Current.CancellationToken);
+        try
+        {
+            var result = await executor.ExecuteAsync(
+                request.Invocation, request.Timeout, TestContext.Current.CancellationToken);
 
-        stopwatch.Stop();
-        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"Execution took {stopwatch.Elapsed}.");
-        Assert.True(result.TimedOut);
-        Assert.False(result.OwnedProcessQuiescent);
-        Assert.Equal("<stdout drain timed out>", result.StandardOutput);
-        Assert.Equal("<stderr drain timed out>", result.StandardError);
+            stopwatch.Stop();
+            Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"Execution took {stopwatch.Elapsed}.");
+            Assert.True(result.TimedOut);
+            Assert.False(result.OwnedProcessQuiescent);
+            Assert.Equal("<stdout drain timed out>", result.StandardOutput);
+            Assert.Equal("<stderr drain timed out>", result.StandardError);
+        }
+        finally
+        {
+            Assert.NotNull(drainTask);
+            await drainTask.WaitAsync(TimeSpan.FromSeconds(2), CancellationToken.None);
+        }
     }
 
     private static GateRequest LongRunningRequest(string output)
