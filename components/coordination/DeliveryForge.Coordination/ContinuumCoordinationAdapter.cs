@@ -154,9 +154,13 @@ public sealed class ContinuumCoordinationAdapter
                 throw new CoordinationUncertainException("Renewal did not grant the exact requested TTL.");
             var safeDeadline = LeaseDeadline.ComputeSafeDeadline(
                 result.ServerTime.Value, result.ExpiresAt.Value, receivedAt - sentAt, receivedAt, TimeSpan.Zero);
-            var replacement = lease with {
-                ServerTime = result.ServerTime.Value, ExpiresAt = result.ExpiresAt.Value,
-                SafeDeadline = safeDeadline, RenewAt = receivedAt + RenewalTarget };
+            var replacement = lease with
+            {
+                ServerTime = result.ServerTime.Value,
+                ExpiresAt = result.ExpiresAt.Value,
+                SafeDeadline = safeDeadline,
+                RenewAt = receivedAt + RenewalTarget
+            };
             replacement.Validate();
             renewed.Add(replacement);
         }
