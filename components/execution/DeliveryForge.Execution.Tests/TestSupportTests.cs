@@ -19,17 +19,18 @@ public sealed class TestSupportTests
     }
 
     [Fact]
-    public void Temporary_directory_dispose_does_not_follow_file_symlinks()
+    public void Temporary_directory_dispose_does_not_follow_directory_symlinks()
     {
         using var outside = new TemporaryDirectory();
-        var target = System.IO.Path.Combine(outside.Path, "target");
-        File.WriteAllText(target, "outside");
-        File.SetAttributes(target, File.GetAttributes(target) | FileAttributes.ReadOnly);
+        var target = Directory.CreateDirectory(System.IO.Path.Combine(outside.Path, "target"));
+        var targetFile = System.IO.Path.Combine(target.FullName, "read-only");
+        File.WriteAllText(targetFile, "outside");
+        File.SetAttributes(targetFile, File.GetAttributes(targetFile) | FileAttributes.ReadOnly);
 
         using (var directory = new TemporaryDirectory())
-            File.CreateSymbolicLink(System.IO.Path.Combine(directory.Path, "link"), target);
+            Directory.CreateSymbolicLink(System.IO.Path.Combine(directory.Path, "link"), target.FullName);
 
-        Assert.True(File.Exists(target));
-        Assert.True((File.GetAttributes(target) & FileAttributes.ReadOnly) != 0);
+        Assert.True(File.Exists(targetFile));
+        Assert.True((File.GetAttributes(targetFile) & FileAttributes.ReadOnly) != 0);
     }
 }
