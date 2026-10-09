@@ -17,6 +17,7 @@ public sealed class ContinuumCoordinationAdapter
     private readonly Dictionary<DispatchAuthority, Lifecycle> _authorities = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<AcquireContinuation, Lifecycle> _acquireContinuations = new(ReferenceEqualityComparer.Instance);
     private readonly Dictionary<ReleaseContinuation, Lifecycle> _releaseContinuations = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<string, Lifecycle> _lifecycles = new(StringComparer.Ordinal);
 
     private ContinuumCoordinationAdapter(
         ICoordinationTransport transport,
@@ -87,6 +88,7 @@ public sealed class ContinuumCoordinationAdapter
             {
                 lifecycle.CleanupAuthority = authority;
                 lifecycle.Authority = null;
+                _authorities[authority] = lifecycle;
                 lifecycle.Phase = CoordinationLifecyclePhase.Cleaning;
                 lifecycle.Reason = "authority-expired";
                 EnsureReleaseContinuationUnderGate(lifecycle);
@@ -108,7 +110,11 @@ public sealed class ContinuumCoordinationAdapter
         var ordered = resources.Distinct().Order(Utf8LexicalComparer.Instance).ToArray();
         if (ordered.Length == 0) throw new ArgumentException("At least one coordination resource is required.", nameof(resources));
         var lifecycle = new Lifecycle(owner, ordered);
-        lock (_ledgerGate) lifecycle.Busy = true;
+        lock (_ledgerGate)
+        {
+            lifecycle.Busy = true;
+            _lifecycles.Add(lifecycle.Id, lifecycle);
+        }
         return AcquireCoreAsync(lifecycle, cancellationToken);
     }
 
@@ -142,7 +148,10 @@ public sealed class ContinuumCoordinationAdapter
                 var intent = ReserveIntent(lifecycle, CoordinationIntentKind.Renew, entry.Evidence.Resource,
                     entry.Identity, FreshRequestId());
                 if (!await PrepareAsync(intent, cancellationToken).ConfigureAwait(false))
+                {
+                    ClearIntent(lifecycle, intent);
                     return FinishFailedRenewal(lifecycle, "checkpoint-prepare-failed");
+                }
 
                 RenewTransportResult? result;
                 try
@@ -272,6 +281,7 @@ public sealed class ContinuumCoordinationAdapter
         IReadOnlyList<CoordinationCheckpointRecord> records;
         try { records = await _checkpoints.ReadLifecycleAsync(lifecycleId, cancellationToken).ConfigureAwait(false); }
         catch (Exception) { throw new CoordinationUncertainException("checkpoint-read-failed"); }
+
         var lifecycle = new Lifecycle(owner, canonical, lifecycleId) { Phase = CoordinationLifecyclePhase.Cleaning };
         var prepared = new Dictionary<long, PreparedCoordinationIntent>();
         var progress = new Dictionary<long, CoordinationIntentProgress>();
@@ -288,40 +298,104 @@ public sealed class ContinuumCoordinationAdapter
             else
             {
                 var item = record.Progress!;
-                if (item.LifecycleId != lifecycleId || !progress.TryAdd(item.OperationSequence, item))
+                if (item.LifecycleId != lifecycleId)
                     throw new CoordinationProtocolException("checkpoint-progress-invalid");
+                progress[item.OperationSequence] = item;
             }
         }
-        foreach (var pair in progress)
+
+        var unresolvedLifecycle = new List<PreparedCoordinationIntent>();
+        foreach (var source in prepared.Values.OrderBy(item => item.OperationSequence))
         {
-            if (!prepared.TryGetValue(pair.Key, out var source))
+            progress.TryGetValue(source.OperationSequence, out var resolution);
+            if (resolution is not null && !prepared.ContainsKey(resolution.OperationSequence))
                 throw new CoordinationProtocolException("checkpoint-progress-without-prepare");
-            if (pair.Value.Lease is not null)
+
+            LeaseEntry? entry = null;
+            if (source.PreviousLease is not null)
             {
-                ValidateRecoveredIdentity(pair.Value.Lease, source, lifecycle);
-                var entry = RecoveredEntry(pair.Value.Lease);
-                if (pair.Value.AdapterCode == "released") entry.ReleaseState = LeaseReleaseState.Released;
-                else if (pair.Value.AdapterCode == "original-not-owned") entry.ReleaseState = LeaseReleaseState.NotOwned;
-                lifecycle.Entries[source.Resource] = entry;
+                ValidateRecoveredIdentity(source.PreviousLease, source, lifecycle);
+                if (!lifecycle.Entries.TryGetValue(source.Resource, out entry))
+                {
+                    entry = RecoveredEntry(source.PreviousLease);
+                    lifecycle.Entries[source.Resource] = entry;
+                }
+            }
+            if (resolution?.Lease is not null)
+            {
+                ValidateRecoveredIdentity(resolution.Lease, source, lifecycle);
+                if (entry is null || entry.ReleaseState is LeaseReleaseState.Pending or LeaseReleaseState.Unknown)
+                {
+                    entry = RecoveredEntry(resolution.Lease);
+                    lifecycle.Entries[source.Resource] = entry;
+                }
+            }
+
+            switch (source.Kind)
+            {
+                case CoordinationIntentKind.Acquire:
+                    if (resolution is null) unresolvedLifecycle.Add(source);
+                    break;
+                case CoordinationIntentKind.Renew:
+                    if (resolution is null) unresolvedLifecycle.Add(source);
+                    break;
+                case CoordinationIntentKind.Release:
+                    if (entry is null) throw new CoordinationProtocolException("checkpoint-release-identity-missing");
+                    entry.ReleaseIntent = RecoveredIntent(source);
+                    if (resolution?.AdapterCode == "released")
+                    {
+                        entry.ReleaseState = LeaseReleaseState.Released;
+                        entry.ReleaseReason = "released";
+                    }
+                    else if (resolution is not null)
+                    {
+                        entry.ReleaseState = LeaseReleaseState.Unknown;
+                        entry.ReleaseReason = resolution.AdapterCode;
+                    }
+                    break;
+                case CoordinationIntentKind.Inspect:
+                    if (entry is null) throw new CoordinationProtocolException("checkpoint-inspect-identity-missing");
+                    if (resolution?.AdapterCode == "original-not-owned")
+                    {
+                        entry.ReleaseState = LeaseReleaseState.NotOwned;
+                        entry.ReleaseReason = "original-not-owned";
+                    }
+                    else if (resolution is null)
+                    {
+                        entry.InspectIntent = RecoveredIntent(source);
+                    }
+                    break;
             }
         }
-        var unresolved = prepared.Values.Where(item => !progress.ContainsKey(item.OperationSequence)).OrderBy(item => item.OperationSequence).ToArray();
-        if (unresolved.Length > 1) throw new CoordinationProtocolException("checkpoint-has-overlapping-intents");
-        if (unresolved.Length == 1)
-        {
-            var item = unresolved[0];
-            lifecycle.PendingIntent = new OperationIntent(item);
-            if (item.PreviousLease is not null)
-                lifecycle.Entries[item.Resource] = RecoveredEntry(item.PreviousLease);
-        }
-        lifecycle.AcquisitionResolved = prepared.Values.Any(item => item.Kind == CoordinationIntentKind.Acquire) &&
-            prepared.Values.Where(item => item.Kind == CoordinationIntentKind.Acquire)
-                .All(item => progress.ContainsKey(item.OperationSequence));
+
+        if (progress.Keys.Any(sequence => !prepared.ContainsKey(sequence)))
+            throw new CoordinationProtocolException("checkpoint-progress-without-prepare");
+        if (unresolvedLifecycle.Count > 1)
+            throw new CoordinationProtocolException("checkpoint-has-overlapping-lifecycle-intents");
+        if (unresolvedLifecycle.Count == 1)
+            lifecycle.PendingIntent = RecoveredIntent(unresolvedLifecycle[0]);
+
+        var acquireOperations = prepared.Values.Where(item => item.Kind == CoordinationIntentKind.Acquire).ToArray();
+        lifecycle.AcquisitionResolved = acquireOperations.Length > 0 &&
+            acquireOperations.All(item => progress.ContainsKey(item.OperationSequence));
         lifecycle.NextSequence = prepared.Keys.DefaultIfEmpty().Max() + 1;
+
         lock (_ledgerGate)
         {
-            EnsureReleaseContinuationUnderGate(lifecycle);
-            lifecycle.Reason = "recovered-cleanup-only";
+            if (_lifecycles.ContainsKey(lifecycle.Id))
+                throw new CoordinationUncertainException("recovery-lifecycle-already-live");
+            lifecycle.Phase = IsClosed(lifecycle) ? CoordinationLifecyclePhase.Closed : CoordinationLifecyclePhase.Cleaning;
+            lifecycle.Ownership = lifecycle.Phase == CoordinationLifecyclePhase.Closed
+                ? LeaseOwnership.Released
+                : LeaseOwnership.Uncertain;
+            lifecycle.Reason = lifecycle.Phase == CoordinationLifecyclePhase.Closed
+                ? "cleanup-complete"
+                : "recovered-cleanup-only";
+            if (lifecycle.Phase != CoordinationLifecyclePhase.Closed)
+            {
+                _lifecycles.Add(lifecycle.Id, lifecycle);
+                EnsureReleaseContinuationUnderGate(lifecycle);
+            }
             return Release(lifecycle, []);
         }
     }
@@ -334,7 +408,11 @@ public sealed class ContinuumCoordinationAdapter
             {
                 var intent = ReserveIntent(lifecycle, CoordinationIntentKind.Acquire, resource, null, FreshRequestId());
                 if (!await PrepareAsync(intent, cancellationToken).ConfigureAwait(false))
-                    return await FailAcquireAsync(lifecycle, intent, "checkpoint-prepare-failed").ConfigureAwait(false);
+                {
+                    ClearIntent(lifecycle, intent);
+                    lock (_ledgerGate) lifecycle.AcquisitionResolved = true;
+                    return await FailAcquireAsync(lifecycle, null, "checkpoint-prepare-failed").ConfigureAwait(false);
+                }
                 var response = await InvokeAcquireAsync(lifecycle, intent, cancellationToken).ConfigureAwait(false);
                 if (response is null)
                     return await FailAcquireAsync(lifecycle, intent, "acquire-transport-uncertain").ConfigureAwait(false);
@@ -350,7 +428,8 @@ public sealed class ContinuumCoordinationAdapter
                         lifecycle.AcquisitionResolved = true;
                         lifecycle.Phase = IsClosed(lifecycle) ? CoordinationLifecyclePhase.Closed : CoordinationLifecyclePhase.Cleaning;
                         lifecycle.Reason = lifecycle.Phase == CoordinationLifecyclePhase.Closed ? "contended" : "cleanup-required";
-                        if (lifecycle.Phase != CoordinationLifecyclePhase.Closed) EnsureReleaseContinuationUnderGate(lifecycle);
+                        if (lifecycle.Phase == CoordinationLifecyclePhase.Closed) CloseUnderGate(lifecycle);
+                        else EnsureReleaseContinuationUnderGate(lifecycle);
                         return Acquisition(lifecycle, null);
                     }
                 }
@@ -377,7 +456,10 @@ public sealed class ContinuumCoordinationAdapter
             lock (_ledgerGate)
             {
                 if (!CanBeHeld(lifecycle))
+                {
+                    if (lifecycle.PendingIntent is null) lifecycle.AcquisitionResolved = true;
                     return FinishUncertainAcquireUnderGate(lifecycle, lifecycle.PendingIntent, "acquire-incomplete");
+                }
                 lifecycle.Busy = false;
                 lifecycle.AcquisitionResolved = true;
                 lifecycle.Phase = CoordinationLifecyclePhase.Held;
@@ -440,6 +522,7 @@ public sealed class ContinuumCoordinationAdapter
     private async Task<AcquireTransportResult?> InvokeAcquireAsync(
         Lifecycle lifecycle, OperationIntent intent, CancellationToken cancellationToken)
     {
+        if (!intent.PreparedWritten) return null;
         try
         {
             var request = new AcquireRequest(intent.Prepared.Resource, lifecycle.Owner, intent.Prepared.Ttl, intent.Prepared.RequestId);
@@ -463,14 +546,24 @@ public sealed class ContinuumCoordinationAdapter
     private AcquisitionResult FinishUncertainAcquireUnderGate(Lifecycle lifecycle, OperationIntent? intent, string code)
     {
         lifecycle.Busy = false;
-        lifecycle.Phase = CoordinationLifecyclePhase.Cleaning;
-        lifecycle.Reason = code;
-        if (intent is not null && intent.Prepared.Kind == CoordinationIntentKind.Acquire)
+        lifecycle.Phase = IsClosed(lifecycle) ? CoordinationLifecyclePhase.Closed : CoordinationLifecyclePhase.Cleaning;
+        lifecycle.Ownership = lifecycle.Phase == CoordinationLifecyclePhase.Closed
+            ? LeaseOwnership.Released
+            : LeaseOwnership.Uncertain;
+        lifecycle.Reason = lifecycle.Phase == CoordinationLifecyclePhase.Closed ? "cleanup-complete" : code;
+        if (lifecycle.Phase == CoordinationLifecyclePhase.Closed)
         {
-            lifecycle.AcquireContinuation ??= new AcquireContinuation();
-            _acquireContinuations[lifecycle.AcquireContinuation] = lifecycle;
+            CloseUnderGate(lifecycle);
         }
-        EnsureReleaseContinuationUnderGate(lifecycle);
+        else
+        {
+            if (intent is not null && intent.Prepared.Kind == CoordinationIntentKind.Acquire)
+            {
+                lifecycle.AcquireContinuation ??= new AcquireContinuation();
+                _acquireContinuations[lifecycle.AcquireContinuation] = lifecycle;
+            }
+            EnsureReleaseContinuationUnderGate(lifecycle);
+        }
         return Acquisition(lifecycle, intent is null ? null : Uncertainty(intent, code));
     }
 
@@ -499,9 +592,11 @@ public sealed class ContinuumCoordinationAdapter
 
             foreach (var entry in ActiveEntries(lifecycle).Reverse())
             {
+                var started = _clock.Elapsed;
                 var observation = await GetQuiescenceAsync(lifecycle, cancellationToken).ConfigureAwait(false);
+                var finished = _clock.Elapsed;
                 if (observation is not null) observations.Add(observation);
-                if (observation is null || !IsValidQuiescence(observation, lifecycle.Owner, observation.ObservedAt, _clock.Elapsed))
+                if (observation is null || !IsValidQuiescence(observation, lifecycle.Owner, started, finished))
                 {
                     lock (_ledgerGate) { entry.ReleaseState = LeaseReleaseState.Unknown; entry.ReleaseReason = "quiescence-unproved"; }
                     break;
@@ -510,6 +605,7 @@ public sealed class ContinuumCoordinationAdapter
                 if (outcome == TransportOutcome.LeaseLost)
                     await ProveNotOwnedAsync(lifecycle, entry, cancellationToken).ConfigureAwait(false);
             }
+            await ResolveTerminalRenewIntentAsync(lifecycle, cancellationToken).ConfigureAwait(false);
             lock (_ledgerGate)
             {
                 lifecycle.Busy = false;
@@ -571,6 +667,12 @@ public sealed class ContinuumCoordinationAdapter
         var intent = lifecycle.PendingIntent!;
         if (intent.Prepared.Kind != CoordinationIntentKind.Renew ||
             !lifecycle.Entries.TryGetValue(intent.Prepared.Resource, out var entry)) return;
+        if (entry.ReleaseState is LeaseReleaseState.Released or LeaseReleaseState.NotOwned)
+        {
+            await ResolveTerminalRenewIntentAsync(lifecycle, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         RenewTransportResult? result;
         try
         {
@@ -579,20 +681,41 @@ public sealed class ContinuumCoordinationAdapter
             result = task is null ? null : await task.ConfigureAwait(false);
         }
         catch (Exception) { return; }
-        if (result is null || result.Outcome != TransportOutcome.Renewed || result.ServerTime is null || result.ExpiresAt is null) return;
-        try
+        if (result is null) return;
+
+        if (result.Outcome == TransportOutcome.Renewed && result.ServerTime is not null && result.ExpiresAt is not null)
         {
-            var renewed = CreateGrantEvidence(entry.Evidence.Resource, lifecycle.Owner, entry.Evidence.LeaseId,
-                entry.Evidence.FencingToken, result.ServerTime.Value, result.ExpiresAt.Value,
-                intent.Prepared.FirstSendMonotonic, _clock.Elapsed, entry.Evidence.Generation);
-            lock (_ledgerGate)
+            try
             {
-                entry.Evidence = renewed;
-                entry.Identity = Identity(renewed);
+                var prior = intent.Prepared.PreviousLease!;
+                var renewed = CreateCleanupEvidence(entry.Evidence.Resource, lifecycle.Owner, prior.LeaseId,
+                    prior.FencingToken, result.ServerTime.Value, result.ExpiresAt.Value, prior.Generation);
+                if (renewed.ExpiresAt <= prior.ExpiresAt || renewed.ServerTime <= prior.ServerTime)
+                    throw new CoordinationProtocolException("renewal-did-not-progress");
+                lock (_ledgerGate)
+                {
+                    entry.Evidence = renewed;
+                    entry.Identity = Identity(renewed);
+                }
+                if (await ProgressAsync(intent, "renewed-cleanup-only", entry.Identity, cancellationToken).ConfigureAwait(false))
+                    ClearIntent(lifecycle, intent);
+                return;
             }
-            if (await ProgressAsync(intent, "renewed-cleanup-only", entry.Identity, cancellationToken).ConfigureAwait(false)) ClearIntent(lifecycle, intent);
+            catch (CoordinationException) { }
         }
-        catch (CoordinationException) { }
+
+        if (await ProgressAsync(intent, "renew-replay-nonauthoritative", entry.Identity, cancellationToken).ConfigureAwait(false))
+            ClearIntent(lifecycle, intent);
+    }
+
+    private async Task ResolveTerminalRenewIntentAsync(Lifecycle lifecycle, CancellationToken cancellationToken)
+    {
+        var intent = lifecycle.PendingIntent;
+        if (intent?.Prepared.Kind != CoordinationIntentKind.Renew ||
+            !lifecycle.Entries.TryGetValue(intent.Prepared.Resource, out var entry) ||
+            entry.ReleaseState is not (LeaseReleaseState.Released or LeaseReleaseState.NotOwned)) return;
+        if (await ProgressAsync(intent, "renew-superseded-by-cleanup", entry.Identity, cancellationToken).ConfigureAwait(false))
+            ClearIntent(lifecycle, intent);
     }
 
     private async Task<TransportOutcome?> ReleaseEntryAsync(
@@ -631,31 +754,42 @@ public sealed class ContinuumCoordinationAdapter
         }
         else
         {
-            lock (_ledgerGate) { entry.ReleaseState = LeaseReleaseState.Unknown; entry.ReleaseReason = "release-uncertain"; }
+            var code = result?.Outcome == TransportOutcome.LeaseLost ? "lease-lost" : "release-uncertain";
+            await ProgressAsync(intent, code, entry.Identity, cancellationToken).ConfigureAwait(false);
+            lock (_ledgerGate) { entry.ReleaseState = LeaseReleaseState.Unknown; entry.ReleaseReason = code; }
         }
         return result?.Outcome;
     }
 
     private async Task ProveNotOwnedAsync(Lifecycle lifecycle, LeaseEntry entry, CancellationToken cancellationToken)
     {
-        var intent = ReserveIntent(lifecycle, CoordinationIntentKind.Inspect, entry.Evidence.Resource, entry.Identity, FreshRequestId());
-        if (!await PrepareAsync(intent, cancellationToken).ConfigureAwait(false)) { ClearIntent(lifecycle, intent, preserveRelease: true); return; }
+        var intent = ReserveInspectIntent(lifecycle, entry);
+        if (!await PrepareAsync(intent, cancellationToken).ConfigureAwait(false)) return;
         InspectTransportResult? result;
         try
         {
             var task = _transport.InspectAsync(new InspectRequest(entry.Evidence.Resource, lifecycle.Owner, intent.Prepared.RequestId), cancellationToken);
             result = task is null ? null : await task.ConfigureAwait(false);
         }
-        catch (Exception) { ClearIntent(lifecycle, intent, preserveRelease: true); return; }
-        if (result is null || result.Outcome != TransportOutcome.Inspected) { ClearIntent(lifecycle, intent, preserveRelease: true); return; }
+        catch (Exception) { return; }
+        if (result is null || result.Outcome != TransportOutcome.Inspected) return;
         var notOwned = !result.Held || !result.CallerOwnsLease ||
             result.LeaseId != entry.Identity.LeaseId || result.FencingToken != entry.Identity.FencingToken;
-        if (!notOwned) { ClearIntent(lifecycle, intent, preserveRelease: true); return; }
-        if (await ProgressAsync(intent, "original-not-owned", null, cancellationToken).ConfigureAwait(false))
+        if (!notOwned)
         {
-            lock (_ledgerGate) { entry.ReleaseState = LeaseReleaseState.NotOwned; entry.ReleaseReason = "original-not-owned"; }
+            if (await ProgressAsync(intent, "original-still-owned", entry.Identity, cancellationToken).ConfigureAwait(false))
+                lock (_ledgerGate) entry.InspectIntent = null;
+            return;
         }
-        ClearIntent(lifecycle, intent, preserveRelease: true);
+        if (await ProgressAsync(intent, "original-not-owned", entry.Identity, cancellationToken).ConfigureAwait(false))
+        {
+            lock (_ledgerGate)
+            {
+                entry.ReleaseState = LeaseReleaseState.NotOwned;
+                entry.ReleaseReason = "original-not-owned";
+                entry.InspectIntent = null;
+            }
+        }
     }
 
     private OperationIntent ReserveIntent(
@@ -682,6 +816,18 @@ public sealed class ContinuumCoordinationAdapter
                 entry.Evidence.Resource, lifecycle.Owner, FreshRequestId(), _clock.Elapsed, _clock.DomainId, DefaultTtl, entry.Identity);
             entry.ReleaseIntent = new OperationIntent(prepared);
             return entry.ReleaseIntent;
+        }
+    }
+
+    private OperationIntent ReserveInspectIntent(Lifecycle lifecycle, LeaseEntry entry)
+    {
+        lock (_ledgerGate)
+        {
+            if (entry.InspectIntent is not null) return entry.InspectIntent;
+            var prepared = new PreparedCoordinationIntent(lifecycle.Id, lifecycle.NextSequence++, CoordinationIntentKind.Inspect,
+                entry.Evidence.Resource, lifecycle.Owner, FreshRequestId(), _clock.Elapsed, _clock.DomainId, DefaultTtl, entry.Identity);
+            entry.InspectIntent = new OperationIntent(prepared);
+            return entry.InspectIntent;
         }
     }
 
@@ -736,6 +882,17 @@ public sealed class ContinuumCoordinationAdapter
                 lifecycle.Phase == CoordinationLifecyclePhase.Cleaning;
             if (!live && !expiredCleanup)
                 throw new CoordinationUncertainException($"{operation}-requires-current-authority");
+            if (operation == "renewal" && !CanBeHeld(lifecycle))
+            {
+                lifecycle.CleanupAuthority = authority;
+                RevokeAuthorityUnderGate(lifecycle);
+                _authorities[authority] = lifecycle;
+                lifecycle.Phase = CoordinationLifecyclePhase.Cleaning;
+                lifecycle.Ownership = LeaseOwnership.Uncertain;
+                lifecycle.Reason = "authority-expired";
+                EnsureReleaseContinuationUnderGate(lifecycle);
+                throw new CoordinationUncertainException("renewal-requires-live-authority");
+            }
             RevokeAuthorityUnderGate(lifecycle);
             lifecycle.CleanupAuthority = null;
             lifecycle.Phase = phase;
@@ -795,6 +952,7 @@ public sealed class ContinuumCoordinationAdapter
         if (lifecycle.ReleaseContinuation is not null) _releaseContinuations.Remove(lifecycle.ReleaseContinuation);
         lifecycle.AcquireContinuation = null;
         lifecycle.ReleaseContinuation = null;
+        _lifecycles.Remove(lifecycle.Id);
     }
 
     private void SettleBusyIfNeeded(Lifecycle lifecycle)
@@ -920,6 +1078,9 @@ public sealed class ContinuumCoordinationAdapter
             identity.FencingToken, identity.ServerTime, identity.ExpiresAt, identity.Generation));
     }
 
+    private static OperationIntent RecoveredIntent(PreparedCoordinationIntent prepared) =>
+        new(prepared) { PreparedWritten = true };
+
     private static LeaseEvidence Evidence(CheckpointLeaseIdentity identity) =>
         new(identity.Resource, identity.Owner, identity.LeaseId, identity.FencingToken,
             identity.ServerTime, identity.ExpiresAt, identity.SafeDeadline, identity.RenewAt, identity.Generation);
@@ -1041,6 +1202,7 @@ public sealed class ContinuumCoordinationAdapter
         public LeaseEvidence Evidence { get; set; }
         public CheckpointLeaseIdentity Identity { get; set; }
         public OperationIntent? ReleaseIntent { get; set; }
+        public OperationIntent? InspectIntent { get; set; }
         public LeaseReleaseState ReleaseState { get; set; } = LeaseReleaseState.Pending;
         public string ReleaseReason { get; set; } = "release-not-attempted";
     }

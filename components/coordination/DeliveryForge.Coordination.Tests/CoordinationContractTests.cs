@@ -565,6 +565,84 @@ public sealed class CoordinationContractTests
     }
 
     [Fact]
+    public async Task Renew_prepare_failure_never_calls_transport_and_cleanup_can_close()
+    {
+        var transport = SingleLeaseTransport();
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.Released());
+        var checkpoints = new FixtureCheckpointStore();
+        var adapter = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var held = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        checkpoints.FailNextPrepare = true;
+
+        var renewal = await adapter.RenewAllAsync(held.Authority!, TestContext.Current.CancellationToken);
+        var cleanup = await adapter.ContinueReleaseAsync(renewal.ReleaseContinuation!, TestContext.Current.CancellationToken);
+
+        Assert.Empty(transport.RenewRequests);
+        Assert.Equal(CoordinationLifecyclePhase.Closed, cleanup.Snapshot.Phase);
+        Assert.Null(cleanup.Continuation);
+    }
+
+    [Fact]
+    public async Task Recovery_handles_multiple_unresolved_releases_with_stable_request_ids()
+    {
+        var transport = TwoLeaseTransport();
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.Uncertain("first-response-lost"));
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.Uncertain("second-response-lost"));
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.Released());
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.Released());
+        var checkpoints = new FixtureCheckpointStore();
+        var clock = new FakeMonotonicClock("clock");
+        var first = await CreateAdapterAsync(
+            transport,
+            clock,
+            new RecordingQuiescenceSource(clock, [true, true]),
+            checkpoints: checkpoints);
+        var held = await first.AcquireAllAsync([Issue(6), Issue(7)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        var partial = await first.ReleaseAllAsync(held.Authority!, TestContext.Current.CancellationToken);
+        var expectedIds = partial.Leases.ToDictionary(item => item.LeaseId, item => item.RequestId);
+        var lifecycleId = checkpoints.Records.First(record =>
+            record.Prepared?.Kind == CoordinationIntentKind.Acquire).Prepared!.LifecycleId;
+
+        var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var recovered = await restarted.RecoverForCleanupAsync(lifecycleId, Owner, [Issue(6), Issue(7)],
+            TestContext.Current.CancellationToken);
+        var cleaned = await restarted.ContinueReleaseAsync(recovered.Continuation!, TestContext.Current.CancellationToken);
+
+        Assert.Equal(CoordinationLifecyclePhase.Closed, cleaned.Snapshot.Phase);
+        Assert.Null(cleaned.Continuation);
+        foreach (var request in transport.ReleaseRequests.Skip(2))
+            Assert.Equal(expectedIds[request.LeaseId], request.RequestId);
+    }
+
+    [Fact]
+    public async Task Recovery_preserves_original_not_owned_proof_as_terminal()
+    {
+        var transport = SingleLeaseTransport();
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.LeaseLost());
+        transport.InspectResults.Enqueue(InspectTransportResult.Available());
+        var checkpoints = new FixtureCheckpointStore();
+        var first = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var held = await first.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        var cleanup = await first.ReleaseAllAsync(held.Authority!, TestContext.Current.CancellationToken);
+        var lifecycleId = checkpoints.Records.First(record =>
+            record.Prepared?.Kind == CoordinationIntentKind.Acquire).Prepared!.LifecycleId;
+        Assert.Equal(CoordinationLifecyclePhase.Closed, cleanup.Snapshot.Phase);
+
+        var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var recovered = await restarted.RecoverForCleanupAsync(lifecycleId, Owner, [Issue(6)],
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(CoordinationLifecyclePhase.Closed, recovered.Snapshot.Phase);
+        Assert.Equal(LeaseReleaseState.NotOwned, recovered.Leases.Single().State);
+        Assert.Null(recovered.Continuation);
+        Assert.Single(transport.ReleaseRequests);
+        Assert.Single(transport.InspectRequests);
+    }
+
+    [Fact]
     public async Task Progress_failure_roundtrips_prepared_state_and_restart_recovers_cleanup_only()
     {
         var clock = new FakeMonotonicClock("clock");
