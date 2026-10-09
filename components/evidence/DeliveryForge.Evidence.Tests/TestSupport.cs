@@ -65,7 +65,7 @@ internal static class TestEvidence
         0, "stdout", "stderr", false, false,
         DateTimeOffset.Parse("2026-10-09T00:00:00Z"), DateTimeOffset.Parse("2026-10-09T00:00:01Z"));
     public static GateRequest GateRequest(string output) => new(
-        "test", Identity('2'), Identity('5'), Identity('6'), Repository(),
+        "test", ResolvedPolicy(), Identity('5'), Identity('6'), Repository(),
         new CommandInvocation("dotnet", ["test", "DeliveryForge.slnx", "--no-restore"], "/repo"),
         "full", TimeSpan.FromSeconds(30), output,
         _ => NormalizedEvidence.Pass("complete test evidence", true));

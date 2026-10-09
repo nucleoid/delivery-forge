@@ -24,7 +24,7 @@ public sealed class Crap4CSharpAdapter
             if (!TryString(root, "schemaVersion", out var schemaVersion) ||
                 !schemaVersion.StartsWith("1.", StringComparison.Ordinal) ||
                 !string.Equals(schemaVersion, capability.FormatVersion, StringComparison.Ordinal))
-                return NormalizedEvidence.Incomplete("Unsupported Crap4CSharp report format version.", capability.Fixture);
+                return NormalizedEvidence.Error("Unsupported or mismatched Crap4CSharp report format version.", true);
             if (!TryString(root, "toolVersion", out var toolVersion) ||
                 !string.Equals(toolVersion, capability.Version, StringComparison.Ordinal))
                 return NormalizedEvidence.Error("Crap4CSharp report/tool version mismatch.", capability.Fixture);
@@ -38,9 +38,16 @@ public sealed class Crap4CSharpAdapter
             if (run.TryGetProperty("cancellation", out var cancellation) &&
                 cancellation.TryGetProperty("timedOut", out var timedOut) &&
                 timedOut.ValueKind == JsonValueKind.True)
-                return NormalizedEvidence.Incomplete("Crap4CSharp evaluation timed out.", capability.Fixture);
+                return NormalizedEvidence.Incomplete("Crap4CSharp evaluation timed out.", true);
+            if (cancellation.ValueKind == JsonValueKind.Object &&
+                cancellation.TryGetProperty("cancelled", out var cancelled) &&
+                cancelled.ValueKind == JsonValueKind.True)
+                return NormalizedEvidence.Incomplete("Crap4CSharp evaluation was cancelled.", true);
+            if (!TryString(run, "status", out var status) ||
+                !string.Equals(status, "completed", StringComparison.Ordinal))
+                return NormalizedEvidence.Error("Crap4CSharp run did not complete successfully.", true);
             if (completedElement.ValueKind != JsonValueKind.True)
-                return NormalizedEvidence.Incomplete("Crap4CSharp evaluation is incomplete.", capability.Fixture);
+                return NormalizedEvidence.Incomplete("Crap4CSharp evaluation is incomplete.", true);
             if (!evaluation.TryGetProperty("coverage", out var coverage) ||
                 !coverage.TryGetProperty("methods", out var methods) ||
                 !coverage.TryGetProperty("unknown", out var unknown) ||
@@ -66,16 +73,16 @@ public sealed class Crap4CSharpAdapter
             {
                 "pass" => new NormalizedEvidence(
                     GateOutcome.Pass, "Crap4CSharp completed with a passing policy decision.",
-                    capability.Fixture, !capability.Fixture, capability.Limitations ?? []),
+                    true, false, [.. capability.Limitations ?? [], "Installed one-command certification is absent."]),
                 "fail" => new NormalizedEvidence(
                     GateOutcome.Fail, "Crap4CSharp completed with policy findings.",
-                    capability.Fixture, !capability.Fixture, capability.Limitations ?? []),
-                "unknown" => NormalizedEvidence.Incomplete("Crap4CSharp returned valid inconclusive evidence.", capability.Fixture),
+                    true, false, [.. capability.Limitations ?? [], "Installed one-command certification is absent."]),
+                "unknown" => NormalizedEvidence.Incomplete("Crap4CSharp returned valid inconclusive evidence.", true),
                 "notApplicable" when TryString(decision, "reason", out var reason) && !string.IsNullOrWhiteSpace(reason) =>
                     new NormalizedEvidence(
-                        GateOutcome.NotApplicable, reason, capability.Fixture, !capability.Fixture,
+                        GateOutcome.NotApplicable, reason, true, false,
                         capability.Limitations ?? [], reason),
-                _ => NormalizedEvidence.Error("Crap4CSharp NOT_APPLICABLE lacks a rationale.", capability.Fixture)
+                _ => NormalizedEvidence.Error("Crap4CSharp NOT_APPLICABLE lacks a rationale.", true)
             };
         }
     }

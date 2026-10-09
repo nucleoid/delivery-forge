@@ -41,6 +41,7 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
             return Unsupported(probe, "Executable was not found in the trusted configured source.");
 
         var (executable, prefixArguments) = resolution.Value;
+        var executableIdentity = HashExecutable(executable);
         var workingDirectory = probe.RepositoryRoot is not null
             ? Path.GetFullPath(probe.RepositoryRoot)
             : Path.GetDirectoryName(executable)!;
@@ -52,7 +53,7 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
             return Unsupported(probe, "Version probe did not complete successfully.", versionInvocation, versionResult);
 
         var version = ParseVersion(versionResult.StandardOutput, versionResult.StandardError);
-        if (version is null || !version.StartsWith(probe.RequiredVersionPrefix, StringComparison.Ordinal))
+        if (version is null || !VersionMatches(version, probe.RequiredVersionPrefix))
             return Unsupported(probe, "Observed executable version is missing or outside the protected policy range.", versionInvocation, versionResult);
 
         var helpInvocation = new CommandInvocation(
@@ -65,7 +66,10 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
                 probe, "Help/capability probe did not complete with documented output.",
                 versionInvocation, versionResult, helpInvocation, helpResult);
 
-        var executableIdentity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(executable)))}";
+        if (!string.Equals(executableIdentity, HashExecutable(executable), StringComparison.Ordinal))
+            return Unsupported(
+                probe, "Executable bytes changed during capability probing.",
+                versionInvocation, versionResult, helpInvocation, helpResult);
         var capability = new ToolCapability(
             probe.Tool, version, probe.DocumentedFormatVersion, true, probe.Fixture, [],
             executable, executableIdentity, ["version", "help", "structured-report"]);
@@ -97,6 +101,8 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
         var path = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
         foreach (var directory in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
         {
+            if (!Path.IsPathFullyQualified(directory))
+                continue;
             foreach (var name in OperatingSystem.IsWindows() ? new[] { tool + ".exe", tool } : new[] { tool })
             {
                 var candidate = Path.Combine(directory, name);
@@ -147,6 +153,14 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
         return match.Success ? match.Groups[1].Value : null;
     }
 
+    private static bool VersionMatches(string observed, string required) =>
+        string.Equals(observed, required, StringComparison.Ordinal) ||
+        observed.StartsWith(required + ".", StringComparison.Ordinal) ||
+        observed.StartsWith(required + "-", StringComparison.Ordinal);
+
+    private static string HashExecutable(string executable) =>
+        $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(executable)))}";
+
     private static CapabilityDetection Unsupported(
         CapabilityProbe probe,
         string reason,
@@ -160,6 +174,6 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
                 [reason], null, null, []),
             versionInvocation, versionResult, helpInvocation, helpResult);
 
-    [GeneratedRegex(@"(?<![0-9])([0-9]+\.[0-9]+(?:\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)?)(?![0-9])", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?m)^\s*(?:[A-Za-z][A-Za-z0-9.-]*\s+)?([0-9]+\.[0-9]+(?:\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)?)\s*$", RegexOptions.CultureInvariant)]
     private static partial Regex VersionPattern();
 }

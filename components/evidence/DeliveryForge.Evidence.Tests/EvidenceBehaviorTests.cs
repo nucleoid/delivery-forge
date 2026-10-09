@@ -61,9 +61,27 @@ public sealed class EvidenceBehaviorTests
     }
 
     [Fact]
+    public void Omitted_current_baseline_metric_is_incomplete()
+    {
+        var policy = TestEvidence.ResolvedPolicy();
+        var baseline = new ReviewedBaseline(
+            TestEvidence.Identity('3'), policy.PolicyIdentity, TestEvidence.Commit('a'),
+            TestEvidence.Identity('4'), false,
+            new Dictionary<string, decimal> { ["changed.crap"] = 10m, ["changed.coverage"] = 0.8m });
+
+        var result = BaselineComparer.Compare(
+            new Dictionary<string, decimal> { ["changed.crap"] = 9m }, baseline, policy);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("omits", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Complete_dotnet_evidence_passes()
     {
-        Assert.Equal(GateOutcome.Pass, new DotNetAdapter().Normalize(TestEvidence.DotNetRun()).Outcome);
+        var result = new DotNetAdapter().Normalize(TestEvidence.DotNetRun());
+        Assert.Equal(GateOutcome.Pass, result.Outcome);
+        Assert.False(result.ProductionCapable);
     }
 
     [Theory]
@@ -90,6 +108,15 @@ public sealed class EvidenceBehaviorTests
         Assert.Contains("omitted", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void Empty_required_project_policy_is_incomplete()
+    {
+        var result = new DotNetAdapter().Normalize(TestEvidence.DotNetRun(expected: [], observed: []));
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("no required", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
     [InlineData(false, "pass", 0, GateOutcome.Incomplete)]
     [InlineData(true, "pass", 1, GateOutcome.Incomplete)]
@@ -108,7 +135,7 @@ public sealed class EvidenceBehaviorTests
     }
 
     [Fact]
-    public void Crap4CSharp_unknown_format_is_incomplete_and_malformed_is_error()
+    public void Crap4CSharp_unknown_format_and_malformed_report_are_errors()
     {
         var adapter = new Crap4CSharpAdapter();
         var unsupported = adapter.Normalize(
@@ -117,7 +144,7 @@ public sealed class EvidenceBehaviorTests
         var malformed = adapter.Normalize("{"u8.ToArray(),
             new ToolCapability("crap4csharp", "1.2.0", "1.2", true, true));
 
-        Assert.Equal(GateOutcome.Incomplete, unsupported.Outcome);
+        Assert.Equal(GateOutcome.Error, unsupported.Outcome);
         Assert.Equal(GateOutcome.Error, malformed.Outcome);
     }
 

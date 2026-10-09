@@ -23,13 +23,34 @@ public sealed record PolicyCandidate(
     decimal MaximumChangedCodeDebtIncrease,
     IReadOnlyList<string> RequiredGates);
 
-public sealed record ResolvedEvidencePolicy(
-    string PolicyIdentity,
-    string ContentIdentity,
-    string SourceRevision,
-    PolicyAuthorityKind AuthorityKind,
-    decimal MaximumChangedCodeDebtIncrease,
-    IReadOnlyList<string> RequiredGates);
+public sealed class ResolvedEvidencePolicy
+{
+    internal ResolvedEvidencePolicy(
+        string policyIdentity,
+        string contentIdentity,
+        string sourceRevision,
+        PolicyAuthorityKind authorityKind,
+        decimal maximumChangedCodeDebtIncrease,
+        IReadOnlyList<string> requiredGates,
+        bool authorityVerified)
+    {
+        PolicyIdentity = policyIdentity;
+        ContentIdentity = contentIdentity;
+        SourceRevision = sourceRevision;
+        AuthorityKind = authorityKind;
+        MaximumChangedCodeDebtIncrease = maximumChangedCodeDebtIncrease;
+        RequiredGates = requiredGates;
+        AuthorityVerified = authorityVerified;
+    }
+
+    public string PolicyIdentity { get; }
+    public string ContentIdentity { get; }
+    public string SourceRevision { get; }
+    public PolicyAuthorityKind AuthorityKind { get; }
+    public decimal MaximumChangedCodeDebtIncrease { get; }
+    public IReadOnlyList<string> RequiredGates { get; }
+    internal bool AuthorityVerified { get; }
+}
 
 public static partial class EvidencePolicy
 {
@@ -58,7 +79,8 @@ public static partial class EvidencePolicy
             candidate.SourceRevision,
             authority.Kind,
             candidate.MaximumChangedCodeDebtIncrease,
-            candidate.RequiredGates.ToArray());
+            candidate.RequiredGates.ToArray(),
+            authorityVerified: false);
     }
 
     [GeneratedRegex("^sha256:[0-9a-f]{64}$", RegexOptions.CultureInvariant)]

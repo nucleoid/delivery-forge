@@ -18,7 +18,7 @@ public sealed record NormalizedEvidence(
     string? NotApplicableRationale = null)
 {
     public static NormalizedEvidence Pass(string reason, bool fixture = false) =>
-        new(GateOutcome.Pass, reason, fixture, !fixture, [], null);
+        new(GateOutcome.Pass, reason, fixture, false, ["Tool outcome is not production authority."], null);
 
     public static NormalizedEvidence Incomplete(string reason, bool fixture = false, params string[] limitations) =>
         new(GateOutcome.Incomplete, reason, fixture, false, limitations, null);
@@ -61,7 +61,7 @@ public sealed record CommandResult(
 
 public sealed record GateRequest(
     string GateId,
-    string PolicyIdentity,
+    ResolvedEvidencePolicy Policy,
     string CapabilityIdentity,
     string ConfigurationIdentity,
     RepositoryIdentity ExpectedRepository,

@@ -8,6 +8,8 @@ public sealed class GitRepositoryIdentityReaderTests
         var reader = new GitRepositoryIdentityReader(
             new QueueCommandExecutor(
                 Result(TestEvidence.Commit('b') + Environment.NewLine),
+                Result(TestEvidence.Commit('a') + Environment.NewLine),
+                Result(string.Empty),
                 Result(TestEvidence.Commit('c') + Environment.NewLine),
                 Result(string.Empty)),
             System.IO.Path.GetTempPath(),
@@ -24,6 +26,8 @@ public sealed class GitRepositoryIdentityReaderTests
         var reader = new GitRepositoryIdentityReader(
             new QueueCommandExecutor(
                 Result(TestEvidence.Commit('b') + Environment.NewLine),
+                Result(TestEvidence.Commit('a') + Environment.NewLine),
+                Result(string.Empty),
                 Result(TestEvidence.Commit('c') + Environment.NewLine),
                 Result("?? generated.txt" + Environment.NewLine)),
             System.IO.Path.GetTempPath(),

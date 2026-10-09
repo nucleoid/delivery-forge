@@ -33,8 +33,12 @@ public sealed class DotNetAdapter
             return NormalizedEvidence.Incomplete("The .NET test counts are incomplete or inconsistent.");
         if (!evidence.CoverageComplete)
             return NormalizedEvidence.Incomplete("Required coverage evidence is missing or incomplete.");
+        if (evidence.SkippedTests > 0)
+            return NormalizedEvidence.Incomplete("Skipped tests require an explicit protected-policy allowance.");
 
         var omitted = evidence.ExpectedProjects.Except(evidence.ObservedProjects, StringComparer.Ordinal).ToArray();
+        if (evidence.ExpectedProjects.Count == 0)
+            return NormalizedEvidence.Incomplete("Protected policy supplied no required test projects.");
         if (omitted.Length > 0)
             return NormalizedEvidence.Incomplete($"Required test projects were omitted: {string.Join(", ", omitted)}.");
 

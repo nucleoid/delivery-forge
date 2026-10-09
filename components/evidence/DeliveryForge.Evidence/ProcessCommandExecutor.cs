@@ -26,11 +26,21 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
 
         using var process = new Process { StartInfo = startInfo };
         var startedAt = DateTimeOffset.UtcNow;
-        if (!process.Start())
-            return new CommandResult(null, string.Empty, "Process did not start.", false, false, startedAt, DateTimeOffset.UtcNow);
+        try
+        {
+            if (!process.Start())
+                return new CommandResult(
+                    null, string.Empty, "Process did not start.", false, false, startedAt, DateTimeOffset.UtcNow);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            return new CommandResult(
+                null, string.Empty, $"Process start failed: {exception.Message}",
+                false, false, startedAt, DateTimeOffset.UtcNow);
+        }
         process.StandardInput.Close();
-        var stdoutTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var stderrTask = process.StandardError.ReadToEndAsync(cancellationToken);
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
 
         using var timeoutSource = new CancellationTokenSource(timeout);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
@@ -45,13 +55,34 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             timedOut = timeoutSource.IsCancellationRequested && !cancellationToken.IsCancellationRequested;
             cancelled = !timedOut;
             TryKillTree(process);
-            await process.WaitForExitAsync(CancellationToken.None).ConfigureAwait(false);
+            try
+            {
+                await process.WaitForExitAsync(CancellationToken.None)
+                    .WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+            }
         }
 
+        string stdout;
+        string stderr;
+        try
+        {
+            await Task.WhenAll(stdoutTask, stderrTask)
+                .WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false);
+            stdout = await stdoutTask.ConfigureAwait(false);
+            stderr = await stderrTask.ConfigureAwait(false);
+        }
+        catch (TimeoutException)
+        {
+            stdout = "<stdout drain timed out>";
+            stderr = "<stderr drain timed out>";
+        }
         return new CommandResult(
             process.HasExited ? process.ExitCode : null,
-            await stdoutTask.ConfigureAwait(false),
-            await stderrTask.ConfigureAwait(false),
+            stdout,
+            stderr,
             timedOut,
             cancelled,
             startedAt,

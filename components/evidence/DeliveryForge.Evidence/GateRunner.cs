@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Nodes;
 using DeliveryForge.Contracts.Models;
 using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Contracts.State;
@@ -15,9 +16,19 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
     public async Task<GateRunResult> RunAsync(GateRequest request, CancellationToken cancellationToken = default)
     {
         ValidateRequest(request);
+        Directory.CreateDirectory(request.OutputDirectory);
+        var claimPath = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId) + ".claim");
+        try
+        {
+            await using var claim = new FileStream(
+                claimPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.WriteThrough);
+            claim.Flush(true);
+        }
+        catch (IOException exception)
+        {
+            throw new EvidenceWriteException($"Gate claim already exists or cannot be created: {exception.Message}");
+        }
         var gateDirectory = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
-        if (Directory.Exists(gateDirectory) || File.Exists(gateDirectory))
-            throw new EvidenceWriteException($"Append-only gate output already exists: {gateDirectory}");
 
         var before = await repository.ReadAsync(cancellationToken).ConfigureAwait(false);
         if (!before.IsClean || before != request.ExpectedRepository)
@@ -31,20 +42,40 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
         Directory.CreateDirectory(gateDirectory);
         var execution = await executor.ExecuteAsync(request.Invocation, request.Timeout, cancellationToken)
             .ConfigureAwait(false);
-        var artifactHashes = await WriteArtifactsAsync(gateDirectory, execution, cancellationToken).ConfigureAwait(false);
-        var after = await repository.ReadAsync(cancellationToken).ConfigureAwait(false);
+        var artifactHashes = await WriteArtifactsAsync(gateDirectory, execution, CancellationToken.None).ConfigureAwait(false);
+        var after = await repository.ReadAsync(CancellationToken.None).ConfigureAwait(false);
         var sourceChanged = before != after || !after.IsClean;
 
-        var normalized = request.Normalize(execution);
+        NormalizedEvidence normalized;
+        try
+        {
+            normalized = request.Normalize(execution);
+        }
+        catch (OperationCanceledException)
+        {
+            normalized = NormalizedEvidence.Incomplete("Evidence normalization was cancelled.");
+        }
+        catch (Exception exception)
+        {
+            normalized = NormalizedEvidence.Error($"Evidence normalizer failed: {exception.Message}");
+        }
         if (sourceChanged)
             normalized = NormalizedEvidence.Error("Repository source/index/status identity changed during evaluation.");
         else if (execution.TimedOut)
             normalized = NormalizedEvidence.Incomplete("Tool timed out before complete evidence was produced.");
         else if (execution.Cancelled)
             normalized = NormalizedEvidence.Incomplete("Tool execution was cancelled before complete evidence was produced.");
+        else if (normalized.Outcome == GateOutcome.Pass && execution.ExitCode != 0)
+            normalized = NormalizedEvidence.Error("PASS evidence requires an observed zero process exit.");
+        else if (normalized.Outcome == GateOutcome.Pass &&
+                 (!request.Policy.AuthorityVerified ||
+                  !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
+                  !normalized.ProductionCapable))
+            normalized = NormalizedEvidence.Incomplete(
+                "Tool PASS is advisory because protected policy/gate authority or certified producer evidence is absent.");
 
         return await PersistAsync(
-            request, gateDirectory, before, after, execution, artifactHashes, normalized, sourceChanged, cancellationToken)
+            request, gateDirectory, before, after, execution, artifactHashes, normalized, sourceChanged, CancellationToken.None)
             .ConfigureAwait(false);
     }
 
@@ -78,7 +109,7 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
     {
         var provisional = new GateReceiptContract(
             "1.0.0", "gate-receipt", $"sha256:{new string('0', 64)}",
-            request.GateId, request.PolicyIdentity,
+            request.GateId, request.Policy.PolicyIdentity,
             before.BaseCommit, before.HeadCommit, before.TreeId,
             JsonSerializer.Serialize(new
             {
@@ -94,16 +125,16 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
             OutcomeText(normalized.Outcome), normalized.Reason, artifactHashes,
             sourceChanged, normalized.Limitations, normalized.NotApplicableRationale);
 
-        var provisionalBytes = JsonSerializer.SerializeToUtf8Bytes(provisional, ContractJson);
+        var provisionalBytes = SerializeReceipt(provisional);
         var receipt = provisional with { Identity = CanonicalJson.ComputeIdentity(provisionalBytes) };
-        var receiptBytes = JsonSerializer.SerializeToUtf8Bytes(receipt, ContractJson);
+        var receiptBytes = SerializeReceipt(receipt);
         var receiptPath = await new AppendOnlyContractStore(Path.Combine(gateDirectory, "receipts"))
             .WriteImmutableAsync(receiptBytes, cancellationToken).ConfigureAwait(false);
 
         return new GateRunResult(
             normalized.Outcome, normalized.Reason, normalized.Fixture, normalized.ProductionCapable,
             normalized.Limitations, sourceChanged, request.Invocation, execution, before, after,
-            request.PolicyIdentity, request.CapabilityIdentity, request.ConfigurationIdentity, request.Scope,
+            request.Policy.PolicyIdentity, request.CapabilityIdentity, request.ConfigurationIdentity, request.Scope,
             artifactHashes, receiptPath, normalized.NotApplicableRationale);
     }
 
@@ -164,12 +195,18 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
 
     private static JsonSerializerOptions CreateContractJson()
     {
-        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web)
-        {
-            DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-        };
+        var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         options.Converters.Add(new UtcDateTimeOffsetConverter());
         return options;
+    }
+
+    private static byte[] SerializeReceipt(GateReceiptContract receipt)
+    {
+        var node = JsonSerializer.SerializeToNode(receipt, ContractJson)?.AsObject()
+            ?? throw new InvalidOperationException("Gate receipt serialization produced no object.");
+        if (receipt.NotApplicableRationale is null)
+            node.Remove("notApplicableRationale");
+        return JsonSerializer.SerializeToUtf8Bytes(node, ContractJson);
     }
 
     private sealed class UtcDateTimeOffsetConverter : JsonConverter<DateTimeOffset>
