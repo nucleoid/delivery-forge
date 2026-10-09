@@ -1,4 +1,18 @@
+using System.Diagnostics;
+
 namespace DeliveryForge.Coordination;
+
+public interface IMonotonicClock
+{
+    TimeSpan Elapsed { get; }
+}
+
+internal sealed class StopwatchMonotonicClock : IMonotonicClock
+{
+    private readonly long _origin = Stopwatch.GetTimestamp();
+
+    public TimeSpan Elapsed => Stopwatch.GetElapsedTime(_origin);
+}
 
 public static class LeaseDeadline
 {

@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Numerics;
 using System.Text;
 using System.Text.RegularExpressions;
 
@@ -25,10 +24,10 @@ public sealed record CoordinationCapabilities(
 {
     public const string V1ContractVersion = "continuum.coordination.v1";
 
-    public static CoordinationCapabilities ValidV1(bool fixture = false) => new(
+    internal static CoordinationCapabilities ValidV1ForFixture() => new(
         V1ContractVersion,
         CoordinationAvailability.Available,
-        fixture,
+        true,
         new HashSet<CoordinationOperation>(Enum.GetValues<CoordinationOperation>()),
         TimeSpan.FromSeconds(1),
         TimeSpan.FromMinutes(10),
@@ -36,7 +35,7 @@ public sealed record CoordinationCapabilities(
         true,
         true,
         true,
-        fixture ? ["test-only fixture; never production authority"] : []);
+        ["test-only fixture; never production authority"]);
 
     public static CoordinationCapabilities Unavailable(string limitation) => new(
         V1ContractVersion,
@@ -74,7 +73,7 @@ public sealed record LeaseOwner
 public sealed record CoordinationResource
 {
     private static readonly Regex IssueKey = new(
-        "^github:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+:issue:[1-9][0-9]*$",
+        "^github:[a-z0-9](?:[a-z0-9-]{0,38})/[a-z0-9](?:[a-z0-9_.-]{0,99}[a-z0-9])?:issue:[1-9][0-9]*$",
         RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
     public CoordinationResource(string scope, string resourceKey)
@@ -113,21 +112,22 @@ public sealed record LeaseGrant(
     string FencingToken,
     DateTimeOffset ServerTime,
     DateTimeOffset ExpiresAt,
-    TimeSpan RenewalTarget)
+    TimeSpan RenewalTarget,
+    TimeSpan SafeDeadline,
+    TimeSpan RenewAt)
 {
     public void Validate()
     {
         if (string.IsNullOrWhiteSpace(LeaseId)) throw new CoordinationProtocolException("Lease ID is missing.");
-        if (!BigInteger.TryParse(FencingToken, NumberStyles.None, CultureInfo.InvariantCulture, out var token) || token < BigInteger.Zero)
-            throw new CoordinationProtocolException("Fencing token must be a non-negative decimal string and is never parsed as floating point.");
+        if (!long.TryParse(FencingToken, NumberStyles.None, CultureInfo.InvariantCulture, out var token) || token < 0 ||
+            (FencingToken.Length > 1 && FencingToken[0] == '0'))
+            throw new CoordinationProtocolException("Fencing token must be a canonical non-negative PostgreSQL BIGINT decimal string and is never parsed as floating point.");
         if (ExpiresAt <= ServerTime) throw new CoordinationProtocolException("Lease expiry must follow authoritative server time.");
+        if (RenewAt >= SafeDeadline) throw new CoordinationProtocolException("Renewal target must precede the conservative safe deadline.");
     }
 }
 
-public sealed record LeaseAcquisition(LeaseOwner Owner, IReadOnlyList<LeaseGrant> Leases, LeaseOwnership Ownership, string Reason)
-{
-    public bool MayDispatch => Ownership == LeaseOwnership.Held && Leases.Count > 0;
-}
+public sealed record LeaseAcquisition(LeaseOwner Owner, IReadOnlyList<LeaseGrant> Leases, LeaseOwnership Ownership, string Reason);
 
 public sealed record QuiescenceEvidence(bool Quiescent, string EvidenceReference);
 
