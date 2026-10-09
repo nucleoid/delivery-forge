@@ -13,14 +13,18 @@ public sealed class ReconcilerTests
         using var directories = new TemporaryDirectory();
         await using var processes = new ProcessControl();
         using var coordinator = new ExecutionCoordinator(
-            new RunStore(System.IO.Path.Combine(directories.Path, "store")), new WorktreeManager(), processes);
+            new RunStore(System.IO.Path.Combine(directories.Path, "store")), new WorktreeManager(), processes,
+            new ProvenTestAgentControl());
         var plan = new FrozenWorkerPlan("run-dirty", "plan", repository.Head, "owner/repo",
             System.IO.Path.Combine(directories.Path, "parent"), repository.Path,
-            System.IO.Path.Combine(directories.Path, "result"), "writer", ["tracked.txt"], []);
+            System.IO.Path.Combine(directories.Path, "result"), "writer", ["tracked.txt"], [],
+            "test.adapter", "1.0", [AgentCapability.Launch, AgentCapability.CompletionEvidence]);
         var (request, _) = await coordinator.PrepareWorkerAsync(plan, cancellationToken);
         var accepted = new AgentAcceptedReceipt(WorkerEnvelope.SchemaVersion, request.RunId, request.RequestIdentity,
-            request.PlanIdentity, request.BaseCommit, request.Worktree, "host", "child", DateTimeOffset.UtcNow,
-            WorkerEnvelope.SupportedHostCapability);
+            request.PlanIdentity, request.BaseCommit, request.Worktree, request.AdapterId, request.AdapterVersion,
+            "runtime", "task", DateTimeOffset.UtcNow,
+            request.RequiredCapabilities.Select(capability =>
+                new AgentCapabilityEvidence(capability, AgentCapabilityStatus.Supported, "test-interface", "test-proof")).ToArray());
         await coordinator.AcceptAsync(accepted, cancellationToken);
         await coordinator.PauseAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
         await File.WriteAllTextAsync(System.IO.Path.Combine(repository.Path, "user-file.txt"), "preserve", cancellationToken);

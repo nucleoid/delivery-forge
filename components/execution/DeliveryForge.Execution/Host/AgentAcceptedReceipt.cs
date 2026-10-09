@@ -7,7 +7,9 @@ public sealed record AgentAcceptedReceipt(
     string PlanIdentity,
     string BaseCommit,
     string Worktree,
-    string HostRunId,
-    string ChildIdentity,
+    string AdapterId,
+    string AdapterVersion,
+    string RuntimeRunIdentity,
+    string RuntimeTaskIdentity,
     DateTimeOffset AcceptedAt,
-    string HostCapability);
+    IReadOnlyList<AgentCapabilityEvidence> Capabilities);

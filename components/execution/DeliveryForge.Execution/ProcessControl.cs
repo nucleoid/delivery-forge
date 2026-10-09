@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -14,7 +15,7 @@ public sealed record ProcessControlResult(ProcessControlOutcome Outcome, string 
 
 public sealed class ProcessControl : IAsyncDisposable
 {
-    private readonly Dictionary<int, OwnedProcess> _owned = [];
+    private readonly ConcurrentDictionary<int, OwnedProcess> _owned = new();
 
     public OwnedProcess StartOwned(ProcessLaunch launch)
     {
@@ -30,7 +31,8 @@ public sealed class ProcessControl : IAsyncDisposable
             var identity = new ProcessIdentity(process.Id, process.StartTime.ToUniversalTime().Ticks, executable,
                 Digest(executable, launch.Arguments));
             var owned = new OwnedProcess(process, identity);
-            _owned.Add(process.Id, owned);
+            if (!_owned.TryAdd(process.Id, owned))
+                throw new InvalidOperationException("A process with the same PID is already registered in this controller.");
             return owned;
         }
         catch
@@ -48,13 +50,16 @@ public sealed class ProcessControl : IAsyncDisposable
         try
         {
             if (owned.Process.HasExited) return new ProcessControlResult(ProcessControlOutcome.AlreadyExited, "Owned child already exited.");
-            var executable = Path.GetFullPath(owned.Process.MainModule?.FileName ?? "");
+            var observedExecutable = owned.Process.MainModule?.FileName;
+            if (string.IsNullOrWhiteSpace(observedExecutable))
+                return new ProcessControlResult(ProcessControlOutcome.IdentityUnknown, "Live process executable could not be observed safely.");
+            var executable = Path.GetFullPath(observedExecutable);
             if (owned.Process.StartTime.ToUniversalTime().Ticks != expected.PlatformStartIdentity ||
                 !string.Equals(executable, expected.ExecutablePath, PlatformPathComparison()))
                 return new ProcessControlResult(ProcessControlOutcome.IdentityUnknown, "Live PID no longer matches its platform start identity or executable.");
             return new ProcessControlResult(ProcessControlOutcome.LiveOwned, "Identity positively matched and the registered process remains live.");
         }
-        catch (Exception exception) when (exception is InvalidOperationException or Win32Exception)
+        catch (Exception exception) when (exception is InvalidOperationException or Win32Exception or ArgumentException)
         {
             return new ProcessControlResult(ProcessControlOutcome.IdentityUnknown, "Process identity could not be observed safely.");
         }

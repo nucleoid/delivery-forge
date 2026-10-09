@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using DeliveryForge.Execution.Host;
 
 namespace DeliveryForge.Execution.Tests;
 
@@ -64,4 +65,28 @@ internal sealed class GitFixture : IAsyncDisposable
     }
 
     public ValueTask DisposeAsync() { Directory.Dispose(); return ValueTask.CompletedTask; }
+}
+
+internal sealed class ProvenTestAgentControl : IAgentControlPort
+{
+    public Task<AgentControlResult> ControlAsync(
+        AgentRunBinding binding,
+        AgentControlAction action,
+        TimeSpan deadline,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(new AgentControlResult(action, AgentActivityState.Quiescent, true,
+            $"test-proof:{binding.AdapterId}:{binding.RuntimeTaskIdentity}:{action}", ""));
+}
+
+internal sealed class MutableExecutionFactSource : IExecutionFactSource
+{
+    public string AuthorizationCeiling { get; set; } = "implement";
+
+    public Task<ExecutionOwnedFacts> ObserveAsync(
+        AgentRequest request,
+        DeliveryForge.Execution.Git.WorktreeObservation worktree,
+        CancellationToken cancellationToken = default) =>
+        Task.FromResult(new ExecutionOwnedFacts(
+            WorkerEnvelope.ComputeRequestIdentity(request), request.PlanIdentity, request.BaseCommit,
+            AuthorizationCeiling, []));
 }

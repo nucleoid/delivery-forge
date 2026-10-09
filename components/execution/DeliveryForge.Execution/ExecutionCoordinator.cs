@@ -11,10 +11,10 @@ public sealed record ProcessRegistration(ProcessIdentity Identity, DateTimeOffse
 public sealed record AgentCheckpoint(
     string RequestIdentity, string HeadCommit, string TreeId, IReadOnlyList<string> StatusEntries,
     FileSnapshot Snapshot, ObservedProcessState ProcessState, IReadOnlyList<string> ArtifactPaths,
-    IReadOnlyList<string> Limitations, string NextReconciliation);
+    ExecutionOwnedFacts OwnedFacts, IReadOnlyList<string> Limitations, string NextReconciliation);
 public sealed record QuiescenceRecord(
     string RequestedState, bool Quiescent, IReadOnlyList<ProcessControlResult> Processes,
-    AgentCheckpoint? Checkpoint, IReadOnlyList<string> Limitations);
+    AgentControlResult? AdapterControl, AgentCheckpoint? Checkpoint, IReadOnlyList<string> Limitations);
 public sealed record QuiescenceResult(bool Quiescent, IReadOnlyList<ProcessControlResult> Processes, StoredRunRecord Record);
 public sealed record ResumeResult(ReconciliationResult Reconciliation, StoredRunRecord? Record);
 
@@ -24,14 +24,23 @@ public sealed class ExecutionCoordinator : IDisposable
     private readonly RunStore _store;
     private readonly WorktreeManager _worktrees;
     private readonly ProcessControl _processes;
-    private readonly Dictionary<string, WriterLease> _writers = new(StringComparer.Ordinal);
+    private readonly IAgentControlPort _agentControl;
+    private readonly IExecutionFactSource _factSource;
+    private readonly ConcurrentDictionary<string, WriterLease> _writers = new(StringComparer.Ordinal);
     private bool _disposed;
 
-    public ExecutionCoordinator(RunStore store, WorktreeManager worktrees, ProcessControl processes)
+    public ExecutionCoordinator(
+        RunStore store,
+        WorktreeManager worktrees,
+        ProcessControl processes,
+        IAgentControlPort? agentControl = null,
+        IExecutionFactSource? factSource = null)
     {
         _store = store;
         _worktrees = worktrees;
         _processes = processes;
+        _agentControl = agentControl ?? new UnsupportedAgentControlPort();
+        _factSource = factSource ?? new RequestExecutionFactSource();
     }
 
     public Task<(AgentRequest Request, StoredRunRecord Record)> PrepareWorkerAsync(
@@ -56,12 +65,13 @@ public sealed class ExecutionCoordinator : IDisposable
             var prepared = new PreparedWorkerRecord(request, observation.Snapshot,
                 new CommittedRevision(observation.HeadCommit, observation.TreeId));
             var record = await _store.AppendAsync(plan.RunId, "worker-prepared", prepared, cancellationToken).ConfigureAwait(false);
-            _writers.Add(plan.RunId, writer);
+            if (!_writers.TryAdd(plan.RunId, writer))
+                throw new WorktreeBoundaryException("A writer is already registered for this run in this coordinator.");
             return (request, record);
         }
         catch
         {
-            writer.Dispose();
+            writer.Abandon();
             throw;
         }
     }
@@ -80,7 +90,7 @@ public sealed class ExecutionCoordinator : IDisposable
         EnsureWriterOwnership(prepared.Request);
         WorkerEnvelope.ValidateAccepted(prepared.Request, receipt);
         WorkflowTransition.EnsureAllowed(WorkflowState.Ready, WorkflowState.Executing,
-            new TransitionEvidence(AuthorizationCeiling.Implement));
+            new TransitionEvidence(GetAuthorization(prepared.Request)));
         return await _store.AppendAsync(receipt.RunId, "worker-accepted", receipt, cancellationToken).ConfigureAwait(false);
     }
 
@@ -98,6 +108,9 @@ public sealed class ExecutionCoordinator : IDisposable
         EnsureWriterOwnership(prepared.Request);
         var accepted = GetAccepted(recovery);
         WorkerEnvelope.ValidateCompletion(prepared.Request, accepted, completion);
+        var processState = ObserveRegisteredProcesses(recovery);
+        if (processState is ObservedProcessState.LiveOwned or ObservedProcessState.Unknown)
+            throw new WorkerEnvelopeException($"Completion is forbidden while registered process activity is {processState}.");
         var observation = await _worktrees.ObserveAsync(prepared.Request.Worktree, cancellationToken).ConfigureAwait(false);
         if (!observation.IsClean)
             throw new WorkerEnvelopeException("Completion requires a clean worktree with no untracked or ignored files.");
@@ -108,7 +121,7 @@ public sealed class ExecutionCoordinator : IDisposable
         _worktrees.EnsureAllowedChanges(prepared.BeforeSnapshot, observation.Snapshot,
             prepared.Request.AllowedPaths, prepared.Request.Exclusions);
         WorkflowTransition.EnsureAllowed(WorkflowState.Executing, WorkflowState.LocalComplete,
-            new TransitionEvidence(AuthorizationCeiling.Implement, prepared.Request.BaseCommit,
+            new TransitionEvidence(GetAuthorization(prepared.Request), prepared.Request.BaseCommit,
                 observation.HeadCommit, observation.TreeId));
         return await _store.AppendAsync(completion.RunId, "worker-completed", completion, cancellationToken).ConfigureAwait(false);
     }
@@ -173,6 +186,9 @@ public sealed class ExecutionCoordinator : IDisposable
         var durable = _store.ReadPayload<QuiescenceRecord>(pause).Checkpoint
             ?? throw new RunStoreCorruptionException("Paused record has no durable checkpoint.");
         var actual = await _worktrees.ObserveAsync(prepared.Request.Worktree, cancellationToken).ConfigureAwait(false);
+        await _worktrees.EnsureDescendsFromAsync(prepared.Request.Worktree, prepared.Request.BaseCommit,
+            actual.HeadCommit, cancellationToken).ConfigureAwait(false);
+        var actualFacts = await ObserveOwnedFactsAsync(prepared.Request, actual, false, cancellationToken).ConfigureAwait(false);
         var processState = ObserveRegisteredProcesses(recovery);
         var writerOwnershipConfirmed = TryEnsureWriterOwnership(prepared.Request);
         var observation = new ResumeObservation(
@@ -180,13 +196,14 @@ public sealed class ExecutionCoordinator : IDisposable
             actual,
             SamePath(actual.RootPath, prepared.Request.Worktree),
             writerOwnershipConfirmed,
-            durable.ArtifactPaths.All(File.Exists),
+            actualFacts.RequiredArtifactPaths.All(File.Exists),
+            OwnedFactsEqual(actualFacts, durable.OwnedFacts),
             processState);
         var reconciliation = Reconciler.ReconcileResume(observation);
         if (reconciliation.Action != ReconciliationAction.ResumeDispatch)
             return new ResumeResult(reconciliation, null);
         WorkflowTransition.EnsureAllowed(WorkflowState.Paused, WorkflowState.Executing,
-            new TransitionEvidence(AuthorizationCeiling.Implement));
+            new TransitionEvidence(GetAuthorization(prepared.Request)));
         var record = await _store.AppendAsync(runId, "resumed", new { requestIdentity = prepared.Request.RequestIdentity }, cancellationToken)
             .ConfigureAwait(false);
         return new ResumeResult(reconciliation, record);
@@ -205,27 +222,50 @@ public sealed class ExecutionCoordinator : IDisposable
         else if (current is WorkflowState.Stopped or WorkflowState.Blocked or WorkflowState.Failed or WorkflowState.LocalComplete)
             throw new WorkerEnvelopeException($"Cannot stop a run in terminal state {current}.");
 
+        var prepared = GetPrepared(recovery);
+        EnsureWriterOwnership(prepared.Request);
+
         var registrations = recovery.Records.Where(record => record.Kind == "process-registered")
             .Select(record => _store.ReadPayload<ProcessRegistration>(record)).ToArray();
         var results = new List<ProcessControlResult>();
         foreach (var registration in registrations)
             results.Add(await _processes.QuiesceAsync(registration.Identity, deadline, cancellationToken).ConfigureAwait(false));
-        var quiescent = results.All(result => result.Outcome is ProcessControlOutcome.Quiesced or ProcessControlOutcome.AlreadyExited);
-        var prepared = GetPrepared(recovery);
-        var observedProcessState = results.Any(result => result.Outcome == ProcessControlOutcome.IdentityUnknown)
+        AgentControlResult? adapterControl = null;
+        var acceptedRecord = recovery.Records.SingleOrDefault(record => record.Kind == "worker-accepted");
+        if (acceptedRecord is not null)
+        {
+            var accepted = _store.ReadPayload<AgentAcceptedReceipt>(acceptedRecord);
+            adapterControl = await _agentControl.ControlAsync(ToBinding(accepted),
+                requestedState == WorkflowState.Paused ? AgentControlAction.Pause : AgentControlAction.Stop,
+                deadline, cancellationToken).ConfigureAwait(false);
+        }
+        var localQuiescent = results.All(result => result.Outcome is ProcessControlOutcome.Quiesced or ProcessControlOutcome.AlreadyExited);
+        var adapterQuiescent = adapterControl is null ||
+            (adapterControl.CapabilitySupported && adapterControl.Activity == AgentActivityState.Quiescent &&
+             !string.IsNullOrWhiteSpace(adapterControl.EvidenceReference));
+        var quiescent = localQuiescent && adapterQuiescent;
+        var observedProcessState = adapterControl?.Activity == AgentActivityState.Unknown ||
+                                   results.Any(result => result.Outcome == ProcessControlOutcome.IdentityUnknown)
             ? ObservedProcessState.Unknown
-            : results.Any(result => result.Outcome == ProcessControlOutcome.TimedOut)
+            : adapterControl?.Activity == AgentActivityState.Live ||
+              results.Any(result => result.Outcome == ProcessControlOutcome.TimedOut)
                 ? ObservedProcessState.LiveOwned
-                : registrations.Length == 0 ? ObservedProcessState.None : ObservedProcessState.Quiesced;
+                : registrations.Length == 0 && adapterControl is null ? ObservedProcessState.None : ObservedProcessState.Quiesced;
         AgentCheckpoint? checkpoint = null;
         var limitations = new List<string>();
+        if (adapterControl is not null && !adapterQuiescent)
+            limitations.Add(adapterControl.Limitation);
         try
         {
             var worktree = await _worktrees.ObserveAsync(prepared.Request.Worktree, cancellationToken).ConfigureAwait(false);
+            await _worktrees.EnsureDescendsFromAsync(prepared.Request.Worktree, prepared.Request.BaseCommit,
+                worktree.HeadCommit, cancellationToken).ConfigureAwait(false);
+            var facts = await ObserveOwnedFactsAsync(prepared.Request, worktree, true, cancellationToken).ConfigureAwait(false);
+            limitations.Add("External dependency, lease, and authorization-revocation facts belong to later adapters and are not claimed by the issue #5 core.");
             checkpoint = new AgentCheckpoint(prepared.Request.RequestIdentity, worktree.HeadCommit, worktree.TreeId,
-                worktree.StatusEntries, worktree.Snapshot, observedProcessState, [], [],
+                worktree.StatusEntries, worktree.Snapshot, observedProcessState, facts.RequiredArtifactPaths, facts, limitations.ToArray(),
                 requestedState == WorkflowState.Paused
-                    ? "Re-observe Git, artifacts, ownership, authorization, and process identity before resume dispatch."
+                    ? "Re-observe request/plan/base/authorization facts owned by this core, Git, declared artifacts, writer ownership, adapter activity, and process identity before resume dispatch."
                     : "Stopped terminally; preserve the assigned worktree and evidence until separately authorized cleanup.");
         }
         catch (WorktreeBoundaryException exception)
@@ -235,10 +275,10 @@ public sealed class ExecutionCoordinator : IDisposable
         }
 
         var target = quiescent ? requestedState : WorkflowState.Blocked;
-        WorkflowTransition.EnsureAllowed(current, target, new TransitionEvidence(AuthorizationCeiling.Implement));
+        WorkflowTransition.EnsureAllowed(current, target, new TransitionEvidence(GetAuthorization(prepared.Request)));
 
         var kind = quiescent ? requestedKind : "blocked-quiescence";
-        var payload = new QuiescenceRecord(requestedKind, quiescent, results, checkpoint, limitations);
+        var payload = new QuiescenceRecord(requestedKind, quiescent, results, adapterControl, checkpoint, limitations);
         var record = await _store.AppendAsync(runId, kind, payload, cancellationToken).ConfigureAwait(false);
         return new QuiescenceResult(quiescent, results, record);
     }
@@ -283,8 +323,8 @@ public sealed class ExecutionCoordinator : IDisposable
             return current.WriterToken == request.WriterToken;
         try
         {
-            _writers.Add(request.RunId,
-                _worktrees.RecoverWriter(request.ResultDirectory, request.RunId, request.WriterToken));
+            var recovered = _worktrees.RecoverWriter(request.ResultDirectory, request.RunId, request.WriterToken);
+            if (!_writers.TryAdd(request.RunId, recovered)) recovered.Dispose();
             return true;
         }
         catch (WorktreeBoundaryException)
@@ -324,6 +364,35 @@ public sealed class ExecutionCoordinator : IDisposable
     private static bool SamePath(string left, string right) =>
         string.Equals(Path.GetFullPath(left), Path.GetFullPath(right),
             OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+
+    private async Task<ExecutionOwnedFacts> ObserveOwnedFactsAsync(
+        AgentRequest request, WorktreeObservation worktree, bool requireFrozenMatch, CancellationToken cancellationToken)
+    {
+        var facts = await _factSource.ObserveAsync(request, worktree, cancellationToken).ConfigureAwait(false);
+        if (requireFrozenMatch && (facts.RequestIdentity != WorkerEnvelope.ComputeRequestIdentity(request) ||
+            facts.PlanIdentity != request.PlanIdentity || facts.BaseCommit != request.BaseCommit ||
+            facts.AuthorizationCeiling != request.AuthorizationCeiling))
+            throw new WorkerEnvelopeException("Fresh execution facts do not match the frozen issue-owned request/plan/base/authorization facts.");
+        if (facts.RequiredArtifactPaths.Any(path => !Path.IsPathFullyQualified(path) || !File.Exists(path)))
+            throw new WorkerEnvelopeException("A freshly declared required checkpoint artifact is missing.");
+        return facts;
+    }
+
+    private static AgentRunBinding ToBinding(AgentAcceptedReceipt accepted) => new(
+        accepted.AdapterId, accepted.AdapterVersion, accepted.RunId, accepted.RequestIdentity,
+        accepted.RuntimeRunIdentity, accepted.RuntimeTaskIdentity);
+
+    private static bool OwnedFactsEqual(ExecutionOwnedFacts left, ExecutionOwnedFacts right) =>
+        left.RequestIdentity == right.RequestIdentity && left.PlanIdentity == right.PlanIdentity &&
+        left.BaseCommit == right.BaseCommit && left.AuthorizationCeiling == right.AuthorizationCeiling &&
+        left.RequiredArtifactPaths.SequenceEqual(right.RequiredArtifactPaths, StringComparer.Ordinal);
+
+    private static AuthorizationCeiling GetAuthorization(AgentRequest request)
+    {
+        if (!Enum.TryParse<AuthorizationCeiling>(request.AuthorizationCeiling, true, out var authorization))
+            throw new WorkerEnvelopeException($"Unsupported authorization ceiling '{request.AuthorizationCeiling}'.");
+        return authorization;
+    }
 
     private static async Task<T> RunExclusiveAsync<T>(
         string runId, Func<Task<T>> action, CancellationToken cancellationToken)

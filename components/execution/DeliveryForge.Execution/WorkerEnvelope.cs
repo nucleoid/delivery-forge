@@ -14,12 +14,15 @@ public sealed record FrozenWorkerPlan(
     string ResultDirectory,
     string WriterToken,
     IReadOnlyList<string> AllowedPaths,
-    IReadOnlyList<string> Exclusions);
+    IReadOnlyList<string> Exclusions,
+    string AdapterId,
+    string AdapterVersion,
+    IReadOnlyList<AgentCapability> RequiredCapabilities,
+    string AuthorizationCeiling = "implement");
 
 public static class WorkerEnvelope
 {
-    public const string SchemaVersion = "1.0.0";
-    public const string SupportedHostCapability = "sessions_spawn";
+    public const string SchemaVersion = "2.0.0";
 
     public static AgentRequest PrepareWorker(FrozenWorkerPlan plan)
     {
@@ -29,17 +32,23 @@ public static class WorkerEnvelope
         RequireGitObject(plan.BaseCommit, nameof(plan.BaseCommit));
         Require(plan.Repository, nameof(plan.Repository));
         Require(plan.WriterToken, nameof(plan.WriterToken));
+        Require(plan.AdapterId, nameof(plan.AdapterId));
+        Require(plan.AdapterVersion, nameof(plan.AdapterVersion));
+        Require(plan.AuthorizationCeiling, nameof(plan.AuthorizationCeiling));
         if (!Path.IsPathFullyQualified(plan.Worktree) || !Path.IsPathFullyQualified(plan.ResultDirectory))
         {
             throw new WorkerEnvelopeException("Worktree and result directory must be absolute local paths.");
         }
 
-        var allowed = plan.AllowedPaths.Select(NormalizeRelative).Distinct(StringComparer.Ordinal).Order().ToArray();
-        var exclusions = plan.Exclusions.Select(NormalizeRelative).Distinct(StringComparer.Ordinal).Order().ToArray();
+        var allowed = plan.AllowedPaths.Select(NormalizeRelative).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        var exclusions = plan.Exclusions.Select(NormalizeRelative).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray();
+        var required = plan.RequiredCapabilities.Distinct().Order().ToArray();
         if (allowed.Length == 0) throw new WorkerEnvelopeException("At least one allowed path is required.");
+        if (!required.Contains(AgentCapability.Launch) || !required.Contains(AgentCapability.CompletionEvidence))
+            throw new WorkerEnvelopeException("Execution requires launch and completion-evidence capabilities.");
         var request = new AgentRequest(SchemaVersion, plan.RunId, "", plan.PlanIdentity, plan.BaseCommit, plan.Repository,
             Path.GetFullPath(plan.Worktree), Path.GetFullPath(plan.ResultDirectory), plan.WriterToken,
-            allowed, exclusions);
+            allowed, exclusions, plan.AdapterId, plan.AdapterVersion, required, plan.AuthorizationCeiling);
         return request with { RequestIdentity = ComputeRequestIdentity(request) };
     }
 
@@ -50,6 +59,21 @@ public static class WorkerEnvelope
         return Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(canonical)));
     }
 
+    public static AgentCapabilityAssessment AssessCapabilities(
+        AgentAdapterProfile profile, IEnumerable<AgentCapability> requiredCapabilities)
+    {
+        ArgumentNullException.ThrowIfNull(profile);
+        ArgumentNullException.ThrowIfNull(requiredCapabilities);
+        var missing = requiredCapabilities.Distinct().Order()
+            .Where(required => profile.Capabilities.Count(evidence =>
+                evidence.Capability == required && evidence.Status == AgentCapabilityStatus.Supported &&
+                !string.IsNullOrWhiteSpace(evidence.Interface) &&
+                !string.IsNullOrWhiteSpace(evidence.EvidenceReference)) != 1)
+            .ToArray();
+        return new AgentCapabilityAssessment(missing.Length == 0, missing,
+            missing.Length == 0 ? "SUPPORTED" : "INCOMPLETE");
+    }
+
     public static void ValidateAccepted(AgentRequest request, AgentAcceptedReceipt receipt)
     {
         ArgumentNullException.ThrowIfNull(request);
@@ -58,10 +82,21 @@ public static class WorkerEnvelope
             request.RequestIdentity != ComputeRequestIdentity(request) ||
             request.RunId != receipt.RunId || request.RequestIdentity != receipt.RequestIdentity ||
             request.PlanIdentity != receipt.PlanIdentity || request.BaseCommit != receipt.BaseCommit ||
-            !SamePath(request.Worktree, receipt.Worktree) || receipt.HostCapability != SupportedHostCapability ||
-            string.IsNullOrWhiteSpace(receipt.HostRunId) || string.IsNullOrWhiteSpace(receipt.ChildIdentity))
+            !SamePath(request.Worktree, receipt.Worktree) || request.AdapterId != receipt.AdapterId ||
+            request.AdapterVersion != receipt.AdapterVersion ||
+            string.IsNullOrWhiteSpace(receipt.RuntimeRunIdentity) || string.IsNullOrWhiteSpace(receipt.RuntimeTaskIdentity))
         {
-            throw new WorkerEnvelopeException("Accepted receipt does not bind the supported host run to the immutable prepared request.");
+            throw new WorkerEnvelopeException("Accepted receipt does not bind the adapter run and opaque runtime identities to the immutable prepared request.");
+        }
+
+        foreach (var required in request.RequiredCapabilities)
+        {
+            var matches = receipt.Capabilities.Where(item => item.Capability == required).ToArray();
+            var evidence = matches.Length == 1 ? matches[0] : null;
+            if (evidence is null || evidence.Status != AgentCapabilityStatus.Supported ||
+                string.IsNullOrWhiteSpace(evidence.Interface) || string.IsNullOrWhiteSpace(evidence.EvidenceReference))
+                throw new AgentCapabilityIncompleteException(request.AdapterId, required,
+                    evidence?.Status ?? AgentCapabilityStatus.Unsupported);
         }
     }
 
@@ -70,8 +105,10 @@ public static class WorkerEnvelope
         ValidateAccepted(request, accepted);
         ArgumentNullException.ThrowIfNull(completion);
         if (completion.SchemaVersion != SchemaVersion || accepted.RunId != completion.RunId ||
-            accepted.RequestIdentity != completion.RequestIdentity || accepted.HostRunId != completion.HostRunId ||
-            accepted.ChildIdentity != completion.ChildIdentity || !SamePath(request.Worktree, completion.Worktree) ||
+            accepted.RequestIdentity != completion.RequestIdentity || accepted.AdapterId != completion.AdapterId ||
+            accepted.AdapterVersion != completion.AdapterVersion ||
+            accepted.RuntimeRunIdentity != completion.RuntimeRunIdentity ||
+            accepted.RuntimeTaskIdentity != completion.RuntimeTaskIdentity || !SamePath(request.Worktree, completion.Worktree) ||
             !string.Equals(completion.Outcome, "success", StringComparison.Ordinal) ||
             completion.CompletedAt < accepted.AcceptedAt)
         {
@@ -121,4 +158,10 @@ public static class WorkerEnvelope
     }
 }
 
-public sealed class WorkerEnvelopeException(string message) : Exception(message);
+public class WorkerEnvelopeException(string message) : Exception(message);
+
+public sealed class AgentCapabilityIncompleteException : WorkerEnvelopeException
+{
+    public AgentCapabilityIncompleteException(string adapterId, AgentCapability capability, AgentCapabilityStatus status)
+        : base($"INCOMPLETE: adapter '{adapterId}' capability '{capability}' is {status} and has no imported supported evidence.") { }
+}

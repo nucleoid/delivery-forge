@@ -266,12 +266,17 @@ public sealed class WriterLease : IDisposable
     public string RunId { get; }
     public string WriterToken { get; }
 
+    internal void Abandon()
+    {
+        Dispose();
+        File.Delete(_path);
+    }
+
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
         _stream.Dispose();
-        File.Delete(_path);
     }
 }
 

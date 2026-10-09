@@ -14,6 +14,7 @@ internal sealed record ResumeObservation(
     bool AssignedWorktreeMatches,
     bool WriterOwnershipConfirmed,
     bool ArtifactsValid,
+    bool OwnedFactsMatch,
     ObservedProcessState ProcessState);
 
 internal static class Reconciler
@@ -30,12 +31,13 @@ internal static class Reconciler
             reasons.Add("Worktree files differ from the durable checkpoint.");
         if (!observation.WriterOwnershipConfirmed) reasons.Add("One-writer ownership is not confirmed in this executor lifetime.");
         if (!observation.ArtifactsValid) reasons.Add("A checkpoint artifact is missing.");
+        if (!observation.OwnedFactsMatch) reasons.Add("Fresh request, plan, base, authorization, or declared artifact facts differ from the durable checkpoint.");
         if (observation.ProcessState == ObservedProcessState.Unknown) reasons.Add("Process identity is unknown; signaling and resume are forbidden.");
         if (reasons.Count > 0) return new ReconciliationResult(ReconciliationAction.Blocked, reasons);
         if (observation.ProcessState == ObservedProcessState.LiveOwned)
             return new ReconciliationResult(ReconciliationAction.Pause, ["A positively identified task child is still live and must quiesce before dispatch."]);
         return new ReconciliationResult(ReconciliationAction.ResumeDispatch,
-            ["Fresh Git, process, artifact, ownership, and frozen-request observations agree with the durable checkpoint."]);
+            ["Fresh issue-owned request/plan/base/authorization, Git, process, artifact, ownership, and adapter observations agree with the durable checkpoint."]);
     }
 
     public static CleanupDecision CleanupEligible(

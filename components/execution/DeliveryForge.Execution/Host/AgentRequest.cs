@@ -12,4 +12,7 @@ public sealed record AgentRequest(
     string WriterToken,
     IReadOnlyList<string> AllowedPaths,
     IReadOnlyList<string> Exclusions,
+    string AdapterId,
+    string AdapterVersion,
+    IReadOnlyList<AgentCapability> RequiredCapabilities,
     string AuthorizationCeiling = "implement");
