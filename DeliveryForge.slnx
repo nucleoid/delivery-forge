@@ -4,6 +4,8 @@
     <Project Path="components/contracts/DeliveryForge.Contracts.Tests/DeliveryForge.Contracts.Tests.csproj" />
     <Project Path="components/execution/DeliveryForge.Execution/DeliveryForge.Execution.csproj" />
     <Project Path="components/execution/DeliveryForge.Execution.Tests/DeliveryForge.Execution.Tests.csproj" />
+    <Project Path="components/evidence/DeliveryForge.Evidence/DeliveryForge.Evidence.csproj" />
+    <Project Path="components/evidence/DeliveryForge.Evidence.Tests/DeliveryForge.Evidence.Tests.csproj" />
     <Project Path="components/planning/DeliveryForge.Planning/DeliveryForge.Planning.csproj" />
     <Project Path="components/planning/DeliveryForge.Planning.Tests/DeliveryForge.Planning.Tests.csproj" />
   </Folder>

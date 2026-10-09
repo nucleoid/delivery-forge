@@ -5,6 +5,7 @@ on:
     paths:
       - "components/contracts/**"
       - "components/execution/**"
+      - "components/evidence/**"
       - "components/planning/**"
       - "DeliveryForge.slnx"
       - "Directory.*.props"
