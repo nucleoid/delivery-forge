@@ -27,14 +27,14 @@ public sealed class GateRunnerTests
         using var temp = new TempDirectory();
         var runner = new GateRunner(
             new StubCommandExecutor(TestEvidence.CommandResult()),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()));
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
 
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.False(result.ProductionCapable);
-        Assert.Equal(["test", "DeliveryForge.slnx", "--no-restore"], result.Invocation.Arguments);
+        Assert.Equal(["test", "DeliveryForge.Tests.csproj", "--no-restore"], result.Invocation.Arguments);
         Assert.Equal(2, result.ArtifactHashes.Count);
         Assert.All(result.ArtifactHashes.Values, value => Assert.StartsWith("sha256:", value));
     }
@@ -46,7 +46,7 @@ public sealed class GateRunnerTests
         var changed = TestEvidence.Repository() with { TreeId = TestEvidence.Commit('d') };
         var runner = new GateRunner(
             new StubCommandExecutor(TestEvidence.CommandResult()),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), changed));
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), changed), temp.Path);
 
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
@@ -64,7 +64,7 @@ public sealed class GateRunnerTests
         var execution = TestEvidence.CommandResult() with { TimedOut = true };
         var runner = new GateRunner(
             new StubCommandExecutor(execution),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()));
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
 
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
@@ -85,7 +85,7 @@ public sealed class GateRunnerTests
         };
         var runner = new GateRunner(
             new ProcessCommandExecutor(),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()));
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
@@ -100,7 +100,7 @@ public sealed class GateRunnerTests
         var execution = TestEvidence.CommandResult() with { Cancelled = true };
         var runner = new GateRunner(
             new StubCommandExecutor(execution),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()));
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
 
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
         cancellation.Cancel();
@@ -117,7 +117,7 @@ public sealed class GateRunnerTests
         using var temp = new TempDirectory();
         var runner = new GateRunner(
             new QueueCommandExecutor(),
-            new ThrowingRepositoryIdentityReader());
+            new ThrowingRepositoryIdentityReader(), temp.Path);
 
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
@@ -133,7 +133,7 @@ public sealed class GateRunnerTests
         using var temp = new TempDirectory();
         var runner = new GateRunner(
             new QueueCommandExecutor(),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()));
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
 
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
@@ -149,7 +149,7 @@ public sealed class GateRunnerTests
         using var temp = new TempDirectory();
         var runner = new GateRunner(
             new StubCommandExecutor(TestEvidence.CommandResult()),
-            new FirstThenThrowRepositoryIdentityReader(TestEvidence.Repository()));
+            new FirstThenThrowRepositoryIdentityReader(TestEvidence.Repository()), temp.Path);
 
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
@@ -158,5 +158,68 @@ public sealed class GateRunnerTests
         Assert.True(result.SourceChanged);
         Assert.True(File.Exists(result.ReceiptPath));
         Assert.Contains("after evaluation", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Adapter_tool_mismatch_is_rejected_before_execution()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path) with
+        {
+            Capability = TestEvidence.GateRequest(temp.Path).Capability with { Tool = "crap4csharp" }
+        };
+        var runner = new GateRunner(new QueueCommandExecutor(),
+            new ThrowingRepositoryIdentityReader(), temp.Path);
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Contains("adapter", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(result.ReceiptPath));
+    }
+
+    [Fact]
+    public async Task Executable_swap_during_run_is_an_orchestration_error()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path);
+        var runner = new GateRunner(
+            new MutatingCommandExecutor(request.Invocation.FileName, TestEvidence.CommandResult()),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Contains("executable bytes changed", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(result.ReceiptPath));
+    }
+
+    [Fact]
+    public async Task Preexisting_unchanged_trx_cannot_be_reused()
+    {
+        using var temp = new TempDirectory();
+        var trx = System.IO.Path.Combine(temp.Path, "stale.trx");
+        await File.WriteAllTextAsync(
+            trx,
+            "<TestRun><ResultSummary><Counters total=\"1\" executed=\"1\" passed=\"1\" failed=\"0\" /></ResultSummary></TestRun>",
+            TestContext.Current.CancellationToken);
+        var request = TestEvidence.GateRequest(temp.Path);
+        request = request with
+        {
+            Invocation = request.Invocation with
+            {
+                Arguments = [.. request.Invocation.Arguments, "--logger", $"trx;LogFileName={trx}"]
+            }
+        };
+        var execution = TestEvidence.CommandResult() with { StandardOutput = "Subject -> Subject.dll" };
+        var runner = new GateRunner(
+            new StubCommandExecutor(execution),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Contains("stale", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("evidence.trx", result.ArtifactHashes.Keys);
     }
 }

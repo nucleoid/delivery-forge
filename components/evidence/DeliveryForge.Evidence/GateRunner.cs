@@ -9,8 +9,18 @@ using DeliveryForge.Contracts.State;
 
 namespace DeliveryForge.Evidence;
 
-public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityReader repository)
+public sealed class GateRunner
 {
+    private readonly ICommandExecutor _executor;
+    private readonly IRepositoryIdentityReader _repository;
+    private readonly string _trustedWorkingDirectory;
+
+    public GateRunner(ICommandExecutor executor, IRepositoryIdentityReader repository, string trustedWorkingDirectory)
+    {
+        _executor = executor;
+        _repository = repository;
+        _trustedWorkingDirectory = Path.GetFullPath(trustedWorkingDirectory);
+    }
     private static readonly JsonSerializerOptions ContractJson = CreateContractJson();
 
     public async Task<GateRunResult> RunAsync(GateRequest request, CancellationToken cancellationToken = default)
@@ -30,10 +40,17 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
         }
         var gateDirectory = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
 
+        var capabilityFailure = ValidateCapabilityBinding(request);
+        if (capabilityFailure is not null)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, request.ExpectedRepository, request.ExpectedRepository,
+                capabilityFailure,
+                CancellationToken.None).ConfigureAwait(false);
+
         RepositoryIdentity before;
         try
         {
-            before = await repository.ReadAsync(CancellationToken.None).ConfigureAwait(false);
+            before = await _repository.ReadAsync(CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -51,10 +68,23 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
         }
 
         Directory.CreateDirectory(gateDirectory);
+        EvidenceExecutionSnapshot evidenceSnapshot;
+        try
+        {
+            evidenceSnapshot = EvidenceAdapterDispatcher.CaptureBefore(request);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before,
+                NormalizedEvidence.Error($"Evidence inputs could not be snapshotted: {exception.Message}"),
+                CancellationToken.None).ConfigureAwait(false);
+        }
+
         CommandResult execution;
         try
         {
-            execution = await executor.ExecuteAsync(request.Invocation, request.Timeout, cancellationToken)
+            execution = await _executor.ExecuteAsync(request.Invocation, request.Timeout, cancellationToken)
                 .ConfigureAwait(false);
         }
         catch (OperationCanceledException)
@@ -69,11 +99,21 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
                 null, string.Empty, $"Command execution failed: {exception.Message}", false, false, now, now);
         }
         var artifactHashes = await WriteArtifactsAsync(gateDirectory, execution, CancellationToken.None).ConfigureAwait(false);
+        string? artifactBindingError = null;
+        try
+        {
+            EvidenceAdapterDispatcher.AppendBoundArtifacts(
+                request, evidenceSnapshot, gateDirectory, artifactHashes);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            artifactBindingError = exception.Message;
+        }
         RepositoryIdentity after;
         var identityReadFailed = false;
         try
         {
-            after = await repository.ReadAsync(CancellationToken.None).ConfigureAwait(false);
+            after = await _repository.ReadAsync(CancellationToken.None).ConfigureAwait(false);
         }
         catch
         {
@@ -85,7 +125,9 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
         NormalizedEvidence normalized;
         try
         {
-            normalized = request.Normalize(execution);
+            normalized = artifactBindingError is null
+                ? EvidenceAdapterDispatcher.Normalize(request, execution, evidenceSnapshot)
+                : NormalizedEvidence.Error($"Bound evidence artifact could not be persisted: {artifactBindingError}");
         }
         catch (OperationCanceledException)
         {
@@ -99,10 +141,14 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
             normalized = NormalizedEvidence.Error("Repository identity could not be read after evaluation.");
         else if (sourceChanged)
             normalized = NormalizedEvidence.Error("Repository source/index/status identity changed during evaluation.");
+        else if (ValidateCapabilityBinding(request) is not null)
+            normalized = NormalizedEvidence.Error("The bound executable bytes changed during gate execution.");
         else if (execution.TimedOut)
             normalized = NormalizedEvidence.Incomplete("Tool timed out before complete evidence was produced.");
         else if (execution.Cancelled)
             normalized = NormalizedEvidence.Incomplete("Tool execution was cancelled before complete evidence was produced.");
+        else if (execution.ExitCode is null)
+            normalized = NormalizedEvidence.Error("Tool process did not start or did not reach a valid exit.");
         else if (normalized.Outcome == GateOutcome.Pass && execution.ExitCode != 0)
             normalized = NormalizedEvidence.Error("PASS evidence requires an observed zero process exit.");
         else if (normalized.Outcome == GateOutcome.Pass &&
@@ -156,7 +202,7 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
                 request.Invocation.WorkingDirectory,
                 Environment = request.Invocation.Environment ?? new Dictionary<string, string>(),
                 request.Scope,
-                request.CapabilityIdentity,
+                request.Capability.ExecutableIdentity,
                 request.ConfigurationIdentity
             }, ContractJson),
             execution.StartedAt, execution.CompletedAt, execution.ExitCode,
@@ -172,11 +218,11 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
         return new GateRunResult(
             normalized.Outcome, normalized.Reason, normalized.Fixture, normalized.ProductionCapable,
             normalized.Limitations, sourceChanged, request.Invocation, execution, before, after,
-            request.Policy.PolicyIdentity, request.CapabilityIdentity, request.ConfigurationIdentity, request.Scope,
+            request.Policy.PolicyIdentity, request.Capability.ExecutableIdentity ?? "unavailable", request.ConfigurationIdentity, request.Scope,
             artifactHashes, receiptPath, normalized.NotApplicableRationale);
     }
 
-    private static async Task<IReadOnlyDictionary<string, string>> WriteArtifactsAsync(
+    private static async Task<Dictionary<string, string>> WriteArtifactsAsync(
         string directory,
         CommandResult result,
         CancellationToken cancellationToken)
@@ -198,8 +244,12 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
         return artifacts;
     }
 
-    private static void ValidateRequest(GateRequest request)
+    private void ValidateRequest(GateRequest request)
     {
+        if (!string.Equals(Path.GetFullPath(request.Invocation.WorkingDirectory), _trustedWorkingDirectory,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            throw new ArgumentException("The invocation working directory is not the parent-frozen host root.");
+
         if (string.IsNullOrWhiteSpace(request.GateId) ||
             string.IsNullOrWhiteSpace(request.Scope) ||
             request.Timeout <= TimeSpan.Zero ||
@@ -221,6 +271,57 @@ public sealed class GateRunner(ICommandExecutor executor, IRepositoryIdentityRea
         return value;
     }
 
+
+    private static NormalizedEvidence? ValidateCapabilityBinding(GateRequest request)
+    {
+        var expectedTool = request.Adapter switch
+        {
+            EvidenceAdapterKind.DotNet => "dotnet",
+            EvidenceAdapterKind.Crap4CSharp => "crap4csharp",
+            EvidenceAdapterKind.Mutate4CSharp => "mutate4csharp",
+            _ => string.Empty
+        };
+        if (!string.Equals(expectedTool, request.Capability.Tool, StringComparison.Ordinal))
+            return NormalizedEvidence.Error("The selected adapter does not match the detected tool capability.");
+
+        if (!request.Capability.Supported)
+            return NormalizedEvidence.Incomplete(
+                "The selected adapter has no detected supported executable capability.",
+                request.Capability.Fixture,
+                request.Capability.Limitations?.ToArray() ?? []);
+        if (string.IsNullOrWhiteSpace(request.Capability.ExecutablePath) ||
+            !Path.IsPathFullyQualified(request.Capability.ExecutablePath) ||
+            string.IsNullOrWhiteSpace(request.Capability.ExecutableIdentity))
+            return NormalizedEvidence.Error("Detected capability lacks an absolute executable path or byte identity.");
+
+        string expected;
+        string actual;
+        try
+        {
+            expected = Path.GetFullPath(request.Capability.ExecutablePath);
+            actual = Path.GetFullPath(request.Invocation.FileName);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return NormalizedEvidence.Error("The capability or invocation executable path is malformed.");
+        }
+        if (!string.Equals(expected, actual, OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal))
+            return NormalizedEvidence.Error("The invocation executable is not the detected capability executable.");
+
+        try
+        {
+            var identity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(expected)))}";
+            return string.Equals(identity, request.Capability.ExecutableIdentity, StringComparison.Ordinal)
+                ? null
+                : NormalizedEvidence.Error("The detected executable bytes do not match the bound capability identity.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return NormalizedEvidence.Error("The bound capability executable cannot be read.");
+        }
+    }
     private static string OutcomeText(GateOutcome outcome) => outcome switch
     {
         GateOutcome.Pass => "PASS",

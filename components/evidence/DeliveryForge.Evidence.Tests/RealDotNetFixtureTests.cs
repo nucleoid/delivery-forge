@@ -1,5 +1,5 @@
+using System.Security.Cryptography;
 using System.Xml.Linq;
-using DeliveryForge.Evidence.Adapters;
 
 namespace DeliveryForge.Evidence.Tests;
 
@@ -30,14 +30,19 @@ public sealed class RealDotNetFixtureTests
         var redHead = await GitAsync(executor, temp.Path, ["rev-parse", "HEAD"]);
 
         var dotnet = ResolveExecutable("DELIVERY_FORGE_DOTNET_HOST", "dotnet");
+        var capability = new ToolCapability(
+            "dotnet", "10.0.401", "trx-v1", true, true, [], dotnet,
+            $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(dotnet)))}", ["test"]);
         var project = System.IO.Path.Combine(temp.Path, "Subject.Tests", "Subject.Tests.csproj");
         var redTrx = System.IO.Path.Combine(temp.Path, "red.trx");
-        var redRun = await RunAsync(executor, dotnet, temp.Path,
+        var redResult = await RunGateAsync(executor, capability, temp.Path, "red-gate",
             ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={redTrx}"]);
-        Assert.NotEqual(0, redRun.ExitCode);
+        Assert.NotEqual(0, redResult.Execution.ExitCode);
+        Assert.Equal(GateOutcome.Fail, redResult.Outcome);
+        Assert.True(File.Exists(redResult.ReceiptPath));
         Assert.True(
             Directory.EnumerateFiles(temp.Path, "*.trx", SearchOption.AllDirectories).Any(),
-            redRun.StandardOutput + Environment.NewLine + redRun.StandardError);
+            redResult.Execution.StandardOutput + Environment.NewLine + redResult.Execution.StandardError);
         Assert.Equal((1, 1, 0, 1), ReadCounts(redTrx));
 
         await File.WriteAllTextAsync(subject, green, TestContext.Current.CancellationToken);
@@ -50,24 +55,42 @@ public sealed class RealDotNetFixtureTests
         var greenTrx = System.IO.Path.Combine(temp.Path, "green.trx");
         var assembly = System.IO.Path.Combine(temp.Path, "Subject", "bin", "Release", "net10.0", "Subject.dll");
         Assert.False(File.Exists(assembly));
-        var greenRun = await RunAsync(executor, dotnet, temp.Path,
+        var greenResult = await RunGateAsync(executor, capability, temp.Path, "green-gate",
             ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={greenTrx}"]);
-        Assert.Equal(0, greenRun.ExitCode);
+        Assert.Equal(0, greenResult.Execution.ExitCode);
         Assert.True(File.Exists(assembly));
         Assert.Equal((1, 1, 1, 0), ReadCounts(greenTrx));
-        Assert.Equal(GateOutcome.Pass, new DotNetAdapter().Normalize(
-            new DotNetRunEvidence("10.0.401", 0, true, 1, 1, 1, 0, 0, true,
-                ["Subject.Tests"], ["Subject.Tests"], false)).Outcome);
+        Assert.Equal(GateOutcome.Incomplete, greenResult.Outcome);
+        Assert.Contains("advisory", greenResult.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(greenResult.ReceiptPath));
+        Assert.Contains("evidence.trx", greenResult.ArtifactHashes.Keys);
+        Assert.StartsWith("sha256:", greenResult.ArtifactHashes["evidence.trx"]);
 
         var warmTrx = System.IO.Path.Combine(temp.Path, "warm.trx");
-        var warmRun = await RunAsync(executor, dotnet, temp.Path,
+        var warmResult = await RunGateAsync(executor, capability, temp.Path, "warm-gate",
             ["test", project, "--configuration", "Release", "--no-restore", "--no-build",
                 "--logger", $"trx;LogFileName={warmTrx}"]);
-        Assert.Equal(0, warmRun.ExitCode);
+        Assert.Equal(0, warmResult.Execution.ExitCode);
         Assert.Equal((1, 1, 1, 0), ReadCounts(warmTrx));
-        Assert.Equal(GateOutcome.Incomplete, new DotNetAdapter().Normalize(
-            new DotNetRunEvidence("10.0.401", 0, false, 1, 1, 1, 0, 0, true,
-                ["Subject.Tests"], ["Subject.Tests"], false)).Outcome);
+        Assert.Equal(GateOutcome.Incomplete, warmResult.Outcome);
+        Assert.Contains("compiler", warmResult.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static Task<GateRunResult> RunGateAsync(
+        ProcessCommandExecutor executor,
+        ToolCapability capability,
+        string repository,
+        string outputName,
+        IReadOnlyList<string> arguments)
+    {
+        var identity = TestEvidence.Repository();
+        return new GateRunner(executor, new SequenceRepositoryIdentityReader(identity, identity), repository).RunAsync(
+            new GateRequest(
+                "test", TestEvidence.ResolvedPolicy(), capability, EvidenceAdapterKind.DotNet,
+                TestEvidence.Identity('6'), identity,
+                new CommandInvocation(capability.ExecutablePath!, arguments, repository),
+                "fixture", TimeSpan.FromSeconds(90), System.IO.Path.Combine(repository, outputName)),
+            TestContext.Current.CancellationToken);
     }
 
     private static async Task<CommandResult> GitAsync(

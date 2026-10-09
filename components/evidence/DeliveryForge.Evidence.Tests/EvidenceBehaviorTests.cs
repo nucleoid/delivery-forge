@@ -1,4 +1,6 @@
 using System.Text;
+using System.Text.Json;
+using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Evidence.Adapters;
 
 namespace DeliveryForge.Evidence.Tests;
@@ -24,8 +26,55 @@ public sealed class EvidenceBehaviorTests
     {
         var candidate = TestEvidence.PolicyCandidate(fixture: true);
         var error = Assert.Throws<EvidencePolicyException>(() => EvidencePolicy.Resolve(candidate,
+
             new PolicyAuthority(PolicyAuthorityKind.ProtectedGitBase, candidate.SourceRevision, candidate.ContentIdentity)));
         Assert.Contains("fixture", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+    [Fact]
+    public async Task Protected_policy_is_read_from_exact_ancestor_base_bytes()
+    {
+        var policyNode = JsonSerializer.SerializeToNode(new
+        {
+            schemaVersion = "1.0.0",
+            kind = "evidence-policy",
+            identity = TestEvidence.Identity('0'),
+            policyId = "fixture",
+            requiredGates = new[] { "build", "test" },
+            authorizedCeiling = "implement",
+            requireIndependentReview = true,
+            allowedNotApplicable = Array.Empty<string>(),
+            createdAt = "2026-10-09T00:00:00Z"
+        })!.AsObject();
+        var identity = CanonicalJson.ComputeIdentity(JsonSerializer.SerializeToUtf8Bytes(policyNode));
+        policyNode["identity"] = identity;
+        var policyJson = policyNode.ToJsonString();
+        var resolver = new ProtectedGitPolicyResolver(
+            new QueueCommandExecutor(
+                TestEvidence.CommandResult() with { StandardOutput = TestEvidence.Commit('a') + Environment.NewLine },
+                TestEvidence.CommandResult() with { StandardOutput = TestEvidence.Commit('b') + Environment.NewLine },
+                TestEvidence.CommandResult(),
+                TestEvidence.CommandResult() with { StandardOutput = policyJson }),
+            System.IO.Path.GetTempPath(),
+            TestEvidence.Commit('a'));
+
+        var policy = await resolver.ResolveAsync(
+            "config/evidence-policy.json", TestContext.Current.CancellationToken);
+
+        Assert.Equal(identity, policy.PolicyIdentity);
+        Assert.Equal(TestEvidence.Commit('a'), policy.SourceRevision);
+        Assert.Equal(["build", "test"], policy.RequiredGates);
+    }
+
+    [Fact]
+    public async Task Protected_policy_rejects_worker_escape_path_before_git()
+    {
+        var resolver = new ProtectedGitPolicyResolver(
+            new QueueCommandExecutor(),
+            System.IO.Path.GetTempPath(),
+            TestEvidence.Commit('a'));
+
+        await Assert.ThrowsAsync<EvidencePolicyException>(() => resolver.ResolveAsync(
+            "../worker-policy.json", TestContext.Current.CancellationToken));
     }
 
     [Fact]

@@ -1,4 +1,5 @@
 using DeliveryForge.Evidence.Adapters;
+using System.Security.Cryptography;
 using System.Text.Json;
 
 namespace DeliveryForge.Evidence.Tests;
@@ -64,11 +65,19 @@ internal static class TestEvidence
     public static CommandResult CommandResult() => new(
         0, "stdout", "stderr", false, false,
         DateTimeOffset.Parse("2026-10-09T00:00:00Z"), DateTimeOffset.Parse("2026-10-09T00:00:01Z"));
-    public static GateRequest GateRequest(string output) => new(
-        "test", ResolvedPolicy(), Identity('5'), Identity('6'), Repository(),
-        new CommandInvocation("dotnet", ["test", "DeliveryForge.slnx", "--no-restore"], "/repo"),
-        "full", TimeSpan.FromSeconds(30), output,
-        _ => NormalizedEvidence.Pass("complete test evidence", true));
+    public static GateRequest GateRequest(string output)
+    {
+        var executable = System.IO.Path.Combine(output, "fixture-dotnet");
+        File.WriteAllText(executable, "fixture executable");
+        var identity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(executable)))}";
+        return new GateRequest(
+            "test", ResolvedPolicy(),
+            new ToolCapability("dotnet", "10.0.401", "trx-v1", true, true, [], executable, identity, ["test"]),
+            EvidenceAdapterKind.DotNet,
+            Identity('6'), Repository(),
+            new CommandInvocation(executable, ["test", "DeliveryForge.Tests.csproj", "--no-restore"], output),
+            "full", TimeSpan.FromSeconds(30), output);
+    }
 }
 
 internal sealed class QueueCommandExecutor(params CommandResult[] results) : ICommandExecutor
@@ -78,6 +87,16 @@ internal sealed class QueueCommandExecutor(params CommandResult[] results) : ICo
     public Task<CommandResult> ExecuteAsync(
         CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken) =>
         Task.FromResult(_results.Dequeue());
+}
+
+internal sealed class MutatingCommandExecutor(string executable, CommandResult result) : ICommandExecutor
+{
+    public Task<CommandResult> ExecuteAsync(
+        CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        File.AppendAllText(executable, "changed");
+        return Task.FromResult(result);
+    }
 }
 
 internal sealed class StubCommandExecutor(CommandResult result) : ICommandExecutor

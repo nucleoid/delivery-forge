@@ -37,6 +37,11 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
         CancellationToken cancellationToken = default)
     {
         var resolution = Resolve(probe);
+        if (probe.Source == ExecutableSource.RepositoryToolManifest)
+            return Unsupported(
+                probe,
+                "Repository tool-manifest execution is non-production until the exact entry package bytes are resolved and hashed.");
+
         if (resolution is null)
             return Unsupported(probe, "Executable was not found in the trusted configured source.");
 

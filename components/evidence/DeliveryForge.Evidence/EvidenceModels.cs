@@ -1,5 +1,12 @@
 namespace DeliveryForge.Evidence;
 
+public enum EvidenceAdapterKind
+{
+    DotNet,
+    Crap4CSharp,
+    Mutate4CSharp
+}
+
 public enum GateOutcome
 {
     Pass,
@@ -62,14 +69,14 @@ public sealed record CommandResult(
 public sealed record GateRequest(
     string GateId,
     ResolvedEvidencePolicy Policy,
-    string CapabilityIdentity,
+    ToolCapability Capability,
+    EvidenceAdapterKind Adapter,
     string ConfigurationIdentity,
     RepositoryIdentity ExpectedRepository,
     CommandInvocation Invocation,
     string Scope,
     TimeSpan Timeout,
-    string OutputDirectory,
-    Func<CommandResult, NormalizedEvidence> Normalize);
+    string OutputDirectory);
 
 public sealed record GateRunResult(
     GateOutcome Outcome,
