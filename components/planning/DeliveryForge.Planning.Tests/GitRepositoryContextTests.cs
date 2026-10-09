@@ -132,6 +132,19 @@ public sealed class GitRepositoryContextTests : IDisposable
     }
 
     [Fact]
+    public async Task Missing_exact_branch_reports_the_exact_branch_failure_before_revision_resolution()
+    {
+        InitializeRepository();
+        Run("git", "branch -M main");
+        var reader = new GitRepositoryContextReader();
+
+        var error = await Assert.ThrowsAsync<PlanningException>(() =>
+            reader.ReadAsync(_root, "refs/heads/does-not-exist", TestContext.Current.CancellationToken));
+
+        Assert.Contains("exact branch", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Real_reader_reconciles_an_unchanged_detached_branch_and_detects_branch_drift()
     {
         InitializeRepository();
