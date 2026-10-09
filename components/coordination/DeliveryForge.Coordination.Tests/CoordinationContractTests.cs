@@ -669,7 +669,9 @@ public sealed class CoordinationContractTests
         Assert.True(cleaned.Snapshot.Phase == CoordinationLifecyclePhase.Closed,
             $"phase={cleaned.Snapshot.Phase}; reason={cleaned.Snapshot.Reason}; states={string.Join(',', cleaned.Leases.Select(item => item.State))}");
         Assert.Null(cleaned.Continuation);
-        Assert.True(transport.ReleaseRequests.Count >= 2);
+        var release = Assert.Single(transport.ReleaseRequests);
+        Assert.Equal(uncertain.ReleaseProgress.Single().RequestId, release.RequestId);
+        Assert.Equal(uncertain.ReleaseProgress.Single().Generation, cleaned.Leases.Single().Generation);
     }
 
     public static TheoryData<InspectTransportResult> NotOwnedInspections => new()
@@ -678,6 +680,38 @@ public sealed class CoordinationContractTests
         InspectTransportResult.HeldByOther("replacement", "99"),
         InspectTransportResult.HeldByCaller("different-lease", "99", ServerNow, ServerNow.AddMinutes(5)),
     };
+
+    public static TheoryData<InspectTransportResult> MalformedLeaseLostInspections => new()
+    {
+        new InspectTransportResult(TransportOutcome.Inspected, true, true, null, "1", ServerNow, ServerNow.AddMinutes(5), "missing lease"),
+        new InspectTransportResult(TransportOutcome.Inspected, true, true, "", "1", ServerNow, ServerNow.AddMinutes(5), "empty lease"),
+        new InspectTransportResult(TransportOutcome.Inspected, true, true, "lease-a", null, ServerNow, ServerNow.AddMinutes(5), "missing fence"),
+        new InspectTransportResult(TransportOutcome.Inspected, true, true, "lease-a", "01", ServerNow, ServerNow.AddMinutes(5), "bad fence"),
+        new InspectTransportResult(TransportOutcome.Inspected, true, true, "lease-a", "1", null, ServerNow.AddMinutes(5), "missing server time"),
+        new InspectTransportResult(TransportOutcome.Inspected, true, true, "lease-a", "1", ServerNow, null, "missing expiry"),
+        new InspectTransportResult(TransportOutcome.Inspected, false, false, "leaked", null, null, null, "available leaked identity"),
+    };
+
+    [Theory]
+    [MemberData(nameof(MalformedLeaseLostInspections))]
+    public async Task Lease_lost_malformed_inspection_is_not_a_not_owned_proof(InspectTransportResult inspection)
+    {
+        var transport = SingleLeaseTransport();
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.LeaseLost());
+        transport.InspectResults.Enqueue(inspection);
+        var checkpoints = new FixtureCheckpointStore();
+        var adapter = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var acquired = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+
+        var cleanup = await adapter.ReleaseAllAsync(acquired.Authority!, TestContext.Current.CancellationToken);
+
+        Assert.Equal(CoordinationLifecyclePhase.Cleaning, cleanup.Snapshot.Phase);
+        Assert.Equal(LeaseReleaseState.Unknown, cleanup.Leases.Single().State);
+        Assert.NotNull(cleanup.Continuation);
+        Assert.DoesNotContain(checkpoints.Records,
+            record => record.Progress?.AdapterCode == "original-not-owned");
+    }
 
     [Theory]
     [MemberData(nameof(NotOwnedInspections))]
