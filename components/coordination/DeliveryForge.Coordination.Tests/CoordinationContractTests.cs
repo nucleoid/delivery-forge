@@ -308,6 +308,69 @@ public sealed class CoordinationContractTests
         Assert.NotNull(uncertain.ReleaseContinuation);
     }
 
+    [Fact]
+    public async Task Two_logical_renewals_use_fresh_ids_and_require_real_expiry_progress()
+    {
+        var clock = new FakeMonotonicClock("clock");
+        var transport = SingleLeaseTransport();
+        transport.RenewResults.Enqueue(RenewTransportResult.Renewed(
+            ServerNow.AddMinutes(1), ServerNow.AddMinutes(6)));
+        transport.RenewResults.Enqueue(RenewTransportResult.Renewed(
+            ServerNow.AddMinutes(2), ServerNow.AddMinutes(7)));
+        var adapter = await CreateAdapterAsync(transport, clock, new RecordingQuiescenceSource(clock, [true]));
+        var acquired = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+
+        var first = await adapter.RenewAllAsync(acquired.Authority!, TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromSeconds(1));
+        var second = await adapter.RenewAllAsync(first.Authority!, TestContext.Current.CancellationToken);
+
+        Assert.NotEqual(transport.RenewRequests[0].RequestId, transport.RenewRequests[1].RequestId);
+        Assert.True(second.Snapshot.Leases.Single().ExpiresAt > first.Snapshot.Leases.Single().ExpiresAt);
+        Assert.True(second.Snapshot.Leases.Single().SafeDeadline > first.Snapshot.Leases.Single().SafeDeadline);
+        Assert.True(adapter.MayDispatch(second.Authority!));
+    }
+
+    [Fact]
+    public async Task Nonprogressing_renewal_cannot_mint_authority()
+    {
+        var transport = SingleLeaseTransport();
+        transport.RenewResults.Enqueue(RenewTransportResult.Renewed(ServerNow, ServerNow.AddMinutes(5)));
+        var adapter = await CreateAdapterAsync(transport);
+        var acquired = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+
+        var renewal = await adapter.RenewAllAsync(acquired.Authority!, TestContext.Current.CancellationToken);
+
+        Assert.Null(renewal.Authority);
+        Assert.NotNull(renewal.ReleaseContinuation);
+        Assert.False(adapter.MayDispatch(acquired.Authority!));
+    }
+
+    [Theory]
+    [InlineData(250)]
+    [InlineData(400)]
+    public async Task Replayed_acquire_after_delay_is_cleanup_only_and_never_mints_authority(int elapsedSeconds)
+    {
+        var clock = new FakeMonotonicClock("clock");
+        var transport = new RecordingTransport(CoordinationContractFixture.Capabilities());
+        transport.AcquireExceptions.Enqueue(new TimeoutException("committed response lost"));
+        var adapter = await CreateAdapterAsync(transport, clock, new RecordingQuiescenceSource(clock, [true, true]));
+        var uncertain = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        clock.Advance(TimeSpan.FromSeconds(elapsedSeconds));
+        transport.AcquireResults.Enqueue(AcquireTransportResult.Acquired(
+            "lease-a", "1", ServerNow, ServerNow.AddMinutes(5)));
+
+        var reconciled = await adapter.ReconcileAcquireAsync(
+            uncertain.AcquireContinuation!, TestContext.Current.CancellationToken);
+
+        Assert.Equal(transport.AcquireRequests[0].RequestId, transport.AcquireRequests[1].RequestId);
+        Assert.Null(reconciled.Authority);
+        Assert.NotEqual(LeaseOwnership.Held, reconciled.Snapshot.Ownership);
+        Assert.NotNull(reconciled.ReleaseContinuation);
+    }
+
     private static readonly DateTimeOffset ServerNow = new(2026, 10, 9, 0, 0, 0, TimeSpan.Zero);
     private static readonly LeaseOwner Owner = new("principal-1", "run-1");
 
