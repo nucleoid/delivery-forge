@@ -719,6 +719,31 @@ public sealed class ExecutionCoordinatorTests
     }
 
     [Fact]
+    public async Task Distinct_result_directories_cannot_create_two_writers_for_one_worktree()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        using var directories = new TemporaryDirectory();
+        await using var firstProcesses = new ProcessControl();
+        await using var secondProcesses = new ProcessControl();
+        using var first = CreateCoordinator(directories.Path, firstProcesses, "store-one");
+        using var second = CreateCoordinator(directories.Path, secondProcesses, "store-two");
+        var firstPlan = Plan(repository, directories.Path, "run-writer-one") with
+        {
+            ResultDirectory = System.IO.Path.Combine(directories.Path, "result-one")
+        };
+        var secondPlan = Plan(repository, directories.Path, "run-writer-two") with
+        {
+            ResultDirectory = System.IO.Path.Combine(directories.Path, "result-two")
+        };
+
+        await first.PrepareWorkerAsync(firstPlan, cancellationToken);
+
+        await Assert.ThrowsAsync<WorktreeBoundaryException>(() =>
+            second.PrepareWorkerAsync(secondPlan, cancellationToken));
+    }
+
+    [Fact]
     public void Adapter_receipts_must_bind_version_capabilities_and_immutable_request_identity()
     {
         var request = Request("run-bind");

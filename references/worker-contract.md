@@ -32,10 +32,12 @@ authority. Recovery enumerates and hashes immutable records, repairs missing/tor
 blocks corruption, sequence gaps, or cross-run data. The implementation does not claim directory
 metadata fsync durability.
 
-The writer identity file persists across orderly coordinator disposal while its exclusive file
-handle is released. A restarted coordinator may recover only the exact run/token; another run,
-token, or concurrent owner is rejected. Pause and stop prove writer ownership before signaling or
-appending state. Failed preparation abandons its unpublished lock; established runs preserve theirs.
+The writer identity file is anchored to the canonical assigned worktree's Git directory, never to a
+caller-selected per-run result directory. It persists across orderly coordinator disposal while its
+exclusive file handle is released. A restarted coordinator may recover only the exact run/token;
+another run, token, or concurrent owner of that worktree is rejected. Pause and stop prove writer
+ownership before signaling or appending state. Failed preparation abandons its unpublished lock;
+established runs preserve theirs.
 
 ## Fresh observations and scope limits
 

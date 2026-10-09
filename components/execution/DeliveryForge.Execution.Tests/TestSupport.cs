@@ -1,4 +1,6 @@
 using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Text;
 using DeliveryForge.Execution.Host;
 
 namespace DeliveryForge.Execution.Tests;
@@ -86,6 +88,26 @@ internal sealed class GitFixture : IAsyncDisposable
     }
 
     public ValueTask DisposeAsync() { Directory.Dispose(); return ValueTask.CompletedTask; }
+}
+
+internal static class WindowsPathAlias
+{
+    public static string? TryGetShortPath(string path)
+    {
+        if (!OperatingSystem.IsWindows()) return null;
+        var capacity = 512;
+        while (true)
+        {
+            var buffer = new StringBuilder(capacity);
+            var length = GetShortPathName(path, buffer, (uint)buffer.Capacity);
+            if (length == 0) return null;
+            if (length < buffer.Capacity) return buffer.ToString();
+            capacity = checked((int)length + 1);
+        }
+    }
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetShortPathName(string longPath, StringBuilder shortPath, uint shortPathLength);
 }
 
 internal sealed class ProvenTestAgentControl : IAgentControlPort

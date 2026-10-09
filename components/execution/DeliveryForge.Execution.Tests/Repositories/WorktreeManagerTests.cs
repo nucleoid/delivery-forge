@@ -64,24 +64,38 @@ public sealed class WorktreeManagerTests
     }
 
     [Fact]
-    public void Enforces_one_writer_per_result_directory()
+    public async Task Enforces_one_writer_per_worktree()
     {
-        using var directory = new TemporaryDirectory();
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
         var manager = new WorktreeManager();
-        using var writer = manager.AcquireWriter(directory.Path, "run", "writer-one");
-        Assert.Throws<WorktreeBoundaryException>(() => manager.AcquireWriter(directory.Path, "run", "writer-two"));
+        using var writer = manager.AcquireWriter(repository.Path, "run", "writer-one");
+        Assert.Throws<WorktreeBoundaryException>(() => manager.AcquireWriter(repository.Path, "run", "writer-two"));
     }
 
     [Fact]
-    public void Recovers_only_the_exact_durable_writer_identity_after_restart()
+    public async Task Recovers_only_the_exact_durable_writer_identity_after_restart()
     {
-        using var directory = new TemporaryDirectory();
-        var lockPath = System.IO.Path.Combine(directory.Path, "writer.lock");
-        File.WriteAllText(lockPath, "run\ntoken\n");
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
         var manager = new WorktreeManager();
 
-        using (manager.RecoverWriter(directory.Path, "run", "token")) { }
-        File.WriteAllText(lockPath, "run\ntoken\n");
-        Assert.Throws<WorktreeBoundaryException>(() => manager.RecoverWriter(directory.Path, "run", "other"));
+        using (manager.AcquireWriter(repository.Path, "run", "token")) { }
+        using (manager.RecoverWriter(repository.Path, "run", "token")) { }
+        Assert.Throws<WorktreeBoundaryException>(() => manager.RecoverWriter(repository.Path, "run", "other"));
+    }
+
+    [Fact]
+    public async Task Windows_short_path_alias_matches_the_git_reported_worktree_root()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        var shortPath = WindowsPathAlias.TryGetShortPath(repository.Path);
+        if (shortPath is null || string.Equals(shortPath, repository.Path, StringComparison.OrdinalIgnoreCase)) return;
+
+        var revision = await new WorktreeManager().CaptureCommittedRevisionAsync(shortPath, cancellationToken);
+
+        Assert.Equal(repository.Head, revision.HeadCommit);
     }
 }

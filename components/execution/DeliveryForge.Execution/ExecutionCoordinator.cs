@@ -60,7 +60,7 @@ public sealed class ExecutionCoordinator : IDisposable
         if (!observation.IsClean || observation.HeadCommit != request.BaseCommit)
             throw new WorkerEnvelopeException("Preparation requires the exact clean frozen base head and tree.");
 
-        var writer = _worktrees.AcquireWriter(request.ResultDirectory, request.RunId, request.WriterToken);
+        var writer = _worktrees.AcquireWriter(request.Worktree, request.RunId, request.WriterToken);
         try
         {
             var prepared = new PreparedWorkerRecord(request, observation.Snapshot,
@@ -394,7 +394,7 @@ public sealed class ExecutionCoordinator : IDisposable
             return current.WriterToken == request.WriterToken;
         try
         {
-            var recovered = _worktrees.RecoverWriter(request.ResultDirectory, request.RunId, request.WriterToken);
+            var recovered = _worktrees.RecoverWriter(request.Worktree, request.RunId, request.WriterToken);
             if (!_writers.TryAdd(request.RunId, recovered)) recovered.Dispose();
             return true;
         }

@@ -1,5 +1,9 @@
+using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
 
 namespace DeliveryForge.Execution.Git;
 
@@ -44,10 +48,9 @@ public sealed class WorktreeManager
         if (actual != baseCommit) throw new WorktreeBoundaryException("Provisioned worktree does not match the frozen base commit.");
     }
 
-    public WriterLease AcquireWriter(string resultDirectory, string runId, string writerToken)
+    public WriterLease AcquireWriter(string worktree, string runId, string writerToken)
     {
-        Directory.CreateDirectory(resultDirectory);
-        var path = Path.Combine(resultDirectory, "writer.lock");
+        var path = WriterLockPath(worktree);
         try
         {
             var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
@@ -59,13 +62,13 @@ public sealed class WorktreeManager
         }
         catch (IOException exception)
         {
-            throw new WorktreeBoundaryException("A writer already owns this run.", exception);
+            throw new WorktreeBoundaryException("A writer already owns this worktree.", exception);
         }
     }
 
-    public WriterLease RecoverWriter(string resultDirectory, string runId, string writerToken)
+    public WriterLease RecoverWriter(string worktree, string runId, string writerToken)
     {
-        var path = Path.Combine(Path.GetFullPath(resultDirectory), "writer.lock");
+        var path = WriterLockPath(worktree);
         FileStream? stream = null;
         try
         {
@@ -205,9 +208,77 @@ public sealed class WorktreeManager
     {
         var full = Path.GetFullPath(path);
         if (!Directory.Exists(full)) return full;
+        if (OperatingSystem.IsWindows()) return WindowsFinalPath(full);
         var info = new DirectoryInfo(full);
         return Path.GetFullPath(info.ResolveLinkTarget(returnFinalTarget: true)?.FullName ?? info.FullName);
     }
+
+    private static string WriterLockPath(string worktree)
+    {
+        var marker = Path.Combine(Path.GetFullPath(worktree), ".git");
+        string gitDirectory;
+        if (Directory.Exists(marker))
+        {
+            gitDirectory = marker;
+        }
+        else if (File.Exists(marker))
+        {
+            var lines = File.ReadAllLines(marker);
+            const string prefix = "gitdir:";
+            if (lines.Length != 1 || !lines[0].StartsWith(prefix, StringComparison.OrdinalIgnoreCase) ||
+                string.IsNullOrWhiteSpace(lines[0][prefix.Length..]))
+                throw new WorktreeBoundaryException("Assigned worktree has invalid Git metadata.");
+            gitDirectory = Path.GetFullPath(lines[0][prefix.Length..].Trim(), Path.GetDirectoryName(marker)!);
+        }
+        else
+        {
+            throw new WorktreeBoundaryException("Assigned worktree has no Git metadata.");
+        }
+
+        if (!Directory.Exists(gitDirectory))
+            throw new WorktreeBoundaryException("Assigned worktree Git directory does not exist.");
+        return Path.Combine(CanonicalPath(gitDirectory), "delivery-forge-writer.lock");
+    }
+
+    private static string WindowsFinalPath(string path)
+    {
+        const uint fileFlagBackupSemantics = 0x02000000;
+        using var handle = CreateFile(path, 0, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero,
+            FileMode.Open, fileFlagBackupSemantics, IntPtr.Zero);
+        if (handle.IsInvalid)
+            throw new WorktreeBoundaryException("Could not resolve the assigned Windows directory identity.",
+                new Win32Exception(Marshal.GetLastWin32Error()));
+
+        var capacity = 512;
+        while (true)
+        {
+            var buffer = new StringBuilder(capacity);
+            var length = GetFinalPathNameByHandle(handle, buffer, (uint)buffer.Capacity, 0);
+            if (length == 0)
+                throw new WorktreeBoundaryException("Could not resolve the assigned Windows directory identity.",
+                    new Win32Exception(Marshal.GetLastWin32Error()));
+            if (length < buffer.Capacity)
+            {
+                var resolved = buffer.ToString();
+                if (resolved.StartsWith(@"\\?\UNC\", StringComparison.OrdinalIgnoreCase))
+                    resolved = @"\\" + resolved[8..];
+                else if (resolved.StartsWith(@"\\?\", StringComparison.OrdinalIgnoreCase))
+                    resolved = resolved[4..];
+                return Path.GetFullPath(resolved);
+            }
+
+            capacity = checked((int)length + 1);
+        }
+    }
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle CreateFile(
+        string fileName, uint desiredAccess, FileShare shareMode, IntPtr securityAttributes,
+        FileMode creationDisposition, uint flagsAndAttributes, IntPtr templateFile);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint GetFinalPathNameByHandle(
+        SafeFileHandle file, StringBuilder filePath, uint filePathLength, uint flags);
 
     private static void RejectSymlinkAncestors(string path)
     {
