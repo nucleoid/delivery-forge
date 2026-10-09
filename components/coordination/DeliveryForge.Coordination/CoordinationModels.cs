@@ -9,8 +9,10 @@ public enum CoordinationOperation { Acquire, Renew, Inspect, Release }
 public enum CoordinationAvailability { Available, Unavailable, Incomplete }
 public enum LeaseOwnership { Held, Contended, Uncertain, Lost, Released }
 public enum TransportOutcome { Acquired, Renewed, Inspected, Released, Contended, LeaseLost, Uncertain }
-public enum LeaseReleaseState { Pending, Released, Unknown }
+public enum LeaseReleaseState { Pending, Released, NotOwned, Unknown }
 public enum InspectionState { Available, HeldByCaller, HeldByOther }
+public enum CoordinationLifecyclePhase { Acquiring, Held, Renewing, Cleaning, Closed }
+public enum CoordinationIntentKind { Acquire, Renew, Inspect, Release }
 
 public sealed record CoordinationCapabilities(
     string ContractVersion,
@@ -168,17 +170,24 @@ public sealed class LeaseEvidence
 
 public sealed class LeaseSnapshot
 {
-    internal LeaseSnapshot(LeaseOwner owner, IEnumerable<LeaseEvidence> leases, LeaseOwnership ownership, string reason)
+    internal LeaseSnapshot(
+        LeaseOwner owner,
+        IEnumerable<LeaseEvidence> leases,
+        LeaseOwnership ownership,
+        CoordinationLifecyclePhase phase,
+        string reason)
     {
         Owner = owner;
         Leases = new ReadOnlyCollection<LeaseEvidence>(leases.ToArray());
         Ownership = ownership;
+        Phase = phase;
         Reason = reason;
     }
 
     public LeaseOwner Owner { get; }
     public IReadOnlyList<LeaseEvidence> Leases { get; }
     public LeaseOwnership Ownership { get; }
+    public CoordinationLifecyclePhase Phase { get; }
     public string Reason { get; }
 }
 
@@ -222,6 +231,47 @@ public sealed record ReleaseResult(
     IReadOnlyList<QuiescenceEvidence> QuiescenceEvidence);
 
 public sealed record CoordinationInspection(InspectionState State, LeaseEvidence? OwnedLease, string Reason);
+
+public sealed record CheckpointLeaseIdentity(
+    CoordinationResource Resource,
+    LeaseOwner Owner,
+    string LeaseId,
+    string FencingToken,
+    string Generation,
+    DateTimeOffset ServerTime,
+    DateTimeOffset ExpiresAt,
+    TimeSpan SafeDeadline,
+    TimeSpan RenewAt);
+
+public sealed record PreparedCoordinationIntent(
+    string LifecycleId,
+    long OperationSequence,
+    CoordinationIntentKind Kind,
+    CoordinationResource Resource,
+    LeaseOwner Owner,
+    string RequestId,
+    TimeSpan FirstSendMonotonic,
+    string ClockDomainId,
+    TimeSpan Ttl,
+    CheckpointLeaseIdentity? PreviousLease);
+
+public sealed record CoordinationIntentProgress(
+    string LifecycleId,
+    long OperationSequence,
+    string AdapterCode,
+    CheckpointLeaseIdentity? Lease);
+
+public sealed record CoordinationCheckpointRecord(
+    PreparedCoordinationIntent? Prepared,
+    CoordinationIntentProgress? Progress);
+
+public interface ICoordinationCheckpointStore
+{
+    Task AppendPreparedAsync(PreparedCoordinationIntent intent, CancellationToken cancellationToken = default);
+    Task AppendProgressAsync(CoordinationIntentProgress progress, CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<CoordinationCheckpointRecord>> ReadLifecycleAsync(
+        string lifecycleId, CancellationToken cancellationToken = default);
+}
 
 public sealed record QuiescenceSourceBinding(
     string IssuerId,
