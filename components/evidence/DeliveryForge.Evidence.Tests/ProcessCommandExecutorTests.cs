@@ -12,6 +12,7 @@ public sealed class ProcessCommandExecutorTests
         using var temp = new TempDirectory();
         var request = LongRunningRequest(temp.Path);
         Process? killedProcess = null;
+        Process? observedProcess = null;
         var executor = new ProcessCommandExecutor(
             killTree: process =>
             {
@@ -22,7 +23,8 @@ public sealed class ProcessCommandExecutorTests
             },
             hasExited: process =>
             {
-                Assert.Same(killedProcess, process);
+                observedProcess ??= process;
+                Assert.Same(observedProcess, process);
                 return process.HasExited;
             },
             waitTimeout: TimeSpan.FromMilliseconds(250));
@@ -36,6 +38,7 @@ public sealed class ProcessCommandExecutorTests
 
         Assert.True(result.Execution.TimedOut);
         Assert.False(result.Execution.Cancelled);
+        Assert.Same(killedProcess, observedProcess);
         Assert.False(result.Execution.OwnedProcessQuiescent);
         Assert.Equal(GateOutcome.Error, result.Outcome);
         Assert.Contains("quiescent", result.Reason, StringComparison.OrdinalIgnoreCase);
@@ -108,8 +111,8 @@ public sealed class ProcessCommandExecutorTests
     {
         var request = TestEvidence.GateRequest(output);
         var (fileName, arguments) = OperatingSystem.IsWindows()
-            ? (Environment.GetEnvironmentVariable("ComSpec")!, new[] { "/d", "/s", "/c", "ping -n 31 127.0.0.1 > nul" })
-            : ("/bin/sh", new[] { "-c", "sleep 30" });
+            ? (Environment.GetEnvironmentVariable("ComSpec")!, new[] { "/d", "/s", "/c", "for /L %i in (1,1,2147483647) do @rem" })
+            : ("/bin/sh", new[] { "-c", "exec sleep 30" });
         var executableIdentity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(fileName)))}";
         var capability = ToolCapability.FromDetection(
             request.Capability.Tool,
