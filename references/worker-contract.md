@@ -42,8 +42,12 @@ appending state. Failed preparation abandons its unpublished lock; established r
 Pause checkpoints and resume observations re-evaluate issue-5-owned request identity, plan
 identity, base commit, authorization ceiling, declared required artifact paths, exact Git
 head/tree/status/files, assigned worktree, writer ownership, registered processes, and accepted
-adapter activity. The fact source is a port so a caller can supply current owned facts; a mismatch
-blocks resume. The base must remain an ancestor of the observed head.
+adapter activity. Resume additionally requires exactly one evidenced `Supported` Resume capability
+in the accepted receipt and a fresh adapter result bound to the same adapter/version, run/request,
+opaque runtime run/task identities, and Resume action. The result must freshly observe that bound
+activity as live before execution resumes. Unsupported, missing, stale, or mismatched evidence
+returns `INCOMPLETE`/blocked. The fact source is a port so a caller can supply current owned facts;
+a mismatch blocks resume. The base must remain an ancestor of the observed head.
 
 External dependency integration, lease state, and later authorization revocation are owned by
 later coordination slices (#6 and #9–#11). The issue-5 core records that limitation and does not
@@ -58,9 +62,18 @@ blocks completion. Pause/stop use finite deadlines and preserve every outcome.
 
 An accepted adapter run is independent activity, even when no local task process is registered.
 Pause/stop call `IAgentControlPort` with the bound adapter/version/run/request and opaque runtime
-identities. Only capability-supported control returning `Quiescent` with an evidence reference can
-establish adapter quiescence. Unsupported, unknown, live, or unevidenced activity records
-`blocked-quiescence`; an empty local process list never proves an accepted adapter idle.
+identities. The accepted receipt must contain exactly one evidenced `Supported` entry for the exact
+Pause or Stop action, and the result must echo every binding identity and that action. Only such a
+bound result returning `Quiescent` with an evidence reference can establish adapter quiescence.
+Unsupported, unknown, live, mismatched, or unevidenced activity records `blocked-quiescence`; an
+empty local process list never proves an accepted adapter idle. A prepared run without an accepted
+receipt may have dispatch in flight, so stop records unknown remote state rather than quiescence.
+
+Once local or adapter control may have produced side effects, process, adapter, cancellation,
+worktree, fact, artifact, and ancestry failures are converted to an append-only
+`blocked-quiescence` record using a non-cancelled persistence attempt. The record retains every
+control outcome collected before the failure; inability to append remains an explicit storage
+failure rather than a false quiescence claim.
 
 Linux and Windows local process control are targeted. macOS is unclaimed. Exact local process
 control is cooperative safety, not a security sandbox; daemonized or inaccessible activity remains
@@ -70,6 +83,8 @@ unknown and blocks.
 
 `LOCAL_COMPLETE` requires a capability-proven completion receipt, confirmed writer ownership,
 clean exact worktree/head/tree, base ancestry, allow-list compliance, and no live/unknown registered
-process. Cleanup additionally requires fresh clean boundary/artifact/ownership/process facts and
+process. The completion check also inspects run-bound processes still owned by the in-memory process
+controller, closing the interval in which process launch succeeded but durable registration failed.
+Cleanup additionally requires fresh clean boundary/artifact/ownership/process facts and
 separate parent authorization. Ambiguous worktrees, user files, unsupported controls, or unknown
 activity are preserved, never force-removed.

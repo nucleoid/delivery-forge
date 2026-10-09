@@ -74,8 +74,28 @@ internal sealed class ProvenTestAgentControl : IAgentControlPort
         AgentControlAction action,
         TimeSpan deadline,
         CancellationToken cancellationToken = default) =>
-        Task.FromResult(new AgentControlResult(action, AgentActivityState.Quiescent, true,
+        Task.FromResult(new AgentControlResult(binding, action,
+            action == AgentControlAction.Resume ? AgentActivityState.Live : AgentActivityState.Quiescent, true,
             $"test-proof:{binding.AdapterId}:{binding.RuntimeTaskIdentity}:{action}", ""));
+}
+
+internal sealed class FixedTestAgentControl(
+    Func<AgentRunBinding, AgentControlAction, AgentControlResult> resultFactory) : IAgentControlPort
+{
+    public Task<AgentControlResult> ControlAsync(
+        AgentRunBinding binding,
+        AgentControlAction action,
+        TimeSpan deadline,
+        CancellationToken cancellationToken = default) => Task.FromResult(resultFactory(binding, action));
+}
+
+internal sealed class ThrowingExecutionFactSource : IExecutionFactSource
+{
+    public Task<ExecutionOwnedFacts> ObserveAsync(
+        AgentRequest request,
+        DeliveryForge.Execution.Git.WorktreeObservation worktree,
+        CancellationToken cancellationToken = default) =>
+        throw new WorkerEnvelopeException("fact observation failed after control");
 }
 
 internal sealed class MutableExecutionFactSource : IExecutionFactSource

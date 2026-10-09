@@ -179,7 +179,7 @@ public sealed class ExecutionCoordinatorTests
         await using var processes = new ProcessControl();
         using var coordinator = CreateCoordinator(directories.Path, processes);
         var (request, _) = await coordinator.PrepareWorkerAsync(Plan(repository, directories.Path, "run-stop"), cancellationToken);
-        var accepted = Accepted(request);
+        var accepted = AcceptedWithControls(request);
         await coordinator.AcceptAsync(accepted, cancellationToken);
         var stopped = await coordinator.StopAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
         var revision = await repository.RevisionAsync(cancellationToken);
@@ -198,7 +198,7 @@ public sealed class ExecutionCoordinatorTests
         await using var processes = new ProcessControl();
         using var coordinator = CreateCoordinator(directories.Path, processes);
         var (request, _) = await coordinator.PrepareWorkerAsync(Plan(repository, directories.Path, "run-resume"), cancellationToken);
-        await coordinator.AcceptAsync(Accepted(request), cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
         await coordinator.PauseAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
         await repository.CommitAsync("tracked.txt", "moved", cancellationToken);
 
@@ -218,7 +218,7 @@ public sealed class ExecutionCoordinatorTests
         await using var processes = new ProcessControl();
         using var coordinator = CreateCoordinator(directories.Path, processes);
         var (request, _) = await coordinator.PrepareWorkerAsync(Plan(repository, directories.Path, "run-resume-positive"), cancellationToken);
-        await coordinator.AcceptAsync(Accepted(request), cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
 
         var paused = await coordinator.PauseAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
         var resumed = await coordinator.ResumeAsync(request.RunId, cancellationToken);
@@ -242,7 +242,7 @@ public sealed class ExecutionCoordinatorTests
             var (request, _) = await original.PrepareWorkerAsync(
                 Plan(repository, directories.Path, "run-orderly-restart"), cancellationToken);
             runId = request.RunId;
-            await original.AcceptAsync(Accepted(request), cancellationToken);
+            await original.AcceptAsync(AcceptedWithControls(request), cancellationToken);
             await original.PauseAsync(runId, TimeSpan.FromSeconds(1), cancellationToken);
         }
 
@@ -286,12 +286,192 @@ public sealed class ExecutionCoordinatorTests
         using var coordinator = CreateCoordinator(directories.Path, processes, controlled: false);
         var (request, _) = await coordinator.PrepareWorkerAsync(
             Plan(repository, directories.Path, "run-uncontrolled-adapter"), cancellationToken);
-        await coordinator.AcceptAsync(Accepted(request), cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
 
         var paused = await coordinator.PauseAsync(request.RunId, TimeSpan.FromMilliseconds(50), cancellationToken);
 
         Assert.False(paused.Quiescent);
         Assert.Equal("blocked-quiescence", paused.Record.Kind);
+    }
+
+    [Fact]
+    public async Task Pause_requires_supported_capability_evidence_from_the_accepted_receipt()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        using var directories = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        using var coordinator = CreateCoordinator(directories.Path, processes);
+        var (request, _) = await coordinator.PrepareWorkerAsync(
+            Plan(repository, directories.Path, "run-pause-capability"), cancellationToken);
+        await coordinator.AcceptAsync(Accepted(request), cancellationToken);
+
+        var paused = await coordinator.PauseAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
+
+        Assert.False(paused.Quiescent);
+        Assert.Equal("blocked-quiescence", paused.Record.Kind);
+    }
+
+    [Fact]
+    public async Task Mismatched_control_action_cannot_prove_adapter_quiescence()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        using var directories = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        var port = new FixedTestAgentControl((binding, _) => new AgentControlResult(
+            binding, AgentControlAction.Stop, AgentActivityState.Quiescent, true, "wrong-action-proof", ""));
+        using var coordinator = new ExecutionCoordinator(
+            new RunStore(System.IO.Path.Combine(directories.Path, "store")), new WorktreeManager(), processes, port);
+        var (request, _) = await coordinator.PrepareWorkerAsync(
+            Plan(repository, directories.Path, "run-mismatched-action"), cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
+
+        var paused = await coordinator.PauseAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
+
+        Assert.False(paused.Quiescent);
+        Assert.Equal("blocked-quiescence", paused.Record.Kind);
+    }
+
+    [Fact]
+    public async Task Control_result_for_another_runtime_identity_cannot_prove_quiescence()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        using var directories = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        var port = new FixedTestAgentControl((binding, action) => new AgentControlResult(
+            binding with { RuntimeTaskIdentity = "another-task" }, action,
+            AgentActivityState.Quiescent, true, "wrong-runtime-proof", ""));
+        using var coordinator = new ExecutionCoordinator(
+            new RunStore(System.IO.Path.Combine(directories.Path, "store")), new WorktreeManager(), processes, port);
+        var (request, _) = await coordinator.PrepareWorkerAsync(
+            Plan(repository, directories.Path, "run-mismatched-binding"), cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
+
+        var stopped = await coordinator.StopAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
+
+        Assert.False(stopped.Quiescent);
+        Assert.Equal("blocked-quiescence", stopped.Record.Kind);
+    }
+
+    [Fact]
+    public async Task Resume_without_supported_resume_evidence_is_blocked()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        using var directories = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        using var coordinator = CreateCoordinator(directories.Path, processes);
+        var (request, _) = await coordinator.PrepareWorkerAsync(
+            Plan(repository, directories.Path, "run-resume-capability"), cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request, includeResume: false), cancellationToken);
+        await coordinator.PauseAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
+
+        var resumed = await coordinator.ResumeAsync(request.RunId, cancellationToken);
+
+        Assert.Equal(ReconciliationAction.Blocked, resumed.Reconciliation.Action);
+        Assert.Null(resumed.Record);
+        Assert.Contains(resumed.Reconciliation.Reasons,
+            reason => reason.Contains("Resume", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Resume_requires_a_fresh_bound_live_adapter_observation()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        using var directories = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        var port = new FixedTestAgentControl((binding, action) => action == AgentControlAction.Resume
+            ? new AgentControlResult(binding with { RunId = "another-run" }, action,
+                AgentActivityState.Live, true, "wrong-run-resume-proof", "")
+            : new AgentControlResult(binding, action, AgentActivityState.Quiescent, true, "pause-proof", ""));
+        using var coordinator = new ExecutionCoordinator(
+            new RunStore(System.IO.Path.Combine(directories.Path, "store")), new WorktreeManager(), processes, port);
+        var (request, _) = await coordinator.PrepareWorkerAsync(
+            Plan(repository, directories.Path, "run-resume-binding"), cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
+        await coordinator.PauseAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
+
+        var resumed = await coordinator.ResumeAsync(request.RunId, cancellationToken);
+
+        Assert.Equal(ReconciliationAction.Blocked, resumed.Reconciliation.Action);
+        Assert.Null(resumed.Record);
+        Assert.Contains(resumed.Reconciliation.Reasons,
+            reason => reason.Contains("unbound", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Stop_before_acceptance_records_unknown_remote_dispatch_state()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        using var directories = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        using var coordinator = CreateCoordinator(directories.Path, processes);
+        var (request, _) = await coordinator.PrepareWorkerAsync(
+            Plan(repository, directories.Path, "run-stop-before-accept"), cancellationToken);
+
+        var stopped = await coordinator.StopAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
+
+        Assert.False(stopped.Quiescent);
+        Assert.Equal("blocked-quiescence", stopped.Record.Kind);
+    }
+
+    [Fact]
+    public async Task Post_control_fact_failure_is_durably_recorded_as_blocked_quiescence()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        using var directories = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        using var coordinator = new ExecutionCoordinator(
+            new RunStore(System.IO.Path.Combine(directories.Path, "store")), new WorktreeManager(), processes,
+            new ProvenTestAgentControl(), new ThrowingExecutionFactSource());
+        var (request, _) = await coordinator.PrepareWorkerAsync(
+            Plan(repository, directories.Path, "run-fact-observation-failure"), cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
+
+        var paused = await coordinator.PauseAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
+
+        Assert.False(paused.Quiescent);
+        Assert.Equal("blocked-quiescence", paused.Record.Kind);
+        var payload = new RunStore(System.IO.Path.Combine(directories.Path, "store"))
+            .ReadPayload<QuiescenceRecord>(paused.Record);
+        Assert.NotNull(payload.AdapterControl);
+        Assert.Contains(payload.Limitations, limitation => limitation.Contains("fact observation failed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Adapter_cancellation_after_control_is_durably_recorded_as_blocked_quiescence()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsWindows()) return;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        using var directories = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        var port = new FixedTestAgentControl((_, _) =>
+            throw new OperationCanceledException("adapter cancelled after dispatching control"));
+        using var coordinator = new ExecutionCoordinator(
+            new RunStore(System.IO.Path.Combine(directories.Path, "store")), new WorktreeManager(), processes, port);
+        var (request, _) = await coordinator.PrepareWorkerAsync(
+            Plan(repository, directories.Path, "run-control-cancelled"), cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
+        var launch = OperatingSystem.IsWindows()
+            ? new ProcessLaunch("ping.exe", ["127.0.0.1", "-n", "30"])
+            : new ProcessLaunch("/bin/sleep", ["30"]);
+        await coordinator.StartTaskProcessAsync(request.RunId, launch, cancellationToken);
+
+        var stopped = await coordinator.StopAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
+
+        Assert.False(stopped.Quiescent);
+        Assert.Equal("blocked-quiescence", stopped.Record.Kind);
+        Assert.Equal(ProcessControlOutcome.Quiesced, Assert.Single(stopped.Processes).Outcome);
+        var payload = new RunStore(System.IO.Path.Combine(directories.Path, "store"))
+            .ReadPayload<QuiescenceRecord>(stopped.Record);
+        Assert.Contains(payload.Limitations,
+            limitation => limitation.Contains("cancelled after dispatching control", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -317,6 +497,55 @@ public sealed class ExecutionCoordinatorTests
             coordinator.CompleteAsync(Completion(request, accepted, revision), cancellationToken));
 
         await processes.QuiesceAsync(child.Identity, TimeSpan.FromMilliseconds(50), CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task Completion_rejects_a_live_owned_process_without_durable_registration()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsWindows()) return;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        using var directories = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        using var coordinator = CreateCoordinator(directories.Path, processes);
+        var (request, _) = await coordinator.PrepareWorkerAsync(
+            Plan(repository, directories.Path, "run-undurable-live-completion"), cancellationToken);
+        var accepted = Accepted(request);
+        await coordinator.AcceptAsync(accepted, cancellationToken);
+        var launch = OperatingSystem.IsWindows()
+            ? new ProcessLaunch("ping.exe", ["127.0.0.1", "-n", "30"])
+            : new ProcessLaunch("/bin/sleep", ["30"]);
+        var child = processes.StartOwned(launch, request.RunId);
+        var revision = await repository.CommitAsync("tracked.txt", "completed", cancellationToken);
+
+        await Assert.ThrowsAsync<WorkerEnvelopeException>(() =>
+            coordinator.CompleteAsync(Completion(request, accepted, revision), cancellationToken));
+
+        await processes.QuiesceAsync(child.Identity, TimeSpan.FromMilliseconds(50), CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task Stop_quiesces_a_live_owned_process_without_durable_registration()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        if (!OperatingSystem.IsLinux() && !OperatingSystem.IsWindows()) return;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        using var directories = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        using var coordinator = CreateCoordinator(directories.Path, processes);
+        var (request, _) = await coordinator.PrepareWorkerAsync(
+            Plan(repository, directories.Path, "run-undurable-live-stop"), cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
+        var launch = OperatingSystem.IsWindows()
+            ? new ProcessLaunch("ping.exe", ["127.0.0.1", "-n", "30"])
+            : new ProcessLaunch("/bin/sleep", ["30"]);
+        var child = processes.StartOwned(launch, request.RunId);
+
+        var stopped = await coordinator.StopAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
+
+        Assert.True(stopped.Quiescent);
+        Assert.Equal(ProcessControlOutcome.Quiesced, Assert.Single(stopped.Processes).Outcome);
+        Assert.Equal(ProcessControlOutcome.AlreadyExited, processes.Observe(child.Identity).Outcome);
     }
 
     [Fact]
@@ -364,7 +593,7 @@ public sealed class ExecutionCoordinatorTests
             new ProvenTestAgentControl(), facts);
         var (request, _) = await coordinator.PrepareWorkerAsync(
             Plan(repository, directories.Path, "run-fact-change"), cancellationToken);
-        await coordinator.AcceptAsync(Accepted(request), cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
         await coordinator.PauseAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
         facts.AuthorizationCeiling = "plan";
 
@@ -392,7 +621,7 @@ public sealed class ExecutionCoordinatorTests
         {
             (request, _) = await original.PrepareWorkerAsync(
                 Plan(repository, directories.Path, "run-restart"), cancellationToken);
-            await original.AcceptAsync(Accepted(request), cancellationToken);
+            await original.AcceptAsync(AcceptedWithControls(request), cancellationToken);
             child = await original.StartTaskProcessAsync(request.RunId, launch, cancellationToken);
         }
 
@@ -495,6 +724,18 @@ public sealed class ExecutionCoordinatorTests
             request.Worktree, request.AdapterId, request.AdapterVersion, $"runtime-{request.RunId}", "opaque-task", DateTimeOffset.UtcNow,
             request.RequiredCapabilities.Select(capability =>
                 new AgentCapabilityEvidence(capability, AgentCapabilityStatus.Supported, "test-interface", "test-proof")).ToArray());
+
+    private static AgentAcceptedReceipt AcceptedWithControls(AgentRequest request, bool includeResume = true)
+    {
+        var capabilities = request.RequiredCapabilities
+            .Concat([AgentCapability.Pause, AgentCapability.Stop])
+            .Concat(includeResume ? [AgentCapability.Resume] : [])
+            .Distinct()
+            .Select(capability => new AgentCapabilityEvidence(
+                capability, AgentCapabilityStatus.Supported, "test-interface", "test-proof"))
+            .ToArray();
+        return Accepted(request) with { Capabilities = capabilities };
+    }
 
     private static AgentCompletionReceipt Completion(
         AgentRequest request, AgentAcceptedReceipt accepted, (string Head, string Tree) revision) =>

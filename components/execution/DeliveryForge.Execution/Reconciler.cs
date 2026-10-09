@@ -37,7 +37,7 @@ internal static class Reconciler
         if (observation.ProcessState == ObservedProcessState.LiveOwned)
             return new ReconciliationResult(ReconciliationAction.Pause, ["A positively identified task child is still live and must quiesce before dispatch."]);
         return new ReconciliationResult(ReconciliationAction.ResumeDispatch,
-            ["Fresh issue-owned request/plan/base/authorization, Git, process, artifact, ownership, and adapter observations agree with the durable checkpoint."]);
+            ["Fresh issue-owned request/plan/base/authorization, Git, process, artifact, and ownership observations agree with the durable checkpoint."]);
     }
 
     public static CleanupDecision CleanupEligible(

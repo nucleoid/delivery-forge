@@ -9,15 +9,15 @@ namespace DeliveryForge.Execution;
 
 public sealed record ProcessLaunch(string Executable, IReadOnlyList<string> Arguments);
 public sealed record ProcessIdentity(int ProcessId, long PlatformStartIdentity, string ExecutablePath, string ArgumentDigest);
-public sealed record OwnedProcess(Process Process, ProcessIdentity Identity);
-public enum ProcessControlOutcome { LiveOwned, Quiesced, AlreadyExited, IdentityUnknown, TimedOut, UnsupportedPlatform }
+public sealed record OwnedProcess(Process Process, ProcessIdentity Identity, string? RunId = null);
+public enum ProcessControlOutcome { LiveOwned, Quiesced, AlreadyExited, IdentityUnknown, TimedOut, UnsupportedPlatform, ControlFailed }
 public sealed record ProcessControlResult(ProcessControlOutcome Outcome, string Reason);
 
 public sealed class ProcessControl : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<int, OwnedProcess> _owned = new();
 
-    public OwnedProcess StartOwned(ProcessLaunch launch)
+    public OwnedProcess StartOwned(ProcessLaunch launch, string? runId = null)
     {
         ArgumentNullException.ThrowIfNull(launch);
         if (!OperatingSystem.IsLinux() && !OperatingSystem.IsWindows())
@@ -30,7 +30,7 @@ public sealed class ProcessControl : IAsyncDisposable
             var executable = Path.GetFullPath(process.MainModule?.FileName ?? launch.Executable);
             var identity = new ProcessIdentity(process.Id, process.StartTime.ToUniversalTime().Ticks, executable,
                 Digest(executable, launch.Arguments));
-            var owned = new OwnedProcess(process, identity);
+            var owned = new OwnedProcess(process, identity, runId);
             if (!_owned.TryAdd(process.Id, owned))
                 throw new InvalidOperationException("A process with the same PID is already registered in this controller.");
             return owned;
@@ -42,6 +42,14 @@ public sealed class ProcessControl : IAsyncDisposable
             throw;
         }
     }
+
+    public IReadOnlyList<ProcessControlResult> ObserveOwned(string runId) =>
+        _owned.Values.Where(owned => owned.RunId == runId)
+            .Select(owned => Observe(owned.Identity)).ToArray();
+
+    public IReadOnlyList<ProcessIdentity> GetOwnedIdentities(string runId) =>
+        _owned.Values.Where(owned => owned.RunId == runId)
+            .Select(owned => owned.Identity).ToArray();
 
     public ProcessControlResult Observe(ProcessIdentity expected)
     {

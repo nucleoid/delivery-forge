@@ -23,7 +23,7 @@ public sealed class ReconcilerTests
         var accepted = new AgentAcceptedReceipt(WorkerEnvelope.SchemaVersion, request.RunId, request.RequestIdentity,
             request.PlanIdentity, request.BaseCommit, request.Worktree, request.AdapterId, request.AdapterVersion,
             "runtime", "task", DateTimeOffset.UtcNow,
-            request.RequiredCapabilities.Select(capability =>
+            request.RequiredCapabilities.Concat([AgentCapability.Pause, AgentCapability.Resume]).Select(capability =>
                 new AgentCapabilityEvidence(capability, AgentCapabilityStatus.Supported, "test-interface", "test-proof")).ToArray());
         await coordinator.AcceptAsync(accepted, cancellationToken);
         await coordinator.PauseAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);

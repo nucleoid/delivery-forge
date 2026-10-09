@@ -13,8 +13,9 @@ but those statements are not operative acceptance criteria.
 ## Contract through the remaining slices
 
 - **#5 execution:** freezes adapter id/version and required capabilities; binds request, acceptance,
-  completion, control, opaque runtime identities, exact Git facts, and ownership. Unsupported or
-  unproved capability is `INCOMPLETE`.
+  completion, each exact control action, opaque runtime identities, exact Git facts, and ownership.
+  Pause/stop/resume advance only with accepted capability evidence and a fresh fully bound adapter
+  result. Unsupported or unproved capability is `INCOMPLETE`.
 - **#6 coordination:** leases and fencing bind generic execution runs. External lock availability
   remains independently capability-proven; no local fake substitutes for it.
 - **#7 evidence:** tools run through the selected adapter or a deterministic command runner. Agent
