@@ -12,7 +12,28 @@ internal sealed class TemporaryDirectory : IDisposable
     }
 
     public string Path { get; }
-    public void Dispose() => Directory.Delete(Path, recursive: true);
+
+    public void Dispose()
+    {
+        if (!Directory.Exists(Path)) return;
+
+        var ownedFiles = new EnumerationOptions
+        {
+            RecurseSubdirectories = true,
+            AttributesToSkip = FileAttributes.ReparsePoint,
+            IgnoreInaccessible = false,
+            ReturnSpecialDirectories = false
+        };
+
+        foreach (var file in Directory.EnumerateFiles(Path, "*", ownedFiles))
+        {
+            var attributes = File.GetAttributes(file);
+            if ((attributes & FileAttributes.ReadOnly) != 0)
+                File.SetAttributes(file, attributes & ~FileAttributes.ReadOnly);
+        }
+
+        Directory.Delete(Path, recursive: true);
+    }
 }
 
 internal sealed class GitFixture : IAsyncDisposable

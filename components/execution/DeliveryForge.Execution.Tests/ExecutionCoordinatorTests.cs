@@ -780,9 +780,21 @@ public sealed class ExecutionCoordinatorTests
             System.IO.Path.Combine(root, "result"), $"writer-{runId}", ["tracked.txt", "allowed"], ["allowed/excluded.txt"],
             "test.adapter", "1.0", [AgentCapability.Launch, AgentCapability.CompletionEvidence]);
 
+    [Fact]
+    public void Request_fixture_uses_platform_local_absolute_paths()
+    {
+        var request = Request("portable-paths");
+
+        Assert.True(System.IO.Path.IsPathFullyQualified(request.Worktree));
+        Assert.True(System.IO.Path.IsPathFullyQualified(request.ResultDirectory));
+    }
+
     private static AgentRequest Request(string runId)
     {
-        var plan = new FrozenWorkerPlan(runId, "plan-v1", new string('a', 40), "owner/repo", "/parent", "/worker", "/result", "token", ["src"], [],
+        var root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "delivery-forge-request-fixtures", runId);
+        var plan = new FrozenWorkerPlan(runId, "plan-v1", new string('a', 40), "owner/repo",
+            System.IO.Path.Combine(root, "parent"), System.IO.Path.Combine(root, "worker"),
+            System.IO.Path.Combine(root, "result"), "token", ["src"], [],
             "test.adapter", "1.0", [AgentCapability.Launch, AgentCapability.CompletionEvidence]);
         return WorkerEnvelope.PrepareWorker(plan);
     }
