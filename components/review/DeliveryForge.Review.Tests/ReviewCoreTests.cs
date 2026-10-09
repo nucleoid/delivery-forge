@@ -257,6 +257,28 @@ public sealed class ReviewCoreTests
     }
 
     [Fact]
+    public void Normalized_result_emits_the_existing_versioned_review_receipt_contract()
+    {
+        var policy = Policy();
+        var normalized = ReviewNormalizer.Normalize(Request(policy), Result(), policy);
+
+        var receipt = ReviewReceiptSerializer.Create(normalized);
+        var bytes = ReviewReceiptSerializer.Serialize(receipt);
+        var validated = DeliveryForge.Contracts.Validation.ContractValidator.ParseAndValidate(bytes);
+
+        Assert.Equal("review-receipt", validated.SchemaName);
+        Assert.Equal(normalized.Identity.BaseCommit, receipt.BaseCommit);
+        Assert.Equal(normalized.Identity.HeadCommit, receipt.HeadCommit);
+        Assert.Equal(normalized.Identity.HeadTree, receipt.TreeId);
+        Assert.Equal(normalized.Identity.PatchSha256, receipt.PatchSha256);
+        Assert.Equal(normalized.ReviewerFamily, receipt.ReviewerFamily);
+        Assert.Equal("PASS", receipt.Outcome);
+        Assert.Equal(normalized.Findings.Count, receipt.FindingCount);
+        Assert.Equal(normalized.ArtifactHash, receipt.ArtifactHash);
+        Assert.Equal(validated.Identity, receipt.Identity);
+    }
+
+    [Fact]
     public void Missing_policy_and_fixture_or_advisory_evidence_cannot_satisfy_production()
     {
         var fixture = ReviewNormalizer.Normalize(Request(Policy()), Result(), Policy());
