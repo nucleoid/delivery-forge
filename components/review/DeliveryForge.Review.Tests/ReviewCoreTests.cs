@@ -1,6 +1,11 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Nodes;
+using DeliveryForge.Contracts.Models;
+using DeliveryForge.Contracts.Serialization;
+using DeliveryForge.Contracts.State;
+using DeliveryForge.Contracts.Validation;
 
 namespace DeliveryForge.Review.Tests;
 
@@ -257,6 +262,52 @@ public sealed class ReviewCoreTests
     }
 
     [Fact]
+    public void Fixture_pass_receipt_cannot_authorize_pr_transition()
+    {
+        var policy = Policy();
+        var normalized = ReviewNormalizer.Normalize(Request(policy), Result(), policy);
+        var receipt = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(normalized)));
+        var identity = normalized.Identity;
+        var evidence = new TransitionEvidence(
+            AuthorizationCeiling.Pr,
+            identity.BaseCommit,
+            identity.HeadCommit,
+            identity.HeadTree,
+            Policy: EvidencePolicy(),
+            ReviewReceipt: receipt);
+
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized, evidence));
+    }
+
+    [Fact]
+    public void Identity_policy_and_findings_mismatches_are_behavioral_non_pass()
+    {
+        var noReuse = Policy(false);
+        var receipt = ReviewNormalizer.Normalize(Request(noReuse), Result(), noReuse);
+        Assert.True(ReviewInvalidation.Assess(
+            receipt,
+            Patch() with { HeadTree = Commit('d') },
+            noReuse,
+            MaterialChange.None).Invalidated);
+
+        var versionMismatch = Result() with
+        {
+            Identity = Patch() with { GitVersion = "git version 9.9.9" }
+        };
+        Assert.NotEqual(ReviewOutcome.Pass,
+            ReviewNormalizer.Normalize(Request(noReuse), versionMismatch, noReuse).Outcome);
+
+        var materialFinding = new ReviewFinding("R1", "material", "must fix", "A.cs:1");
+        Assert.NotEqual(ReviewOutcome.Pass,
+            ReviewNormalizer.Normalize(
+                Request(noReuse),
+                Result() with { Findings = [materialFinding] },
+                noReuse).Outcome);
+    }
+
+    [Fact]
     public void Normalized_result_emits_the_existing_versioned_review_receipt_contract()
     {
         var policy = Policy();
@@ -305,6 +356,25 @@ public sealed class ReviewCoreTests
     private static string Hash(byte[] bytes) => $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
     private static DateTimeOffset Time(int seconds) =>
         DateTimeOffset.Parse("2026-10-09T00:00:00Z").AddSeconds(seconds);
+
+    private static ValidatedContract EvidencePolicy()
+    {
+        var node = JsonNode.Parse($$"""
+            {
+              "schemaVersion": "1.0.0",
+              "kind": "evidence-policy",
+              "identity": "{{Identity('0')}}",
+              "policyId": "review-tests",
+              "requiredGates": ["review"],
+              "authorizedCeiling": "pr",
+              "requireIndependentReview": true,
+              "allowedNotApplicable": [],
+              "createdAt": "2026-10-09T00:00:00Z"
+            }
+            """)!.AsObject();
+        node["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(node.ToJsonString()));
+        return ContractValidator.ParseAndValidate(Encoding.UTF8.GetBytes(node.ToJsonString()));
+    }
 }
 
 internal sealed class TinyGitRepository : IDisposable
