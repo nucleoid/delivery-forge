@@ -27,8 +27,9 @@ public sealed class ReviewCoreTests
         var headCommit = repository.CommitAll();
 
         var identity = await GitPatchIdentity.ComputeAsync(
-            repository.Path, baseCommit, headCommit, Identity('p'),
-            new Dictionary<string, string> { ["tests"] = Identity('a') });
+            repository.Path, baseCommit, headCommit, Identity('e'),
+            new Dictionary<string, string> { ["tests"] = Identity('a') },
+            TestContext.Current.CancellationToken);
         var bytes = repository.GitBytes(
             "-c", "core.quotepath=false", "diff", "--binary", "--full-index", "--no-color",
             "--no-ext-diff", baseCommit, headCommit, "--");
@@ -38,12 +39,13 @@ public sealed class ReviewCoreTests
         Assert.Equal(["git", "-c", "core.quotepath=false", "diff", "--binary", "--full-index",
             "--no-color", "--no-ext-diff", baseCommit, headCommit, "--"], identity.Command);
         Assert.Contains("git version", identity.GitVersion, StringComparison.Ordinal);
-        Assert.Equal(Identity('p'), identity.PlanIdentity);
+        Assert.Equal(Identity('e'), identity.PlanIdentity);
         Assert.Equal(Identity('a'), identity.ArtifactIdentities["tests"]);
 
         repository.Write("dirty.txt", "dirty"u8.ToArray());
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
-            repository.Path, baseCommit, headCommit, Identity('p'), new Dictionary<string, string>()));
+            repository.Path, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -55,13 +57,16 @@ public sealed class ReviewCoreTests
         var headCommit = repository.CommitAll();
 
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
-            repository.Path, baseCommit, new string('f', 40), Identity('p'), new Dictionary<string, string>()));
+            repository.Path, baseCommit, new string('f', 40), Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
-            repository.Path, headCommit, baseCommit, Identity('p'), new Dictionary<string, string>()));
+            repository.Path, headCommit, baseCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
         repository.Write("staged.txt", "staged"u8.ToArray());
         repository.Git("add", "staged.txt");
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
-            repository.Path, baseCommit, headCommit, Identity('p'), new Dictionary<string, string>()));
+            repository.Path, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -191,6 +196,64 @@ public sealed class ReviewCoreTests
         Assert.Equal(ReviewOutcome.Incomplete, exhausted.Outcome);
         Assert.Equal([finding], exhausted.Findings);
         Assert.Equal(1, ledger.ConsumedRounds);
+    }
+
+    [Fact]
+    public void Raw_capability_and_mutable_caller_collections_cannot_gain_or_change_authority()
+    {
+        var capability = new ReviewerCapability("caller", "1", "claude", true, false, false, ["source"]);
+        Assert.False(capability.ProductionCapable);
+
+        var artifacts = new Dictionary<string, string> { ["tests"] = Identity('1') };
+        var findings = new List<ReviewFinding> { new("R1", "material", "before", "A.cs:1") };
+        var identity = Patch() with { ArtifactIdentities = artifacts };
+        var policy = Policy();
+        var request = Request(policy) with { Identity = identity };
+        var result = ReviewResult.Complete(identity, "claude", "PASS", findings, Identity('f'), Time(1));
+        var receipt = ReviewNormalizer.Normalize(request, result, policy);
+
+        artifacts["tests"] = Identity('2');
+        findings[0] = new ReviewFinding("R2", "material", "after", "B.cs:2");
+        Assert.Equal(Identity('1'), receipt.Identity.ArtifactIdentities["tests"]);
+        Assert.Equal("R1", receipt.Findings[0].Code);
+        Assert.False(receipt.ProductionAccepted);
+    }
+
+    [Fact]
+    public async Task Protected_policy_resolver_freezes_exact_base_and_ignores_worker_branch_edits()
+    {
+        using var repository = new TinyGitRepository();
+        var protectedJson = """
+            {
+              "PolicyIdentity": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+              "Fixture": false,
+              "Advisory": false,
+              "AllowedFamilies": [{ "Author": "gpt", "Reviewer": "claude" }],
+              "AllowedScopes": ["source"],
+              "AllowExactReuse": true,
+              "Budget": {
+                "MaximumRounds": 2,
+                "MaximumDuration": "00:05:00",
+                "MaximumTokens": 20000,
+                "MaximumCost": 2.0
+              },
+              "ExemptionApprovers": []
+            }
+            """;
+        var protectedBase = repository.Commit(new Dictionary<string, byte[]>
+        {
+            ["policy/review.json"] = Encoding.UTF8.GetBytes(protectedJson)
+        });
+        repository.Write("policy/review.json", Encoding.UTF8.GetBytes("{}"));
+        repository.CommitAll();
+
+        var policy = await new ProtectedReviewPolicyResolver(repository.Path, protectedBase)
+            .ResolveAsync("policy/review.json", TestContext.Current.CancellationToken);
+
+        Assert.True(policy.Trusted);
+        Assert.False(policy.Fixture);
+        Assert.Equal(protectedBase, policy.SourceRevision);
+        Assert.Contains(new FamilyPair("gpt", "claude"), policy.AllowedFamilies);
     }
 
     [Fact]
