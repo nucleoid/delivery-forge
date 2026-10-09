@@ -10,7 +10,8 @@ public sealed class GateRunnerTests
             new StubCommandExecutor(TestEvidence.CommandResult()),
             new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()));
 
-        var result = await runner.RunAsync(TestEvidence.GateRequest(temp.Path));
+        var result = await runner.RunAsync(
+            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Pass, result.Outcome);
         Assert.Equal(["test", "DeliveryForge.slnx", "--no-restore"], result.Invocation.Arguments);
@@ -27,11 +28,13 @@ public sealed class GateRunnerTests
             new StubCommandExecutor(TestEvidence.CommandResult()),
             new SequenceRepositoryIdentityReader(TestEvidence.Repository(), changed));
 
-        var result = await runner.RunAsync(TestEvidence.GateRequest(temp.Path));
+        var result = await runner.RunAsync(
+            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Error, result.Outcome);
         Assert.True(result.SourceChanged);
-        await Assert.ThrowsAsync<EvidenceWriteException>(() => runner.RunAsync(TestEvidence.GateRequest(temp.Path)));
+        await Assert.ThrowsAsync<EvidenceWriteException>(() => runner.RunAsync(
+            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken));
     }
 
     [Fact]
@@ -43,7 +46,8 @@ public sealed class GateRunnerTests
             new StubCommandExecutor(execution),
             new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()));
 
-        var result = await runner.RunAsync(TestEvidence.GateRequest(temp.Path));
+        var result = await runner.RunAsync(
+            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
     }

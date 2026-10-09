@@ -139,6 +139,15 @@
           "xunit.v3.extensibility.core": "[3.0.1]",
           "xunit.v3.runner.common": "[3.0.1]"
         }
+      },
+      "deliveryforge.contracts": {
+        "type": "Project"
+      },
+      "deliveryforge.evidence": {
+        "type": "Project",
+        "dependencies": {
+          "DeliveryForge.Contracts": "[1.0.0, )"
+        }
       }
     }
   }
