@@ -118,6 +118,33 @@ public sealed class PlanningBehaviorTests
         Assert.Contains("raw details remain local-only", json, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("rollout")]
+    [InlineData("request")]
+    [InlineData("change-map")]
+    public void Copying_private_advisory_into_any_public_plan_field_is_rejected(string destination)
+    {
+        const string privateText = "Project Phoenix is coordinated from attic seven";
+        var draft = Draft();
+        var envelope = new ImportedContextEnvelope(
+            "1.0.0",
+            [new("memory", "opaque-local-record", privateText, null, ObservedAt,
+                DistilledMeaning: ImportedMeaningCode.CallerRelationship)],
+            [],
+            []);
+        var assessment = IntakePlanner.Assess(draft.Request, draft.Provenance, envelope);
+        draft = destination switch
+        {
+            "rollout" => draft with { Rollout = draft.Rollout with { Compatibility = privateText }, Intake = assessment },
+            "request" => draft with { Request = draft.Request with { Outcome = privateText }, Intake = assessment },
+            "change-map" => draft with { ChangeMap = [new("Core.cs", "symbol", privateText)], Intake = assessment },
+            _ => throw new InvalidOperationException(destination)
+        };
+
+        var error = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(draft, "copied-private", ObservedAt));
+        Assert.Contains("copied", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void Private_advisory_provenance_exports_only_an_opaque_locator_digest_and_typed_caveat()
     {

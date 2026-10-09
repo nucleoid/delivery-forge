@@ -435,6 +435,9 @@ public static class PlanFreezer
          .Concat(draft.Unknowns.SelectMany(item => new[] { item.Description, item.Owner }));
         if (portableText.Any(PortableMaterial.ContainsPrivateMaterial))
             failures.Add("plan contains a host path or credential-like private material");
+        if (draft.Intake.PrivateAdvisoryMaterial.Any(privateValue =>
+                portableText.Any(publicValue => publicValue.Contains(privateValue, StringComparison.Ordinal))))
+            failures.Add("private advisory material was copied into a portable public field");
 
         foreach (var evidence in draft.Provenance.Where(item => item.ProducerKind == EvidenceProducerKind.PrivateAdvisory))
         {

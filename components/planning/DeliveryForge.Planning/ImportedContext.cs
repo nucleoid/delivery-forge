@@ -217,6 +217,14 @@ public static class IntakePlanner
             throw new PlanningException("A genuine user-owned decision and its concrete recommended option must be supplied together.");
         }
         var limitations = new List<string>();
+        var privateAdvisoryMaterial = importedContext is null
+            ? Array.Empty<string>()
+            : importedContext.Entries.SelectMany(entry => new[] { entry.Locator, entry.Summary })
+                .Concat(importedContext.Conflicts)
+                .Concat(importedContext.Limitations)
+                .Distinct(StringComparer.Ordinal)
+                .Order(StringComparer.Ordinal)
+                .ToArray();
         var ready = evidence.Any(IsPinnedReadinessEvidence);
         var verifiedRepositoryIdentities = evidence
             .Where(item => item.IsComplete && item.IsReaderBoundRepositoryEvidence())
@@ -330,7 +338,8 @@ public static class IntakePlanner
             importedContextRequirement,
             importedContextAvailable,
             verifiedRepositoryIdentities,
-            ComputeBinding(request, evidence, importedContextRequirement, importedContextAvailable, normalizedLimitations, verifiedRepositoryIdentities));
+            privateAdvisoryMaterial,
+            ComputeBinding(request, evidence, importedContextRequirement, importedContextAvailable, normalizedLimitations, verifiedRepositoryIdentities, privateAdvisoryMaterial));
     }
 
     private static bool IsPinnedReadinessEvidence(EvidenceItem item) =>
@@ -436,7 +445,8 @@ public static class IntakePlanner
                 assessment.ImportedContextRequirement,
                 assessment.ImportedContextAvailable,
                 assessment.Limitations,
-                assessment.VerifiedRepositoryIdentities),
+                assessment.VerifiedRepositoryIdentities,
+                assessment.PrivateAdvisoryMaterial),
             StringComparison.Ordinal);
 
     private static string ComputeBinding(
@@ -445,7 +455,8 @@ public static class IntakePlanner
         EvidenceRequirement importedContextRequirement,
         bool importedContextAvailable,
         IReadOnlyList<string> limitations,
-        IReadOnlyList<VerifiedRepositoryIdentity> verifiedRepositoryIdentities)
+        IReadOnlyList<VerifiedRepositoryIdentity> verifiedRepositoryIdentities,
+        IReadOnlyList<string> privateAdvisoryMaterial)
     {
         var material = new
         {
@@ -488,7 +499,11 @@ public static class IntakePlanner
                 .OrderBy(item => item.Locator, StringComparer.Ordinal)
                 .Select(item => new { item.Locator, item.Commit, item.Tree })
                 .ToArray(),
-            limitations = limitations.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray()
+            limitations = limitations.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+            privateAdvisoryDigests = privateAdvisoryMaterial
+                .Select(value => $"sha256:{Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value)))}")
+                .Order(StringComparer.Ordinal)
+                .ToArray()
         };
         return CanonicalJson.ComputeIdentity(JsonSerializer.SerializeToUtf8Bytes(material));
     }

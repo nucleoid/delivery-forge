@@ -181,6 +181,7 @@ public sealed class IntakeAssessment
         EvidenceRequirement importedContextRequirement,
         bool importedContextAvailable,
         IReadOnlyList<VerifiedRepositoryIdentity> verifiedRepositoryIdentities,
+        IReadOnlyList<string> privateAdvisoryMaterial,
         string bindingDigest)
     {
         Ready = ready;
@@ -190,6 +191,7 @@ public sealed class IntakeAssessment
         ImportedContextRequirement = importedContextRequirement;
         ImportedContextAvailable = importedContextAvailable;
         VerifiedRepositoryIdentities = verifiedRepositoryIdentities.ToArray();
+        PrivateAdvisoryMaterial = privateAdvisoryMaterial.ToArray();
         BindingDigest = bindingDigest;
     }
 
@@ -200,6 +202,7 @@ public sealed class IntakeAssessment
     public EvidenceRequirement ImportedContextRequirement { get; }
     public bool ImportedContextAvailable { get; }
     internal IReadOnlyList<VerifiedRepositoryIdentity> VerifiedRepositoryIdentities { get; }
+    internal IReadOnlyList<string> PrivateAdvisoryMaterial { get; }
     internal string BindingDigest { get; }
 }
 
