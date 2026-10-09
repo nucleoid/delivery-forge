@@ -383,12 +383,19 @@ public sealed class ExecutionCoordinatorTests
         await using var repository = await GitFixture.CreateAsync(cancellationToken);
         using var directories = new TemporaryDirectory();
         await using var processes = new ProcessControl();
-        var port = new FixedTestAgentControl((binding, action) => action == AgentControlAction.Resume
-            ? new AgentControlResult(binding with { RunId = "another-run" }, action,
-                AgentActivityState.Live, true, "wrong-run-resume-proof", "")
-            : new AgentControlResult(binding, action, AgentActivityState.Quiescent, true, "pause-proof", ""));
+        AgentControlResult? invalidResult = null;
+        var port = new FixedTestAgentControl((binding, action) =>
+        {
+            var result = action == AgentControlAction.Resume
+                ? new AgentControlResult(binding with { RunId = "another-run" }, action,
+                    AgentActivityState.Live, true, "wrong-run-resume-proof", "raw-adapter-limitation")
+                : new AgentControlResult(binding, action, AgentActivityState.Quiescent, true, "pause-proof", "");
+            if (action == AgentControlAction.Resume) invalidResult = result;
+            return result;
+        });
+        var store = new RunStore(System.IO.Path.Combine(directories.Path, "store"));
         using var coordinator = new ExecutionCoordinator(
-            new RunStore(System.IO.Path.Combine(directories.Path, "store")), new WorktreeManager(), processes, port);
+            store, new WorktreeManager(), processes, port);
         var (request, _) = await coordinator.PrepareWorkerAsync(
             Plan(repository, directories.Path, "run-resume-binding"), cancellationToken);
         await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
@@ -397,9 +404,70 @@ public sealed class ExecutionCoordinatorTests
         var resumed = await coordinator.ResumeAsync(request.RunId, cancellationToken);
 
         Assert.Equal(ReconciliationAction.Blocked, resumed.Reconciliation.Action);
-        Assert.Null(resumed.Record);
+        Assert.Equal("blocked-quiescence", resumed.Record!.Kind);
         Assert.Contains(resumed.Reconciliation.Reasons,
             reason => reason.Contains("unbound", StringComparison.Ordinal));
+        var payload = store.ReadPayload<QuiescenceRecord>(resumed.Record);
+        Assert.Equal(invalidResult, payload.AdapterControl);
+        Assert.False(payload.Quiescent);
+    }
+
+    [Fact]
+    public async Task Resume_adapter_exception_is_durably_recorded_as_blocked_quiescence()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        using var directories = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        var port = new FixedTestAgentControl((binding, action) => action == AgentControlAction.Resume
+            ? throw new InvalidOperationException("resume adapter failed")
+            : new AgentControlResult(binding, action, AgentActivityState.Quiescent, true, "pause-proof", ""));
+        var store = new RunStore(System.IO.Path.Combine(directories.Path, "store"));
+        using var coordinator = new ExecutionCoordinator(store, new WorktreeManager(), processes, port);
+        var (request, _) = await coordinator.PrepareWorkerAsync(
+            Plan(repository, directories.Path, "run-resume-exception"), cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
+        await coordinator.PauseAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
+
+        var resumed = await coordinator.ResumeAsync(request.RunId, cancellationToken);
+
+        Assert.Equal(ReconciliationAction.Blocked, resumed.Reconciliation.Action);
+        Assert.Equal("blocked-quiescence", resumed.Record!.Kind);
+        var payload = store.ReadPayload<QuiescenceRecord>(resumed.Record);
+        Assert.Null(payload.AdapterControl);
+        Assert.Contains(payload.Limitations,
+            limitation => limitation.Contains("InvalidOperationException: resume adapter failed", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task Caller_cancellation_after_successful_resume_cannot_lose_the_durable_outcome()
+    {
+        var cancellationToken = TestContext.Current.CancellationToken;
+        await using var repository = await GitFixture.CreateAsync(cancellationToken);
+        using var directories = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        using var resumeCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var port = new FixedTestAgentControl((binding, action) =>
+        {
+            if (action == AgentControlAction.Resume) resumeCancellation.Cancel();
+            return new AgentControlResult(binding, action,
+                action == AgentControlAction.Resume ? AgentActivityState.Live : AgentActivityState.Quiescent,
+                true, $"proof-{action}", "");
+        });
+        var store = new RunStore(System.IO.Path.Combine(directories.Path, "store"));
+        using var coordinator = new ExecutionCoordinator(store, new WorktreeManager(), processes, port);
+        var (request, _) = await coordinator.PrepareWorkerAsync(
+            Plan(repository, directories.Path, "run-resume-cancelled-after-control"), cancellationToken);
+        await coordinator.AcceptAsync(AcceptedWithControls(request), cancellationToken);
+        await coordinator.PauseAsync(request.RunId, TimeSpan.FromSeconds(1), cancellationToken);
+
+        var resumed = await coordinator.ResumeAsync(request.RunId, resumeCancellation.Token);
+
+        Assert.True(resumeCancellation.IsCancellationRequested);
+        Assert.Equal(ReconciliationAction.ResumeDispatch, resumed.Reconciliation.Action);
+        Assert.Equal("resumed", resumed.Record!.Kind);
+        var payload = store.ReadPayload<AgentResumeRecord>(resumed.Record);
+        Assert.Equal(AgentActivityState.Live, payload.AdapterObservation.Activity);
     }
 
     [Fact]

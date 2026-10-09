@@ -206,6 +206,8 @@ public sealed class ExecutionCoordinator : IDisposable
         var accepted = GetAccepted(recovery);
         if (!TryGetSupportedCapability(accepted, AgentCapability.Resume, out var capabilityLimitation))
             return BlockedResume(capabilityLimitation);
+        var transitionEvidence = new TransitionEvidence(GetAuthorization(prepared.Request));
+        WorkflowTransition.EnsureAllowed(WorkflowState.Paused, WorkflowState.Executing, transitionEvidence);
         AgentControlResult adapterObservation;
         try
         {
@@ -214,19 +216,34 @@ public sealed class ExecutionCoordinator : IDisposable
         }
         catch (Exception exception)
         {
-            return BlockedResume($"Fresh Resume adapter observation failed: {exception.Message}");
+            return await RecordBlockedResumeAsync(
+                $"Fresh Resume adapter observation failed after control may have produced side effects: {exception.GetType().FullName}: {exception.Message}",
+                null).ConfigureAwait(false);
         }
+        if (adapterObservation is null)
+            return await RecordBlockedResumeAsync(
+                "Adapter Resume result is null and cannot prove bound live activity.", null).ConfigureAwait(false);
         if (!TryValidateControlResult(accepted, AgentControlAction.Resume, AgentActivityState.Live,
                 adapterObservation, out var controlLimitation))
-            return BlockedResume(controlLimitation);
-        WorkflowTransition.EnsureAllowed(WorkflowState.Paused, WorkflowState.Executing,
-            new TransitionEvidence(GetAuthorization(prepared.Request)));
+            return await RecordBlockedResumeAsync(controlLimitation, adapterObservation).ConfigureAwait(false);
         var record = await _store.AppendAsync(runId, "resumed",
-            new AgentResumeRecord(prepared.Request.RequestIdentity, adapterObservation), cancellationToken).ConfigureAwait(false);
+            new AgentResumeRecord(prepared.Request.RequestIdentity, adapterObservation), CancellationToken.None).ConfigureAwait(false);
         return new ResumeResult(reconciliation, record);
 
         static ResumeResult BlockedResume(string reason) =>
             new(new ReconciliationResult(ReconciliationAction.Blocked, [reason]), null);
+
+        async Task<ResumeResult> RecordBlockedResumeAsync(string reason, AgentControlResult? adapterControl)
+        {
+            WorkflowTransition.EnsureAllowed(WorkflowState.Paused, WorkflowState.Blocked,
+                new TransitionEvidence(GetAuthorization(prepared.Request)));
+            var payload = new QuiescenceRecord(
+                "resumed", false, [], adapterControl, null, [reason]);
+            var blockedRecord = await _store.AppendAsync(
+                runId, "blocked-quiescence", payload, CancellationToken.None).ConfigureAwait(false);
+            return new ResumeResult(
+                new ReconciliationResult(ReconciliationAction.Blocked, [reason]), blockedRecord);
+        }
     }
 
     private async Task<QuiescenceResult> QuiesceAndRecordAsync(
