@@ -514,7 +514,7 @@ public sealed class CoordinationContractTests
             record => record.Prepared?.Kind == CoordinationIntentKind.Acquire).Prepared!.LifecycleId;
 
         var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
-        var recovered = await restarted.RecoverForCleanupAsync(lifecycleId, Owner, [Issue(6)],
+        var recovered = await restarted.RecoverForCleanupAsync(lifecycleId, Owner, [Issue(6)], "trusted-host-restart",
             TestContext.Current.CancellationToken);
         var cleaned = await restarted.ContinueReleaseAsync(recovered.Continuation!, TestContext.Current.CancellationToken);
 
@@ -606,7 +606,7 @@ public sealed class CoordinationContractTests
             record.Prepared?.Kind == CoordinationIntentKind.Acquire).Prepared!.LifecycleId;
 
         var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
-        var recovered = await restarted.RecoverForCleanupAsync(lifecycleId, Owner, [Issue(6), Issue(7)],
+        var recovered = await restarted.RecoverForCleanupAsync(lifecycleId, Owner, [Issue(6), Issue(7)], "trusted-host-restart",
             TestContext.Current.CancellationToken);
         var cleaned = await restarted.ContinueReleaseAsync(recovered.Continuation!, TestContext.Current.CancellationToken);
 
@@ -632,7 +632,7 @@ public sealed class CoordinationContractTests
         Assert.Equal(CoordinationLifecyclePhase.Closed, cleanup.Snapshot.Phase);
 
         var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
-        var recovered = await restarted.RecoverForCleanupAsync(lifecycleId, Owner, [Issue(6)],
+        var recovered = await restarted.RecoverForCleanupAsync(lifecycleId, Owner, [Issue(6)], "trusted-host-restart",
             TestContext.Current.CancellationToken);
 
         Assert.Equal(CoordinationLifecyclePhase.Closed, recovered.Snapshot.Phase);
@@ -660,7 +660,7 @@ public sealed class CoordinationContractTests
 
         var restarted = await CreateAdapterAsync(transport, clock, new RecordingQuiescenceSource(clock, [true, true]),
             checkpoints: checkpoints);
-        var recovered = await restarted.RecoverForCleanupAsync(prepared.LifecycleId, Owner, [Issue(6)],
+        var recovered = await restarted.RecoverForCleanupAsync(prepared.LifecycleId, Owner, [Issue(6)], "trusted-host-restart",
             TestContext.Current.CancellationToken);
         var cleaned = await restarted.ContinueReleaseAsync(recovered.Continuation!, TestContext.Current.CancellationToken);
 
@@ -860,6 +860,189 @@ public sealed class CoordinationContractTests
         Assert.Equal("release-uncertain", release.Leases.Single().Reason);
     }
 
+    [Fact]
+    public async Task Safe_deadline_uses_nonzero_known_uncertainty_and_first_send_anchor()
+    {
+        var clock = new FakeMonotonicClock("clock");
+        var transport = SingleLeaseTransport();
+        transport.AcquireHandler = (request, _) =>
+        {
+            clock.Advance(TimeSpan.FromSeconds(3));
+            return Task.FromResult(AcquireTransportResult.Acquired(
+                "lease-a", "1", ServerNow, ServerNow.AddMinutes(5)));
+        };
+        var adapter = await CreateAdapterAsync(transport, clock,
+            new RecordingQuiescenceSource(clock, [true]), maximumClockUncertainty: TimeSpan.FromSeconds(5));
+
+        var acquired = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+
+        var lease = Assert.Single(acquired.Snapshot.Leases);
+        Assert.Equal(TimeSpan.FromSeconds(295), lease.SafeDeadline);
+        Assert.Equal(TimeSpan.FromSeconds(100), lease.RenewAt);
+        clock.Advance(TimeSpan.FromSeconds(292));
+        Assert.False(adapter.MayDispatch(acquired.Authority!));
+    }
+
+    [Fact]
+    public async Task Slow_journal_prepare_invalidates_quiescence_without_release_and_retry_keeps_id()
+    {
+        var clock = new FakeMonotonicClock("clock");
+        var checkpoints = new FixtureCheckpointStore();
+        checkpoints.AfterAppend = record =>
+        {
+            if (record.Prepared?.Kind == CoordinationIntentKind.Release)
+                clock.Advance(TimeSpan.FromSeconds(6));
+        };
+        var transport = SingleLeaseTransport();
+        var source = new RecordingQuiescenceSource(clock, [true, true]);
+        var adapter = await CreateAdapterAsync(transport, clock, source, checkpoints: checkpoints);
+        var acquired = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+
+        var stale = await adapter.ReleaseAllAsync(acquired.Authority!, TestContext.Current.CancellationToken);
+        var stableId = stale.Leases.Single().RequestId;
+        Assert.Empty(transport.ReleaseRequests);
+        checkpoints.AfterAppend = null;
+        var cleaned = await adapter.ContinueReleaseAsync(stale.Continuation!, TestContext.Current.CancellationToken);
+
+        var request = Assert.Single(transport.ReleaseRequests);
+        Assert.Equal(stableId, request.RequestId);
+        Assert.Equal(CoordinationLifecyclePhase.Closed, cleaned.Snapshot.Phase);
+    }
+
+    [Fact]
+    public async Task Shuffled_json_records_and_identical_duplicates_replay_terminal_proof()
+    {
+        var transport = SingleLeaseTransport();
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.LeaseLost());
+        transport.InspectResults.Enqueue(InspectTransportResult.Available());
+        var checkpoints = new FixtureCheckpointStore();
+        var first = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var held = await first.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        _ = await first.ReleaseAllAsync(held.Authority!, TestContext.Current.CancellationToken);
+        var lifecycleId = checkpoints.Records[0].Prepared!.LifecycleId;
+        checkpoints.Inject(checkpoints.Records[1]);
+        checkpoints.ReverseReads = true;
+
+        var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var recovered = await restarted.RecoverForCleanupAsync(
+            lifecycleId, Owner, [Issue(6)], "trusted-shuffled-restart", TestContext.Current.CancellationToken);
+
+        Assert.Equal(CoordinationLifecyclePhase.Closed, recovered.Snapshot.Phase);
+        Assert.Equal(LeaseReleaseState.NotOwned, recovered.Leases.Single().State);
+    }
+
+    [Fact]
+    public async Task Writer_epoch_claim_and_expected_sequence_cas_reject_competing_and_stale_writers()
+    {
+        var store = new FixtureCheckpointStore();
+        var lifecycleId = Guid.NewGuid().ToString("D");
+        var firstEpoch = Guid.NewGuid().ToString("D");
+        var first = await store.ClaimWriterAsync(lifecycleId, firstEpoch, null, TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() => store.ClaimWriterAsync(
+            lifecycleId, Guid.NewGuid().ToString("D"), null, TestContext.Current.CancellationToken));
+        var intent = new PreparedCoordinationIntent(lifecycleId, 1, CoordinationIntentKind.Acquire, Issue(6), Owner,
+            Guid.NewGuid().ToString("D"), TimeSpan.Zero, "clock", ContinuumCoordinationAdapter.DefaultTtl, null);
+        var record = new CoordinationCheckpointRecord(CoordinationCheckpointRecord.CurrentSchemaVersion, 1, 1,
+            CoordinationIntentKind.Acquire, firstEpoch, 0, intent, null);
+        await store.AppendAsync(first, 1, record, TestContext.Current.CancellationToken);
+        var takeover = await store.ClaimWriterAsync(lifecycleId, Guid.NewGuid().ToString("D"), "host-proof-1",
+            TestContext.Current.CancellationToken);
+
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() =>
+            store.AppendAsync(first, 2, record with { RecordSequence = 2 }, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() =>
+            store.ClaimWriterAsync(lifecycleId, Guid.NewGuid().ToString("D"), "host-proof-1",
+                TestContext.Current.CancellationToken));
+        Assert.Equal(2, takeover.NextRecordSequence);
+    }
+
+    [Fact]
+    public async Task Noncooperative_capability_transport_and_quiescence_ports_are_bounded_and_late_results_are_inert()
+    {
+        var capabilityBarrier = new TaskCompletionSource<CoordinationCapabilities>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var capabilityTransport = new RecordingTransport(CoordinationContractFixture.Capabilities())
+        {
+            CapabilityHandler = _ => capabilityBarrier.Task,
+        };
+        await Assert.ThrowsAsync<CoordinationUnavailableException>(() => CreateAdapterAsync(
+            capabilityTransport, rollbackTimeout: TimeSpan.FromMilliseconds(20))).WaitAsync(
+                TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+        capabilityBarrier.SetResult(CoordinationContractFixture.Capabilities());
+
+        var acquireBarrier = new TaskCompletionSource<AcquireTransportResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var acquireTransport = new RecordingTransport(CoordinationContractFixture.Capabilities())
+        {
+            AcquireHandler = (_, _) => acquireBarrier.Task,
+        };
+        var acquireAdapter = await CreateAdapterAsync(acquireTransport, rollbackTimeout: TimeSpan.FromMilliseconds(20));
+        var uncertain = await acquireAdapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+        acquireBarrier.SetResult(AcquireTransportResult.Acquired("late", "1", ServerNow, ServerNow.AddMinutes(5)));
+        Assert.Null(uncertain.Authority);
+
+        var clock = new FakeMonotonicClock("clock");
+        var quiescenceBarrier = new TaskCompletionSource<QuiescenceEvidence>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var source = new RecordingQuiescenceSource(clock, [true]) { Handler = (_, _) => quiescenceBarrier.Task };
+        var releaseTransport = SingleLeaseTransport();
+        var releaseAdapter = await CreateAdapterAsync(releaseTransport, clock, source,
+            rollbackTimeout: TimeSpan.FromMilliseconds(20));
+        var held = await releaseAdapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        var cleanup = await releaseAdapter.ReleaseAllAsync(held.Authority!, TestContext.Current.CancellationToken)
+            .WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+        quiescenceBarrier.SetResult(new QuiescenceEvidence(Owner, "test-issuer", "test-source", "clock",
+            clock.Elapsed, "late-evidence", true));
+        Assert.Empty(releaseTransport.ReleaseRequests);
+        Assert.NotNull(cleanup.Continuation);
+    }
+
+    [Fact]
+    public async Task Noncooperative_checkpoint_claim_append_and_read_are_bounded_and_never_authorize_rpc()
+    {
+        foreach (var mode in new[] { BlockingCheckpointMode.Claim, BlockingCheckpointMode.Append })
+        {
+            var store = new BlockingCheckpointStore(mode);
+            var transport = SingleLeaseTransport();
+            var adapter = await CreateAdapterAsync(transport, rollbackTimeout: TimeSpan.FromMilliseconds(20), checkpoints: store);
+            var result = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+                TestContext.Current.CancellationToken).WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+            Assert.Null(result.Authority);
+            Assert.Empty(transport.AcquireRequests);
+            store.Settle();
+        }
+
+        var readStore = new BlockingCheckpointStore(BlockingCheckpointMode.Read);
+        var restarted = await CreateAdapterAsync(SingleLeaseTransport(), rollbackTimeout: TimeSpan.FromMilliseconds(20),
+            checkpoints: readStore);
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() => restarted.RecoverForCleanupAsync(
+            Guid.NewGuid().ToString("D"), Owner, [Issue(6)], "trusted-read-restart",
+            TestContext.Current.CancellationToken)).WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+        readStore.Settle();
+    }
+
+    [Fact]
+    public async Task A_takeover_proof_is_single_use_so_two_recoveries_cannot_share_the_writer_epoch()
+    {
+        var transport = SingleLeaseTransport();
+        transport.ReleaseResults.Enqueue(ReleaseTransportResult.Uncertain("lost"));
+        var checkpoints = new FixtureCheckpointStore();
+        var original = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var held = await original.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        _ = await original.ReleaseAllAsync(held.Authority!, TestContext.Current.CancellationToken);
+        var lifecycleId = checkpoints.Records[0].Prepared!.LifecycleId;
+        var firstRecovery = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        _ = await firstRecovery.RecoverForCleanupAsync(lifecycleId, Owner, [Issue(6)], "single-use-proof",
+            TestContext.Current.CancellationToken);
+        var secondRecovery = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() => secondRecovery.RecoverForCleanupAsync(
+            lifecycleId, Owner, [Issue(6)], "single-use-proof", TestContext.Current.CancellationToken));
+    }
+
     private static readonly DateTimeOffset ServerNow = new(2026, 10, 9, 0, 0, 0, TimeSpan.Zero);
     private static readonly LeaseOwner Owner = new("principal-1", "run-1");
 
@@ -884,12 +1067,14 @@ public sealed class CoordinationContractTests
         FakeMonotonicClock? clock = null,
         RecordingQuiescenceSource? source = null,
         TimeSpan? rollbackTimeout = null,
-        ICoordinationCheckpointStore? checkpoints = null)
+        ICoordinationCheckpointStore? checkpoints = null,
+        TimeSpan? maximumClockUncertainty = null)
     {
         clock ??= new FakeMonotonicClock("test-clock");
         source ??= new RecordingQuiescenceSource(clock, [true, true, true, true]);
         return ContinuumCoordinationAdapter.CreateForContractTestsAsync(
-            transport, source, TestContext.Current.CancellationToken, clock, rollbackTimeout, checkpoints);
+            transport, source, TestContext.Current.CancellationToken, clock, rollbackTimeout, checkpoints,
+            maximumClockUncertainty);
     }
 
     private sealed class FakeMonotonicClock(string domainId) : IMonotonicClock
@@ -916,9 +1101,11 @@ public sealed class CoordinationContractTests
         public int Observations { get; private set; }
         public Action? BeforeObservation { get; set; }
         public TimeSpan ObservedAtOffset { get; set; }
+        public Func<LeaseOwner, CancellationToken, Task<QuiescenceEvidence>>? Handler { get; set; }
 
         public Task<QuiescenceEvidence> ObserveAsync(LeaseOwner owner, CancellationToken cancellationToken = default)
         {
+            if (Handler is not null) return Handler(owner, cancellationToken);
             BeforeObservation?.Invoke();
             Observations++;
             var quiet = _observations.Count > 0 && _observations.Dequeue();
@@ -944,12 +1131,13 @@ public sealed class CoordinationContractTests
         public Func<ReleaseRequest, CancellationToken, Task<ReleaseTransportResult>>? ReleaseHandler { get; set; }
         public Func<AcquireRequest, CancellationToken, Task<AcquireTransportResult>>? AcquireHandler { get; set; }
         public Func<InspectRequest, CancellationToken, Task<InspectTransportResult>>? InspectHandler { get; set; }
+        public Func<CancellationToken, Task<CoordinationCapabilities>>? CapabilityHandler { get; set; }
         public int CapabilityDetections { get; private set; }
 
         public Task<CoordinationCapabilities> DetectCapabilitiesAsync(CancellationToken cancellationToken = default)
         {
             CapabilityDetections++;
-            return Task.FromResult(capabilities);
+            return CapabilityHandler?.Invoke(cancellationToken) ?? Task.FromResult(capabilities);
         }
 
         public Task<AcquireTransportResult> AcquireAsync(AcquireRequest request, CancellationToken cancellationToken = default)
@@ -980,6 +1168,42 @@ public sealed class CoordinationContractTests
             ReleaseRequests.Add(request);
             if (ReleaseHandler is not null) return ReleaseHandler(request, cancellationToken);
             return Task.FromResult(ReleaseResults.Count > 0 ? ReleaseResults.Dequeue() : ReleaseTransportResult.Released());
+        }
+    }
+
+    private enum BlockingCheckpointMode { Claim, Append, Read }
+
+    private sealed class BlockingCheckpointStore(BlockingCheckpointMode mode) : ICoordinationCheckpointStore
+    {
+        private readonly TaskCompletionSource<CoordinationWriterClaim> _claim =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _append = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<IReadOnlyList<CoordinationCheckpointRecord>> _read =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public Task<CoordinationWriterClaim> ClaimWriterAsync(
+            string lifecycleId, string proposedWriterEpoch, string? trustedTakeoverProof,
+            CancellationToken cancellationToken = default) =>
+            mode == BlockingCheckpointMode.Claim
+                ? _claim.Task
+                : Task.FromResult(new CoordinationWriterClaim(lifecycleId, proposedWriterEpoch, 1));
+
+        public Task AppendAsync(
+            CoordinationWriterClaim claim, long expectedRecordSequence, CoordinationCheckpointRecord record,
+            CancellationToken cancellationToken = default) =>
+            mode == BlockingCheckpointMode.Append ? _append.Task : Task.CompletedTask;
+
+        public Task<IReadOnlyList<CoordinationCheckpointRecord>> ReadLifecycleAsync(
+            string lifecycleId, CancellationToken cancellationToken = default) =>
+            mode == BlockingCheckpointMode.Read
+                ? _read.Task
+                : Task.FromResult<IReadOnlyList<CoordinationCheckpointRecord>>([]);
+
+        public void Settle()
+        {
+            _claim.TrySetResult(new CoordinationWriterClaim(Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"), 1));
+            _append.TrySetResult();
+            _read.TrySetResult([]);
         }
     }
 }

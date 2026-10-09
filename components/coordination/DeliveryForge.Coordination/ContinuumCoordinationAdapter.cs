@@ -12,6 +12,7 @@ public sealed class ContinuumCoordinationAdapter
     private readonly QuiescenceSourceBinding _quiescenceBinding;
     private readonly ICoordinationCheckpointStore _checkpoints;
     private readonly TimeSpan _rollbackTimeout;
+    private readonly TimeSpan _maximumClockUncertainty;
     private readonly string _adapterId = Guid.NewGuid().ToString("D");
     private readonly object _ledgerGate = new();
     private readonly Dictionary<DispatchAuthority, Lifecycle> _authorities = new(ReferenceEqualityComparer.Instance);
@@ -26,7 +27,8 @@ public sealed class ContinuumCoordinationAdapter
         IOwnedRunQuiescenceSource quiescence,
         QuiescenceSourceBinding quiescenceBinding,
         ICoordinationCheckpointStore checkpoints,
-        TimeSpan rollbackTimeout)
+        TimeSpan rollbackTimeout,
+        TimeSpan maximumClockUncertainty)
     {
         _transport = transport;
         Capabilities = capabilities;
@@ -35,6 +37,7 @@ public sealed class ContinuumCoordinationAdapter
         _quiescenceBinding = quiescenceBinding;
         _checkpoints = checkpoints;
         _rollbackTimeout = rollbackTimeout;
+        _maximumClockUncertainty = maximumClockUncertainty;
     }
 
     public CoordinationCapabilities Capabilities { get; }
@@ -54,7 +57,8 @@ public sealed class ContinuumCoordinationAdapter
         CancellationToken cancellationToken = default,
         IMonotonicClock? clock = null,
         TimeSpan? rollbackTimeout = null,
-        ICoordinationCheckpointStore? checkpoints = null)
+        ICoordinationCheckpointStore? checkpoints = null,
+        TimeSpan? maximumClockUncertainty = null)
     {
         ArgumentNullException.ThrowIfNull(transport);
         ArgumentNullException.ThrowIfNull(quiescence);
@@ -62,15 +66,19 @@ public sealed class ContinuumCoordinationAdapter
         var binding = quiescence.Binding;
         ValidateQuiescenceBinding(binding, clock);
         CoordinationCapabilities? capabilities;
-        try { capabilities = await transport.DetectCapabilitiesAsync(cancellationToken).ConfigureAwait(false); }
+        var boundedTimeout = rollbackTimeout ?? DefaultRollbackTimeout;
+        if (boundedTimeout <= TimeSpan.Zero || boundedTimeout >= DefaultTtl)
+            throw new ArgumentOutOfRangeException(nameof(rollbackTimeout), "Coordination calls require a known positive bound below the lease TTL.");
+        try { capabilities = await InvokeBoundedStaticAsync(
+            () => transport.DetectCapabilitiesAsync(cancellationToken), boundedTimeout).ConfigureAwait(false); }
         catch (Exception) { throw new CoordinationUnavailableException("Coordination capability detection failed."); }
         var reason = ValidateCapabilities(capabilities, requireFixture: true);
         if (reason is not null) throw new CoordinationUnavailableException(reason);
-        var boundedTimeout = rollbackTimeout ?? DefaultRollbackTimeout;
-        if (boundedTimeout <= TimeSpan.Zero || boundedTimeout >= DefaultTtl)
-            throw new ArgumentOutOfRangeException(nameof(rollbackTimeout), "Rollback must have a known positive bound below the lease TTL.");
+        var uncertainty = maximumClockUncertainty ?? TimeSpan.Zero;
+        if (uncertainty < TimeSpan.Zero || uncertainty >= DefaultTtl)
+            throw new ArgumentOutOfRangeException(nameof(maximumClockUncertainty));
         return new ContinuumCoordinationAdapter(transport, capabilities!, clock, quiescence, binding,
-            checkpoints ?? new VolatileCheckpointStore(), boundedTimeout);
+            checkpoints ?? new VolatileCheckpointStore(), boundedTimeout, uncertainty);
     }
 
     public bool MayDispatch(DispatchAuthority authority)
@@ -156,8 +164,9 @@ public sealed class ContinuumCoordinationAdapter
                 RenewTransportResult? result;
                 try
                 {
-                    var task = _transport.RenewAsync(new RenewRequest(entry.Evidence, intent.Prepared.RequestId), cancellationToken);
-                    result = task is null ? null : await task.ConfigureAwait(false);
+                    result = await InvokeBoundedAsync(() =>
+                        _transport.RenewAsync(new RenewRequest(entry.Evidence, intent.Prepared.RequestId), cancellationToken))
+                        .ConfigureAwait(false);
                 }
                 catch (Exception) { return FinishFailedRenewal(lifecycle, "renew-transport-uncertain"); }
                 var receivedAt = _clock.Elapsed;
@@ -173,7 +182,8 @@ public sealed class ContinuumCoordinationAdapter
                         intent.Prepared.FirstSendMonotonic, receivedAt, entry.Evidence.Generation);
                     if (renewed.ExpiresAt <= intent.Prepared.PreviousLease!.ExpiresAt ||
                         renewed.ServerTime <= intent.Prepared.PreviousLease.ServerTime ||
-                        renewed.SafeDeadline <= entry.Evidence.SafeDeadline)
+                        renewed.SafeDeadline <= entry.Evidence.SafeDeadline ||
+                        renewed.RenewAt <= entry.Evidence.RenewAt)
                         throw new CoordinationProtocolException("renewal-did-not-progress");
                 }
                 catch (CoordinationException) { return FinishFailedRenewal(lifecycle, "renew-response-invalid"); }
@@ -234,16 +244,20 @@ public sealed class ContinuumCoordinationAdapter
         ArgumentNullException.ThrowIfNull(resource);
         ArgumentNullException.ThrowIfNull(owner);
         var lifecycle = new Lifecycle(owner, [resource]) { Busy = true, Phase = CoordinationLifecyclePhase.Cleaning };
+        if (!await ClaimOriginalWriterAsync(lifecycle, cancellationToken).ConfigureAwait(false))
+            throw new CoordinationUncertainException("inspect-checkpoint-claim-failed");
         var intent = ReserveIntent(lifecycle, CoordinationIntentKind.Inspect, resource, null, FreshRequestId());
         if (!await PrepareAsync(intent, cancellationToken).ConfigureAwait(false))
             throw new CoordinationUncertainException("inspect-checkpoint-prepare-failed");
         InspectTransportResult? result;
         try
         {
-            var task = _transport.InspectAsync(new InspectRequest(resource, owner, intent.Prepared.RequestId), cancellationToken);
-            result = task is null ? null : await task.ConfigureAwait(false);
+            result = await InvokeBoundedAsync(() =>
+                _transport.InspectAsync(new InspectRequest(resource, owner, intent.Prepared.RequestId), cancellationToken))
+                .ConfigureAwait(false);
         }
         catch (Exception) { throw new CoordinationUncertainException("inspect-transport-uncertain"); }
+        if (result is null) throw new CoordinationUncertainException("inspect-transport-uncertain");
         var receivedAt = _clock.Elapsed;
         CoordinationInspection inspection;
         try { inspection = ValidateInspection(resource, owner, result, intent.Prepared.FirstSendMonotonic, receivedAt); }
@@ -272,37 +286,92 @@ public sealed class ContinuumCoordinationAdapter
         string lifecycleId,
         LeaseOwner owner,
         IEnumerable<CoordinationResource> resources,
+        string trustedTakeoverProof,
         CancellationToken cancellationToken = default)
     {
         if (!Guid.TryParseExact(lifecycleId, "D", out _))
             throw new CoordinationProtocolException("recovery-lifecycle-invalid");
         var canonical = resources.Distinct().Order(Utf8LexicalComparer.Instance).ToArray();
         if (canonical.Length == 0) throw new CoordinationProtocolException("recovery-resources-empty");
+        if (string.IsNullOrWhiteSpace(trustedTakeoverProof) || trustedTakeoverProof.Any(char.IsControl))
+            throw new CoordinationProtocolException("recovery-takeover-proof-invalid");
+        CoordinationWriterClaim claim;
+        try
+        {
+            claim = await InvokeBoundedAsync(() => _checkpoints.ClaimWriterAsync(
+                lifecycleId, FreshRequestId(), trustedTakeoverProof, cancellationToken)).ConfigureAwait(false)
+                ?? throw new CoordinationUncertainException("checkpoint-claim-missing");
+        }
+        catch (Exception exception) when (exception is not CoordinationException)
+        {
+            throw new CoordinationUncertainException("checkpoint-claim-failed");
+        }
         IReadOnlyList<CoordinationCheckpointRecord> records;
-        try { records = await _checkpoints.ReadLifecycleAsync(lifecycleId, cancellationToken).ConfigureAwait(false); }
+        try { records = await InvokeBoundedAsync(
+            () => _checkpoints.ReadLifecycleAsync(lifecycleId, cancellationToken)).ConfigureAwait(false)
+            ?? throw new CoordinationUncertainException("checkpoint-read-missing"); }
         catch (Exception) { throw new CoordinationUncertainException("checkpoint-read-failed"); }
 
-        var lifecycle = new Lifecycle(owner, canonical, lifecycleId) { Phase = CoordinationLifecyclePhase.Cleaning };
+        var lifecycle = new Lifecycle(owner, canonical, lifecycleId)
+        {
+            Phase = CoordinationLifecyclePhase.Cleaning,
+            WriterClaim = claim,
+            NextRecordSequence = claim.NextRecordSequence,
+        };
         var prepared = new Dictionary<long, PreparedCoordinationIntent>();
         var progress = new Dictionary<long, CoordinationIntentProgress>();
-        foreach (var record in records)
+        var canonicalRecords = new List<CoordinationCheckpointRecord>();
+        foreach (var group in records.GroupBy(item => item.RecordSequence).OrderBy(item => item.Key))
         {
+            var record = group.First();
+            if (group.Any(item => item != record))
+                throw new CoordinationProtocolException("checkpoint-record-conflicting-duplicate");
+            canonicalRecords.Add(record);
+        }
+        for (var index = 0; index < canonicalRecords.Count; index++)
+        {
+            var record = canonicalRecords[index];
+            if (record.SchemaVersion != CoordinationCheckpointRecord.CurrentSchemaVersion)
+                throw new CoordinationProtocolException("checkpoint-version-unsupported");
+            if (record.RecordSequence != index + 1)
+                throw new CoordinationProtocolException("checkpoint-record-gap");
+            if (record.OperationSequence < 1 || record.ProgressRevision < 0 ||
+                !Guid.TryParseExact(record.WriterEpoch, "D", out _))
+                throw new CoordinationProtocolException("checkpoint-envelope-invalid");
             if ((record.Prepared is null) == (record.Progress is null))
                 throw new CoordinationProtocolException("checkpoint-record-invalid");
             if (record.Prepared is not null)
             {
                 ValidateRecovered(record.Prepared, lifecycle);
+                if (record.OperationSequence != record.Prepared.OperationSequence ||
+                    record.Kind != record.Prepared.Kind || record.ProgressRevision != 0)
+                    throw new CoordinationProtocolException("checkpoint-prepare-envelope-invalid");
                 if (!prepared.TryAdd(record.Prepared.OperationSequence, record.Prepared))
                     throw new CoordinationProtocolException("checkpoint-prepare-duplicate");
             }
             else
             {
                 var item = record.Progress!;
-                if (item.LifecycleId != lifecycleId)
+                if (item.LifecycleId != lifecycleId || record.OperationSequence != item.OperationSequence ||
+                    record.Kind != prepared.GetValueOrDefault(item.OperationSequence)?.Kind ||
+                    record.ProgressRevision != item.Revision || item.Revision < 1)
                     throw new CoordinationProtocolException("checkpoint-progress-invalid");
+                if (item.AdapterCode == "release-observed" &&
+                    (item.Quiescence is null || item.Quiescence.Owner != lifecycle.Owner ||
+                     string.IsNullOrWhiteSpace(item.Quiescence.IssuerId) ||
+                     string.IsNullOrWhiteSpace(item.Quiescence.SourceId) ||
+                     string.IsNullOrWhiteSpace(item.Quiescence.ClockDomainId) ||
+                     string.IsNullOrWhiteSpace(item.Quiescence.EvidenceId)))
+                    throw new CoordinationProtocolException("checkpoint-quiescence-binding-invalid");
+                if (progress.TryGetValue(item.OperationSequence, out var prior) && item.Revision <= prior.Revision)
+                    throw new CoordinationProtocolException("checkpoint-progress-transition-invalid");
+                ValidateProgressTransition(record.Kind, prior, item);
                 progress[item.OperationSequence] = item;
             }
         }
+
+        if (canonicalRecords.Count == 0)
+            throw new CoordinationProtocolException("checkpoint-lifecycle-empty");
 
         var unresolvedLifecycle = new List<PreparedCoordinationIntent>();
         foreach (var source in prepared.Values.OrderBy(item => item.OperationSequence))
@@ -324,10 +393,14 @@ public sealed class ContinuumCoordinationAdapter
             if (resolution?.Lease is not null)
             {
                 ValidateRecoveredIdentity(resolution.Lease, source, lifecycle);
-                if (entry is null || entry.ReleaseState is LeaseReleaseState.Pending or LeaseReleaseState.Unknown)
+                if (entry is null)
                 {
                     entry = RecoveredEntry(resolution.Lease);
                     lifecycle.Entries[source.Resource] = entry;
+                }
+                else if (!SameIdentity(entry.Identity, resolution.Lease))
+                {
+                    throw new CoordinationProtocolException("checkpoint-identity-drift");
                 }
             }
 
@@ -341,7 +414,8 @@ public sealed class ContinuumCoordinationAdapter
                     break;
                 case CoordinationIntentKind.Release:
                     if (entry is null) throw new CoordinationProtocolException("checkpoint-release-identity-missing");
-                    entry.ReleaseIntent = RecoveredIntent(source);
+                    entry.ReleaseIntent = RecoveredIntent(lifecycle, source);
+                    entry.ReleaseIntent.ProgressRevision = resolution?.Revision ?? 0;
                     if (resolution?.AdapterCode == "released")
                     {
                         entry.ReleaseState = LeaseReleaseState.Released;
@@ -362,7 +436,12 @@ public sealed class ContinuumCoordinationAdapter
                     }
                     else if (resolution is null)
                     {
-                        entry.InspectIntent = RecoveredIntent(source);
+                        entry.InspectIntent = RecoveredIntent(lifecycle, source);
+                    }
+                    else if (resolution.AdapterCode == "original-still-owned")
+                    {
+                        entry.InspectIntent = RecoveredIntent(lifecycle, source);
+                        entry.InspectIntent.ProgressRevision = resolution.Revision;
                     }
                     break;
             }
@@ -370,10 +449,12 @@ public sealed class ContinuumCoordinationAdapter
 
         if (progress.Keys.Any(sequence => !prepared.ContainsKey(sequence)))
             throw new CoordinationProtocolException("checkpoint-progress-without-prepare");
-        if (unresolvedLifecycle.Count > 1)
-            throw new CoordinationProtocolException("checkpoint-has-overlapping-lifecycle-intents");
-        if (unresolvedLifecycle.Count == 1)
-            lifecycle.PendingIntent = RecoveredIntent(unresolvedLifecycle[0]);
+        foreach (var unresolved in unresolvedLifecycle.OrderBy(item => item.OperationSequence))
+        {
+            var recoveredIntent = RecoveredIntent(lifecycle, unresolved);
+            if (lifecycle.PendingIntent is null) lifecycle.PendingIntent = recoveredIntent;
+            else lifecycle.DeferredIntents.Enqueue(recoveredIntent);
+        }
 
         var acquireOperations = prepared.Values.Where(item => item.Kind == CoordinationIntentKind.Acquire).ToArray();
         lifecycle.AcquisitionResolved = acquireOperations.Length > 0 &&
@@ -404,6 +485,11 @@ public sealed class ContinuumCoordinationAdapter
     {
         try
         {
+            if (!await ClaimOriginalWriterAsync(lifecycle, cancellationToken).ConfigureAwait(false))
+            {
+                lock (_ledgerGate) lifecycle.AcquisitionResolved = true;
+                return FinishUncertainAcquire(lifecycle, null, "checkpoint-writer-claim-failed");
+            }
             foreach (var resource in lifecycle.Resources)
             {
                 var intent = ReserveIntent(lifecycle, CoordinationIntentKind.Acquire, resource, null, FreshRequestId());
@@ -494,8 +580,7 @@ public sealed class ContinuumCoordinationAdapter
                 {
                     var evidence = CreateCleanupEvidence(intent.Prepared.Resource, lifecycle.Owner, response.LeaseId ?? "",
                         response.FencingToken ?? "", response.ServerTime.Value, response.ExpiresAt.Value, FreshRequestId());
-                    var entry = new LeaseEntry(evidence);
-                    lock (_ledgerGate) lifecycle.Entries[intent.Prepared.Resource] = entry;
+                    var entry = MergeAcquireEvidence(lifecycle, evidence);
                     if (await ProgressAsync(intent, "acquired", entry.Identity, cancellationToken).ConfigureAwait(false))
                         ClearIntent(lifecycle, intent);
                 }
@@ -526,8 +611,7 @@ public sealed class ContinuumCoordinationAdapter
         try
         {
             var request = new AcquireRequest(intent.Prepared.Resource, lifecycle.Owner, intent.Prepared.Ttl, intent.Prepared.RequestId);
-            var task = _transport.AcquireAsync(request, cancellationToken);
-            return task is null ? null : await task.ConfigureAwait(false);
+            return await InvokeBoundedAsync(() => _transport.AcquireAsync(request, cancellationToken)).ConfigureAwait(false);
         }
         catch (Exception) { return null; }
     }
@@ -571,12 +655,14 @@ public sealed class ContinuumCoordinationAdapter
     {
         foreach (var entry in ActiveEntries(lifecycle).Reverse())
         {
-            if (!await ObserveQuiescenceAsync(lifecycle, CancellationToken.None).ConfigureAwait(false))
+            var started = _clock.Elapsed;
+            var evidence = await GetQuiescenceAsync(lifecycle, CancellationToken.None).ConfigureAwait(false);
+            if (evidence is null || !IsValidQuiescence(evidence, lifecycle.Owner, started, _clock.Elapsed))
             {
                 lock (_ledgerGate) { entry.ReleaseState = LeaseReleaseState.Unknown; entry.ReleaseReason = "quiescence-unproved"; }
                 continue;
             }
-            await ReleaseEntryAsync(lifecycle, entry, CancellationToken.None, bounded: true).ConfigureAwait(false);
+            await ReleaseEntryAsync(lifecycle, entry, evidence, CancellationToken.None).ConfigureAwait(false);
         }
     }
 
@@ -601,7 +687,7 @@ public sealed class ContinuumCoordinationAdapter
                     lock (_ledgerGate) { entry.ReleaseState = LeaseReleaseState.Unknown; entry.ReleaseReason = "quiescence-unproved"; }
                     break;
                 }
-                var outcome = await ReleaseEntryAsync(lifecycle, entry, cancellationToken, bounded: false).ConfigureAwait(false);
+                var outcome = await ReleaseEntryAsync(lifecycle, entry, observation, cancellationToken).ConfigureAwait(false);
                 if (outcome == TransportOutcome.LeaseLost)
                     await ProveNotOwnedAsync(lifecycle, entry, cancellationToken).ConfigureAwait(false);
             }
@@ -642,7 +728,7 @@ public sealed class ContinuumCoordinationAdapter
             if (await ProgressAsync(intent, "contended", null, cancellationToken).ConfigureAwait(false))
             {
                 ClearIntent(lifecycle, intent);
-                lock (_ledgerGate) lifecycle.AcquisitionResolved = true;
+                lock (_ledgerGate) lifecycle.AcquisitionResolved = !HasUnresolvedAcquire(lifecycle);
             }
             return;
         }
@@ -651,12 +737,11 @@ public sealed class ContinuumCoordinationAdapter
         {
             var evidence = CreateCleanupEvidence(intent.Prepared.Resource, lifecycle.Owner, response.LeaseId ?? "",
                 response.FencingToken ?? "", response.ServerTime.Value, response.ExpiresAt.Value, FreshRequestId());
-            var entry = new LeaseEntry(evidence);
-            lock (_ledgerGate) lifecycle.Entries[evidence.Resource] = entry;
+            var entry = MergeAcquireEvidence(lifecycle, evidence);
             if (await ProgressAsync(intent, "acquired", entry.Identity, cancellationToken).ConfigureAwait(false))
             {
                 ClearIntent(lifecycle, intent);
-                lock (_ledgerGate) lifecycle.AcquisitionResolved = true;
+                lock (_ledgerGate) lifecycle.AcquisitionResolved = !HasUnresolvedAcquire(lifecycle);
             }
         }
         catch (CoordinationException) { RetainStructuralIdentity(lifecycle, intent, response); }
@@ -677,8 +762,7 @@ public sealed class ContinuumCoordinationAdapter
         try
         {
             var request = new RenewRequest(Evidence(intent.Prepared.PreviousLease!), intent.Prepared.RequestId);
-            var task = _transport.RenewAsync(request, cancellationToken);
-            result = task is null ? null : await task.ConfigureAwait(false);
+            result = await InvokeBoundedAsync(() => _transport.RenewAsync(request, cancellationToken)).ConfigureAwait(false);
         }
         catch (Exception) { return; }
         if (result is null) return;
@@ -719,30 +803,31 @@ public sealed class ContinuumCoordinationAdapter
     }
 
     private async Task<TransportOutcome?> ReleaseEntryAsync(
-        Lifecycle lifecycle, LeaseEntry entry, CancellationToken cancellationToken, bool bounded)
+        Lifecycle lifecycle, LeaseEntry entry, QuiescenceEvidence observation, CancellationToken cancellationToken)
     {
-        var intent = entry.ReleaseIntent ?? ReserveReleaseIntent(lifecycle, entry);
+        var intent = entry.ReleaseIntent ?? ReserveReleaseIntent(lifecycle, entry, observation);
         if (!intent.PreparedWritten && !await PrepareAsync(intent, cancellationToken).ConfigureAwait(false))
         {
             lock (_ledgerGate) { entry.ReleaseState = LeaseReleaseState.Unknown; entry.ReleaseReason = "checkpoint-prepare-failed"; }
             return null;
         }
+        if (!await ProgressAsync(intent, "release-observed", entry.Identity, cancellationToken, observation)
+                .ConfigureAwait(false))
+        {
+            lock (_ledgerGate) { entry.ReleaseState = LeaseReleaseState.Unknown; entry.ReleaseReason = "checkpoint-observation-failed"; }
+            return null;
+        }
         ReleaseTransportResult? result = null;
+        var now = _clock.Elapsed;
+        if (!IsValidQuiescence(observation, lifecycle.Owner, observation.ObservedAt, now))
+        {
+            lock (_ledgerGate) { entry.ReleaseState = LeaseReleaseState.Unknown; entry.ReleaseReason = "quiescence-stale-before-send"; }
+            return null;
+        }
         try
         {
             var request = new ReleaseRequest(entry.Identity.LeaseId, lifecycle.Owner, entry.Identity.FencingToken, intent.Prepared.RequestId);
-            var task = _transport.ReleaseAsync(request, cancellationToken);
-            if (task is not null)
-            {
-                if (bounded)
-                {
-                    var completed = await Task.WhenAny(task, Task.Delay(_rollbackTimeout)).ConfigureAwait(false);
-                    if (ReferenceEquals(completed, task)) result = await task.ConfigureAwait(false);
-                    else _ = task.ContinueWith(item => _ = item.Exception, CancellationToken.None,
-                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-                }
-                else result = await task.ConfigureAwait(false);
-            }
+            result = await InvokeBoundedAsync(() => _transport.ReleaseAsync(request, cancellationToken)).ConfigureAwait(false);
         }
         catch (Exception) { }
         if (result?.Outcome == TransportOutcome.Released)
@@ -768,13 +853,17 @@ public sealed class ContinuumCoordinationAdapter
         InspectTransportResult? result;
         try
         {
-            var task = _transport.InspectAsync(new InspectRequest(entry.Evidence.Resource, lifecycle.Owner, intent.Prepared.RequestId), cancellationToken);
-            result = task is null ? null : await task.ConfigureAwait(false);
+            result = await InvokeBoundedAsync(() =>
+                _transport.InspectAsync(new InspectRequest(entry.Evidence.Resource, lifecycle.Owner, intent.Prepared.RequestId), cancellationToken))
+                .ConfigureAwait(false);
         }
         catch (Exception) { return; }
-        if (result is null || result.Outcome != TransportOutcome.Inspected) return;
-        var notOwned = !result.Held || !result.CallerOwnsLease ||
-            result.LeaseId != entry.Identity.LeaseId || result.FencingToken != entry.Identity.FencingToken;
+        CoordinationInspection inspection;
+        try { inspection = ValidateInspectionForCleanup(entry.Evidence.Resource, lifecycle.Owner, result); }
+        catch (CoordinationException) { return; }
+        var notOwned = inspection.State is InspectionState.Available or InspectionState.HeldByOther ||
+            inspection.OwnedLease?.LeaseId != entry.Identity.LeaseId ||
+            inspection.OwnedLease?.FencingToken != entry.Identity.FencingToken;
         if (!notOwned)
         {
             if (await ProgressAsync(intent, "original-still-owned", entry.Identity, cancellationToken).ConfigureAwait(false))
@@ -801,20 +890,21 @@ public sealed class ContinuumCoordinationAdapter
             if (lifecycle.PendingIntent is not null) throw new CoordinationUncertainException("logical-operation-overlap");
             var prepared = new PreparedCoordinationIntent(lifecycle.Id, lifecycle.NextSequence++, kind, resource,
                 lifecycle.Owner, requestId, _clock.Elapsed, _clock.DomainId, DefaultTtl, prior);
-            var intent = new OperationIntent(prepared);
+            var intent = new OperationIntent(lifecycle, prepared);
             lifecycle.PendingIntent = intent;
             return intent;
         }
     }
 
-    private OperationIntent ReserveReleaseIntent(Lifecycle lifecycle, LeaseEntry entry)
+    private OperationIntent ReserveReleaseIntent(Lifecycle lifecycle, LeaseEntry entry, QuiescenceEvidence observation)
     {
         lock (_ledgerGate)
         {
             if (entry.ReleaseIntent is not null) return entry.ReleaseIntent;
             var prepared = new PreparedCoordinationIntent(lifecycle.Id, lifecycle.NextSequence++, CoordinationIntentKind.Release,
-                entry.Evidence.Resource, lifecycle.Owner, FreshRequestId(), _clock.Elapsed, _clock.DomainId, DefaultTtl, entry.Identity);
-            entry.ReleaseIntent = new OperationIntent(prepared);
+                entry.Evidence.Resource, lifecycle.Owner, FreshRequestId(), _clock.Elapsed, _clock.DomainId, DefaultTtl,
+                entry.Identity, observation);
+            entry.ReleaseIntent = new OperationIntent(lifecycle, prepared);
             return entry.ReleaseIntent;
         }
     }
@@ -826,7 +916,7 @@ public sealed class ContinuumCoordinationAdapter
             if (entry.InspectIntent is not null) return entry.InspectIntent;
             var prepared = new PreparedCoordinationIntent(lifecycle.Id, lifecycle.NextSequence++, CoordinationIntentKind.Inspect,
                 entry.Evidence.Resource, lifecycle.Owner, FreshRequestId(), _clock.Elapsed, _clock.DomainId, DefaultTtl, entry.Identity);
-            entry.InspectIntent = new OperationIntent(prepared);
+            entry.InspectIntent = new OperationIntent(lifecycle, prepared);
             return entry.InspectIntent;
         }
     }
@@ -834,24 +924,79 @@ public sealed class ContinuumCoordinationAdapter
     private async Task<bool> PrepareAsync(OperationIntent intent, CancellationToken cancellationToken)
     {
         if (intent.PreparedWritten) return true;
+        var lifecycle = intent.Lifecycle;
+        if (lifecycle.WriterClaim is null) return false;
+        var sequence = lifecycle.NextRecordSequence;
+        var record = new CoordinationCheckpointRecord(
+            CoordinationCheckpointRecord.CurrentSchemaVersion, sequence, intent.Prepared.OperationSequence,
+            intent.Prepared.Kind, lifecycle.WriterClaim.WriterEpoch, 0, intent.Prepared, null);
+        if (!await AppendOrReconcileAsync(lifecycle, record, cancellationToken).ConfigureAwait(false)) return false;
+        lock (_ledgerGate) intent.PreparedWritten = true;
+        return true;
+    }
+
+    private async Task<bool> ProgressAsync(
+        OperationIntent intent, string code, CheckpointLeaseIdentity? lease, CancellationToken cancellationToken,
+        QuiescenceEvidence? quiescence = null)
+    {
+        var lifecycle = intent.Lifecycle;
+        if (lifecycle.WriterClaim is null) return false;
+        var revision = intent.ProgressRevision + 1;
+        var progress = new CoordinationIntentProgress(
+            intent.Prepared.LifecycleId, intent.Prepared.OperationSequence, code, lease, revision, quiescence);
+        var record = new CoordinationCheckpointRecord(
+            CoordinationCheckpointRecord.CurrentSchemaVersion, lifecycle.NextRecordSequence,
+            intent.Prepared.OperationSequence, intent.Prepared.Kind, lifecycle.WriterClaim.WriterEpoch,
+            revision, null, progress);
+        if (!await AppendOrReconcileAsync(lifecycle, record, cancellationToken).ConfigureAwait(false)) return false;
+        lock (_ledgerGate)
+        {
+            intent.ProgressRevision = revision;
+            intent.Resolved = true;
+        }
+        return true;
+    }
+
+    private async Task<bool> ClaimOriginalWriterAsync(Lifecycle lifecycle, CancellationToken cancellationToken)
+    {
         try
         {
-            await _checkpoints.AppendPreparedAsync(intent.Prepared, cancellationToken).ConfigureAwait(false);
-            lock (_ledgerGate) intent.PreparedWritten = true;
+            var claim = await InvokeBoundedAsync(() => _checkpoints.ClaimWriterAsync(
+                lifecycle.Id, FreshRequestId(), null, cancellationToken)).ConfigureAwait(false);
+            if (claim is null || claim.LifecycleId != lifecycle.Id || claim.NextRecordSequence < 1 ||
+                !Guid.TryParseExact(claim.WriterEpoch, "D", out _)) return false;
+            lock (_ledgerGate)
+            {
+                lifecycle.WriterClaim = claim;
+                lifecycle.NextRecordSequence = claim.NextRecordSequence;
+            }
             return true;
         }
         catch (Exception) { return false; }
     }
 
-    private async Task<bool> ProgressAsync(
-        OperationIntent intent, string code, CheckpointLeaseIdentity? lease, CancellationToken cancellationToken)
+    private async Task<bool> AppendOrReconcileAsync(
+        Lifecycle lifecycle, CoordinationCheckpointRecord record, CancellationToken cancellationToken)
     {
         try
         {
-            await _checkpoints.AppendProgressAsync(
-                new CoordinationIntentProgress(intent.Prepared.LifecycleId, intent.Prepared.OperationSequence, code, lease),
-                cancellationToken).ConfigureAwait(false);
-            lock (_ledgerGate) intent.Resolved = true;
+            await InvokeBoundedAsync(async () =>
+            {
+                await _checkpoints.AppendAsync(lifecycle.WriterClaim!, record.RecordSequence, record, cancellationToken)
+                    .ConfigureAwait(false);
+                return true;
+            }).ConfigureAwait(false);
+        }
+        catch (Exception) { }
+
+        try
+        {
+            var records = await InvokeBoundedAsync(
+                () => _checkpoints.ReadLifecycleAsync(lifecycle.Id, cancellationToken)).ConfigureAwait(false);
+            if (records is null) return false;
+            var matches = records.Where(item => item.RecordSequence == record.RecordSequence).ToArray();
+            if (matches.Length == 0 || matches.Any(item => item != record)) return false;
+            lock (_ledgerGate) lifecycle.NextRecordSequence = record.RecordSequence + 1;
             return true;
         }
         catch (Exception) { return false; }
@@ -861,7 +1006,8 @@ public sealed class ContinuumCoordinationAdapter
     {
         lock (_ledgerGate)
         {
-            if (ReferenceEquals(lifecycle.PendingIntent, intent)) lifecycle.PendingIntent = null;
+            if (ReferenceEquals(lifecycle.PendingIntent, intent))
+                lifecycle.PendingIntent = lifecycle.DeferredIntents.TryDequeue(out var next) ? next : null;
             if (!preserveRelease && intent.Prepared.Kind == CoordinationIntentKind.Release &&
                 lifecycle.Entries.TryGetValue(intent.Prepared.Resource, out var entry)) entry.ReleaseIntent = intent;
         }
@@ -948,10 +1094,12 @@ public sealed class ContinuumCoordinationAdapter
     private void CloseUnderGate(Lifecycle lifecycle)
     {
         RevokeAuthorityUnderGate(lifecycle);
+        if (lifecycle.CleanupAuthority is not null) _authorities.Remove(lifecycle.CleanupAuthority);
         if (lifecycle.AcquireContinuation is not null) _acquireContinuations.Remove(lifecycle.AcquireContinuation);
         if (lifecycle.ReleaseContinuation is not null) _releaseContinuations.Remove(lifecycle.ReleaseContinuation);
         lifecycle.AcquireContinuation = null;
         lifecycle.ReleaseContinuation = null;
+        lifecycle.CleanupAuthority = null;
         _lifecycles.Remove(lifecycle.Id);
     }
 
@@ -974,8 +1122,7 @@ public sealed class ContinuumCoordinationAdapter
     {
         try
         {
-            var task = _quiescence.ObserveAsync(lifecycle.Owner, cancellationToken);
-            return task is null ? null : await task.ConfigureAwait(false);
+            return await InvokeBoundedAsync(() => _quiescence.ObserveAsync(lifecycle.Owner, cancellationToken)).ConfigureAwait(false);
         }
         catch (Exception) { return null; }
     }
@@ -1005,8 +1152,9 @@ public sealed class ContinuumCoordinationAdapter
             throw new CoordinationProtocolException("grant-ttl-invalid");
         if (receivedAt < firstSend) throw new CoordinationProtocolException("monotonic-clock-went-backwards");
         TimeSpan deadline;
-        try { deadline = firstSend + DefaultTtl; }
-        catch (OverflowException) { throw new CoordinationProtocolException("deadline-overflow"); }
+        try { deadline = LeaseDeadline.ComputeSafeDeadline(serverTime, expiresAt,
+            receivedAt - firstSend, receivedAt, _maximumClockUncertainty); }
+        catch (ArgumentOutOfRangeException exception) { throw new CoordinationProtocolException("deadline-input-invalid", exception); }
         return new LeaseEvidence(resource, owner, leaseId, fencingToken, serverTime, expiresAt,
             deadline, firstSend + RenewalTarget, generation);
     }
@@ -1017,8 +1165,9 @@ public sealed class ContinuumCoordinationAdapter
     {
         if (receivedAt < firstSend || expiresAt <= serverTime) throw new CoordinationProtocolException("inspect-time-invalid");
         TimeSpan deadline;
-        try { deadline = firstSend + (expiresAt - serverTime); }
-        catch (OverflowException) { throw new CoordinationProtocolException("deadline-overflow"); }
+        try { deadline = LeaseDeadline.ComputeSafeDeadline(serverTime, expiresAt,
+            receivedAt - firstSend, receivedAt, _maximumClockUncertainty); }
+        catch (ArgumentOutOfRangeException exception) { throw new CoordinationProtocolException("deadline-input-invalid", exception); }
         return new LeaseEvidence(resource, owner, leaseId, fencingToken, serverTime, expiresAt,
             deadline, deadline - TimeSpan.FromTicks(1), FreshRequestId());
     }
@@ -1055,6 +1204,27 @@ public sealed class ContinuumCoordinationAdapter
         return new CoordinationInspection(InspectionState.HeldByCaller, evidence, "held-by-caller");
     }
 
+    private static CoordinationInspection ValidateInspectionForCleanup(
+        CoordinationResource resource, LeaseOwner owner, InspectTransportResult? result)
+    {
+        if (result is null || result.Outcome != TransportOutcome.Inspected)
+            throw new CoordinationProtocolException("inspect-not-authoritative");
+        if (!result.Held)
+        {
+            if (result.CallerOwnsLease || result.LeaseId is not null || result.FencingToken is not null ||
+                result.ServerTime is not null || result.ExpiresAt is not null)
+                throw new CoordinationProtocolException("available-inspect-leaked-details");
+            return new CoordinationInspection(InspectionState.Available, null, "available");
+        }
+        if (!result.CallerOwnsLease)
+            return new CoordinationInspection(InspectionState.HeldByOther, null, "held-by-other");
+        if (result.ServerTime is null || result.ExpiresAt is null)
+            throw new CoordinationProtocolException("owned-inspect-missing-time");
+        var evidence = CreateCleanupEvidence(resource, owner, result.LeaseId ?? "", result.FencingToken ?? "",
+            result.ServerTime.Value, result.ExpiresAt.Value, FreshRequestId());
+        return new CoordinationInspection(InspectionState.HeldByCaller, evidence, "held-by-caller");
+    }
+
     private void RetainStructuralIdentity(Lifecycle lifecycle, OperationIntent intent, AcquireTransportResult response)
     {
         try
@@ -1063,9 +1233,25 @@ public sealed class ContinuumCoordinationAdapter
             var evidence = CreateGrantEvidence(intent.Prepared.Resource, lifecycle.Owner, response.LeaseId ?? "",
                 response.FencingToken ?? "", response.ServerTime.Value, response.ExpiresAt.Value,
                 intent.Prepared.FirstSendMonotonic, _clock.Elapsed, FreshRequestId());
-            lock (_ledgerGate) lifecycle.Entries[intent.Prepared.Resource] = new LeaseEntry(evidence);
+            _ = MergeAcquireEvidence(lifecycle, evidence);
         }
         catch (CoordinationException) { }
+    }
+
+    private LeaseEntry MergeAcquireEvidence(Lifecycle lifecycle, LeaseEvidence evidence)
+    {
+        lock (_ledgerGate)
+        {
+            if (!lifecycle.Entries.TryGetValue(evidence.Resource, out var existing))
+            {
+                existing = new LeaseEntry(evidence);
+                lifecycle.Entries.Add(evidence.Resource, existing);
+                return existing;
+            }
+            if (!SameServerIdentity(existing.Identity, Identity(evidence)))
+                throw new CoordinationProtocolException("acquire-replay-identity-drift");
+            return existing;
+        }
     }
 
     private static CheckpointLeaseIdentity Identity(LeaseEvidence evidence) =>
@@ -1078,8 +1264,15 @@ public sealed class ContinuumCoordinationAdapter
             identity.FencingToken, identity.ServerTime, identity.ExpiresAt, identity.Generation));
     }
 
-    private static OperationIntent RecoveredIntent(PreparedCoordinationIntent prepared) =>
-        new(prepared) { PreparedWritten = true };
+    private static OperationIntent RecoveredIntent(Lifecycle lifecycle, PreparedCoordinationIntent prepared) =>
+        new(lifecycle, prepared) { PreparedWritten = true };
+
+    private static bool SameServerIdentity(CheckpointLeaseIdentity left, CheckpointLeaseIdentity right) =>
+        left.Resource == right.Resource && left.Owner == right.Owner && left.LeaseId == right.LeaseId &&
+        left.FencingToken == right.FencingToken;
+
+    private static bool SameIdentity(CheckpointLeaseIdentity left, CheckpointLeaseIdentity right) =>
+        SameServerIdentity(left, right) && left.Generation == right.Generation;
 
     private static LeaseEvidence Evidence(CheckpointLeaseIdentity identity) =>
         new(identity.Resource, identity.Owner, identity.LeaseId, identity.FencingToken,
@@ -1103,14 +1296,36 @@ public sealed class ContinuumCoordinationAdapter
             throw new CoordinationProtocolException("checkpoint-lease-binding-invalid");
     }
 
+    private static void ValidateProgressTransition(
+        CoordinationIntentKind kind, CoordinationIntentProgress? prior, CoordinationIntentProgress current)
+    {
+        var allowed = kind switch
+        {
+            CoordinationIntentKind.Acquire => current.AdapterCode is "acquired" or "contended",
+            CoordinationIntentKind.Renew => current.AdapterCode is "renewed" or "renewed-cleanup-only" or
+                "renew-replay-nonauthoritative" or "renew-superseded-by-cleanup",
+            CoordinationIntentKind.Release => current.AdapterCode is "release-observed" or "released" or "lease-lost" or "release-uncertain",
+            CoordinationIntentKind.Inspect => current.AdapterCode is "inspected" or "original-still-owned" or "original-not-owned",
+            _ => false,
+        };
+        if (!allowed) throw new CoordinationProtocolException("checkpoint-progress-code-invalid");
+        if (prior?.AdapterCode is "acquired" or "contended" or "released" or "original-not-owned" ||
+            prior?.AdapterCode is "renewed" or "renewed-cleanup-only" or "renew-superseded-by-cleanup")
+            throw new CoordinationProtocolException("checkpoint-terminal-transition-invalid");
+    }
+
     private bool CanBeHeld(Lifecycle lifecycle) =>
         lifecycle.PendingIntent is null && lifecycle.Entries.Count == lifecycle.Resources.Length &&
         lifecycle.Resources.All(resource => lifecycle.Entries.TryGetValue(resource, out var entry) &&
             entry.ReleaseState == LeaseReleaseState.Pending && _clock.Elapsed < entry.Evidence.SafeDeadline);
 
     private static bool IsClosed(Lifecycle lifecycle) =>
-        lifecycle.AcquisitionResolved && lifecycle.PendingIntent is null && lifecycle.Entries.Values.All(entry =>
+        lifecycle.AcquisitionResolved && lifecycle.PendingIntent is null && lifecycle.DeferredIntents.Count == 0 && lifecycle.Entries.Values.All(entry =>
             entry.ReleaseState is LeaseReleaseState.Released or LeaseReleaseState.NotOwned);
+
+    private static bool HasUnresolvedAcquire(Lifecycle lifecycle) =>
+        lifecycle.PendingIntent?.Prepared.Kind == CoordinationIntentKind.Acquire ||
+        lifecycle.DeferredIntents.Any(item => item.Prepared.Kind == CoordinationIntentKind.Acquire);
 
     private static LeaseEntry[] ActiveEntries(Lifecycle lifecycle) =>
         lifecycle.Entries.Values.Where(entry => entry.ReleaseState is not LeaseReleaseState.Released and not LeaseReleaseState.NotOwned)
@@ -1164,6 +1379,27 @@ public sealed class ContinuumCoordinationAdapter
         return null;
     }
 
+    private Task<T?> InvokeBoundedAsync<T>(Func<Task<T>> invoke) =>
+        InvokeBoundedStaticAsync(invoke, _rollbackTimeout);
+
+    private static async Task<T?> InvokeBoundedStaticAsync<T>(Func<Task<T>> invoke, TimeSpan timeout)
+    {
+        Task<T>? task;
+        try { task = invoke(); }
+        catch { return default; }
+        if (task is null) return default;
+        var completed = await Task.WhenAny(task, Task.Delay(timeout)).ConfigureAwait(false);
+        if (!ReferenceEquals(completed, task))
+        {
+            _ = task.ContinueWith(item => _ = item.Exception, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            return default;
+        }
+        try { return await task.ConfigureAwait(false); }
+        catch { return default; }
+    }
+
     private static string FreshRequestId() => Guid.NewGuid().ToString("D");
 
     private sealed class Lifecycle
@@ -1180,6 +1416,7 @@ public sealed class ContinuumCoordinationAdapter
         public CoordinationResource[] Resources { get; }
         public Dictionary<CoordinationResource, LeaseEntry> Entries { get; } = [];
         public OperationIntent? PendingIntent { get; set; }
+        public Queue<OperationIntent> DeferredIntents { get; } = [];
         public DispatchAuthority? Authority { get; set; }
         public DispatchAuthority? CleanupAuthority { get; set; }
         public AcquireContinuation? AcquireContinuation { get; set; }
@@ -1190,6 +1427,8 @@ public sealed class ContinuumCoordinationAdapter
         public bool Busy { get; set; }
         public bool AcquisitionResolved { get; set; }
         public long NextSequence { get; set; } = 1;
+        public CoordinationWriterClaim? WriterClaim { get; set; }
+        public long NextRecordSequence { get; set; } = 1;
     }
 
     private sealed class LeaseEntry
@@ -1207,25 +1446,64 @@ public sealed class ContinuumCoordinationAdapter
         public string ReleaseReason { get; set; } = "release-not-attempted";
     }
 
-    private sealed class OperationIntent(PreparedCoordinationIntent prepared)
+    private sealed class OperationIntent(Lifecycle lifecycle, PreparedCoordinationIntent prepared)
     {
+        public Lifecycle Lifecycle { get; } = lifecycle;
         public PreparedCoordinationIntent Prepared { get; } = prepared;
         public bool PreparedWritten { get; set; }
         public bool Resolved { get; set; }
+        public long ProgressRevision { get; set; }
     }
 
     private sealed class VolatileCheckpointStore : ICoordinationCheckpointStore
     {
         private readonly List<CoordinationCheckpointRecord> _records = [];
-        public Task AppendPreparedAsync(PreparedCoordinationIntent intent, CancellationToken cancellationToken = default)
+        private readonly Dictionary<string, string> _epochs = new(StringComparer.Ordinal);
+        private readonly HashSet<(string LifecycleId, string Proof)> _usedTakeovers = [];
+
+        public Task<CoordinationWriterClaim> ClaimWriterAsync(
+            string lifecycleId, string proposedWriterEpoch, string? trustedTakeoverProof,
+            CancellationToken cancellationToken = default)
         {
-            lock (_records) _records.Add(new CoordinationCheckpointRecord(intent, null));
-            return Task.CompletedTask;
+            lock (_records)
+            {
+                if (_epochs.ContainsKey(lifecycleId))
+                {
+                    if (string.IsNullOrWhiteSpace(trustedTakeoverProof) ||
+                        !_usedTakeovers.Add((lifecycleId, trustedTakeoverProof)))
+                        throw new CoordinationUncertainException("checkpoint-writer-already-owned");
+                }
+                _epochs[lifecycleId] = proposedWriterEpoch;
+                var next = _records.Where(item =>
+                    item.Prepared?.LifecycleId == lifecycleId || item.Progress?.LifecycleId == lifecycleId)
+                    .Select(item => item.RecordSequence).DefaultIfEmpty().Max() + 1;
+                return Task.FromResult(new CoordinationWriterClaim(lifecycleId, proposedWriterEpoch, next));
+            }
         }
-        public Task AppendProgressAsync(CoordinationIntentProgress progress, CancellationToken cancellationToken = default)
+
+        public Task AppendAsync(
+            CoordinationWriterClaim claim, long expectedRecordSequence, CoordinationCheckpointRecord record,
+            CancellationToken cancellationToken = default)
         {
-            lock (_records) _records.Add(new CoordinationCheckpointRecord(null, progress));
-            return Task.CompletedTask;
+            lock (_records)
+            {
+                if (!_epochs.TryGetValue(claim.LifecycleId, out var epoch) || epoch != claim.WriterEpoch ||
+                    record.WriterEpoch != epoch)
+                    throw new CoordinationUncertainException("checkpoint-writer-stale");
+                var lifecycleRecords = _records.Where(item =>
+                    item.Prepared?.LifecycleId == claim.LifecycleId || item.Progress?.LifecycleId == claim.LifecycleId).ToArray();
+                var next = lifecycleRecords.Select(item => item.RecordSequence).DefaultIfEmpty().Max() + 1;
+                var duplicate = lifecycleRecords.SingleOrDefault(item => item.RecordSequence == expectedRecordSequence);
+                if (duplicate is not null)
+                {
+                    if (duplicate != record) throw new CoordinationProtocolException("checkpoint-cas-conflicting-duplicate");
+                    return Task.CompletedTask;
+                }
+                if (expectedRecordSequence != next || record.RecordSequence != expectedRecordSequence)
+                    throw new CoordinationUncertainException("checkpoint-cas-conflict");
+                _records.Add(record);
+                return Task.CompletedTask;
+            }
         }
         public Task<IReadOnlyList<CoordinationCheckpointRecord>> ReadLifecycleAsync(
             string lifecycleId, CancellationToken cancellationToken = default)

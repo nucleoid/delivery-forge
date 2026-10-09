@@ -253,22 +253,43 @@ public sealed record PreparedCoordinationIntent(
     TimeSpan FirstSendMonotonic,
     string ClockDomainId,
     TimeSpan Ttl,
-    CheckpointLeaseIdentity? PreviousLease);
+    CheckpointLeaseIdentity? PreviousLease,
+    QuiescenceEvidence? Quiescence = null);
 
 public sealed record CoordinationIntentProgress(
     string LifecycleId,
     long OperationSequence,
     string AdapterCode,
-    CheckpointLeaseIdentity? Lease);
+    CheckpointLeaseIdentity? Lease,
+    long Revision = 1,
+    QuiescenceEvidence? Quiescence = null);
 
 public sealed record CoordinationCheckpointRecord(
+    int SchemaVersion,
+    long RecordSequence,
+    long OperationSequence,
+    CoordinationIntentKind Kind,
+    string WriterEpoch,
+    long ProgressRevision,
     PreparedCoordinationIntent? Prepared,
-    CoordinationIntentProgress? Progress);
+    CoordinationIntentProgress? Progress)
+{
+    public const int CurrentSchemaVersion = 1;
+}
+
+public sealed record CoordinationWriterClaim(
+    string LifecycleId,
+    string WriterEpoch,
+    long NextRecordSequence);
 
 public interface ICoordinationCheckpointStore
 {
-    Task AppendPreparedAsync(PreparedCoordinationIntent intent, CancellationToken cancellationToken = default);
-    Task AppendProgressAsync(CoordinationIntentProgress progress, CancellationToken cancellationToken = default);
+    Task<CoordinationWriterClaim> ClaimWriterAsync(
+        string lifecycleId, string proposedWriterEpoch, string? trustedTakeoverProof,
+        CancellationToken cancellationToken = default);
+    Task AppendAsync(
+        CoordinationWriterClaim claim, long expectedRecordSequence, CoordinationCheckpointRecord record,
+        CancellationToken cancellationToken = default);
     Task<IReadOnlyList<CoordinationCheckpointRecord>> ReadLifecycleAsync(
         string lifecycleId, CancellationToken cancellationToken = default);
 }

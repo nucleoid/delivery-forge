@@ -150,30 +150,87 @@ internal sealed class IdempotentCoordinationFixture(Func<DateTimeOffset> serverN
 internal sealed class FixtureCheckpointStore : ICoordinationCheckpointStore
 {
     private readonly List<byte[]> _records = [];
+    private readonly Dictionary<string, string> _epochs = new(StringComparer.Ordinal);
+    private readonly HashSet<(string LifecycleId, string Proof)> _usedTakeovers = [];
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 
     public bool FailNextPrepare { get; set; }
     public bool FailNextProgress { get; set; }
+    public bool FailAfterNextAppend { get; set; }
+    public bool ReverseReads { get; set; }
+    public Action<CoordinationCheckpointRecord>? AfterAppend { get; set; }
     public IReadOnlyList<CoordinationCheckpointRecord> Records => _records.Select(RoundTrip).ToArray();
 
-    public Task AppendPreparedAsync(PreparedCoordinationIntent intent, CancellationToken cancellationToken = default)
+    public Task<CoordinationWriterClaim> ClaimWriterAsync(
+        string lifecycleId, string proposedWriterEpoch, string? trustedTakeoverProof,
+        CancellationToken cancellationToken = default)
     {
-        if (FailNextPrepare) { FailNextPrepare = false; throw new IOException("fixture-prepare-failure"); }
-        _records.Add(JsonSerializer.SerializeToUtf8Bytes(new CoordinationCheckpointRecord(intent, null), Json));
-        return Task.CompletedTask;
+        lock (_records)
+        {
+            if (_epochs.ContainsKey(lifecycleId))
+            {
+                if (string.IsNullOrWhiteSpace(trustedTakeoverProof) ||
+                    !_usedTakeovers.Add((lifecycleId, trustedTakeoverProof)))
+                    throw new CoordinationUncertainException("fixture-writer-owned");
+            }
+            _epochs[lifecycleId] = proposedWriterEpoch;
+            var next = Records.Where(record => LifecycleId(record) == lifecycleId)
+                .Select(record => record.RecordSequence).DefaultIfEmpty().Max() + 1;
+            return Task.FromResult(new CoordinationWriterClaim(lifecycleId, proposedWriterEpoch, next));
+        }
     }
 
-    public Task AppendProgressAsync(CoordinationIntentProgress progress, CancellationToken cancellationToken = default)
+    public Task AppendAsync(
+        CoordinationWriterClaim claim, long expectedRecordSequence, CoordinationCheckpointRecord record,
+        CancellationToken cancellationToken = default)
     {
-        if (FailNextProgress) { FailNextProgress = false; throw new IOException("fixture-progress-failure"); }
-        _records.Add(JsonSerializer.SerializeToUtf8Bytes(new CoordinationCheckpointRecord(null, progress), Json));
-        return Task.CompletedTask;
+        lock (_records)
+        {
+            if (record.Prepared is not null && FailNextPrepare)
+            {
+                FailNextPrepare = false;
+                throw new IOException("fixture-prepare-failure");
+            }
+            if (record.Progress is not null && FailNextProgress)
+            {
+                FailNextProgress = false;
+                throw new IOException("fixture-progress-failure");
+            }
+            if (!_epochs.TryGetValue(claim.LifecycleId, out var epoch) || epoch != claim.WriterEpoch ||
+                record.WriterEpoch != epoch)
+                throw new CoordinationUncertainException("fixture-writer-stale");
+            var existing = Records.Where(item => LifecycleId(item) == claim.LifecycleId).ToArray();
+            var duplicate = existing.SingleOrDefault(item => item.RecordSequence == expectedRecordSequence);
+            if (duplicate is not null)
+            {
+                if (duplicate != record) throw new CoordinationProtocolException("fixture-conflicting-duplicate");
+                return Task.CompletedTask;
+            }
+            var next = existing.Select(item => item.RecordSequence).DefaultIfEmpty().Max() + 1;
+            if (expectedRecordSequence != next || record.RecordSequence != expectedRecordSequence)
+                throw new CoordinationUncertainException("fixture-cas-conflict");
+            _records.Add(JsonSerializer.SerializeToUtf8Bytes(record, Json));
+            AfterAppend?.Invoke(record);
+            if (FailAfterNextAppend)
+            {
+                FailAfterNextAppend = false;
+                throw new IOException("fixture-ambiguous-append");
+            }
+            return Task.CompletedTask;
+        }
     }
 
     public Task<IReadOnlyList<CoordinationCheckpointRecord>> ReadLifecycleAsync(
         string lifecycleId, CancellationToken cancellationToken = default) =>
-        Task.FromResult<IReadOnlyList<CoordinationCheckpointRecord>>(Records.Where(record =>
-            record.Prepared?.LifecycleId == lifecycleId || record.Progress?.LifecycleId == lifecycleId).ToArray());
+        Task.FromResult<IReadOnlyList<CoordinationCheckpointRecord>>((ReverseReads
+            ? Records.Where(record => LifecycleId(record) == lifecycleId).Reverse()
+            : Records.Where(record => LifecycleId(record) == lifecycleId)).ToArray());
+
+    public void Inject(CoordinationCheckpointRecord record) =>
+        _records.Add(JsonSerializer.SerializeToUtf8Bytes(record, Json));
+
+    private static string? LifecycleId(CoordinationCheckpointRecord record) =>
+        record.Prepared?.LifecycleId ?? record.Progress?.LifecycleId;
 
     private static CoordinationCheckpointRecord RoundTrip(byte[] bytes) =>
         JsonSerializer.Deserialize<CoordinationCheckpointRecord>(bytes, Json) ??
