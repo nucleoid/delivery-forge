@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>DeliveryForge.Evidence</AssemblyName>
+    <RootNamespace>DeliveryForge.Evidence</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../contracts/DeliveryForge.Contracts/DeliveryForge.Contracts.csproj" />
+  </ItemGroup>
+</Project>

@@ -6,6 +6,7 @@ on:
       - "components/contracts/**"
       - "components/coordination/**"
       - "components/execution/**"
+      - "components/evidence/**"
       - "components/planning/**"
       - "DeliveryForge.slnx"
       - "Directory.*.props"
