@@ -69,8 +69,11 @@ public sealed class ContinuumCoordinationAdapter
         var boundedTimeout = rollbackTimeout ?? DefaultRollbackTimeout;
         if (boundedTimeout <= TimeSpan.Zero || boundedTimeout >= DefaultTtl)
             throw new ArgumentOutOfRangeException(nameof(rollbackTimeout), "Coordination calls require a known positive bound below the lease TTL.");
-        try { capabilities = await InvokeBoundedStaticAsync(
-            () => transport.DetectCapabilitiesAsync(cancellationToken), boundedTimeout).ConfigureAwait(false); }
+        try
+        {
+            capabilities = await InvokeBoundedStaticAsync(
+            () => transport.DetectCapabilitiesAsync(cancellationToken), boundedTimeout).ConfigureAwait(false);
+        }
         catch (Exception) { throw new CoordinationUnavailableException("Coordination capability detection failed."); }
         var reason = ValidateCapabilities(capabilities, requireFixture: true);
         if (reason is not null) throw new CoordinationUnavailableException(reason);
@@ -307,9 +310,12 @@ public sealed class ContinuumCoordinationAdapter
             throw new CoordinationUncertainException("checkpoint-claim-failed");
         }
         IReadOnlyList<CoordinationCheckpointRecord> records;
-        try { records = await InvokeBoundedAsync(
+        try
+        {
+            records = await InvokeBoundedAsync(
             () => _checkpoints.ReadLifecycleAsync(lifecycleId, cancellationToken)).ConfigureAwait(false)
-            ?? throw new CoordinationUncertainException("checkpoint-read-missing"); }
+            ?? throw new CoordinationUncertainException("checkpoint-read-missing");
+        }
         catch (Exception) { throw new CoordinationUncertainException("checkpoint-read-failed"); }
 
         var lifecycle = new Lifecycle(owner, canonical, lifecycleId)
@@ -1152,8 +1158,11 @@ public sealed class ContinuumCoordinationAdapter
             throw new CoordinationProtocolException("grant-ttl-invalid");
         if (receivedAt < firstSend) throw new CoordinationProtocolException("monotonic-clock-went-backwards");
         TimeSpan deadline;
-        try { deadline = LeaseDeadline.ComputeSafeDeadline(serverTime, expiresAt,
-            receivedAt - firstSend, receivedAt, _maximumClockUncertainty); }
+        try
+        {
+            deadline = LeaseDeadline.ComputeSafeDeadline(serverTime, expiresAt,
+            receivedAt - firstSend, receivedAt, _maximumClockUncertainty);
+        }
         catch (ArgumentOutOfRangeException exception) { throw new CoordinationProtocolException("deadline-input-invalid", exception); }
         return new LeaseEvidence(resource, owner, leaseId, fencingToken, serverTime, expiresAt,
             deadline, firstSend + RenewalTarget, generation);
@@ -1165,8 +1174,11 @@ public sealed class ContinuumCoordinationAdapter
     {
         if (receivedAt < firstSend || expiresAt <= serverTime) throw new CoordinationProtocolException("inspect-time-invalid");
         TimeSpan deadline;
-        try { deadline = LeaseDeadline.ComputeSafeDeadline(serverTime, expiresAt,
-            receivedAt - firstSend, receivedAt, _maximumClockUncertainty); }
+        try
+        {
+            deadline = LeaseDeadline.ComputeSafeDeadline(serverTime, expiresAt,
+            receivedAt - firstSend, receivedAt, _maximumClockUncertainty);
+        }
         catch (ArgumentOutOfRangeException exception) { throw new CoordinationProtocolException("deadline-input-invalid", exception); }
         return new LeaseEvidence(resource, owner, leaseId, fencingToken, serverTime, expiresAt,
             deadline, deadline - TimeSpan.FromTicks(1), FreshRequestId());
