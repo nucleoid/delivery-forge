@@ -67,17 +67,21 @@ internal static class TestEvidence
         DateTimeOffset.Parse("2026-10-09T00:00:00Z"), DateTimeOffset.Parse("2026-10-09T00:00:01Z"));
     public static GateRequest GateRequest(string output)
     {
-        var executable = System.IO.Path.Combine(output, "fixture-dotnet");
+        var workingDirectory = WorkingDirectory(output);
+        Directory.CreateDirectory(workingDirectory);
+        var executable = System.IO.Path.Combine(workingDirectory, "fixture-dotnet");
         File.WriteAllText(executable, "fixture executable");
         var identity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(executable)))}";
         return new GateRequest(
             "test", ResolvedPolicy(),
-            new ToolCapability("dotnet", "10.0.401", "trx-v1", true, true, [], executable, identity, ["test"]),
+            ToolCapability.DetectedFixture("dotnet", "10.0.401", "trx-v1", executable, identity, ["test"]),
             EvidenceAdapterKind.DotNet,
             Identity('6'), Repository(),
-            new CommandInvocation(executable, ["test", "DeliveryForge.Tests.csproj", "--no-restore"], output),
+            new CommandInvocation(executable, ["test", "DeliveryForge.Tests.csproj", "--no-restore"], workingDirectory),
             "full", TimeSpan.FromSeconds(30), output);
     }
+
+    public static string WorkingDirectory(string output) => System.IO.Path.Combine(output, "work");
 }
 
 internal sealed class QueueCommandExecutor(params CommandResult[] results) : ICommandExecutor
@@ -96,6 +100,16 @@ internal sealed class MutatingCommandExecutor(string executable, CommandResult r
     {
         File.AppendAllText(executable, "changed");
         return Task.FromResult(result);
+    }
+}
+
+internal sealed class DeletingProcessCommandExecutor : ICommandExecutor
+{
+    public Task<CommandResult> ExecuteAsync(
+        CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        File.Delete(invocation.FileName);
+        return new ProcessCommandExecutor().ExecuteAsync(invocation, timeout, cancellationToken);
     }
 }
 

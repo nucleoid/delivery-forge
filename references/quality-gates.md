@@ -28,14 +28,16 @@ production authority. Baseline comparison is advisory until a parent-approved id
 changed-code allowance exist; omitted metrics or stale source revisions remain non-pass. Workers may
 prepare proposals but cannot promote policy, baselines, thresholds, budgets, or exemptions.
 Protected policy resolution verifies the exact commit, ancestry, protected Git bytes, canonical schema,
-and contract identity. The proposal-only resolver remains non-authoritative. No parent-approved baseline
-promotion source exists yet, so no-regression results remain advisory.
+and contract identity. GateRunner additionally requires the policy revision/root to equal its
+parent-frozen repository base/root and records policy provenance in the receipt. The proposal-only
+resolver remains non-authoritative. No parent-approved baseline promotion source exists yet, so
+no-regression results remain advisory.
 
 ## Capability matrix at this issue head
 
 | Tool | Observed contract | Production acceptance |
 | --- | --- | --- |
-| .NET SDK | Pinned 10.0.401; GateRunner derives counts from the bound TRX, SDK version from detected capability, compiler evidence from bound invocation/output, and rejects warm `--no-build`; the real fixture flows through runner → producer → adapter for RED/GREEN/warm receipts | Advisory until an approved policy binds the complete required project/coverage set; no production PASS is claimed |
+| .NET SDK | Pinned 10.0.401; the detector probes from the gate working root; GateRunner derives counts from the bound TRX, SDK version from detector-issued capability, compiler evidence from bound invocation/output, and rejects warm `--no-build`; the real fixture uses real Git identities through runner → producer → adapter for RED/GREEN/warm receipts | Advisory until an approved policy binds the complete required project/coverage set; no production PASS is claimed |
 | Crap4CSharp | Public result schema 1.x is parsed by version and tool identity; honest pass/fail/incomplete/error fixtures are marked fixture:true | Installed one-command acceptance is not yet certified; fixture results cannot authorize production |
 | Mutate4CSharp | Current preview is recognized only as uncertified evidence | nucleoid/mutate4csharp#5 remains open; ENUMERATION_NOT_IMPLEMENTED and caller-asserted PASS remain INCOMPLETE |
 
@@ -43,8 +45,9 @@ Executable discovery is separate from OpenClaw skill discovery. The detector acc
 explicit executable, PATH, or a repository-local .NET tool manifest contained by the repository root,
 hashes the resolved host before and after bounded version/help probes, and rejects swaps. A manifest
 route is unsupported until it can bind and hash the exact entry package as well as the dotnet host.
-GateRunner executes only the exact detected path and rechecks its hash afterward. The detector does
-not install, restore, publish, or infer an unavailable capability.
+GateRunner accepts only detector-issued capabilities, executes only the exact detected path, rechecks
+its hash afterward, keeps artifacts outside the frozen worktree, and requires owned-process quiescence
+after interruption. The detector does not install, restore, publish, or infer an unavailable capability.
 
 ## Rollout
 

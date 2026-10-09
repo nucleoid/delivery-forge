@@ -53,7 +53,8 @@ public sealed class ProtectedGitPolicyResolver(
             var contentIdentity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
             return new ResolvedEvidencePolicy(
                 validated.Identity, contentIdentity, baseId, PolicyAuthorityKind.ProtectedGitBase,
-                0m, requiredGates.Select(value => value!).ToArray(), authorityVerified: true);
+                0m, requiredGates.Select(value => value!).ToArray(), authorityVerified: true,
+                sourceRepositoryRoot: _repositoryRoot);
         }
         catch (ContractValidationException exception)
         {

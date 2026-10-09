@@ -75,8 +75,8 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
             return Unsupported(
                 probe, "Executable bytes changed during capability probing.",
                 versionInvocation, versionResult, helpInvocation, helpResult);
-        var capability = new ToolCapability(
-            probe.Tool, version, probe.DocumentedFormatVersion, true, probe.Fixture, [],
+        var capability = ToolCapability.FromDetection(
+            probe.Tool, version, probe.DocumentedFormatVersion, probe.Fixture, [],
             executable, executableIdentity, ["version", "help", "structured-report"]);
         return new CapabilityDetection(capability, versionInvocation, versionResult, helpInvocation, helpResult);
     }
@@ -174,9 +174,8 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
         CommandInvocation? helpInvocation = null,
         CommandResult? helpResult = null) =>
         new(
-            new ToolCapability(
-                probe.Tool, "unavailable", probe.DocumentedFormatVersion, false, probe.Fixture,
-                [reason], null, null, []),
+            ToolCapability.UnsupportedDetection(
+                probe.Tool, probe.DocumentedFormatVersion, probe.Fixture, reason),
             versionInvocation, versionResult, helpInvocation, helpResult);
 
     [GeneratedRegex(@"(?m)^\s*(?:[A-Za-z][A-Za-z0-9.-]*\s+)?([0-9]+\.[0-9]+(?:\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)?)\s*$", RegexOptions.CultureInvariant)]

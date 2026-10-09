@@ -14,12 +14,18 @@ public sealed class GateRunner
     private readonly ICommandExecutor _executor;
     private readonly IRepositoryIdentityReader _repository;
     private readonly string _trustedWorkingDirectory;
+    private readonly string _trustedProtectedBaseCommit;
 
-    public GateRunner(ICommandExecutor executor, IRepositoryIdentityReader repository, string trustedWorkingDirectory)
+    public GateRunner(
+        ICommandExecutor executor,
+        IRepositoryIdentityReader repository,
+        string trustedWorkingDirectory,
+        string trustedProtectedBaseCommit)
     {
         _executor = executor;
         _repository = repository;
         _trustedWorkingDirectory = Path.GetFullPath(trustedWorkingDirectory);
+        _trustedProtectedBaseCommit = trustedProtectedBaseCommit;
     }
     private static readonly JsonSerializerOptions ContractJson = CreateContractJson();
 
@@ -28,6 +34,8 @@ public sealed class GateRunner
         ValidateRequest(request);
         Directory.CreateDirectory(request.OutputDirectory);
         var claimPath = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId) + ".claim");
+        var gateDirectory = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
+        var gateDirectoryPreexisted = Directory.Exists(gateDirectory);
         try
         {
             await using var claim = new FileStream(
@@ -38,7 +46,14 @@ public sealed class GateRunner
         {
             throw new EvidenceWriteException($"Gate claim already exists or cannot be created: {exception.Message}");
         }
-        var gateDirectory = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
+        if (gateDirectoryPreexisted)
+        {
+            var failureDirectory = gateDirectory + ".claim-error-" + Guid.NewGuid().ToString("N");
+            return await PersistWithoutExecutionAsync(
+                request, failureDirectory, request.ExpectedRepository, request.ExpectedRepository,
+                NormalizedEvidence.Error("Gate artifact directory existed before the atomic claim."),
+                CancellationToken.None).ConfigureAwait(false);
+        }
 
         var capabilityFailure = ValidateCapabilityBinding(request);
         if (capabilityFailure is not null)
@@ -64,8 +79,21 @@ public sealed class GateRunner
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, before, before,
                 NormalizedEvidence.Error("Repository identity is not the expected clean committed base/head/tree."),
-                cancellationToken).ConfigureAwait(false);
+                CancellationToken.None).ConfigureAwait(false);
         }
+        if (request.Policy.AuthorityVerified &&
+            (!string.Equals(request.Policy.SourceRevision, before.BaseCommit, StringComparison.Ordinal) ||
+             !string.Equals(request.Policy.SourceRevision, _trustedProtectedBaseCommit, StringComparison.Ordinal) ||
+             !string.Equals(request.Policy.SourceRepositoryRoot, _trustedWorkingDirectory,
+                 OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)))
+        {
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before,
+                NormalizedEvidence.Error(
+                    "Protected policy authority is not bound to this gate's frozen repository base and root."),
+                CancellationToken.None).ConfigureAwait(false);
+        }
+
 
         Directory.CreateDirectory(gateDirectory);
         EvidenceExecutionSnapshot evidenceSnapshot;
@@ -143,6 +171,8 @@ public sealed class GateRunner
             normalized = NormalizedEvidence.Error("Repository source/index/status identity changed during evaluation.");
         else if (ValidateCapabilityBinding(request) is not null)
             normalized = NormalizedEvidence.Error("The bound executable bytes changed during gate execution.");
+        else if (!execution.OwnedProcessQuiescent)
+            normalized = NormalizedEvidence.Error("Owned tool process did not become quiescent after interruption.");
         else if (execution.TimedOut)
             normalized = NormalizedEvidence.Incomplete("Tool timed out before complete evidence was produced.");
         else if (execution.Cancelled)
@@ -191,6 +221,9 @@ public sealed class GateRunner
         bool sourceChanged,
         CancellationToken cancellationToken)
     {
+        var limitations = normalized.Limitations
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Distinct(StringComparer.Ordinal).ToArray();
         var provisional = new GateReceiptContract(
             "1.0.0", "gate-receipt", $"sha256:{new string('0', 64)}",
             request.GateId, request.Policy.PolicyIdentity,
@@ -203,11 +236,17 @@ public sealed class GateRunner
                 Environment = request.Invocation.Environment ?? new Dictionary<string, string>(),
                 request.Scope,
                 request.Capability.ExecutableIdentity,
+                CapabilityTool = request.Capability.Tool,
+                CapabilityVersion = request.Capability.Version,
+                CapabilityFormat = request.Capability.FormatVersion,
+                CapabilityExecutable = request.Capability.ExecutablePath,
+                PolicySourceRevision = request.Policy.SourceRevision,
+                PolicyContentIdentity = request.Policy.ContentIdentity,
                 request.ConfigurationIdentity
             }, ContractJson),
             execution.StartedAt, execution.CompletedAt, execution.ExitCode,
             OutcomeText(normalized.Outcome), normalized.Reason, artifactHashes,
-            sourceChanged, normalized.Limitations, normalized.NotApplicableRationale);
+            sourceChanged, limitations, normalized.NotApplicableRationale);
 
         var provisionalBytes = SerializeReceipt(provisional);
         var receipt = provisional with { Identity = CanonicalJson.ComputeIdentity(provisionalBytes) };
@@ -217,7 +256,7 @@ public sealed class GateRunner
 
         return new GateRunResult(
             normalized.Outcome, normalized.Reason, normalized.Fixture, normalized.ProductionCapable,
-            normalized.Limitations, sourceChanged, request.Invocation, execution, before, after,
+            limitations, sourceChanged, request.Invocation, execution, before, after,
             request.Policy.PolicyIdentity, request.Capability.ExecutableIdentity ?? "unavailable", request.ConfigurationIdentity, request.Scope,
             artifactHashes, receiptPath, normalized.NotApplicableRationale);
     }
@@ -258,6 +297,18 @@ public sealed class GateRunner
         if (!Path.IsPathFullyQualified(request.OutputDirectory) ||
             !Path.IsPathFullyQualified(request.Invocation.WorkingDirectory))
             throw new ArgumentException("Gate output and command working directories must be absolute.");
+        var output = Path.GetFullPath(request.OutputDirectory);
+        var trustedPrefix = _trustedWorkingDirectory.EndsWith(Path.DirectorySeparatorChar)
+            ? _trustedWorkingDirectory
+            : _trustedWorkingDirectory + Path.DirectorySeparatorChar;
+        if (string.Equals(output, _trustedWorkingDirectory,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) ||
+            output.StartsWith(trustedPrefix,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            throw new ArgumentException("Gate output directory must be outside the parent-frozen working root.");
+        if (Directory.Exists(output) && File.GetAttributes(output).HasFlag(FileAttributes.ReparsePoint))
+            throw new ArgumentException("Gate output directory cannot be a reparse point.");
+
         if (string.IsNullOrWhiteSpace(request.Invocation.FileName) ||
             request.Invocation.Arguments.Any(argument => argument is null))
             throw new ArgumentException("Executable and immutable argument list are required.");
@@ -283,6 +334,8 @@ public sealed class GateRunner
         };
         if (!string.Equals(expectedTool, request.Capability.Tool, StringComparison.Ordinal))
             return NormalizedEvidence.Error("The selected adapter does not match the detected tool capability.");
+        if (!request.Capability.DetectionVerified)
+            return NormalizedEvidence.Error("The selected capability was not issued by the capability detector.");
 
         if (!request.Capability.Supported)
             return NormalizedEvidence.Incomplete(

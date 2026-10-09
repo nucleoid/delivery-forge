@@ -72,7 +72,7 @@ public static class BaselineComparer
                     GateOutcome.Fail,
                     $"Changed-code metric '{metric.Key}' regressed from {previous} to {metric.Value}.",
                     false,
-                    true,
+                    policy.AuthorityVerified && baseline.AuthorityVerified,
                     []);
             }
         }

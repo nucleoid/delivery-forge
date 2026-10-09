@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Xml.Linq;
 
 namespace DeliveryForge.Evidence.Tests;
@@ -10,8 +9,13 @@ public sealed class RealDotNetFixtureTests
     public async Task Earlier_red_commit_then_clean_green_head_produces_real_test_counts()
     {
         using var temp = new TempDirectory();
+        using var evidence = new TempDirectory();
         var fixture = System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "RealDotNet");
         CopyTree(fixture, temp.Path);
+        File.Copy(FindRepositoryFile("global.json"),
+            System.IO.Path.Combine(temp.Path, "global.json"));
+        await File.WriteAllTextAsync(System.IO.Path.Combine(temp.Path, ".gitignore"),
+            "**/bin/\n**/obj/\n*.trx\n", TestContext.Current.CancellationToken);
         var subject = System.IO.Path.Combine(temp.Path, "Subject", "Calculator.cs");
         var red = await File.ReadAllTextAsync(
             System.IO.Path.Combine(temp.Path, "Subject", "Calculator.red.cs.txt"),
@@ -30,12 +34,18 @@ public sealed class RealDotNetFixtureTests
         var redHead = await GitAsync(executor, temp.Path, ["rev-parse", "HEAD"]);
 
         var dotnet = ResolveExecutable("DELIVERY_FORGE_DOTNET_HOST", "dotnet");
-        var capability = new ToolCapability(
-            "dotnet", "10.0.401", "trx-v1", true, true, [], dotnet,
-            $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(dotnet)))}", ["test"]);
+        var detection = await new ToolCapabilityDetector(executor).DetectAsync(
+            new CapabilityProbe(
+                "dotnet", ExecutableSource.TrustedExplicit, dotnet, temp.Path, null,
+                ["--version"], ["--help"], "10.0.401", "trx-v1", true),
+            TestContext.Current.CancellationToken);
+        var capability = detection.Capability;
+        Assert.True(capability.Supported);
+        Assert.Equal("10.0.401", capability.Version);
         var project = System.IO.Path.Combine(temp.Path, "Subject.Tests", "Subject.Tests.csproj");
         var redTrx = System.IO.Path.Combine(temp.Path, "red.trx");
-        var redResult = await RunGateAsync(executor, capability, temp.Path, "red-gate",
+        var protectedBase = redHead.StandardOutput.Trim();
+        var redResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "red-gate",
             ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={redTrx}"]);
         Assert.NotEqual(0, redResult.Execution.ExitCode);
         Assert.Equal(GateOutcome.Fail, redResult.Outcome);
@@ -55,7 +65,7 @@ public sealed class RealDotNetFixtureTests
         var greenTrx = System.IO.Path.Combine(temp.Path, "green.trx");
         var assembly = System.IO.Path.Combine(temp.Path, "Subject", "bin", "Release", "net10.0", "Subject.dll");
         Assert.False(File.Exists(assembly));
-        var greenResult = await RunGateAsync(executor, capability, temp.Path, "green-gate",
+        var greenResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "green-gate",
             ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={greenTrx}"]);
         Assert.Equal(0, greenResult.Execution.ExitCode);
         Assert.True(File.Exists(assembly));
@@ -67,7 +77,7 @@ public sealed class RealDotNetFixtureTests
         Assert.StartsWith("sha256:", greenResult.ArtifactHashes["evidence.trx"]);
 
         var warmTrx = System.IO.Path.Combine(temp.Path, "warm.trx");
-        var warmResult = await RunGateAsync(executor, capability, temp.Path, "warm-gate",
+        var warmResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "warm-gate",
             ["test", project, "--configuration", "Release", "--no-restore", "--no-build",
                 "--logger", $"trx;LogFileName={warmTrx}"]);
         Assert.Equal(0, warmResult.Execution.ExitCode);
@@ -76,20 +86,23 @@ public sealed class RealDotNetFixtureTests
         Assert.Contains("compiler", warmResult.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
-    private static Task<GateRunResult> RunGateAsync(
+    private static async Task<GateRunResult> RunGateAsync(
         ProcessCommandExecutor executor,
         ToolCapability capability,
         string repository,
+        string outputRoot,
+        string protectedBase,
         string outputName,
         IReadOnlyList<string> arguments)
     {
-        var identity = TestEvidence.Repository();
-        return new GateRunner(executor, new SequenceRepositoryIdentityReader(identity, identity), repository).RunAsync(
+        var reader = new GitRepositoryIdentityReader(executor, repository, protectedBase);
+        var identity = await reader.ReadAsync(TestContext.Current.CancellationToken);
+        return await new GateRunner(executor, reader, repository, protectedBase).RunAsync(
             new GateRequest(
                 "test", TestEvidence.ResolvedPolicy(), capability, EvidenceAdapterKind.DotNet,
                 TestEvidence.Identity('6'), identity,
                 new CommandInvocation(capability.ExecutablePath!, arguments, repository),
-                "fixture", TimeSpan.FromSeconds(90), System.IO.Path.Combine(repository, outputName)),
+                "fixture", TimeSpan.FromSeconds(90), System.IO.Path.Combine(outputRoot, outputName)),
             TestContext.Current.CancellationToken);
     }
 
@@ -99,6 +112,19 @@ public sealed class RealDotNetFixtureTests
         var result = await RunAsync(executor, "git", directory, arguments);
         Assert.Equal(0, result.ExitCode);
         return result;
+    }
+
+    private static string FindRepositoryFile(string name)
+    {
+        for (var directory = new DirectoryInfo(AppContext.BaseDirectory);
+             directory is not null;
+             directory = directory.Parent)
+        {
+            var candidate = System.IO.Path.Combine(directory.FullName, name);
+            if (File.Exists(candidate))
+                return candidate;
+        }
+        throw new FileNotFoundException($"Repository file '{name}' was not found above the test output directory.");
     }
 
     private static Task<CommandResult> RunAsync(

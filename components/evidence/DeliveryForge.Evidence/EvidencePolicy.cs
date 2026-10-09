@@ -32,7 +32,8 @@ public sealed class ResolvedEvidencePolicy
         PolicyAuthorityKind authorityKind,
         decimal maximumChangedCodeDebtIncrease,
         IReadOnlyList<string> requiredGates,
-        bool authorityVerified)
+        bool authorityVerified,
+        string? sourceRepositoryRoot = null)
     {
         PolicyIdentity = policyIdentity;
         ContentIdentity = contentIdentity;
@@ -41,7 +42,10 @@ public sealed class ResolvedEvidencePolicy
         MaximumChangedCodeDebtIncrease = maximumChangedCodeDebtIncrease;
         RequiredGates = requiredGates;
         AuthorityVerified = authorityVerified;
+        SourceRepositoryRoot = sourceRepositoryRoot;
     }
+
+    internal string? SourceRepositoryRoot { get; }
 
     public string PolicyIdentity { get; }
     public string ContentIdentity { get; }

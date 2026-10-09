@@ -54,7 +54,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         {
             timedOut = timeoutSource.IsCancellationRequested && !cancellationToken.IsCancellationRequested;
             cancelled = !timedOut;
-            TryKillTree(process);
+            _ = TryKillTree(process);
             try
             {
                 await process.WaitForExitAsync(CancellationToken.None)
@@ -86,18 +86,21 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             timedOut,
             cancelled,
             startedAt,
-            DateTimeOffset.UtcNow);
+            DateTimeOffset.UtcNow,
+            process.HasExited);
     }
 
-    private static void TryKillTree(Process process)
+    private static bool TryKillTree(Process process)
     {
         try
         {
             if (!process.HasExited)
                 process.Kill(entireProcessTree: true);
+            return true;
         }
-        catch (InvalidOperationException)
+        catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException)
         {
+            return process.HasExited;
         }
     }
 }

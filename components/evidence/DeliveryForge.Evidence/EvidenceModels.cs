@@ -45,6 +45,34 @@ public sealed record ToolCapability(
     string? ExecutableIdentity = null,
     IReadOnlyList<string>? Operations = null)
 {
+    internal bool DetectionVerified { get; init; }
+
+    internal static ToolCapability FromDetection(
+        string tool,
+        string version,
+        string formatVersion,
+        bool fixture,
+        IReadOnlyList<string> limitations,
+        string executablePath,
+        string executableIdentity,
+        IReadOnlyList<string> operations) =>
+        new(tool, version, formatVersion, true, fixture, limitations, executablePath, executableIdentity, operations)
+        {
+            DetectionVerified = true
+        };
+
+    public static ToolCapability DetectedFixture(
+        string tool, string version, string formatVersion, string executablePath,
+        string executableIdentity, IReadOnlyList<string> operations) =>
+        FromDetection(tool, version, formatVersion, true, [], executablePath, executableIdentity, operations);
+
+    internal static ToolCapability UnsupportedDetection(
+        string tool, string formatVersion, bool fixture, string limitation) =>
+        new(tool, "unavailable", formatVersion, false, fixture, [limitation])
+        {
+            DetectionVerified = true
+        };
+
     public static ToolCapability Unsupported(string tool, string limitation) =>
         new(tool, "unavailable", "unavailable", false, false, [limitation]);
 }
@@ -64,7 +92,8 @@ public sealed record CommandResult(
     bool TimedOut,
     bool Cancelled,
     DateTimeOffset StartedAt,
-    DateTimeOffset CompletedAt);
+    DateTimeOffset CompletedAt,
+    bool OwnedProcessQuiescent = true);
 
 public sealed record GateRequest(
     string GateId,

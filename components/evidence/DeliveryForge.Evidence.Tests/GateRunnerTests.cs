@@ -5,20 +5,27 @@ public sealed class GateRunnerTests
     [Fact]
     public void Temp_cleanup_does_not_change_a_reparse_point_target()
     {
-        if (OperatingSystem.IsWindows())
-            return;
-
         using var target = new TempDirectory();
         var targetFile = System.IO.Path.Combine(target.Path, "target.txt");
         File.WriteAllText(targetFile, "outside");
-        File.SetUnixFileMode(targetFile, UnixFileMode.UserRead);
-        var mode = File.GetUnixFileMode(targetFile);
+        File.SetAttributes(targetFile, FileAttributes.ReadOnly);
+        var attributes = File.GetAttributes(targetFile);
 
         using (var cleanupRoot = new TempDirectory())
-            File.CreateSymbolicLink(System.IO.Path.Combine(cleanupRoot.Path, "link.txt"), targetFile);
+        {
+            try
+            {
+                File.CreateSymbolicLink(System.IO.Path.Combine(cleanupRoot.Path, "link.txt"), targetFile);
+            }
+            catch (Exception exception) when (OperatingSystem.IsWindows() &&
+                                              exception is UnauthorizedAccessException or IOException)
+            {
+                Assert.Skip($"Windows host cannot create the required file symlink: {exception.Message}");
+            }
+        }
 
         Assert.True(File.Exists(targetFile));
-        Assert.Equal(mode, File.GetUnixFileMode(targetFile));
+        Assert.Equal(attributes, File.GetAttributes(targetFile));
     }
 
     [Fact]
@@ -27,7 +34,7 @@ public sealed class GateRunnerTests
         using var temp = new TempDirectory();
         var runner = new GateRunner(
             new StubCommandExecutor(TestEvidence.CommandResult()),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
 
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
@@ -46,7 +53,7 @@ public sealed class GateRunnerTests
         var changed = TestEvidence.Repository() with { TreeId = TestEvidence.Commit('d') };
         var runner = new GateRunner(
             new StubCommandExecutor(TestEvidence.CommandResult()),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), changed), temp.Path);
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), changed), TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
 
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
@@ -64,7 +71,7 @@ public sealed class GateRunnerTests
         var execution = TestEvidence.CommandResult() with { TimedOut = true };
         var runner = new GateRunner(
             new StubCommandExecutor(execution),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
 
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
@@ -76,16 +83,10 @@ public sealed class GateRunnerTests
     public async Task Missing_executable_is_recorded_as_error_receipt()
     {
         using var temp = new TempDirectory();
-        var request = TestEvidence.GateRequest(temp.Path) with
-        {
-            Invocation = new CommandInvocation(
-                System.IO.Path.Combine(temp.Path, "missing-executable"),
-                [],
-                temp.Path)
-        };
+        var request = TestEvidence.GateRequest(temp.Path);
         var runner = new GateRunner(
-            new ProcessCommandExecutor(),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
+            new DeletingProcessCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
@@ -100,7 +101,7 @@ public sealed class GateRunnerTests
         var execution = TestEvidence.CommandResult() with { Cancelled = true };
         var runner = new GateRunner(
             new StubCommandExecutor(execution),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
 
         using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
         cancellation.Cancel();
@@ -117,7 +118,7 @@ public sealed class GateRunnerTests
         using var temp = new TempDirectory();
         var runner = new GateRunner(
             new QueueCommandExecutor(),
-            new ThrowingRepositoryIdentityReader(), temp.Path);
+            new ThrowingRepositoryIdentityReader(), TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
 
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
@@ -133,7 +134,7 @@ public sealed class GateRunnerTests
         using var temp = new TempDirectory();
         var runner = new GateRunner(
             new QueueCommandExecutor(),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
 
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
@@ -149,7 +150,7 @@ public sealed class GateRunnerTests
         using var temp = new TempDirectory();
         var runner = new GateRunner(
             new StubCommandExecutor(TestEvidence.CommandResult()),
-            new FirstThenThrowRepositoryIdentityReader(TestEvidence.Repository()), temp.Path);
+            new FirstThenThrowRepositoryIdentityReader(TestEvidence.Repository()), TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
 
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
@@ -169,7 +170,7 @@ public sealed class GateRunnerTests
             Capability = TestEvidence.GateRequest(temp.Path).Capability with { Tool = "crap4csharp" }
         };
         var runner = new GateRunner(new QueueCommandExecutor(),
-            new ThrowingRepositoryIdentityReader(), temp.Path);
+            new ThrowingRepositoryIdentityReader(), TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
@@ -185,7 +186,7 @@ public sealed class GateRunnerTests
         var request = TestEvidence.GateRequest(temp.Path);
         var runner = new GateRunner(
             new MutatingCommandExecutor(request.Invocation.FileName, TestEvidence.CommandResult()),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
@@ -198,7 +199,8 @@ public sealed class GateRunnerTests
     public async Task Preexisting_unchanged_trx_cannot_be_reused()
     {
         using var temp = new TempDirectory();
-        var trx = System.IO.Path.Combine(temp.Path, "stale.trx");
+        var trx = System.IO.Path.Combine(TestEvidence.WorkingDirectory(temp.Path), "stale.trx");
+        Directory.CreateDirectory(TestEvidence.WorkingDirectory(temp.Path));
         await File.WriteAllTextAsync(
             trx,
             "<TestRun><ResultSummary><Counters total=\"1\" executed=\"1\" passed=\"1\" failed=\"0\" /></ResultSummary></TestRun>",
@@ -214,12 +216,53 @@ public sealed class GateRunnerTests
         var execution = TestEvidence.CommandResult() with { StandardOutput = "Subject -> Subject.dll" };
         var runner = new GateRunner(
             new StubCommandExecutor(execution),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), temp.Path);
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()), TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Error, result.Outcome);
         Assert.Contains("stale", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("evidence.trx", result.ArtifactHashes.Keys);
+    }
+
+    [Fact]
+    public async Task Preexisting_gate_directory_gets_a_separate_error_receipt_without_execution()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path);
+        Directory.CreateDirectory(System.IO.Path.Combine(temp.Path, request.GateId));
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new ThrowingRepositoryIdentityReader(),
+            TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Contains("existed", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("claim-error", result.ReceiptPath, StringComparison.Ordinal);
+        Assert.True(File.Exists(result.ReceiptPath));
+    }
+
+    [Fact]
+    public async Task Nonquiescent_owned_process_is_recorded_as_error()
+    {
+        using var temp = new TempDirectory();
+        var execution = TestEvidence.CommandResult() with
+        {
+            TimedOut = true,
+            OwnedProcessQuiescent = false
+        };
+        var runner = new GateRunner(
+            new StubCommandExecutor(execution),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
+            TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(
+            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Contains("quiescent", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(result.ReceiptPath));
     }
 }
