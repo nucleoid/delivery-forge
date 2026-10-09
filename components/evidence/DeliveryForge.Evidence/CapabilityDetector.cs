@@ -77,7 +77,8 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
                 versionInvocation, versionResult, helpInvocation, helpResult);
         var capability = ToolCapability.FromDetection(
             probe.Tool, version, probe.DocumentedFormatVersion, probe.Fixture, [],
-            executable, executableIdentity, ["version", "help", "structured-report"]);
+            executable, executableIdentity, ["version", "help", "structured-report"],
+            workingDirectory);
         return new CapabilityDetection(capability, versionInvocation, versionResult, helpInvocation, helpResult);
     }
 

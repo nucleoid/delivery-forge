@@ -74,7 +74,9 @@ internal static class TestEvidence
         var identity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(executable)))}";
         return new GateRequest(
             "test", ResolvedPolicy(),
-            ToolCapability.DetectedFixture("dotnet", "10.0.401", "trx-v1", executable, identity, ["test"]),
+            ToolCapability.FromDetection(
+                "dotnet", "10.0.401", "trx-v1", true, [], executable, identity, ["test"],
+                workingDirectory),
             EvidenceAdapterKind.DotNet,
             Identity('6'), Repository(),
             new CommandInvocation(executable, ["test", "DeliveryForge.Tests.csproj", "--no-restore"], workingDirectory),
@@ -117,6 +119,13 @@ internal sealed class StubCommandExecutor(CommandResult result) : ICommandExecut
 {
     public Task<CommandResult> ExecuteAsync(
         CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken) => Task.FromResult(result);
+}
+
+internal sealed class CancellingCommandExecutor : ICommandExecutor
+{
+    public Task<CommandResult> ExecuteAsync(
+        CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken) =>
+        throw new OperationCanceledException(cancellationToken);
 }
 
 internal sealed class SequenceRepositoryIdentityReader(params RepositoryIdentity[] identities) : IRepositoryIdentityReader

@@ -46,6 +46,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, timeoutSource.Token);
         var timedOut = false;
         var cancelled = false;
+        var killSucceeded = true;
         try
         {
             await process.WaitForExitAsync(linked.Token).ConfigureAwait(false);
@@ -54,7 +55,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         {
             timedOut = timeoutSource.IsCancellationRequested && !cancellationToken.IsCancellationRequested;
             cancelled = !timedOut;
-            _ = TryKillTree(process);
+            killSucceeded = TryKillTree(process);
             try
             {
                 await process.WaitForExitAsync(CancellationToken.None)
@@ -87,7 +88,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             cancelled,
             startedAt,
             DateTimeOffset.UtcNow,
-            process.HasExited);
+            killSucceeded && process.HasExited);
     }
 
     private static bool TryKillTree(Process process)

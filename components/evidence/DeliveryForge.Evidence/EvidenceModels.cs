@@ -34,18 +34,45 @@ public sealed record NormalizedEvidence(
         new(GateOutcome.Error, reason, fixture, false, limitations, null);
 }
 
-public sealed record ToolCapability(
-    string Tool,
-    string Version,
-    string FormatVersion,
-    bool Supported,
-    bool Fixture,
-    IReadOnlyList<string>? Limitations = null,
-    string? ExecutablePath = null,
-    string? ExecutableIdentity = null,
-    IReadOnlyList<string>? Operations = null)
+public sealed class ToolCapability
 {
-    internal bool DetectionVerified { get; init; }
+    internal ToolCapability(
+        string tool,
+        string version,
+        string formatVersion,
+        bool supported,
+        bool fixture,
+        IReadOnlyList<string>? limitations = null,
+        string? executablePath = null,
+        string? executableIdentity = null,
+        IReadOnlyList<string>? operations = null,
+        bool detectionVerified = false,
+        string? probeWorkingDirectory = null)
+    {
+        Tool = tool;
+        Version = version;
+        FormatVersion = formatVersion;
+        Supported = supported;
+        Fixture = fixture;
+        Limitations = limitations;
+        ExecutablePath = executablePath;
+        ExecutableIdentity = executableIdentity;
+        Operations = operations;
+        DetectionVerified = detectionVerified;
+        ProbeWorkingDirectory = probeWorkingDirectory;
+    }
+
+    public string Tool { get; }
+    public string Version { get; }
+    public string FormatVersion { get; }
+    public bool Supported { get; }
+    public bool Fixture { get; }
+    public IReadOnlyList<string>? Limitations { get; }
+    public string? ExecutablePath { get; }
+    public string? ExecutableIdentity { get; }
+    public IReadOnlyList<string>? Operations { get; }
+    internal bool DetectionVerified { get; }
+    internal string? ProbeWorkingDirectory { get; }
 
     internal static ToolCapability FromDetection(
         string tool,
@@ -55,23 +82,16 @@ public sealed record ToolCapability(
         IReadOnlyList<string> limitations,
         string executablePath,
         string executableIdentity,
-        IReadOnlyList<string> operations) =>
-        new(tool, version, formatVersion, true, fixture, limitations, executablePath, executableIdentity, operations)
-        {
-            DetectionVerified = true
-        };
-
-    public static ToolCapability DetectedFixture(
-        string tool, string version, string formatVersion, string executablePath,
-        string executableIdentity, IReadOnlyList<string> operations) =>
-        FromDetection(tool, version, formatVersion, true, [], executablePath, executableIdentity, operations);
+        IReadOnlyList<string> operations,
+        string probeWorkingDirectory) =>
+        new(tool, version, formatVersion, true, fixture, limitations, executablePath,
+            executableIdentity, operations, detectionVerified: true,
+            probeWorkingDirectory: Path.GetFullPath(probeWorkingDirectory));
 
     internal static ToolCapability UnsupportedDetection(
         string tool, string formatVersion, bool fixture, string limitation) =>
-        new(tool, "unavailable", formatVersion, false, fixture, [limitation])
-        {
-            DetectionVerified = true
-        };
+        new(tool, "unavailable", formatVersion, false, fixture, [limitation],
+            detectionVerified: true);
 
     public static ToolCapability Unsupported(string tool, string limitation) =>
         new(tool, "unavailable", "unavailable", false, false, [limitation]);

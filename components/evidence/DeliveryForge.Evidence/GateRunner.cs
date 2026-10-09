@@ -118,7 +118,9 @@ public sealed class GateRunner
         catch (OperationCanceledException)
         {
             var now = DateTimeOffset.UtcNow;
-            execution = new CommandResult(null, string.Empty, "Command execution was cancelled.", false, true, now, now);
+            execution = new CommandResult(
+                null, string.Empty, "Command execution was cancelled.", false, true, now, now,
+                OwnedProcessQuiescent: false);
         }
         catch (Exception exception)
         {
@@ -240,6 +242,8 @@ public sealed class GateRunner
                 CapabilityVersion = request.Capability.Version,
                 CapabilityFormat = request.Capability.FormatVersion,
                 CapabilityExecutable = request.Capability.ExecutablePath,
+                CapabilityFixture = request.Capability.Fixture,
+                CapabilityProbeWorkingDirectory = request.Capability.ProbeWorkingDirectory,
                 PolicySourceRevision = request.Policy.SourceRevision,
                 PolicyContentIdentity = request.Policy.ContentIdentity,
                 request.ConfigurationIdentity
@@ -323,7 +327,7 @@ public sealed class GateRunner
     }
 
 
-    private static NormalizedEvidence? ValidateCapabilityBinding(GateRequest request)
+    private NormalizedEvidence? ValidateCapabilityBinding(GateRequest request)
     {
         var expectedTool = request.Adapter switch
         {
@@ -346,6 +350,11 @@ public sealed class GateRunner
             !Path.IsPathFullyQualified(request.Capability.ExecutablePath) ||
             string.IsNullOrWhiteSpace(request.Capability.ExecutableIdentity))
             return NormalizedEvidence.Error("Detected capability lacks an absolute executable path or byte identity.");
+        if (string.IsNullOrWhiteSpace(request.Capability.ProbeWorkingDirectory) ||
+            !string.Equals(Path.GetFullPath(request.Capability.ProbeWorkingDirectory), _trustedWorkingDirectory,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            return NormalizedEvidence.Error(
+                "The capability probe root does not match the parent-frozen gate working root.");
 
         string expected;
         string actual;

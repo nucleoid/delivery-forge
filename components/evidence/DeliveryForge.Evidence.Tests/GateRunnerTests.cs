@@ -1,7 +1,19 @@
 namespace DeliveryForge.Evidence.Tests;
 
+using System.Reflection;
+
 public sealed class GateRunnerTests
 {
+    [Fact]
+    public void Supported_capability_has_no_public_minting_or_record_copy_surface()
+    {
+        Assert.Empty(typeof(ToolCapability).GetConstructors(BindingFlags.Public | BindingFlags.Instance));
+        Assert.Null(typeof(ToolCapability).GetMethod(
+            "DetectedFixture", BindingFlags.Public | BindingFlags.Static));
+        Assert.Null(typeof(ToolCapability).GetMethod(
+            "<Clone>$", BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance));
+    }
+
     [Fact]
     public void Temp_cleanup_does_not_change_a_reparse_point_target()
     {
@@ -113,6 +125,24 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
+    public async Task Executor_thrown_cancellation_is_nonquiescent_error()
+    {
+        using var temp = new TempDirectory();
+        var runner = new GateRunner(
+            new CancellingCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
+            TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(
+            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.False(result.Execution.OwnedProcessQuiescent);
+        Assert.Contains("quiescent", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(result.ReceiptPath));
+    }
+
+    [Fact]
     public async Task Repository_preflight_failure_is_recorded_as_error_receipt()
     {
         using var temp = new TempDirectory();
@@ -165,9 +195,16 @@ public sealed class GateRunnerTests
     public async Task Adapter_tool_mismatch_is_rejected_before_execution()
     {
         using var temp = new TempDirectory();
-        var request = TestEvidence.GateRequest(temp.Path) with
+        var original = TestEvidence.GateRequest(temp.Path);
+        var request = original with
         {
-            Capability = TestEvidence.GateRequest(temp.Path).Capability with { Tool = "crap4csharp" }
+            Capability = new ToolCapability(
+                "crap4csharp", original.Capability.Version, original.Capability.FormatVersion,
+                original.Capability.Supported, original.Capability.Fixture,
+                original.Capability.Limitations, original.Capability.ExecutablePath,
+                original.Capability.ExecutableIdentity, original.Capability.Operations,
+                detectionVerified: true,
+                probeWorkingDirectory: original.Capability.ProbeWorkingDirectory)
         };
         var runner = new GateRunner(new QueueCommandExecutor(),
             new ThrowingRepositoryIdentityReader(), TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
@@ -176,6 +213,33 @@ public sealed class GateRunnerTests
 
         Assert.Equal(GateOutcome.Error, result.Outcome);
         Assert.Contains("adapter", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(result.ReceiptPath));
+    }
+
+    [Fact]
+    public async Task Capability_probe_root_mismatch_is_rejected_before_execution()
+    {
+        using var temp = new TempDirectory();
+        using var other = new TempDirectory();
+        var original = TestEvidence.GateRequest(temp.Path);
+        var request = original with
+        {
+            Capability = new ToolCapability(
+                original.Capability.Tool, original.Capability.Version,
+                original.Capability.FormatVersion, original.Capability.Supported,
+                original.Capability.Fixture, original.Capability.Limitations,
+                original.Capability.ExecutablePath, original.Capability.ExecutableIdentity,
+                original.Capability.Operations, detectionVerified: true,
+                probeWorkingDirectory: other.Path)
+        };
+        var runner = new GateRunner(
+            new QueueCommandExecutor(), new ThrowingRepositoryIdentityReader(),
+            TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Contains("probe root", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.True(File.Exists(result.ReceiptPath));
     }
 
