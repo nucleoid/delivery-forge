@@ -52,7 +52,7 @@ public sealed class ContinuumCoordinationAdapter
                 response = await _transport.AcquireAsync(
                     new AcquireRequest(resource, owner, ttl, FreshRequestId()), cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (Exception exception)
             {
                 await RollBackPrefixAsync(acquired, owner, CancellationToken.None).ConfigureAwait(false);
                 throw new CoordinationUncertainException("Acquire transport failed; ownership is uncertain and dispatch is forbidden.", exception);
@@ -70,11 +70,22 @@ public sealed class ContinuumCoordinationAdapter
                 throw new CoordinationUncertainException($"Acquire did not return authoritative ownership: {response.Reason}");
             }
 
-            var lease = new LeaseGrant(resource, owner,
+            var possibleLease = new LeaseGrant(resource, owner,
                 response.LeaseId ?? "", response.FencingToken ?? "",
                 response.ServerTime ?? default, response.ExpiresAt ?? default, RenewalTarget);
-            lease.Validate();
-            acquired.Add(lease);
+            acquired.Add(possibleLease);
+            try
+            {
+                possibleLease.Validate();
+            }
+            catch (CoordinationProtocolException exception)
+            {
+                var cleanRollback = await RollBackPrefixAsync(acquired, owner, CancellationToken.None).ConfigureAwait(false);
+                throw new CoordinationUncertainException(
+                    cleanRollback
+                        ? "Acquire response was invalid; possible ownership was released and dispatch is forbidden."
+                        : "Acquire response was invalid and possible ownership could not be released authoritatively.", exception);
+            }
         }
 
         return new LeaseAcquisition(owner, acquired.AsReadOnly(), LeaseOwnership.Held, "All resources are authoritatively held.");
@@ -93,7 +104,7 @@ public sealed class ContinuumCoordinationAdapter
             {
                 result = await _transport.RenewAsync(new RenewRequest(lease, FreshRequestId()), cancellationToken).ConfigureAwait(false);
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (Exception exception)
             {
                 throw new CoordinationUncertainException("Renew transport failed; halt dispatch and publication before the safe deadline.", exception);
             }
@@ -132,7 +143,7 @@ public sealed class ContinuumCoordinationAdapter
                     new ReleaseRequest(lease.LeaseId, acquisition.Owner, lease.FencingToken, FreshRequestId()), cancellationToken)
                     .ConfigureAwait(false);
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (Exception exception)
             {
                 throw new CoordinationUncertainException("Release transport failed; ownership remains uncertain.", exception);
             }
@@ -154,7 +165,7 @@ public sealed class ContinuumCoordinationAdapter
                     new ReleaseRequest(lease.LeaseId, owner, lease.FencingToken, FreshRequestId()), cancellationToken).ConfigureAwait(false);
                 certain &= result.Outcome == TransportOutcome.Released;
             }
-            catch (Exception exception) when (exception is not OperationCanceledException)
+            catch (Exception)
             {
                 certain = false;
             }
