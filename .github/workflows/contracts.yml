@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "components/contracts/**"
+      - "components/planning/**"
       - "DeliveryForge.slnx"
       - "Directory.*.props"
       - "global.json"
