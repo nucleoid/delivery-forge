@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 
 namespace DeliveryForge.Review;
@@ -88,7 +89,7 @@ public sealed partial class ReviewPolicy
         return Create(candidate, authority.Kind, trusted: false);
     }
 
-    public static ReviewPolicy TrustedFixture(
+    internal static ReviewPolicy TrustedFixture(
         string policyIdentity,
         IReadOnlyList<FamilyPair> allowedFamilies,
         IReadOnlyList<string> allowedScopes,
@@ -121,6 +122,12 @@ public sealed partial class ReviewPolicy
 
     private static void Validate(ReviewPolicyCandidate candidate)
     {
+        if (candidate is null ||
+            candidate.AllowedFamilies is null ||
+            candidate.AllowedScopes is null ||
+            candidate.Budget is null ||
+            candidate.ExemptionApprovers is null)
+            throw new ReviewPolicyException("Review policy is incomplete.");
         if (!IdentityPattern().IsMatch(candidate.PolicyIdentity) ||
             !IdentityPattern().IsMatch(candidate.ContentIdentity) ||
             !GitPattern().IsMatch(candidate.SourceRevision))
@@ -175,12 +182,25 @@ public sealed class ProtectedReviewPolicyResolver(string repositoryRoot, string 
         await GitTextAsync(["merge-base", "--is-ancestor", protectedBaseCommit, head], cancellationToken);
         var bytes = await GitBytesAsync(
             ["show", $"{protectedBaseCommit}:{repositoryRelativePath.Replace('\\', '/')}"], cancellationToken);
-        var candidate = JsonSerializer.Deserialize<ReviewPolicyFile>(
-            bytes, new JsonSerializerOptions { PropertyNameCaseInsensitive = false })
-            ?? throw new ReviewPolicyException("Protected review policy is empty.");
+        ReviewPolicyFile candidate;
+        try
+        {
+            candidate = JsonSerializer.Deserialize<ReviewPolicyFile>(
+                bytes,
+                new JsonSerializerOptions
+                {
+                    PropertyNameCaseInsensitive = false,
+                    UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+                }) ?? throw new ReviewPolicyException("Protected review policy is empty.");
+        }
+        catch (JsonException error)
+        {
+            throw new ReviewPolicyException("Protected review policy is malformed.", error);
+        }
+
         var contentIdentity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
         var resolved = new ReviewPolicyCandidate(
-            candidate.PolicyIdentity, contentIdentity, protectedBaseCommit, candidate.Fixture,
+            contentIdentity, contentIdentity, protectedBaseCommit, candidate.Fixture,
             candidate.Advisory, candidate.AllowedFamilies, candidate.AllowedScopes,
             candidate.AllowExactReuse, candidate.Budget, candidate.ExemptionApprovers);
         return ReviewPolicy.FromVerifiedProtectedSource(resolved);
@@ -197,15 +217,17 @@ public sealed class ProtectedReviewPolicyResolver(string repositoryRoot, string 
         return result.StandardOutput;
     }
 
-    private sealed record ReviewPolicyFile(
-        string PolicyIdentity,
-        bool Fixture,
-        bool Advisory,
-        IReadOnlyList<FamilyPair> AllowedFamilies,
-        IReadOnlyList<string> AllowedScopes,
-        bool AllowExactReuse,
-        ReviewBudget Budget,
-        IReadOnlyList<string> ExemptionApprovers);
+    private sealed class ReviewPolicyFile
+    {
+        public required string PolicyIdentity { get; init; }
+        public required bool Fixture { get; init; }
+        public required bool Advisory { get; init; }
+        public required IReadOnlyList<FamilyPair> AllowedFamilies { get; init; }
+        public required IReadOnlyList<string> AllowedScopes { get; init; }
+        public required bool AllowExactReuse { get; init; }
+        public required ReviewBudget Budget { get; init; }
+        public required IReadOnlyList<string> ExemptionApprovers { get; init; }
+    }
 }
 
-public sealed class ReviewPolicyException(string message) : Exception(message);
+public sealed class ReviewPolicyException(string message, Exception? inner = null) : Exception(message, inner);

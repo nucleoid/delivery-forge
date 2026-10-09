@@ -185,7 +185,7 @@ public sealed class ReviewCoreTests
         Assert.False(ReviewInvalidation.Assess(
             receipt, Patch() with { HeadTree = Commit('d') }, policy, MaterialChange.None).Reusable);
         Assert.False(ReviewInvalidation.Assess(
-            receipt with { OriginalExecution = false }, Patch(), policy, MaterialChange.None).Reusable);
+            WithoutOriginalExecution(receipt), Patch(), policy, MaterialChange.None).Reusable);
         Assert.False(ReviewInvalidation.Assess(
             receipt, Patch(), Policy(false), MaterialChange.None).Reusable);
     }
@@ -258,7 +258,25 @@ public sealed class ReviewCoreTests
         Assert.True(policy.Trusted);
         Assert.False(policy.Fixture);
         Assert.Equal(protectedBase, policy.SourceRevision);
+        Assert.Equal(policy.ContentIdentity, policy.PolicyIdentity);
+        Assert.NotEqual(Identity('7'), policy.PolicyIdentity);
         Assert.Contains(new FamilyPair("gpt", "claude"), policy.AllowedFamilies);
+    }
+
+    [Fact]
+    public async Task Protected_policy_missing_required_fields_fails_typed_and_closed()
+    {
+        using var repository = new TinyGitRepository();
+        var protectedBase = repository.Commit(new Dictionary<string, byte[]>
+        {
+            ["policy/review.json"] = "{}"u8.ToArray()
+        });
+
+        var error = await Assert.ThrowsAsync<ReviewPolicyException>(() =>
+            new ProtectedReviewPolicyResolver(repository.Path, protectedBase)
+                .ResolveAsync("policy/review.json", TestContext.Current.CancellationToken));
+
+        Assert.Contains("malformed", error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -323,7 +341,7 @@ public sealed class ReviewCoreTests
         Assert.Equal(normalized.Identity.HeadTree, receipt.TreeId);
         Assert.Equal(normalized.Identity.PatchSha256, receipt.PatchSha256);
         Assert.Equal(normalized.ReviewerFamily, receipt.ReviewerFamily);
-        Assert.Equal("PASS", receipt.Outcome);
+        Assert.Equal("INCOMPLETE", receipt.Outcome);
         Assert.Equal(normalized.Findings.Count, receipt.FindingCount);
         Assert.Equal(normalized.ArtifactHash, receipt.ArtifactHash);
         Assert.Equal(validated.Identity, receipt.Identity);
@@ -356,6 +374,24 @@ public sealed class ReviewCoreTests
     private static string Hash(byte[] bytes) => $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
     private static DateTimeOffset Time(int seconds) =>
         DateTimeOffset.Parse("2026-10-09T00:00:00Z").AddSeconds(seconds);
+
+    private static NormalizedReview WithoutOriginalExecution(NormalizedReview source) => new(
+        source.Outcome,
+        source.Reason,
+        source.Identity,
+        source.PolicyIdentity,
+        source.PolicyContentIdentity,
+        source.PolicySourceRevision,
+        source.PolicyAuthorityKind,
+        source.AuthorFamily,
+        source.ReviewerFamily,
+        source.Findings,
+        source.ArtifactHash,
+        source.CompletedAt,
+        source.Fixture,
+        source.Advisory,
+        source.ProductionAccepted,
+        originalExecution: false);
 
     private static ValidatedContract EvidencePolicy()
     {

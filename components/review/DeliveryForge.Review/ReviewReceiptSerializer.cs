@@ -14,6 +14,9 @@ public static class ReviewReceiptSerializer
     public static ReviewReceiptContract Create(NormalizedReview review)
     {
         ArgumentNullException.ThrowIfNull(review);
+        var receiptOutcome = review.Outcome == ReviewOutcome.Pass && !review.ProductionAccepted
+            ? ReviewOutcome.Incomplete
+            : review.Outcome;
         var provisional = new ReviewReceiptContract(
             "1.0.0",
             "review-receipt",
@@ -23,7 +26,7 @@ public static class ReviewReceiptSerializer
             review.Identity.HeadTree,
             review.Identity.PatchSha256,
             review.ReviewerFamily,
-            OutcomeText(review.Outcome),
+            OutcomeText(receiptOutcome),
             review.Findings.Count,
             review.ArtifactHash,
             review.CompletedAt.ToUniversalTime());

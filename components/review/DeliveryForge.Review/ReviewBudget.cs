@@ -4,7 +4,7 @@ public sealed record ReviewBudget(int? MaximumRounds, TimeSpan MaximumDuration, 
 {
     public static ReviewBudget None { get; } = new(null, TimeSpan.Zero, 0, 0);
     public bool IsFinite =>
-        MaximumRounds is null or > 0 &&
+        MaximumRounds is > 0 &&
         MaximumDuration > TimeSpan.Zero &&
         MaximumTokens > 0 &&
         MaximumCost > 0;

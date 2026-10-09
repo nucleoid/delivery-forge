@@ -46,7 +46,11 @@ public static class ReviewNormalizer
         else if (policy.Advisory || request.Capability.Advisory || result.Advisory)
             (outcome, reason) = (ReviewOutcome.Incomplete, "Advisory review evidence cannot pass.");
         else
+        {
             (outcome, reason) = NormalizeVerdict(result.Verdict);
+            if (outcome == ReviewOutcome.Pass && findings.Length != 0)
+                (outcome, reason) = (ReviewOutcome.Incomplete, "A PASS verdict cannot carry unresolved findings.");
+        }
 
         var fixture = policy.Fixture || request.Capability.Fixture || result.Fixture;
         var advisory = policy.Advisory || request.Capability.Advisory || result.Advisory;
@@ -56,9 +60,22 @@ public static class ReviewNormalizer
             request.Capability.ProductionCapable;
 
         return new NormalizedReview(
-            outcome, reason, Freeze(request.Identity), policy.PolicyIdentity, request.AuthorFamily,
-            result.ReviewerFamily, findings, result.ArtifactHash, result.CompletedAt,
-            fixture, advisory, productionAccepted, OriginalExecution: true);
+            outcome,
+            reason,
+            Freeze(request.Identity),
+            policy.PolicyIdentity,
+            policy.ContentIdentity,
+            policy.SourceRevision,
+            policy.AuthorityKind,
+            request.AuthorFamily,
+            result.ReviewerFamily,
+            findings,
+            result.ArtifactHash,
+            result.CompletedAt,
+            fixture,
+            advisory,
+            productionAccepted,
+            originalExecution: true);
     }
 
     internal static bool SameIdentity(PatchIdentity left, PatchIdentity right) =>
@@ -70,7 +87,9 @@ public static class ReviewNormalizer
         left.ArtifactIdentities.Count == right.ArtifactIdentities.Count &&
         left.ArtifactIdentities.All(pair =>
             right.ArtifactIdentities.TryGetValue(pair.Key, out var value) &&
-            string.Equals(pair.Value, value, StringComparison.Ordinal));
+            string.Equals(pair.Value, value, StringComparison.Ordinal)) &&
+        string.Equals(left.GitVersion, right.GitVersion, StringComparison.Ordinal) &&
+        left.Command.SequenceEqual(right.Command, StringComparer.Ordinal);
 
 
     private static PatchIdentity Freeze(PatchIdentity identity) => new(

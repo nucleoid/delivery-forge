@@ -66,17 +66,58 @@ public sealed record ReviewResult(
             false, false, true, false);
 }
 
-public sealed record NormalizedReview(
-    ReviewOutcome Outcome,
-    string Reason,
-    PatchIdentity Identity,
-    string PolicyIdentity,
-    string AuthorFamily,
-    string ReviewerFamily,
-    IReadOnlyList<ReviewFinding> Findings,
-    string ArtifactHash,
-    DateTimeOffset CompletedAt,
-    bool Fixture,
-    bool Advisory,
-    bool ProductionAccepted,
-    bool OriginalExecution);
+public sealed class NormalizedReview
+{
+    internal NormalizedReview(
+        ReviewOutcome outcome,
+        string reason,
+        PatchIdentity identity,
+        string policyIdentity,
+        string policyContentIdentity,
+        string policySourceRevision,
+        ReviewPolicyAuthorityKind policyAuthorityKind,
+        string authorFamily,
+        string reviewerFamily,
+        IReadOnlyList<ReviewFinding> findings,
+        string artifactHash,
+        DateTimeOffset completedAt,
+        bool fixture,
+        bool advisory,
+        bool productionAccepted,
+        bool originalExecution)
+    {
+        Outcome = outcome;
+        Reason = reason;
+        Identity = identity;
+        PolicyIdentity = policyIdentity;
+        PolicyContentIdentity = policyContentIdentity;
+        PolicySourceRevision = policySourceRevision;
+        PolicyAuthorityKind = policyAuthorityKind;
+        AuthorFamily = authorFamily;
+        ReviewerFamily = reviewerFamily;
+        Findings = findings.ToArray();
+        ArtifactHash = artifactHash;
+        CompletedAt = completedAt;
+        Fixture = fixture;
+        Advisory = advisory;
+        ProductionAccepted = productionAccepted;
+        OriginalExecution = originalExecution;
+    }
+
+    public ReviewOutcome Outcome { get; }
+    public string Reason { get; }
+    public PatchIdentity Identity { get; }
+    public string PolicyIdentity { get; }
+    public string PolicyContentIdentity { get; }
+    public string PolicySourceRevision { get; }
+    public ReviewPolicyAuthorityKind PolicyAuthorityKind { get; }
+    public string AuthorFamily { get; }
+    public string ReviewerFamily { get; }
+    public IReadOnlyList<ReviewFinding> Findings { get; }
+    public string ArtifactHash { get; }
+    public DateTimeOffset CompletedAt { get; }
+    public bool Fixture { get; }
+    public bool Advisory { get; }
+    public bool ProductionAccepted { get; }
+    public bool OriginalExecution { get; }
+}

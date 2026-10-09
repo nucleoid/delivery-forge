@@ -86,6 +86,8 @@ internal sealed record GitProcessResult(int ExitCode, byte[] StandardOutput, byt
 
 internal static class GitProcess
 {
+    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
+
     public static async Task<GitProcessResult> RunAsync(
         string workingDirectory,
         IReadOnlyList<string> arguments,
@@ -98,9 +100,14 @@ internal static class GitProcess
             RedirectStandardError = true,
             UseShellExecute = false
         };
+        foreach (var key in start.Environment.Keys.Where(key =>
+                     key.StartsWith("GIT_", StringComparison.OrdinalIgnoreCase)).ToArray())
+            start.Environment.Remove(key);
         start.Environment["LC_ALL"] = "C";
         start.Environment["LANG"] = "C";
         start.Environment["GIT_OPTIONAL_LOCKS"] = "0";
+        start.Environment["GIT_CONFIG_NOSYSTEM"] = "1";
+        start.Environment["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
         foreach (var argument in arguments)
             start.ArgumentList.Add(argument);
 
@@ -108,12 +115,31 @@ internal static class GitProcess
             ?? throw new ReviewPreflightException("Git process could not be started.");
         await using var output = new MemoryStream();
         await using var error = new MemoryStream();
-        var outputTask = process.StandardOutput.BaseStream.CopyToAsync(output, cancellationToken);
-        var errorTask = process.StandardError.BaseStream.CopyToAsync(error, cancellationToken);
-        await process.WaitForExitAsync(cancellationToken);
+        using var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        bounded.CancelAfter(Timeout);
+        var outputTask = process.StandardOutput.BaseStream.CopyToAsync(output, CancellationToken.None);
+        var errorTask = process.StandardError.BaseStream.CopyToAsync(error, CancellationToken.None);
+        try
+        {
+            await process.WaitForExitAsync(bounded.Token);
+        }
+        catch (OperationCanceledException errorCause)
+        {
+            if (!process.HasExited)
+            {
+                try { process.Kill(entireProcessTree: true); }
+                catch (InvalidOperationException) { }
+            }
+            await Task.WhenAll(outputTask, errorTask);
+            var reason = cancellationToken.IsCancellationRequested
+                ? "Git preflight was cancelled."
+                : $"Git preflight exceeded the {Timeout.TotalSeconds:0}-second timeout.";
+            throw new ReviewPreflightException(reason, errorCause);
+        }
+
         await Task.WhenAll(outputTask, errorTask);
         return new GitProcessResult(process.ExitCode, output.ToArray(), error.ToArray());
     }
 }
 
-public sealed class ReviewPreflightException(string message) : Exception(message);
+public sealed class ReviewPreflightException(string message, Exception? inner = null) : Exception(message, inner);
