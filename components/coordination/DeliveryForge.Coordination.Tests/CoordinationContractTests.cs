@@ -5,7 +5,7 @@ public sealed class CoordinationContractTests
     [Fact]
     public async Task Production_adapter_rejects_a_test_fixture_capability()
     {
-        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1(fixture: true));
+        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1ForFixture());
 
         var error = await Assert.ThrowsAsync<CoordinationUnavailableException>(() =>
             ContinuumCoordinationAdapter.CreateProductionAsync(transport, TestContext.Current.CancellationToken));
@@ -16,10 +16,10 @@ public sealed class CoordinationContractTests
     [Fact]
     public async Task Partial_contention_releases_the_acquired_prefix_and_never_authorizes_dispatch()
     {
-        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1());
+        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1ForFixture());
         transport.AcquireResults.Enqueue(AcquireTransportResult.Acquired("lease-a", "9007199254740993", ServerNow, ServerNow.AddMinutes(5)));
         transport.AcquireResults.Enqueue(AcquireTransportResult.Contended());
-        var adapter = await ContinuumCoordinationAdapter.CreateProductionAsync(transport, TestContext.Current.CancellationToken);
+        var adapter = await ContinuumCoordinationAdapter.CreateForContractTestsAsync(transport, TestContext.Current.CancellationToken);
         var owner = new LeaseOwner("principal-1", "run-1");
         var resources = new[]
         {
@@ -29,7 +29,7 @@ public sealed class CoordinationContractTests
 
         var result = await adapter.AcquireAllAsync(resources, owner, TimeSpan.FromSeconds(300), TestContext.Current.CancellationToken);
 
-        Assert.False(result.MayDispatch);
+        Assert.False(adapter.MayDispatch(result));
         Assert.Equal(LeaseOwnership.Contended, result.Ownership);
         Assert.Equal(new[]
         {
@@ -45,9 +45,9 @@ public sealed class CoordinationContractTests
     [Fact]
     public async Task Release_requires_positive_owned_quiescence()
     {
-        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1());
+        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1ForFixture());
         transport.AcquireResults.Enqueue(AcquireTransportResult.Acquired("lease-a", "42", ServerNow, ServerNow.AddMinutes(5)));
-        var adapter = await ContinuumCoordinationAdapter.CreateProductionAsync(transport, TestContext.Current.CancellationToken);
+        var adapter = await ContinuumCoordinationAdapter.CreateForContractTestsAsync(transport, TestContext.Current.CancellationToken);
         var owner = new LeaseOwner("principal-1", "run-1");
         var acquired = await adapter.AcquireAllAsync(
             [new CoordinationResource("scope", "github:nucleoid/delivery-forge:issue:6")], owner,
@@ -87,7 +87,7 @@ public sealed class CoordinationContractTests
     [Fact]
     public async Task Missing_required_capability_is_rejected_before_any_acquire()
     {
-        var capabilities = CoordinationCapabilities.ValidV1() with
+        var capabilities = CoordinationCapabilities.ValidV1ForFixture() with
         {
             Operations = new HashSet<CoordinationOperation> { CoordinationOperation.Acquire }
         };
@@ -102,6 +102,9 @@ public sealed class CoordinationContractTests
     [InlineData("github:nucleoid/delivery-forge:issue:0")]
     [InlineData(" github:nucleoid/delivery-forge:issue:6")]
     [InlineData("secret-token")]
+    [InlineData("github:Nucleoid/delivery-forge:issue:6")]
+    [InlineData("github:./delivery-forge:issue:6")]
+    [InlineData("github:nucleoid/..:issue:6")]
     [InlineData("github:nucleoid/delivery-forge:issue:6\n")]
     public void Non_canonical_or_sensitive_resource_keys_are_rejected(string key)
     {
@@ -109,12 +112,12 @@ public sealed class CoordinationContractTests
     }
 
     [Fact]
-    public async Task Decimal_fencing_larger_than_javascript_safe_integer_round_trips_as_a_string()
+    public async Task Decimal_bigint_fencing_larger_than_javascript_safe_integer_round_trips_as_a_string()
     {
-        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1());
+        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1ForFixture());
         transport.AcquireResults.Enqueue(AcquireTransportResult.Acquired(
-            "lease-a", "184467440737095516160000", ServerNow, ServerNow.AddMinutes(5)));
-        var adapter = await ContinuumCoordinationAdapter.CreateProductionAsync(transport, TestContext.Current.CancellationToken);
+            "lease-a", "9223372036854775807", ServerNow, ServerNow.AddMinutes(5)));
+        var adapter = await ContinuumCoordinationAdapter.CreateForContractTestsAsync(transport, TestContext.Current.CancellationToken);
         var owner = new LeaseOwner("principal", "run");
         var acquisition = await adapter.AcquireAllAsync(
             [new CoordinationResource("scope", "github:nucleoid/delivery-forge:issue:6")], owner,
@@ -122,16 +125,16 @@ public sealed class CoordinationContractTests
 
         await adapter.ReleaseAllAsync(acquisition, new FixedQuiescence(true), TestContext.Current.CancellationToken);
 
-        Assert.Equal("184467440737095516160000", transport.ReleaseRequests.Single().FencingToken);
+        Assert.Equal("9223372036854775807", transport.ReleaseRequests.Single().FencingToken);
     }
 
     [Fact]
     public async Task Invalid_acquired_fencing_attempts_release_and_blocks_dispatch_as_uncertain()
     {
-        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1());
+        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1ForFixture());
         transport.AcquireResults.Enqueue(AcquireTransportResult.Acquired(
             "lease-a", "9.25", ServerNow, ServerNow.AddMinutes(5)));
-        var adapter = await ContinuumCoordinationAdapter.CreateProductionAsync(transport, TestContext.Current.CancellationToken);
+        var adapter = await ContinuumCoordinationAdapter.CreateForContractTestsAsync(transport, TestContext.Current.CancellationToken);
 
         await Assert.ThrowsAsync<CoordinationUncertainException>(() => adapter.AcquireAllAsync(
             [new CoordinationResource("scope", "github:nucleoid/delivery-forge:issue:6")],
@@ -144,10 +147,10 @@ public sealed class CoordinationContractTests
     [Fact]
     public async Task Cancellation_after_possible_acquire_rolls_back_prefix_and_is_never_a_clean_cancel()
     {
-        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1());
+        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1ForFixture());
         transport.AcquireResults.Enqueue(AcquireTransportResult.Acquired("lease-a", "1", ServerNow, ServerNow.AddMinutes(5)));
         transport.AcquireExceptions.Enqueue(new OperationCanceledException("response lost"));
-        var adapter = await ContinuumCoordinationAdapter.CreateProductionAsync(transport, TestContext.Current.CancellationToken);
+        var adapter = await ContinuumCoordinationAdapter.CreateForContractTestsAsync(transport, TestContext.Current.CancellationToken);
 
         await Assert.ThrowsAsync<CoordinationUncertainException>(() => adapter.AcquireAllAsync(
             [
@@ -159,7 +162,43 @@ public sealed class CoordinationContractTests
         Assert.Equal("lease-a", transport.ReleaseRequests.Single().LeaseId);
     }
 
+    [Fact]
+    public async Task Self_attested_non_fixture_transport_cannot_enable_production_before_live_contract_cutover()
+    {
+        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1ForFixture() with { Fixture = false });
+
+        var error = await Assert.ThrowsAsync<CoordinationUnavailableException>(() =>
+            ContinuumCoordinationAdapter.CreateProductionAsync(transport, TestContext.Current.CancellationToken));
+
+        Assert.Contains("INCOMPLETE", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Dispatch_authority_expires_at_the_conservative_monotonic_deadline()
+    {
+        var clock = new FakeMonotonicClock();
+        var transport = new RecordingTransport(CoordinationCapabilities.ValidV1ForFixture());
+        transport.AcquireResults.Enqueue(AcquireTransportResult.Acquired("lease-a", "7", ServerNow, ServerNow.AddMinutes(5)));
+        var adapter = await ContinuumCoordinationAdapter.CreateForContractTestsAsync(
+            transport, TestContext.Current.CancellationToken, clock);
+        var acquisition = await adapter.AcquireAllAsync(
+            [new CoordinationResource("scope", "github:nucleoid/delivery-forge:issue:6")],
+            new LeaseOwner("principal", "run"), TimeSpan.FromSeconds(300), TestContext.Current.CancellationToken);
+
+        Assert.True(adapter.MayDispatch(acquisition));
+        clock.Advance(TimeSpan.FromSeconds(299));
+        Assert.True(adapter.MayDispatch(acquisition));
+        clock.Advance(TimeSpan.FromSeconds(1));
+        Assert.False(adapter.MayDispatch(acquisition));
+    }
+
     private static readonly DateTimeOffset ServerNow = new(2026, 10, 9, 0, 0, 0, TimeSpan.Zero);
+
+    private sealed class FakeMonotonicClock : IMonotonicClock
+    {
+        public TimeSpan Elapsed { get; private set; }
+        public void Advance(TimeSpan duration) => Elapsed += duration;
+    }
 
     private sealed class FixedQuiescence(bool quiescent) : IOwnedRunQuiescence
     {
