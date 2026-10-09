@@ -124,11 +124,22 @@ public sealed class TypedBoundaryRedesignTests
                 CheckoutDigest: digest, DistilledMeaning: ImportedMeaningCode.AdditionalRepositoryEvidence),
             file);
         var request = draft.Request with { Depth = IntakeDepth.Deep };
+        EvidenceItem[] provenance =
+        [
+            .. draft.Provenance,
+            EvidenceItem.FromRepositoryFile(
+                new RepositoryFile(
+                    "Directory.Build.props", new string('d', 40), "100644", Encoding.UTF8.GetBytes("other exact bytes"),
+                    isSymlink: false, escapesWorktree: false, "not-detected", SymlinkResolution.NotSymlink,
+                    new string('a', 40), new string('b', 40)),
+                ObservedAt,
+                [])
+        ];
         var imported = new ImportedContextEnvelope("1.0.0", [verified], [], []);
-        var intake = IntakePlanner.Assess(request, draft.Provenance, imported);
+        var intake = IntakePlanner.Assess(request, provenance, imported);
 
         var frozen = PlanFreezer.Freeze(
-            draft with { Request = request, Intake = intake }, "repository-and-import", ObservedAt);
+            draft with { Request = request, Provenance = provenance, Intake = intake }, "repository-and-import", ObservedAt);
         var json = Encoding.UTF8.GetString(frozen.CanonicalBytes);
         Assert.True(intake.Ready);
         Assert.Contains("git:README.md", json, StringComparison.Ordinal);

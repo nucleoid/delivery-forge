@@ -118,11 +118,8 @@ public sealed class PlanningBehaviorTests
         Assert.Contains("raw details remain local-only", json, StringComparison.Ordinal);
     }
 
-    [Theory]
-    [InlineData("rollout")]
-    [InlineData("request")]
-    [InlineData("change-map")]
-    public void Copying_private_advisory_into_any_public_plan_field_is_rejected(string destination)
+    [Fact]
+    public void Explicit_public_user_intent_is_a_distinct_host_authority_path_not_a_string_blacklist()
     {
         const string privateText = "Project Phoenix is coordinated from attic seven";
         var draft = Draft();
@@ -132,21 +129,29 @@ public sealed class PlanningBehaviorTests
                 DistilledMeaning: ImportedMeaningCode.CallerRelationship)],
             [],
             []);
-        var assessment = IntakePlanner.Assess(draft.Request, draft.Provenance, envelope);
-        draft = destination switch
-        {
-            "rollout" => draft with { Rollout = draft.Rollout with { Compatibility = privateText }, Intake = assessment },
-            "request" => draft with { Request = draft.Request with { Outcome = privateText }, Intake = assessment },
-            "change-map" => draft with { ChangeMap = [new("Core.cs", "symbol", privateText)], Intake = assessment },
-            _ => throw new InvalidOperationException(destination)
-        };
+        EvidenceItem[] provenance =
+        [
+            .. draft.Provenance,
+            EvidenceItem.FromExplicitPublicUserIntent(
+                "user:explicit-public-statement", null, ObservedAt, [])
+        ];
+        var publicRequest = draft.Request with { Outcome = privateText };
+        var assessment = IntakePlanner.Assess(publicRequest, provenance, envelope);
+        var frozen = PlanFreezer.Freeze(
+            draft with
+            {
+                Request = publicRequest,
+                Provenance = provenance,
+                Intake = assessment
+            },
+            "explicit-public-authority",
+            ObservedAt);
 
-        var error = Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(draft, "copied-private", ObservedAt));
-        Assert.Contains("copied", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(privateText, Encoding.UTF8.GetString(frozen.CanonicalBytes), StringComparison.Ordinal);
     }
 
     [Fact]
-    public void Private_advisory_provenance_exports_only_an_opaque_locator_digest_and_typed_caveat()
+    public void Private_advisory_provenance_exports_no_record_identity_and_only_a_typed_caveat()
     {
         var draft = Draft();
         EvidenceItem[] provenance =
@@ -162,8 +167,10 @@ public sealed class PlanningBehaviorTests
             ObservedAt);
         var json = Encoding.UTF8.GetString(frozen.CanonicalBytes);
 
-        Assert.Contains("private-advisory", json, StringComparison.Ordinal);
-        Assert.Contains("opaque:memory-record-7", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-advisory", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("opaque:memory-record-7", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("sha256:" + new string('d', 64), json, StringComparison.Ordinal);
+        Assert.Contains("\"code\":\"heuristic\"", json, StringComparison.Ordinal);
         Assert.Contains("Private advisory evidence is heuristic", json, StringComparison.Ordinal);
     }
 
@@ -174,7 +181,7 @@ public sealed class PlanningBehaviorTests
         EvidenceItem[] provenance =
         [
             RepositoryEvidence(),
-            new(EvidenceSourceKind.User, EvidenceProducerKind.ExplicitUserPublic, EvidenceLocatorKind.Public,
+            EvidenceItem.FromExplicitPublicUserIntent(
                 "user:approved-scope", "sha256:" + new string('e', 64), ObservedAt, [])
         ];
         var frozen = PlanFreezer.Freeze(
@@ -187,7 +194,7 @@ public sealed class PlanningBehaviorTests
     }
 
     [Fact]
-    public void A_private_advisory_cannot_be_relabelled_with_a_public_locator()
+    public void A_private_advisory_with_a_public_looking_locator_is_still_not_exported()
     {
         var draft = Draft();
         EvidenceItem[] provenance =
@@ -197,8 +204,11 @@ public sealed class PlanningBehaviorTests
                 "https://example.invalid/public-looking", "sha256:" + new string('d', 64), ObservedAt, [])
         ];
         var assessment = IntakePlanner.Assess(draft.Request, provenance);
-        Assert.Throws<PlanningException>(() => PlanFreezer.Freeze(
-            draft with { Provenance = provenance, Intake = assessment }, "relabel", ObservedAt));
+        var frozen = PlanFreezer.Freeze(
+            draft with { Provenance = provenance, Intake = assessment }, "relabel", ObservedAt);
+        var json = Encoding.UTF8.GetString(frozen.CanonicalBytes);
+        Assert.DoesNotContain("https://example.invalid/public-looking", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("private-advisory", json, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -374,10 +384,7 @@ public sealed class PlanningBehaviorTests
     private static EvidenceItem RepositoryEvidence(string path = "README.md") =>
         EvidenceItem.FromRepositoryFile(RepositoryFileFor(path), ObservedAt, []);
 
-    private static EvidenceItem PolicyEvidence() => new(
-        EvidenceSourceKind.Policy,
-        EvidenceProducerKind.DeterministicGenerated,
-        EvidenceLocatorKind.Public,
+    private static EvidenceItem PolicyEvidence() => EvidenceItem.FromDeterministicPolicyFact(
         "policy:planning",
         "sha256:" + new string('c', 64),
         ObservedAt,

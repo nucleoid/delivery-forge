@@ -20,12 +20,21 @@ public-looking locator does not sanitize them.
 
 ## Portable projection
 
-Frozen plans receive only typed fixed sentences, exact repository facts, digests, and public or
-opaque evidence locators. Raw summaries, conflicts, limitations, and local locators are never copied.
+Frozen plans receive typed caveat/notice/meaning metadata with fixed sentences and separately sourced
+public evidence. Imported records themselves contribute no public provenance: no kind, locator,
+digest, summary, supersession, flags, or other record metadata is projected. Raw summaries,
+conflicts, limitations, and local locators are never copied.
 Required meaning without a safe typed distillation blocks readiness. Optional undistilled meaning is
 represented by a fixed caveat. Typed distillation records categories such as caller relationship,
 policy constraint, repository conflict, or additional repository evidence; it does not reproduce the
 private explanation.
+
+There is no supported promotion from an imported entry to public evidence and no caller-supplied
+`opaque:` prefix that changes an entry's identity. A safe public repository fact must be created
+independently from a reader-issued exact Git object, even when an imported entry mentions the same
+`git:` locator. Explicitly public user prose is a separate intentional host-authority input; the
+library cannot prove arbitrary prose's prior byte history or secret absence, so the host must not use
+that path as an import conversion or malicious relabelling mechanism.
 
 An empty search means only that the bounded search returned no matches. Optional absence degrades
 honestly; required absence blocks. Stale, truncated, heuristic, and checkout-conflicting states render

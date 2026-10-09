@@ -46,24 +46,88 @@ public sealed record PlanningRequest(
     string? UserOwnedDecision = null,
     string? RecommendedOption = null);
 
-public sealed record EvidenceItem(
-    EvidenceSourceKind SourceKind,
-    EvidenceProducerKind ProducerKind,
-    EvidenceLocatorKind LocatorKind,
-    string Locator,
-    string? Digest,
-    DateTimeOffset ObservedAt,
-    IReadOnlyList<EvidenceCaveatCode> Caveats,
-    string? Supersedes = null,
-    bool IsComplete = true,
-    EvidenceRequirement Requirement = EvidenceRequirement.Optional)
+public sealed record EvidenceItem
 {
+    internal EvidenceItem(
+        EvidenceSourceKind sourceKind,
+        EvidenceProducerKind producerKind,
+        EvidenceLocatorKind locatorKind,
+        string locator,
+        string? digest,
+        DateTimeOffset observedAt,
+        IReadOnlyList<EvidenceCaveatCode> caveats,
+        string? supersedes = null,
+        bool isComplete = true,
+        EvidenceRequirement requirement = EvidenceRequirement.Optional)
+    {
+        SourceKind = sourceKind;
+        ProducerKind = producerKind;
+        LocatorKind = locatorKind;
+        Locator = locator;
+        Digest = digest;
+        ObservedAt = observedAt;
+        Caveats = caveats.ToArray();
+        Supersedes = supersedes;
+        IsComplete = isComplete;
+        Requirement = requirement;
+    }
+
+    public EvidenceSourceKind SourceKind { get; }
+    public EvidenceProducerKind ProducerKind { get; }
+    public EvidenceLocatorKind LocatorKind { get; }
+    public string Locator { get; }
+    public string? Digest { get; }
+    public DateTimeOffset ObservedAt { get; }
+    public IReadOnlyList<EvidenceCaveatCode> Caveats { get; }
+    public string? Supersedes { get; }
+    public bool IsComplete { get; }
+    public EvidenceRequirement Requirement { get; }
     internal string? RepositoryCommit { get; init; }
     internal string? RepositoryTree { get; init; }
     internal string? RepositoryBinding { get; init; }
     internal bool? RepositoryIsSymlink { get; init; }
     internal SymlinkResolution? RepositorySymlinkResolution { get; init; }
     internal string? RepositoryGenerationClassification { get; init; }
+
+    public static EvidenceItem FromExplicitPublicUserIntent(
+        string locator,
+        string? digest,
+        DateTimeOffset observedAt,
+        IReadOnlyList<EvidenceCaveatCode> caveats,
+        string? supersedes = null,
+        bool isComplete = true,
+        EvidenceRequirement requirement = EvidenceRequirement.Optional) =>
+        new(
+            EvidenceSourceKind.User,
+            EvidenceProducerKind.ExplicitUserPublic,
+            EvidenceLocatorKind.Public,
+            locator,
+            digest,
+            observedAt,
+            caveats,
+            supersedes,
+            isComplete,
+            requirement);
+
+    public static EvidenceItem FromDeterministicPolicyFact(
+        string locator,
+        string? digest,
+        DateTimeOffset observedAt,
+        IReadOnlyList<EvidenceCaveatCode> caveats,
+        string? supersedes = null,
+        bool isComplete = true,
+        EvidenceRequirement requirement = EvidenceRequirement.Optional) =>
+        new(
+            EvidenceSourceKind.Policy,
+            EvidenceProducerKind.DeterministicGenerated,
+            EvidenceLocatorKind.Public,
+            locator,
+            digest,
+            observedAt,
+            caveats,
+            supersedes,
+            isComplete,
+            requirement);
 
     public static EvidenceItem FromRepositoryFile(
         RepositoryFile exactFile,
@@ -92,8 +156,8 @@ public sealed record EvidenceItem(
             $"sha256:{Convert.ToHexStringLower(SHA256.HashData(exactFile.Bytes))}",
             observedAt,
             safetyCaveats,
-            IsComplete: !unsafeSymlink && !generated,
-            Requirement: requirement)
+            isComplete: !unsafeSymlink && !generated,
+            requirement: requirement)
         {
             RepositoryCommit = exactFile.Commit,
             RepositoryTree = exactFile.Tree,
@@ -112,7 +176,12 @@ public sealed record EvidenceItem(
 
     internal bool HasConsistentSourceLocator()
     {
-        if (ProducerKind == EvidenceProducerKind.PrivateAdvisory && LocatorKind != EvidenceLocatorKind.Opaque)
+        if (ProducerKind == EvidenceProducerKind.PrivateAdvisory) return true;
+        if (ProducerKind == EvidenceProducerKind.ExplicitUserPublic &&
+            (SourceKind != EvidenceSourceKind.User || LocatorKind != EvidenceLocatorKind.Public))
+            return false;
+        if (ProducerKind == EvidenceProducerKind.DeterministicGenerated &&
+            (SourceKind != EvidenceSourceKind.Policy || LocatorKind != EvidenceLocatorKind.Public))
             return false;
         if (ProducerKind == EvidenceProducerKind.RepositoryAtBase && SourceKind != EvidenceSourceKind.Repository)
             return false;
@@ -181,7 +250,10 @@ public sealed class IntakeAssessment
         EvidenceRequirement importedContextRequirement,
         bool importedContextAvailable,
         IReadOnlyList<VerifiedRepositoryIdentity> verifiedRepositoryIdentities,
-        IReadOnlyList<string> privateAdvisoryMaterial,
+        IReadOnlyList<EvidenceCaveatCode> advisoryCaveats,
+        IReadOnlyList<ImportedMeaningCode> advisoryMeanings,
+        IReadOnlyList<PlanningNoticeCode> advisoryNotices,
+        IReadOnlyList<string> privateAdvisoryBindingDigests,
         string bindingDigest)
     {
         Ready = ready;
@@ -191,7 +263,10 @@ public sealed class IntakeAssessment
         ImportedContextRequirement = importedContextRequirement;
         ImportedContextAvailable = importedContextAvailable;
         VerifiedRepositoryIdentities = verifiedRepositoryIdentities.ToArray();
-        PrivateAdvisoryMaterial = privateAdvisoryMaterial.ToArray();
+        AdvisoryCaveats = advisoryCaveats.ToArray();
+        AdvisoryMeanings = advisoryMeanings.ToArray();
+        AdvisoryNotices = advisoryNotices.ToArray();
+        PrivateAdvisoryBindingDigests = privateAdvisoryBindingDigests.ToArray();
         BindingDigest = bindingDigest;
     }
 
@@ -202,7 +277,10 @@ public sealed class IntakeAssessment
     public EvidenceRequirement ImportedContextRequirement { get; }
     public bool ImportedContextAvailable { get; }
     internal IReadOnlyList<VerifiedRepositoryIdentity> VerifiedRepositoryIdentities { get; }
-    internal IReadOnlyList<string> PrivateAdvisoryMaterial { get; }
+    internal IReadOnlyList<EvidenceCaveatCode> AdvisoryCaveats { get; }
+    internal IReadOnlyList<ImportedMeaningCode> AdvisoryMeanings { get; }
+    internal IReadOnlyList<PlanningNoticeCode> AdvisoryNotices { get; }
+    internal IReadOnlyList<string> PrivateAdvisoryBindingDigests { get; }
     internal string BindingDigest { get; }
 }
 

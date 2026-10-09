@@ -87,9 +87,25 @@ public static class PlanFreezer
                 depth = draft.Intake.Depth.ToString().ToLowerInvariant(),
                 importedContextRequirement = draft.Intake.ImportedContextRequirement.ToString().ToLowerInvariant(),
                 draft.Intake.ImportedContextAvailable,
-                limitations = Sorted(draft.Intake.Limitations)
+                limitations = Sorted(draft.Intake.Limitations),
+                advisoryCaveats = draft.Intake.AdvisoryCaveats
+                    .Distinct()
+                    .Order()
+                    .Select(code => new { code = CaveatWireValue(code), message = IntakePlanner.CaveatText(code) })
+                    .ToArray(),
+                advisoryMeanings = draft.Intake.AdvisoryMeanings
+                    .Distinct()
+                    .Order()
+                    .Select(code => new { code = MeaningWireValue(code), message = IntakePlanner.MeaningText(code) })
+                    .ToArray(),
+                advisoryNotices = draft.Intake.AdvisoryNotices
+                    .Distinct()
+                    .Order()
+                    .Select(code => new { code = NoticeWireValue(code), message = IntakePlanner.NoticeText(code) })
+                    .ToArray()
             },
             provenance = draft.Provenance
+                .Where(item => item.ProducerKind != EvidenceProducerKind.PrivateAdvisory)
                 .OrderBy(item => item.SourceKind)
                 .ThenBy(item => item.Locator, StringComparer.Ordinal)
                 .Select(item => new
@@ -97,9 +113,7 @@ public static class PlanFreezer
                     sourceKind = item.SourceKind.ToString().ToLowerInvariant(),
                     producerKind = ProducerWireValue(item.ProducerKind),
                     locatorKind = item.LocatorKind.ToString().ToLowerInvariant(),
-                    locator = item.ProducerKind == EvidenceProducerKind.PrivateAdvisory
-                        ? item.Locator
-                        : item.Locator,
+                    locator = item.Locator,
                     item.Digest,
                     observedAt = FormatUtc(item.ObservedAt),
                     caveats = item.Caveats.Order().Select(IntakePlanner.CaveatText).ToArray(),
@@ -295,16 +309,19 @@ public static class PlanFreezer
             failures.Add("intake assessment is not bound to this planning request, evidence, and imported-context caveats");
         if (draft.Intake.ImportedContextRequirement == EvidenceRequirement.Required && !draft.Intake.ImportedContextAvailable)
             failures.Add("required imported context is unavailable");
-        if (draft.Provenance.Count == 0) failures.Add("provenance is required");
+        if (!draft.Provenance.Any(item => item.ProducerKind != EvidenceProducerKind.PrivateAdvisory))
+            failures.Add("portable public provenance is required");
         if (draft.Provenance.Any(item => item.Requirement == EvidenceRequirement.Required && !item.IsComplete))
             failures.Add("required provenance is incomplete");
         if (draft.Provenance.Any(item => !item.HasConsistentSourceLocator()))
             failures.Add("provenance source kind and locator scheme must be consistent");
         if (draft.Provenance.Any(item =>
+                item.ProducerKind != EvidenceProducerKind.PrivateAdvisory &&
                 item.SourceKind == EvidenceSourceKind.Repository &&
                 !item.IsReaderBoundRepositoryEvidence()))
             failures.Add("repository provenance is not bound to exact reader-issued file/commit/tree and safety metadata");
         if (draft.Provenance.Any(item =>
+                item.ProducerKind != EvidenceProducerKind.PrivateAdvisory &&
                 item.SourceKind == EvidenceSourceKind.Repository &&
                 (!string.Equals(item.RepositoryCommit, draft.Repository.Commit, StringComparison.Ordinal) ||
                  !string.Equals(item.RepositoryTree, draft.Repository.Tree, StringComparison.Ordinal))))
@@ -435,20 +452,6 @@ public static class PlanFreezer
          .Concat(draft.Unknowns.SelectMany(item => new[] { item.Description, item.Owner }));
         if (portableText.Any(PortableMaterial.ContainsPrivateMaterial))
             failures.Add("plan contains a host path or credential-like private material");
-        if (draft.Intake.PrivateAdvisoryMaterial.Any(privateValue =>
-                portableText.Any(publicValue => publicValue.Contains(privateValue, StringComparison.Ordinal))))
-            failures.Add("private advisory material was copied into a portable public field");
-
-        foreach (var evidence in draft.Provenance.Where(item => item.ProducerKind == EvidenceProducerKind.PrivateAdvisory))
-        {
-            if (evidence.LocatorKind != EvidenceLocatorKind.Opaque ||
-                !evidence.Locator.StartsWith("opaque:", StringComparison.Ordinal) ||
-                evidence.Locator.Length > 135 ||
-                !PortableMaterial.IsSafeIdentifier(evidence.Locator[7..]))
-            {
-                failures.Add("private advisory provenance requires a bounded opaque locator");
-            }
-        }
     }
 
     private static void ValidateUnique<T>(IReadOnlyList<T> values, Func<T, string> key, string name, List<string> failures)
@@ -490,6 +493,38 @@ public static class PlanFreezer
         EvidenceProducerKind.DeterministicGenerated => "deterministic-generated",
         EvidenceProducerKind.PrivateAdvisory => "private-advisory",
         _ => throw new PlanningException("Evidence producer kind is not recognized.")
+    };
+
+    private static string CaveatWireValue(EvidenceCaveatCode value) => value switch
+    {
+        EvidenceCaveatCode.Stale => "stale",
+        EvidenceCaveatCode.Truncated => "truncated",
+        EvidenceCaveatCode.Heuristic => "heuristic",
+        EvidenceCaveatCode.Incomplete => "incomplete",
+        EvidenceCaveatCode.UnverifiedCheckout => "unverified-checkout",
+        EvidenceCaveatCode.CheckoutConflict => "checkout-conflict",
+        EvidenceCaveatCode.UnsafeSymlink => "unsafe-symlink",
+        EvidenceCaveatCode.GeneratedFile => "generated-file",
+        EvidenceCaveatCode.OptionalEvidenceUnavailable => "optional-evidence-unavailable",
+        EvidenceCaveatCode.RequiredMeaningNotDistillable => "required-meaning-not-distillable",
+        _ => throw new PlanningException("Evidence caveat code is not recognized.")
+    };
+
+    private static string MeaningWireValue(ImportedMeaningCode value) => value switch
+    {
+        ImportedMeaningCode.AdditionalRepositoryEvidence => "additional-repository-evidence",
+        ImportedMeaningCode.RepositoryConflict => "repository-conflict",
+        ImportedMeaningCode.PolicyConstraint => "policy-constraint",
+        ImportedMeaningCode.CallerRelationship => "caller-relationship",
+        _ => throw new PlanningException("Imported meaning code is not recognized.")
+    };
+
+    private static string NoticeWireValue(PlanningNoticeCode value) => value switch
+    {
+        PlanningNoticeCode.PrivateAdvisoryConflictReported => "private-advisory-conflict-reported",
+        PlanningNoticeCode.PrivateAdvisoryLimitationReported => "private-advisory-limitation-reported",
+        PlanningNoticeCode.OptionalPrivateMeaningNotExported => "optional-private-meaning-not-exported",
+        _ => throw new PlanningException("Planning notice code is not recognized.")
     };
 
     private static string ArgumentWireValue(CommandArgumentKind value) => value switch

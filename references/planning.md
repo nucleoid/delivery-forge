@@ -12,18 +12,26 @@ it public-safe.
 
 Portable evidence records:
 
-- source kind and producer kind (`explicitUserPublic`, `repositoryAtBase`,
-  `deterministicGenerated`, or `privateAdvisory`);
-- a public locator or bounded opaque locator;
+- source kind and one public producer kind (`explicitUserPublic`, `repositoryAtBase`, or
+  `deterministicGenerated`);
+- a public locator;
 - optional immutable SHA-256 digest, UTC observation time, completeness and freshness caveats;
 - optional supersession; and
 - exact checkout commit/tree plus symlink and generation metadata for repository-at-base evidence.
 
-Private advisory summaries, conflicts, and limitations remain in the local intake envelope. They are
-never copied directly into a frozen plan. The planner emits only fixed sentences rendered from typed
-caveat and meaning codes. A private-advisory producer cannot become public merely by supplying a
-public-looking locator. Required advisory meaning that has no safe typed distillation blocks
-readiness; optional undistilled meaning produces a fixed caveat.
+Private advisory records remain in local intake and are absent from public provenance in their
+entirety: source kind, producer kind, locator, digest, summary, supersession, and nested metadata are
+not projected. The planner emits typed caveat, notice, and meaning codes with deterministic fixed
+sentences. A private-advisory producer cannot become public through an opaque prefix, a caller label,
+or an identity conversion. Required advisory meaning that has no safe typed distillation blocks
+readiness; optional undistilled meaning produces a fixed typed caveat.
+
+Public evidence has separate construction paths. Repository facts come only from reader-issued exact
+Git objects, deterministic policy facts use their own factory, and explicitly public user intent uses
+a deliberate host-authority factory. The library prevents its supported local-advisory/import path
+from exporting private records, but it cannot prove the byte history or secret absence of arbitrary
+explicit-public prose and cannot defeat a malicious host that deliberately relabels private text as
+new user-public input. Hosts must expose that path only for genuinely explicit public intent.
 
 ## Intake and readiness
 
@@ -56,7 +64,9 @@ command-string field. The display string is an adapter only; it is not shell par
 Typed public values receive bounded checks for NUL/control characters, common private host paths,
 home aliases, populated credential assignments, private-key markers, bearer values, and a few
 high-confidence token formats. These checks catch common mistakes and may have false positives or
-false negatives. They are not a privacy certificate and do not define an arbitrary grammar.
+false negatives. They are not a privacy certificate and do not define an arbitrary grammar. Private
+advisory isolation is enforced by producer/API separation, not substring, normalized, fuzzy,
+case-folded, whitespace, or encoding comparisons against imported text.
 
 ## Exact repository boundary
 

@@ -217,14 +217,15 @@ public static class IntakePlanner
             throw new PlanningException("A genuine user-owned decision and its concrete recommended option must be supplied together.");
         }
         var limitations = new List<string>();
-        var privateAdvisoryMaterial = importedContext is null
+        var advisoryCaveats = new HashSet<EvidenceCaveatCode>();
+        var advisoryMeanings = new HashSet<ImportedMeaningCode>();
+        var advisoryNotices = new HashSet<PlanningNoticeCode>();
+        var privateAdvisoryBindingDigests = importedContext is null
             ? Array.Empty<string>()
-            : importedContext.Entries.SelectMany(entry => new[] { entry.Locator, entry.Summary })
-                .Concat(importedContext.Conflicts)
-                .Concat(importedContext.Limitations)
-                .Distinct(StringComparer.Ordinal)
-                .Order(StringComparer.Ordinal)
-                .ToArray();
+            :
+            [
+                $"sha256:{Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(importedContext)))}"
+            ];
         var ready = evidence.Any(IsPinnedReadinessEvidence);
         var verifiedRepositoryIdentities = evidence
             .Where(item => item.IsComplete && item.IsReaderBoundRepositoryEvidence())
@@ -234,6 +235,22 @@ public static class IntakePlanner
         foreach (var item in evidence)
         {
             limitations.AddRange(item.Caveats.Select(CaveatText));
+            if (item.ProducerKind == EvidenceProducerKind.PrivateAdvisory)
+            {
+                foreach (var caveat in item.Caveats) advisoryCaveats.Add(caveat);
+                if (item.Requirement == EvidenceRequirement.Required)
+                {
+                    advisoryCaveats.Add(EvidenceCaveatCode.RequiredMeaningNotDistillable);
+                    limitations.Add(CaveatText(EvidenceCaveatCode.RequiredMeaningNotDistillable));
+                    ready = false;
+                }
+                else
+                {
+                    advisoryNotices.Add(PlanningNoticeCode.OptionalPrivateMeaningNotExported);
+                    limitations.Add(NoticeText(PlanningNoticeCode.OptionalPrivateMeaningNotExported));
+                }
+                continue;
+            }
             if (!item.HasConsistentSourceLocator())
             {
                 limitations.Add($"Evidence source kind at {item.Locator} is inconsistent with its locator scheme.");
@@ -284,29 +301,46 @@ public static class IntakePlanner
         if (importedContext is not null)
         {
             if (importedContext.Limitations.Count > 0)
+            {
+                advisoryNotices.Add(PlanningNoticeCode.PrivateAdvisoryLimitationReported);
                 limitations.Add(NoticeText(PlanningNoticeCode.PrivateAdvisoryLimitationReported));
+            }
             if (importedContext.Conflicts.Count > 0)
+            {
+                advisoryNotices.Add(PlanningNoticeCode.PrivateAdvisoryConflictReported);
                 limitations.Add(NoticeText(PlanningNoticeCode.PrivateAdvisoryConflictReported));
+            }
             foreach (var entry in importedContext.Entries)
             {
-                if (entry.Stale) limitations.Add(CaveatText(EvidenceCaveatCode.Stale));
-                if (entry.Truncated) limitations.Add(CaveatText(EvidenceCaveatCode.Truncated));
-                if (entry.Heuristic) limitations.Add(CaveatText(EvidenceCaveatCode.Heuristic));
+                if (entry.Stale) AddCaveat(EvidenceCaveatCode.Stale);
+                if (entry.Truncated) AddCaveat(EvidenceCaveatCode.Truncated);
+                if (entry.Heuristic) AddCaveat(EvidenceCaveatCode.Heuristic);
                 if (entry.DistilledMeaning is not null)
+                {
+                    advisoryMeanings.Add(entry.DistilledMeaning.Value);
                     limitations.Add(MeaningText(entry.DistilledMeaning.Value));
+                }
                 else if (entry.Requirement == EvidenceRequirement.Required)
                 {
-                    limitations.Add(CaveatText(EvidenceCaveatCode.RequiredMeaningNotDistillable));
+                    AddCaveat(EvidenceCaveatCode.RequiredMeaningNotDistillable);
                     ready = false;
                 }
                 else
+                {
+                    advisoryNotices.Add(PlanningNoticeCode.OptionalPrivateMeaningNotExported);
                     limitations.Add(NoticeText(PlanningNoticeCode.OptionalPrivateMeaningNotExported));
+                }
                 var verification = ImportedContextVerifier.GetEffectiveVerification(entry);
                 if (verification == CheckoutVerification.Unverified)
-                    limitations.Add(CaveatText(EvidenceCaveatCode.UnverifiedCheckout));
+                    AddCaveat(EvidenceCaveatCode.UnverifiedCheckout);
                 if (verification == CheckoutVerification.Verified)
                 {
                     limitations.AddRange(ImportedContextVerifier.GetReaderSafetyCaveats(entry));
+                    if (entry.VerifiedSymlinkResolution is not (SymlinkResolution.NotSymlink or SymlinkResolution.InTree))
+                        advisoryCaveats.Add(EvidenceCaveatCode.UnsafeSymlink);
+                    if (entry.VerifiedGenerationClassification is not null &&
+                        !entry.VerifiedGenerationClassification.StartsWith("not-detected", StringComparison.Ordinal))
+                        advisoryCaveats.Add(EvidenceCaveatCode.GeneratedFile);
                     var identity = ImportedContextVerifier.GetVerifiedRepositoryIdentity(entry);
                     if (identity is not null)
                     {
@@ -316,10 +350,16 @@ public static class IntakePlanner
                 }
                 if (verification == CheckoutVerification.Conflict)
                 {
-                    limitations.Add(CaveatText(EvidenceCaveatCode.CheckoutConflict));
+                    AddCaveat(EvidenceCaveatCode.CheckoutConflict);
                     ready = false;
                 }
             }
+        }
+
+        void AddCaveat(EvidenceCaveatCode code)
+        {
+            advisoryCaveats.Add(code);
+            limitations.Add(CaveatText(code));
         }
 
         string? question = null;
@@ -338,8 +378,21 @@ public static class IntakePlanner
             importedContextRequirement,
             importedContextAvailable,
             verifiedRepositoryIdentities,
-            privateAdvisoryMaterial,
-            ComputeBinding(request, evidence, importedContextRequirement, importedContextAvailable, normalizedLimitations, verifiedRepositoryIdentities, privateAdvisoryMaterial));
+            advisoryCaveats.Order().ToArray(),
+            advisoryMeanings.Order().ToArray(),
+            advisoryNotices.Order().ToArray(),
+            privateAdvisoryBindingDigests,
+            ComputeBinding(
+                request,
+                evidence,
+                importedContextRequirement,
+                importedContextAvailable,
+                normalizedLimitations,
+                verifiedRepositoryIdentities,
+                advisoryCaveats.Order().ToArray(),
+                advisoryMeanings.Order().ToArray(),
+                advisoryNotices.Order().ToArray(),
+                privateAdvisoryBindingDigests));
     }
 
     private static bool IsPinnedReadinessEvidence(EvidenceItem item) =>
@@ -416,7 +469,7 @@ public static class IntakePlanner
         _ => throw new PlanningException("Evidence caveat code is not recognized.")
     };
 
-    private static string MeaningText(ImportedMeaningCode code) => code switch
+    internal static string MeaningText(ImportedMeaningCode code) => code switch
     {
         ImportedMeaningCode.AdditionalRepositoryEvidence => "Private advisory intake identified additional repository evidence.",
         ImportedMeaningCode.RepositoryConflict => "Private advisory intake identified a repository conflict.",
@@ -425,7 +478,7 @@ public static class IntakePlanner
         _ => throw new PlanningException("Imported meaning code is not recognized.")
     };
 
-    private static string NoticeText(PlanningNoticeCode code) => code switch
+    internal static string NoticeText(PlanningNoticeCode code) => code switch
     {
         PlanningNoticeCode.PrivateAdvisoryConflictReported => "Private advisory intake reported a conflict; raw details remain local-only.",
         PlanningNoticeCode.PrivateAdvisoryLimitationReported => "Private advisory intake reported one or more limitations; raw details remain local-only.",
@@ -446,7 +499,10 @@ public static class IntakePlanner
                 assessment.ImportedContextAvailable,
                 assessment.Limitations,
                 assessment.VerifiedRepositoryIdentities,
-                assessment.PrivateAdvisoryMaterial),
+                assessment.AdvisoryCaveats,
+                assessment.AdvisoryMeanings,
+                assessment.AdvisoryNotices,
+                assessment.PrivateAdvisoryBindingDigests),
             StringComparison.Ordinal);
 
     private static string ComputeBinding(
@@ -456,7 +512,10 @@ public static class IntakePlanner
         bool importedContextAvailable,
         IReadOnlyList<string> limitations,
         IReadOnlyList<VerifiedRepositoryIdentity> verifiedRepositoryIdentities,
-        IReadOnlyList<string> privateAdvisoryMaterial)
+        IReadOnlyList<EvidenceCaveatCode> advisoryCaveats,
+        IReadOnlyList<ImportedMeaningCode> advisoryMeanings,
+        IReadOnlyList<PlanningNoticeCode> advisoryNotices,
+        IReadOnlyList<string> privateAdvisoryBindingDigests)
     {
         var material = new
         {
@@ -500,10 +559,10 @@ public static class IntakePlanner
                 .Select(item => new { item.Locator, item.Commit, item.Tree })
                 .ToArray(),
             limitations = limitations.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
-            privateAdvisoryDigests = privateAdvisoryMaterial
-                .Select(value => $"sha256:{Convert.ToHexStringLower(SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(value)))}")
-                .Order(StringComparer.Ordinal)
-                .ToArray()
+            advisoryCaveats = advisoryCaveats.Distinct().Order().ToArray(),
+            advisoryMeanings = advisoryMeanings.Distinct().Order().ToArray(),
+            advisoryNotices = advisoryNotices.Distinct().Order().ToArray(),
+            privateAdvisoryBindingDigests = privateAdvisoryBindingDigests.Order(StringComparer.Ordinal).ToArray()
         };
         return CanonicalJson.ComputeIdentity(JsonSerializer.SerializeToUtf8Bytes(material));
     }
