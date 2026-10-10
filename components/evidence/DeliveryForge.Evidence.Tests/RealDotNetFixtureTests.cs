@@ -47,8 +47,13 @@ public sealed class RealDotNetFixtureTests
         var protectedBase = redHead.StandardOutput.Trim();
         var redResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "red-gate",
             ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={redTrx}"]);
+        ArchiveFixtureEvidence(evidence.Path, redResult);
         Assert.NotEqual(0, redResult.Execution.ExitCode);
-        Assert.Equal(GateOutcome.Fail, redResult.Outcome);
+        Assert.True(redResult.Outcome == GateOutcome.Fail,
+            $"RED gate: {redResult.Outcome}; reason: {redResult.Reason}; " +
+            $"exit: {redResult.Execution.ExitCode}; timeout: {redResult.Execution.TimedOut}; " +
+            $"cancelled: {redResult.Execution.Cancelled}; quiescent: {redResult.Execution.OwnedProcessQuiescent}\n" +
+            redResult.Execution.StandardOutput + "\n" + redResult.Execution.StandardError);
         Assert.True(File.Exists(redResult.ReceiptPath));
         Assert.True(
             Directory.EnumerateFiles(temp.Path, "*.trx", SearchOption.AllDirectories).Any(),
@@ -67,6 +72,7 @@ public sealed class RealDotNetFixtureTests
         Assert.False(File.Exists(assembly));
         var greenResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "green-gate",
             ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={greenTrx}"]);
+        ArchiveFixtureEvidence(evidence.Path, greenResult);
         Assert.Equal(0, greenResult.Execution.ExitCode);
         Assert.True(File.Exists(assembly));
         Assert.Equal((1, 1, 1, 0), ReadCounts(greenTrx));
@@ -80,6 +86,7 @@ public sealed class RealDotNetFixtureTests
         var warmResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "warm-gate",
             ["test", project, "--configuration", "Release", "--no-restore", "--no-build",
                 "--logger", $"trx;LogFileName={warmTrx}"]);
+        ArchiveFixtureEvidence(evidence.Path, warmResult);
         Assert.Equal(0, warmResult.Execution.ExitCode);
         Assert.Equal((1, 1, 1, 0), ReadCounts(warmTrx));
         Assert.Equal(GateOutcome.Incomplete, warmResult.Outcome);
@@ -104,6 +111,25 @@ public sealed class RealDotNetFixtureTests
                 new CommandInvocation(capability.ExecutablePath!, arguments, repository),
                 "fixture", TimeSpan.FromSeconds(90), System.IO.Path.Combine(outputRoot, outputName)),
             TestContext.Current.CancellationToken);
+    }
+
+    private static void ArchiveFixtureEvidence(string evidenceRoot, GateRunResult result)
+    {
+        var destination = Environment.GetEnvironmentVariable("DELIVERY_FORGE_TEST_ARTIFACTS");
+        if (string.IsNullOrWhiteSpace(destination)) return;
+        if (!Path.IsPathFullyQualified(destination))
+            throw new InvalidOperationException("Fixture artifact destination must be explicit and absolute.");
+        var ownedLeaf = Path.Combine(destination, "real-dotnet", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(ownedLeaf);
+        File.WriteAllText(Path.Combine(ownedLeaf, "observed-result.json"),
+            System.Text.Json.JsonSerializer.Serialize(new { result.Outcome, result.Reason, result.Execution }));
+        var files = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
+        foreach (var source in Directory.EnumerateFiles(evidenceRoot, "*", files))
+        {
+            var target = Path.Combine(ownedLeaf, Path.GetRelativePath(evidenceRoot, source));
+            Directory.CreateDirectory(Path.GetDirectoryName(target)!);
+            File.Copy(source, target, overwrite: false);
+        }
     }
 
     private static async Task<CommandResult> GitAsync(
