@@ -19,7 +19,8 @@ public static class ReviewNormalizer
                                        capabilityAuthority.Matches(request.Capability, request.Scope, result.CompletedAt);
         var executionAuthorityValid = execution is not null &&
                                       capabilityAuthority is not null &&
-                                      string.Equals(execution.RootIdentity, capabilityAuthority.RootIdentity, StringComparison.Ordinal) &&
+                                      ReferenceEquals(execution.Capability, capabilityAuthority) &&
+                                      SameRequest(execution.Registration.Request, request) &&
                                       execution.Realm == capabilityAuthority.Realm &&
                                       execution.Accepted && execution.Completed &&
                                       string.Equals(execution.RawArtifactHash, result.ArtifactHash, StringComparison.Ordinal) &&
@@ -104,7 +105,14 @@ public static class ReviewNormalizer
             execution?.RequestIdentity ?? string.Empty,
             execution?.ExecutionIdentity ?? string.Empty,
             execution?.RawArtifactHash ?? string.Empty,
-            capabilityAuthority?.Realm ?? DeliveryForge.Contracts.State.ReviewAuthorityRealm.Test);
+            capabilityAuthority?.Realm ?? DeliveryForge.Contracts.State.ReviewAuthorityRealm.Test,
+            executionAuthorityValid
+                ? new ReviewAuthorityProvenance(
+                    execution!.Registration.Issuer,
+                    execution.Registration,
+                    capabilityAuthority!,
+                    execution)
+                : null);
     }
 
     internal static bool SameIdentity(PatchIdentity left, PatchIdentity right) =>
@@ -121,7 +129,7 @@ public static class ReviewNormalizer
         left.Command.SequenceEqual(right.Command, StringComparer.Ordinal);
 
 
-    private static PatchIdentity Freeze(PatchIdentity identity) => new(
+    internal static PatchIdentity Freeze(PatchIdentity identity) => new(
         identity.BaseCommit,
         identity.HeadCommit,
         identity.HeadTree,
@@ -130,6 +138,26 @@ public static class ReviewNormalizer
         identity.ArtifactIdentities.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
         identity.GitVersion,
         identity.Command.ToArray());
+
+    internal static ReviewRequest FreezeRequest(ReviewRequest request) => new(
+        Freeze(request.Identity),
+        request.AuthorFamily,
+        request.Capability with { Scopes = request.Capability.Scopes?.ToArray() ?? [] },
+        request.Scope,
+        request.PolicyIdentity);
+
+    internal static bool SameRequest(ReviewRequest left, ReviewRequest right) =>
+        SameIdentity(left.Identity, right.Identity) &&
+        string.Equals(left.AuthorFamily, right.AuthorFamily, StringComparison.OrdinalIgnoreCase) &&
+        string.Equals(left.Scope, right.Scope, StringComparison.Ordinal) &&
+        string.Equals(left.PolicyIdentity, right.PolicyIdentity, StringComparison.Ordinal) &&
+        string.Equals(left.Capability.AdapterId, right.Capability.AdapterId, StringComparison.Ordinal) &&
+        string.Equals(left.Capability.AdapterVersion, right.Capability.AdapterVersion, StringComparison.Ordinal) &&
+        string.Equals(left.Capability.Family, right.Capability.Family, StringComparison.OrdinalIgnoreCase) &&
+        left.Capability.Supported == right.Capability.Supported &&
+        left.Capability.Fixture == right.Capability.Fixture &&
+        left.Capability.Advisory == right.Capability.Advisory &&
+        (left.Capability.Scopes ?? []).SequenceEqual(right.Capability.Scopes ?? [], StringComparer.Ordinal);
     private static bool VerdictMatches(string rawVerdict, string? normalizedVerdict)
     {
         var mapped = rawVerdict.Trim().ToLowerInvariant() switch

@@ -73,8 +73,8 @@ public sealed class IssuedReviewerCapability
 public sealed class AcceptedReviewExecution
 {
     internal AcceptedReviewExecution(
-        string rootIdentity,
-        string requestIdentity,
+        RegisteredReviewRequest registration,
+        IssuedReviewerCapability capability,
         string executionIdentity,
         bool accepted,
         bool completed,
@@ -83,8 +83,8 @@ public sealed class AcceptedReviewExecution
         DateTimeOffset completedAt,
         ReviewAuthorityRealm realm)
     {
-        RootIdentity = rootIdentity;
-        RequestIdentity = requestIdentity;
+        Registration = registration;
+        Capability = capability;
         ExecutionIdentity = executionIdentity;
         Accepted = accepted;
         Completed = completed;
@@ -94,8 +94,10 @@ public sealed class AcceptedReviewExecution
         Realm = realm;
     }
 
-    internal string RootIdentity { get; }
-    public string RequestIdentity { get; }
+    internal RegisteredReviewRequest Registration { get; }
+    internal IssuedReviewerCapability Capability { get; }
+    internal string RootIdentity => Registration.RootIdentity;
+    public string RequestIdentity => Registration.RequestIdentity;
     public string ExecutionIdentity { get; }
     public bool Accepted { get; }
     public bool Completed { get; }
@@ -104,6 +106,50 @@ public sealed class AcceptedReviewExecution
     public DateTimeOffset CompletedAt { get; }
     public ReviewAuthorityRealm Realm { get; }
 }
+
+public sealed class RegisteredReviewRequest
+{
+    internal RegisteredReviewRequest(
+        object issuer,
+        string rootIdentity,
+        string requestIdentity,
+        ReviewRequest request,
+        string runIdentity,
+        string evidencePolicyIdentity,
+        string reviewPolicyContentIdentity,
+        string protectedSourceIdentity,
+        string protectedObjectViewIdentity,
+        ReviewEvidenceRole role)
+    {
+        Issuer = issuer;
+        RootIdentity = rootIdentity;
+        RequestIdentity = requestIdentity;
+        Request = ReviewNormalizer.FreezeRequest(request);
+        RunIdentity = runIdentity;
+        EvidencePolicyIdentity = evidencePolicyIdentity;
+        ReviewPolicyContentIdentity = reviewPolicyContentIdentity;
+        ProtectedSourceIdentity = protectedSourceIdentity;
+        ProtectedObjectViewIdentity = protectedObjectViewIdentity;
+        Role = role;
+    }
+
+    internal object Issuer { get; }
+    internal string RootIdentity { get; }
+    public string RequestIdentity { get; }
+    public ReviewRequest Request { get; }
+    internal string RunIdentity { get; }
+    internal string EvidencePolicyIdentity { get; }
+    internal string ReviewPolicyContentIdentity { get; }
+    internal string ProtectedSourceIdentity { get; }
+    internal string ProtectedObjectViewIdentity { get; }
+    internal ReviewEvidenceRole Role { get; }
+}
+
+internal sealed record ReviewAuthorityProvenance(
+    object Issuer,
+    RegisteredReviewRequest Registration,
+    IssuedReviewerCapability Capability,
+    AcceptedReviewExecution Execution);
 
 public sealed class IssuedReviewReuseContext
 {
@@ -206,7 +252,8 @@ public sealed class NormalizedReview
         string executionRequestIdentity = "",
         string executionIdentity = "",
         string rawArtifactHash = "",
-        ReviewAuthorityRealm authorityRealm = ReviewAuthorityRealm.Test)
+        ReviewAuthorityRealm authorityRealm = ReviewAuthorityRealm.Test,
+        ReviewAuthorityProvenance? provenance = null)
     {
         Outcome = outcome;
         Reason = reason;
@@ -234,6 +281,7 @@ public sealed class NormalizedReview
         ExecutionIdentity = executionIdentity;
         RawArtifactHash = rawArtifactHash;
         AuthorityRealm = authorityRealm;
+        Provenance = provenance;
     }
 
     public ReviewOutcome Outcome { get; }
@@ -262,4 +310,5 @@ public sealed class NormalizedReview
     public string ExecutionIdentity { get; }
     public string RawArtifactHash { get; }
     public ReviewAuthorityRealm AuthorityRealm { get; }
+    internal ReviewAuthorityProvenance? Provenance { get; }
 }

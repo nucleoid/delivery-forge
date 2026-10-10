@@ -18,7 +18,46 @@ public sealed record ReviewAcceptanceRequirement(
     ReviewAuthorityRealm RequiredRealm,
     string BaseCommit,
     string HeadCommit,
-    string TreeId);
+    string TreeId,
+    string EvidencePolicyIdentity,
+    ReviewConsumerContext ConsumerContext,
+    string? OtherReceiptIdentity = null);
+
+/// <summary>
+/// Opaque, root-issued context for a review-authorizing workflow consumer.  Public
+/// receipt data cannot construct one.
+/// </summary>
+public sealed class ReviewConsumerContext
+{
+    internal ReviewConsumerContext(
+        object issuer,
+        string runIdentity,
+        string requestIdentity,
+        string planIdentity,
+        string evidencePolicyIdentity,
+        string reviewPolicyIdentity,
+        string protectedSourceIdentity,
+        string protectedObjectViewIdentity)
+    {
+        Issuer = issuer;
+        RunIdentity = runIdentity;
+        RequestIdentity = requestIdentity;
+        PlanIdentity = planIdentity;
+        EvidencePolicyIdentity = evidencePolicyIdentity;
+        ReviewPolicyIdentity = reviewPolicyIdentity;
+        ProtectedSourceIdentity = protectedSourceIdentity;
+        ProtectedObjectViewIdentity = protectedObjectViewIdentity;
+    }
+
+    internal object Issuer { get; }
+    internal string RunIdentity { get; }
+    internal string RequestIdentity { get; }
+    internal string PlanIdentity { get; }
+    internal string EvidencePolicyIdentity { get; }
+    internal string ReviewPolicyIdentity { get; }
+    internal string ProtectedSourceIdentity { get; }
+    internal string ProtectedObjectViewIdentity { get; }
+}
 
 public sealed class ReviewAcceptanceAuthority
 {

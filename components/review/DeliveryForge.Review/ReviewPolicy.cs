@@ -166,21 +166,19 @@ public sealed partial class ReviewPolicy
 public sealed class ProtectedReviewSourceContext
 {
     internal ProtectedReviewSourceContext(
-        string sourceRoot,
+        ControlledGitEvidenceContext objectView,
         string protectedBaseCommit,
-        string sourceAuthorityIdentity,
-        string trustedGitExecutable)
+        string sourceAuthorityIdentity)
     {
-        SourceRoot = Path.GetFullPath(sourceRoot);
+        ObjectView = objectView;
         ProtectedBaseCommit = protectedBaseCommit;
         SourceAuthorityIdentity = sourceAuthorityIdentity;
-        TrustedGitExecutable = Path.GetFullPath(trustedGitExecutable);
     }
 
-    public string SourceRoot { get; }
+    internal ControlledGitEvidenceContext ObjectView { get; }
     public string ProtectedBaseCommit { get; }
     public string SourceAuthorityIdentity { get; }
-    public string TrustedGitExecutable { get; }
+    public string ProtectedObjectViewIdentity => ObjectView.ProtectedObjectViewIdentity;
 }
 
 public sealed class ProtectedReviewPolicyResolver(ProtectedReviewSourceContext sourceContext)
@@ -196,14 +194,19 @@ public sealed class ProtectedReviewPolicyResolver(ProtectedReviewSourceContext s
             repositoryRelativePath.Split(['/', '\\']).Any(segment => segment is "" or "." or ".."))
             throw new ReviewPolicyException("A safe repository-relative policy path is required.");
 
+        ValidateObjectView();
         var exactBase = await GitTextAsync(["rev-parse", "--verify", $"{_source.ProtectedBaseCommit}^{{commit}}"], cancellationToken);
         if (!string.Equals(exactBase.Trim(), _source.ProtectedBaseCommit, StringComparison.Ordinal))
             throw new ReviewPolicyException("Git did not resolve the exact protected review-policy base.");
 
-        var head = (await GitTextAsync(["rev-parse", "HEAD"], cancellationToken)).Trim();
-        await GitTextAsync(["merge-base", "--is-ancestor", _source.ProtectedBaseCommit, head], cancellationToken);
-        var bytes = await GitBytesAsync(
-            ["show", $"{_source.ProtectedBaseCommit}:{repositoryRelativePath.Replace('\\', '/')}"], cancellationToken);
+        var objectId = (await GitTextAsync(
+            ["rev-parse", $"{_source.ProtectedBaseCommit}:{repositoryRelativePath.Replace('\\', '/')}"], cancellationToken)).Trim();
+        var objectType = (await GitTextAsync(["cat-file", "-t", objectId], cancellationToken)).Trim();
+        var objectSizeText = (await GitTextAsync(["cat-file", "-s", objectId], cancellationToken)).Trim();
+        if (objectType != "blob" || !long.TryParse(objectSizeText, out var objectSize) ||
+            objectSize < 0 || objectSize > _source.ObjectView.MaximumEvidenceBytes)
+            throw new ReviewPolicyException("Protected review policy object is not a bounded blob.");
+        var bytes = await GitBytesAsync(["cat-file", "blob", objectId], cancellationToken);
         ReviewPolicyFile candidate;
         try
         {
@@ -234,11 +237,40 @@ public sealed class ProtectedReviewPolicyResolver(ProtectedReviewSourceContext s
 
     private async Task<byte[]> GitBytesAsync(IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
+        var prefix = new[]
+        {
+            "--no-replace-objects",
+            $"--git-dir={_source.ObjectView.ControlledGitDirectory}",
+            $"--work-tree={_source.ObjectView.SourceRoot}",
+            "-c", "core.fsmonitor=false",
+            "-c", $"core.hooksPath={(OperatingSystem.IsWindows() ? "NUL" : "/dev/null")}"
+        };
         var result = await GitProcess.RunAsync(
-            _source.SourceRoot, args, cancellationToken, _source.TrustedGitExecutable);
+            _source.ObjectView.SourceRoot,
+            prefix.Concat(args).ToArray(),
+            cancellationToken,
+            _source.ObjectView.TrustedGitExecutable,
+            _source.ObjectView.MaximumEvidenceBytes);
         if (result.ExitCode != 0)
             throw new ReviewPolicyException($"Protected review policy Git read failed: git {string.Join(" ", args)}.");
         return result.StandardOutput;
+    }
+
+    private void ValidateObjectView()
+    {
+        var git = _source.ObjectView.ControlledGitDirectory;
+        var objects = Path.Combine(git, "objects");
+        if (!Directory.Exists(objects) ||
+            File.Exists(Path.Combine(objects, "info", "alternates")) ||
+            File.Exists(Path.Combine(git, "info", "grafts")) ||
+            File.Exists(Path.Combine(git, "shallow")) ||
+            Directory.Exists(Path.Combine(git, "refs", "replace")))
+            throw new ReviewPolicyException("Protected object view contains replacement, graft, alternate, or incomplete authority.");
+        var config = Path.Combine(git, "config");
+        var text = File.Exists(config) ? File.ReadAllText(config) : string.Empty;
+        if (new[] { "include", "promisor", "partialclone", "alternates", "worktree" }
+            .Any(value => text.Contains(value, StringComparison.OrdinalIgnoreCase)))
+            throw new ReviewPolicyException("Protected object view contains external configuration authority.");
     }
 
     private sealed class ReviewPolicyFile

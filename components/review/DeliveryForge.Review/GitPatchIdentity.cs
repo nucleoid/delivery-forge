@@ -18,6 +18,9 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         string expectedGitVersion,
         long maximumEvidenceBytes,
         string sourceAuthorityIdentity,
+        string frozenHeadCommit,
+        string protectedObjectViewIdentity,
+        object quiescenceAuthority,
         Action? dispose = null,
         Action? beforeFinalRecheck = null)
     {
@@ -28,6 +31,9 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         ExpectedGitVersion = expectedGitVersion;
         MaximumEvidenceBytes = maximumEvidenceBytes;
         SourceAuthorityIdentity = sourceAuthorityIdentity;
+        FrozenHeadCommit = frozenHeadCommit;
+        ProtectedObjectViewIdentity = protectedObjectViewIdentity;
+        QuiescenceAuthority = quiescenceAuthority;
         _dispose = dispose;
         BeforeFinalRecheck = beforeFinalRecheck;
     }
@@ -39,6 +45,9 @@ public sealed class ControlledGitEvidenceContext : IDisposable
     public string ExpectedGitVersion { get; }
     public long MaximumEvidenceBytes { get; }
     public string SourceAuthorityIdentity { get; }
+    public string FrozenHeadCommit { get; }
+    public string ProtectedObjectViewIdentity { get; }
+    internal object QuiescenceAuthority { get; }
     internal Action? BeforeFinalRecheck { get; }
 
     public void Dispose() => _dispose?.Invoke();
@@ -89,6 +98,9 @@ public static partial class GitPatchIdentity
             !File.Exists(context.TrustedGitExecutable) ||
             context.MaximumEvidenceBytes <= 0 ||
             string.IsNullOrWhiteSpace(context.SourceAuthorityIdentity) ||
+            string.IsNullOrWhiteSpace(context.ProtectedObjectViewIdentity) ||
+            string.IsNullOrWhiteSpace(context.FrozenHeadCommit) ||
+            context.QuiescenceAuthority is null ||
             !GitObjectPattern().IsMatch(baseCommit) ||
             !GitObjectPattern().IsMatch(headCommit) ||
             !IdentityPattern().IsMatch(planIdentity) ||
@@ -109,6 +121,8 @@ public static partial class GitPatchIdentity
         if (!string.Equals(exactBase, baseCommit, StringComparison.Ordinal) ||
             !string.Equals(exactHead, headCommit, StringComparison.Ordinal))
             throw new ReviewPreflightException("Base or head did not resolve to the exact supplied commit in controlled objects.");
+        if (!string.Equals(headCommit, context.FrozenHeadCommit, StringComparison.Ordinal))
+            throw new ReviewPreflightException("Requested head is not the parent-owned immutable source snapshot.");
 
         await ControlledGit(context, ["merge-base", "--is-ancestor", baseCommit, headCommit], cancellationToken);
         var baseTree = Text(await ControlledGit(context, ["rev-parse", $"{baseCommit}^{{tree}}"], cancellationToken));
@@ -117,7 +131,8 @@ public static partial class GitPatchIdentity
 
         var args = DiffArguments.Concat([baseCommit, headCommit, "--"]).ToArray();
         var patch = await ControlledGit(context, args, cancellationToken);
-        await VerifyPatchReconstructsBaseAsync(context, patch.StandardOutput, headCommit, baseTree, cancellationToken);
+        await VerifyPatchReconstructsBothDirectionsAsync(
+            context, patch.StandardOutput, baseCommit, headCommit, baseTree, headTree, cancellationToken);
         var patchHash = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(patch.StandardOutput))}";
 
         context.BeforeFinalRecheck?.Invoke();
@@ -168,14 +183,6 @@ public static partial class GitPatchIdentity
         string headTree,
         CancellationToken cancellationToken)
     {
-        var actualHead = Text(await WorkerGit(context, ["rev-parse", "--verify", "HEAD^{commit}"], cancellationToken));
-        if (!string.Equals(actualHead, headCommit, StringComparison.Ordinal))
-            throw new ReviewPreflightException("Assigned source HEAD changed or does not match the requested review head.");
-
-        var indexTree = Text(await WorkerGit(context, ["write-tree"], cancellationToken));
-        if (!string.Equals(indexTree, headTree, StringComparison.Ordinal))
-            throw new ReviewPreflightException("Assigned source index contains staged changes.");
-
         var listing = await ControlledGit(
             context,
             ["ls-tree", "-r", "-z", "--full-tree", headCommit],
@@ -270,34 +277,54 @@ public static partial class GitPatchIdentity
         hash.AppendData(SHA256.HashData(bytes));
     }
 
-    private static async Task VerifyPatchReconstructsBaseAsync(
+    private static async Task VerifyPatchReconstructsBothDirectionsAsync(
         ControlledGitEvidenceContext context,
         byte[] patch,
+        string baseCommit,
         string headCommit,
         string expectedBaseTree,
+        string expectedHeadTree,
         CancellationToken cancellationToken)
     {
-        var indexPath = Path.Combine(Path.GetTempPath(), $"delivery-forge-review-index-{Guid.NewGuid():N}");
-        var environment = new Dictionary<string, string> { ["GIT_INDEX_FILE"] = indexPath };
+        var reverseIndex = Path.Combine(Path.GetTempPath(), $"delivery-forge-review-index-{Guid.NewGuid():N}");
+        var forwardIndex = Path.Combine(Path.GetTempPath(), $"delivery-forge-review-index-{Guid.NewGuid():N}");
         try
         {
-            await ControlledGit(context, ["read-tree", headCommit], cancellationToken, environment: environment);
+            var reverseEnvironment = new Dictionary<string, string> { ["GIT_INDEX_FILE"] = reverseIndex };
+            await ControlledGit(context, ["read-tree", headCommit], cancellationToken, environment: reverseEnvironment);
             if (patch.Length > 0)
                 await ControlledGit(
                     context,
                     ["apply", "--cached", "--reverse", "--binary", "--whitespace=nowarn", "-"],
                     cancellationToken,
                     patch,
-                    environment);
+                    reverseEnvironment);
             var reconstructed = Text(await ControlledGit(
-                context, ["write-tree"], cancellationToken, environment: environment));
+                context, ["write-tree"], cancellationToken, environment: reverseEnvironment));
             if (!string.Equals(reconstructed, expectedBaseTree, StringComparison.Ordinal))
                 throw new ReviewPreflightException("Binary patch does not reconstruct the exact controlled base tree.");
+
+            var forwardEnvironment = new Dictionary<string, string> { ["GIT_INDEX_FILE"] = forwardIndex };
+            await ControlledGit(context, ["read-tree", baseCommit], cancellationToken, environment: forwardEnvironment);
+            if (patch.Length > 0)
+                await ControlledGit(
+                    context,
+                    ["apply", "--cached", "--binary", "--whitespace=nowarn", "-"],
+                    cancellationToken,
+                    patch,
+                    forwardEnvironment);
+            var forward = Text(await ControlledGit(
+                context, ["write-tree"], cancellationToken, environment: forwardEnvironment));
+            if (!string.Equals(forward, expectedHeadTree, StringComparison.Ordinal))
+                throw new ReviewPreflightException("Binary patch does not reconstruct the exact controlled head tree.");
         }
         finally
         {
-            if (File.Exists(indexPath)) File.Delete(indexPath);
-            if (File.Exists(indexPath + ".lock")) File.Delete(indexPath + ".lock");
+            foreach (var indexPath in new[] { reverseIndex, forwardIndex })
+            {
+                if (File.Exists(indexPath)) File.Delete(indexPath);
+                if (File.Exists(indexPath + ".lock")) File.Delete(indexPath + ".lock");
+            }
         }
     }
 
@@ -314,12 +341,6 @@ public static partial class GitPatchIdentity
             cancellationToken,
             input,
             environment);
-
-    private static Task<GitProcessResult> WorkerGit(
-        ControlledGitEvidenceContext context,
-        IReadOnlyList<string> args,
-        CancellationToken cancellationToken) =>
-        Git(context, context.WorkerGitDirectory, args, cancellationToken);
 
     private static async Task<GitProcessResult> Git(
         ControlledGitEvidenceContext context,
@@ -424,18 +445,38 @@ internal static class GitProcess
             }
             catch (Exception cause) when (cause is OperationCanceledException or IOException)
             {
+                Exception? killFailure = null;
                 if (!process.HasExited)
                 {
                     try { process.Kill(entireProcessTree: true); }
-                    catch (Exception killError) when (killError is InvalidOperationException or Win32Exception or NotSupportedException) { }
+                    catch (Exception killError) when (killError is InvalidOperationException or Win32Exception or NotSupportedException)
+                    {
+                        killFailure = killError;
+                    }
                 }
-                try { await process.WaitForExitAsync(CancellationToken.None); } catch { }
+                using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+                var exited = false;
+                try
+                {
+                    await process.WaitForExitAsync(cleanup.Token);
+                    exited = true;
+                }
+                catch (OperationCanceledException) { }
+                catch (InvalidOperationException) { exited = process.HasExited; }
+                try
+                {
+                    await Task.WhenAll(outputTask, errorTask, inputTask).WaitAsync(cleanup.Token);
+                }
+                catch (Exception) when (!cleanup.IsCancellationRequested) { }
+                catch (OperationCanceledException) { }
                 var reason = cancellationToken.IsCancellationRequested
                     ? "Git evidence capture was cancelled."
                     : cause is IOException
                         ? "Git evidence exceeded the frozen output bound."
                         : $"Git evidence exceeded the {Timeout.TotalSeconds:0}-second timeout.";
-                throw new ReviewPreflightException(reason, cause);
+                var residual = !exited || killFailure is not null;
+                if (residual) reason += " Residual process termination is uncertain.";
+                throw new ReviewPreflightException(reason, cause, residual);
             }
             return new GitProcessResult(process.ExitCode, output.ToArray(), error.ToArray());
         }
@@ -467,4 +508,13 @@ internal static class GitProcess
     }
 }
 
-public sealed class ReviewPreflightException(string message, Exception? inner = null) : Exception(message, inner);
+public sealed class ReviewPreflightException : Exception
+{
+    public ReviewPreflightException(
+        string message,
+        Exception? inner = null,
+        bool residualProcessUncertain = false) : base(message, inner) =>
+        ResidualProcessUncertain = residualProcessUncertain;
+
+    public bool ResidualProcessUncertain { get; }
+}

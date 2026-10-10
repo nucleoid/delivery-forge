@@ -16,7 +16,8 @@ public sealed record ReviewAuthorityRootContext(
     ReviewPolicyAuthorityKind ReviewPolicyAuthorityKind,
     string SourceAuthorityIdentity,
     string SourceRoot,
-    string ProtectedBaseCommit);
+    string ProtectedBaseCommit,
+    string ProtectedObjectViewIdentity = "");
 
 public sealed record ProductionReviewAuthorityConfiguration(
     string RootIdentity,
@@ -32,7 +33,8 @@ public sealed record ReviewAcceptanceContext(
     ReviewPolicyAuthorityKind ReviewPolicyAuthorityKind,
     string SourceAuthorityIdentity,
     string SourceRoot,
-    string ProtectedBaseCommit);
+    string ProtectedBaseCommit,
+    string ProtectedObjectViewIdentity = "");
 
 public sealed class ReviewAuthorityHost
 {
@@ -41,7 +43,9 @@ public sealed class ReviewAuthorityHost
     private readonly DateTimeOffset? _testNow;
     private readonly ProductionReviewAuthorityConfiguration? _production;
     private readonly ReviewAuthorityRootContext? _rootContext;
+    private readonly object _issuer = new();
     private readonly ConcurrentDictionary<string, byte> _revokedCapabilities = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, RegisteredReviewRequest> _requests = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<(string ReceiptIdentity, ReviewEvidenceRole Role), AcceptanceEntry> _acceptances = new();
 
     private ReviewAuthorityHost(
@@ -76,6 +80,7 @@ public sealed class ReviewAuthorityHost
         if (string.IsNullOrWhiteSpace(configuration.RootIdentity) ||
             configuration.Context is null ||
             string.IsNullOrWhiteSpace(configuration.Context.SourceAuthorityIdentity) ||
+            string.IsNullOrWhiteSpace(configuration.Context.ProtectedObjectViewIdentity) ||
             !Path.IsPathFullyQualified(configuration.Context.SourceRoot) ||
             string.IsNullOrWhiteSpace(configuration.Context.ProtectedBaseCommit))
             throw new ArgumentException("Production review authority requires frozen root and protected-source configuration.", nameof(configuration));
@@ -103,9 +108,8 @@ public sealed class ReviewAuthorityHost
             (!SamePath(_production.Context.SourceRoot, sourceRoot) ||
              !string.Equals(_production.Context.SourceAuthorityIdentity, sourceAuthorityIdentity, StringComparison.Ordinal)))
             throw new InvalidOperationException("Controlled Git source does not match production root configuration.");
-        return new ControlledGitEvidenceContext(
-            sourceRoot, workerGitDirectory, controlledGitDirectory, trustedGitExecutable,
-            expectedGitVersion, maximumEvidenceBytes, sourceAuthorityIdentity);
+        throw new ReviewPreflightException(
+            "Production immutable object snapshot and owned quiescence preparation is not configured; review evidence is INCOMPLETE.");
     }
 
     public ControlledGitEvidenceContext PrepareIsolatedTestGitEvidence(
@@ -117,37 +121,54 @@ public sealed class ReviewAuthorityHost
     {
         if (_realm != ReviewAuthorityRealm.Test)
             throw new InvalidOperationException("Only an isolated test authority may prepare fixture Git metadata.");
+        var workerObjects = Path.Combine(workerGitDirectory, "objects");
+        var workerConfig = Path.Combine(workerGitDirectory, "config");
+        var workerConfigText = File.Exists(workerConfig) ? File.ReadAllText(workerConfig) : string.Empty;
+        if (!Directory.Exists(workerObjects) ||
+            new DirectoryInfo(workerObjects).LinkTarget is not null ||
+            File.Exists(Path.Combine(workerObjects, "info", "alternates")) ||
+            File.Exists(Path.Combine(workerGitDirectory, "info", "grafts")) ||
+            Directory.Exists(Path.Combine(workerGitDirectory, "refs", "replace")) ||
+            new[] { "include", "promisor", "partialclone", "alternates", "worktree" }
+                .Any(value => workerConfigText.Contains(value, StringComparison.OrdinalIgnoreCase)))
+            throw new ReviewPreflightException(
+                "Fixture Git preparation rejected external, replace, graft, promisor, include, or shared-worktree authority.");
         var controlled = Path.Combine(Path.GetTempPath(), "delivery-forge-controlled-git", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(Path.Combine(controlled, "objects"));
         Directory.CreateDirectory(Path.Combine(controlled, "refs"));
         File.WriteAllText(Path.Combine(controlled, "HEAD"), "ref: refs/heads/controlled\n");
         File.WriteAllText(Path.Combine(controlled, "config"), "[core]\n\trepositoryformatversion = 0\n\tbare = true\n\tfilemode = true\n");
-        CopyDirectory(Path.Combine(workerGitDirectory, "objects"), Path.Combine(controlled, "objects"));
+        CopyDirectory(workerObjects, Path.Combine(controlled, "objects"));
         var version = ReadGitVersion(trustedGitExecutable, sourceRoot);
+        var frozenHead = ReadGitOutput(
+            trustedGitExecutable, sourceRoot,
+            ["--no-replace-objects", $"--git-dir={workerGitDirectory}", "rev-parse", "--verify", "HEAD^{commit}"]);
+        var objectViewIdentity = $"test-object-view:{Guid.NewGuid():N}";
         return new ControlledGitEvidenceContext(
             sourceRoot, workerGitDirectory, controlled, trustedGitExecutable, version,
-            maximumEvidenceBytes, _rootIdentity,
+            maximumEvidenceBytes, _rootIdentity, frozenHead, objectViewIdentity, _issuer,
             () => { if (Directory.Exists(controlled)) Directory.Delete(controlled, recursive: true); },
             beforeFinalRecheck);
     }
 
     public ProtectedReviewSourceContext FreezeProtectedSource(
-        string sourceRoot,
+        ControlledGitEvidenceContext objectView,
         string protectedBaseCommit,
-        string sourceAuthorityIdentity,
-        string trustedGitExecutable)
+        string sourceAuthorityIdentity)
     {
-        if (!Path.IsPathFullyQualified(sourceRoot) || !Directory.Exists(sourceRoot) ||
-            string.IsNullOrWhiteSpace(protectedBaseCommit) || string.IsNullOrWhiteSpace(sourceAuthorityIdentity) ||
-            !Path.IsPathFullyQualified(trustedGitExecutable) || !File.Exists(trustedGitExecutable))
+        ArgumentNullException.ThrowIfNull(objectView);
+        if (string.IsNullOrWhiteSpace(protectedBaseCommit) || string.IsNullOrWhiteSpace(sourceAuthorityIdentity) ||
+            !ReferenceEquals(objectView.QuiescenceAuthority, _issuer) ||
+            !string.Equals(objectView.SourceAuthorityIdentity, _rootIdentity, StringComparison.Ordinal))
             throw new ArgumentException("Protected review source context requires root-issued absolute source and Git identities.");
         if (_production is not null &&
-            (!SamePath(_production.Context.SourceRoot, sourceRoot) ||
+            (!SamePath(_production.Context.SourceRoot, objectView.SourceRoot) ||
              !string.Equals(_production.Context.ProtectedBaseCommit, protectedBaseCommit, StringComparison.Ordinal) ||
-             !string.Equals(_production.Context.SourceAuthorityIdentity, sourceAuthorityIdentity, StringComparison.Ordinal)))
+             !string.Equals(_production.Context.SourceAuthorityIdentity, sourceAuthorityIdentity, StringComparison.Ordinal) ||
+             !string.Equals(_production.Context.ProtectedObjectViewIdentity, objectView.ProtectedObjectViewIdentity, StringComparison.Ordinal)))
             throw new InvalidOperationException("Protected review source does not match production root configuration.");
         return new ProtectedReviewSourceContext(
-            sourceRoot, protectedBaseCommit, sourceAuthorityIdentity, trustedGitExecutable);
+            objectView, protectedBaseCommit, sourceAuthorityIdentity);
     }
 
     public IssuedReviewerCapability IssueCapability(
@@ -175,8 +196,32 @@ public sealed class ReviewAuthorityHost
     public void RevokeCapability(string proofIdentity) =>
         _revokedCapabilities.TryAdd(proofIdentity, 0);
 
-    public AcceptedReviewExecution RecordExecution(
+    public RegisteredReviewRequest RegisterRequest(
         string requestIdentity,
+        ReviewRequest request,
+        ReviewAcceptanceContext context)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(context);
+        if (string.IsNullOrWhiteSpace(requestIdentity) || _rootContext is null ||
+            !MatchesRootContext(_rootContext, context) ||
+            !string.Equals(request.Identity.PlanIdentity, context.PlanIdentity, StringComparison.Ordinal))
+            throw new InvalidOperationException("Review request does not match the root-frozen authority context.");
+        var role = string.Equals(request.Capability.Family, "github-hosted", StringComparison.OrdinalIgnoreCase)
+            ? ReviewEvidenceRole.Hosted
+            : ReviewEvidenceRole.Independent;
+        var registration = new RegisteredReviewRequest(
+            _issuer, _rootIdentity, requestIdentity, request, context.RunIdentity,
+            context.EvidencePolicyIdentity, context.ReviewPolicyContentIdentity,
+            context.SourceAuthorityIdentity, context.ProtectedObjectViewIdentity, role);
+        if (!_requests.TryAdd(requestIdentity, registration))
+            throw new InvalidOperationException("Review request identity was already registered and cannot be rebound.");
+        return registration;
+    }
+
+    public AcceptedReviewExecution RecordExecution(
+        RegisteredReviewRequest registration,
+        IssuedReviewerCapability capability,
         string executionIdentity,
         bool accepted,
         bool completed,
@@ -184,12 +229,18 @@ public sealed class ReviewAuthorityHost
         string rawVerdict,
         DateTimeOffset completedAt)
     {
-        if (string.IsNullOrWhiteSpace(requestIdentity) || string.IsNullOrWhiteSpace(executionIdentity) ||
+        ArgumentNullException.ThrowIfNull(registration);
+        ArgumentNullException.ThrowIfNull(capability);
+        if (!ReferenceEquals(registration.Issuer, _issuer) ||
+            !string.Equals(capability.RootIdentity, _rootIdentity, StringComparison.Ordinal) ||
+            !_requests.TryGetValue(registration.RequestIdentity, out var current) ||
+            !ReferenceEquals(current, registration) ||
+            string.IsNullOrWhiteSpace(executionIdentity) ||
             string.IsNullOrWhiteSpace(rawArtifactHash) || string.IsNullOrWhiteSpace(rawVerdict))
             throw new ArgumentException("Accepted reviewer execution evidence is incomplete.");
         return new AcceptedReviewExecution(
-            _rootIdentity,
-            requestIdentity,
+            registration,
+            capability,
             executionIdentity,
             accepted,
             completed,
@@ -197,6 +248,17 @@ public sealed class ReviewAuthorityHost
             rawVerdict,
             completedAt,
             _realm);
+    }
+
+    public ReviewConsumerContext CreateConsumerContext(ReviewAcceptanceContext context)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (_rootContext is null || !MatchesRootContext(_rootContext, context))
+            throw new InvalidOperationException("Consumer context does not match the root-frozen authority context.");
+        return new ReviewConsumerContext(
+            _issuer, context.RunIdentity, context.RequestIdentity, context.PlanIdentity,
+            context.EvidencePolicyIdentity, context.ReviewPolicyContentIdentity,
+            context.SourceAuthorityIdentity, context.ProtectedObjectViewIdentity);
     }
 
     public void IssueAcceptance(
@@ -208,8 +270,14 @@ public sealed class ReviewAuthorityHost
         ArgumentNullException.ThrowIfNull(receipt);
         ArgumentNullException.ThrowIfNull(review);
         ArgumentNullException.ThrowIfNull(context);
+        var provenance = review.Provenance;
         if (receipt.SchemaName != "review-receipt" || !Enum.IsDefined(role) ||
             review.Outcome != ReviewOutcome.Pass || !review.AuthorityAccepted ||
+            provenance is null || !ReferenceEquals(provenance.Issuer, _issuer) ||
+            !ReferenceEquals(provenance.Registration.Issuer, _issuer) ||
+            provenance.Registration.Role != role ||
+            !ReferenceEquals(provenance.Execution.Registration, provenance.Registration) ||
+            !ReferenceEquals(provenance.Execution.Capability, provenance.Capability) ||
             review.AuthorityRealm != _realm ||
             string.IsNullOrWhiteSpace(review.CapabilityProofIdentity) ||
             string.IsNullOrWhiteSpace(review.ExecutionIdentity) ||
@@ -231,6 +299,12 @@ public sealed class ReviewAuthorityHost
         if (_production is not null && !review.ProductionAccepted)
             throw new InvalidOperationException("Production review acceptance was not issued from live production evidence.");
 
+        var expectedReceipt = ReviewReceiptSerializer.Create(review);
+        var expectedBytes = ReviewReceiptSerializer.Serialize(expectedReceipt);
+        var expectedValidated = ContractValidator.ParseAndValidate(expectedBytes);
+        if (!string.Equals(receipt.Identity, expectedValidated.Identity, StringComparison.Ordinal))
+            throw new InvalidOperationException("Canonical receipt is not the exact safe-factory receipt for the issued review.");
+
         using var document = JsonDocument.Parse(receipt.CanonicalBytes);
         var root = document.RootElement;
         if (root.GetProperty("outcome").GetString() != "PASS" ||
@@ -250,7 +324,8 @@ public sealed class ReviewAuthorityHost
             review.Identity.HeadTree,
             review.CapabilityProofIdentity,
             review.CapabilityValidUntil,
-            context);
+            context,
+            provenance.Execution.ExecutionIdentity);
         if (!_acceptances.TryAdd((receipt.Identity, role), entry))
             throw new InvalidOperationException("Review acceptance identity and role were already issued.");
     }
@@ -264,13 +339,17 @@ public sealed class ReviewAuthorityHost
         ArgumentNullException.ThrowIfNull(receipt);
         ArgumentNullException.ThrowIfNull(currentRequest);
         ArgumentNullException.ThrowIfNull(capability);
+        if (!_acceptances.TryGetValue((receipt.Identity, role), out var accepted) || accepted.Context is null)
+            throw new InvalidOperationException("Review reuse requires a current root acceptance.");
         var requirement = new ReviewAcceptanceRequirement(
             receipt.Identity,
             role,
             _realm,
             currentRequest.Identity.BaseCommit,
             currentRequest.Identity.HeadCommit,
-            currentRequest.Identity.HeadTree);
+            currentRequest.Identity.HeadTree,
+            accepted.Context.EvidencePolicyIdentity,
+            CreateConsumerContext(accepted.Context));
         return new IssuedReviewReuseContext(
             _rootIdentity,
             currentRequest,
@@ -284,16 +363,23 @@ public sealed class ReviewAuthorityHost
                       _testNow ?? DateTimeOffset.UtcNow));
     }
 
-    public void IssueTestAcceptance(string receiptIdentity, ReviewEvidenceRole role)
+    public void IssueTestAcceptance(
+        string receiptIdentity,
+        ReviewEvidenceRole role,
+        ReviewAcceptanceContext context,
+        string executionIdentity)
     {
         if (_realm != ReviewAuthorityRealm.Test)
             throw new InvalidOperationException("Test acceptance can only be issued by an isolated test authority.");
-        if (string.IsNullOrWhiteSpace(receiptIdentity) || !Enum.IsDefined(role))
+        ArgumentNullException.ThrowIfNull(context);
+        if (string.IsNullOrWhiteSpace(receiptIdentity) || !Enum.IsDefined(role) ||
+            string.IsNullOrWhiteSpace(executionIdentity) || _rootContext is null ||
+            !MatchesRootContext(_rootContext, context))
             throw new ArgumentException("A valid receipt identity and review role are required.");
         _acceptances.TryAdd(
             (receiptIdentity, role),
             new AcceptanceEntry(receiptIdentity, role, _realm, "*", "*", "*", string.Empty,
-                DateTimeOffset.MaxValue, null));
+                DateTimeOffset.MaxValue, context, executionIdentity));
     }
 
     private bool Accepts(ReviewAcceptanceRequirement requirement)
@@ -301,11 +387,23 @@ public sealed class ReviewAuthorityHost
         if (requirement.RequiredRealm != _realm ||
             !_acceptances.TryGetValue((requirement.ReceiptIdentity, requirement.Role), out var entry) ||
             entry.Realm != requirement.RequiredRealm ||
+            requirement.ConsumerContext is null ||
+            !ReferenceEquals(requirement.ConsumerContext.Issuer, _issuer) ||
+            entry.Context is null ||
+            !string.Equals(requirement.EvidencePolicyIdentity, entry.Context.EvidencePolicyIdentity, StringComparison.Ordinal) ||
+            !MatchesConsumer(entry.Context, requirement.ConsumerContext) ||
             (!string.IsNullOrEmpty(entry.CapabilityProofIdentity) &&
              _revokedCapabilities.ContainsKey(entry.CapabilityProofIdentity)))
             return false;
 
         var now = _testNow ?? DateTimeOffset.UtcNow;
+        if (requirement.Role == ReviewEvidenceRole.Hosted)
+        {
+            if (string.IsNullOrWhiteSpace(requirement.OtherReceiptIdentity) ||
+                !_acceptances.TryGetValue((requirement.OtherReceiptIdentity, ReviewEvidenceRole.Independent), out var independent) ||
+                string.Equals(independent.ExecutionIdentity, entry.ExecutionIdentity, StringComparison.Ordinal))
+                return false;
+        }
         return entry.CapabilityValidUntil >= now &&
                (entry.BaseCommit == "*" || string.Equals(entry.BaseCommit, requirement.BaseCommit, StringComparison.Ordinal)) &&
                (entry.HeadCommit == "*" || string.Equals(entry.HeadCommit, requirement.HeadCommit, StringComparison.Ordinal)) &&
@@ -323,17 +421,36 @@ public sealed class ReviewAuthorityHost
         expected.ReviewPolicyAuthorityKind == actual.ReviewPolicyAuthorityKind &&
         string.Equals(expected.SourceAuthorityIdentity, actual.SourceAuthorityIdentity, StringComparison.Ordinal) &&
         SamePath(expected.SourceRoot, actual.SourceRoot) &&
-        string.Equals(expected.ProtectedBaseCommit, actual.ProtectedBaseCommit, StringComparison.Ordinal);
+        string.Equals(expected.ProtectedBaseCommit, actual.ProtectedBaseCommit, StringComparison.Ordinal) &&
+        string.Equals(expected.ProtectedObjectViewIdentity, actual.ProtectedObjectViewIdentity, StringComparison.Ordinal);
+
+    private static bool MatchesConsumer(ReviewAcceptanceContext expected, ReviewConsumerContext actual) =>
+        string.Equals(expected.RunIdentity, actual.RunIdentity, StringComparison.Ordinal) &&
+        string.Equals(expected.RequestIdentity, actual.RequestIdentity, StringComparison.Ordinal) &&
+        string.Equals(expected.PlanIdentity, actual.PlanIdentity, StringComparison.Ordinal) &&
+        string.Equals(expected.EvidencePolicyIdentity, actual.EvidencePolicyIdentity, StringComparison.Ordinal) &&
+        string.Equals(expected.ReviewPolicyContentIdentity, actual.ReviewPolicyIdentity, StringComparison.Ordinal) &&
+        string.Equals(expected.SourceAuthorityIdentity, actual.ProtectedSourceIdentity, StringComparison.Ordinal) &&
+        string.Equals(expected.ProtectedObjectViewIdentity, actual.ProtectedObjectViewIdentity, StringComparison.Ordinal);
 
     private static string ReadGitVersion(string executable, string workingDirectory)
+        => ReadGitOutput(executable, workingDirectory, ["--version"]);
+
+    private static string ReadGitOutput(
+        string executable,
+        string workingDirectory,
+        IReadOnlyList<string> arguments)
     {
-        using var process = Process.Start(new ProcessStartInfo(executable, "--version")
+        var start = new ProcessStartInfo(executable)
         {
             WorkingDirectory = workingDirectory,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false
-        }) ?? throw new InvalidOperationException("Trusted Git executable could not be started.");
+        };
+        foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        using var process = Process.Start(start) ??
+            throw new InvalidOperationException("Trusted Git executable could not be started.");
         var output = process.StandardOutput.ReadToEnd();
         process.WaitForExit();
         if (process.ExitCode != 0) throw new InvalidOperationException("Trusted Git version could not be observed.");
@@ -369,5 +486,6 @@ public sealed class ReviewAuthorityHost
         string TreeId,
         string CapabilityProofIdentity,
         DateTimeOffset CapabilityValidUntil,
-        ReviewAcceptanceContext? Context);
+        ReviewAcceptanceContext? Context,
+        string ExecutionIdentity);
 }

@@ -5,6 +5,7 @@ using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Contracts.State;
 using DeliveryForge.Contracts.Validation;
 using DeliveryForge.Execution.Host;
+using DeliveryForge.Review;
 
 namespace DeliveryForge.Contracts.Tests;
 
@@ -309,6 +310,23 @@ public sealed class WorkflowTransitionTests
     }
 
     [Fact]
+    public void Current_consumer_rejects_policy_swap_after_acceptance()
+    {
+        var evidence = FullEvidence();
+        var replacement = MutatedFixture("evidence-policy.json", node =>
+        {
+            node["authorizedCeiling"] = "merge";
+            node["policyId"] = "replacement-policy";
+        });
+
+        AssertMessage("root-issued review acceptance", () =>
+            WorkflowTransition.EnsureAllowedForIsolatedTest(
+                WorkflowState.IndependentReview,
+                WorkflowState.PrAuthorized,
+                evidence with { Policy = replacement }));
+    }
+
+    [Fact]
     public void Gate_receipts_must_bind_the_supplied_policy()
     {
         var evidence = FullEvidence();
@@ -392,9 +410,23 @@ public sealed class WorkflowTransitionTests
             .ToArray();
         var review = ParseFixture("review-receipt.json");
         var hosted = MutatedFixture("review-receipt.json", node => node["reviewerFamily"] = "github-hosted");
-        var authorityHost = ReviewAuthorityHost.CreateIsolatedTest();
-        authorityHost.IssueTestAcceptance(review.Identity, ReviewEvidenceRole.Independent);
-        authorityHost.IssueTestAcceptance(hosted.Identity, ReviewEvidenceRole.Hosted);
+        var root = new ReviewAuthorityRootContext(
+            "fixture-run", "sha256:" + new string('e', 64), policy.Identity,
+            "sha256:" + new string('7', 64), new string('f', 40),
+            ReviewPolicyAuthorityKind.ProtectedGitBase, "fixture-source", "/trusted/source",
+            "6304c90f83df3cdb918dff03f6358dcf4a939d16", "fixture-object-view");
+        var authorityHost = ReviewAuthorityHost.CreateIsolatedTest(root);
+        var independentContext = new ReviewAcceptanceContext(
+            root.RunIdentity, "fixture-independent-request", root.PlanIdentity,
+            root.EvidencePolicyIdentity, root.ReviewPolicyContentIdentity,
+            root.ReviewPolicySourceRevision, root.ReviewPolicyAuthorityKind,
+            root.SourceAuthorityIdentity, root.SourceRoot, root.ProtectedBaseCommit,
+            root.ProtectedObjectViewIdentity);
+        var hostedContext = independentContext with { RequestIdentity = "fixture-hosted-request" };
+        authorityHost.IssueTestAcceptance(
+            review.Identity, ReviewEvidenceRole.Independent, independentContext, "fixture-independent-execution");
+        authorityHost.IssueTestAcceptance(
+            hosted.Identity, ReviewEvidenceRole.Hosted, hostedContext, "fixture-hosted-execution");
         return new TransitionEvidence(
             AuthorizationCeiling.Merge,
             BaseCommit: "6304c90f83df3cdb918dff03f6358dcf4a939d16",
@@ -408,7 +440,9 @@ public sealed class WorkflowTransitionTests
                 ? MutatedFixture("publication-receipt.json", node => node["action"] = "MERGED")
                 : ParseFixture("publication-receipt.json"),
             HostReviewReceipt: hosted,
-            ReviewAuthority: authorityHost.Authority);
+            ReviewAuthority: authorityHost.Authority,
+            ReviewContext: authorityHost.CreateConsumerContext(independentContext),
+            HostReviewContext: authorityHost.CreateConsumerContext(hostedContext));
     }
 
     private static ValidatedContract GateFixture(string policyIdentity, string gateId) =>

@@ -33,7 +33,7 @@ public sealed class ReviewCoreTests
         var headCommit = repository.CommitAll();
 
         using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
-            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 1024 * 1024);
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
         var identity = await GitPatchIdentity.ComputeAsync(
             controlled, baseCommit, headCommit, Identity('e'),
             new Dictionary<string, string> { ["tests"] = Identity('a') },
@@ -42,7 +42,7 @@ public sealed class ReviewCoreTests
         var bytes = repository.GitBytes(
             "-c", "core.quotepath=false",
             "-c", "core.fsmonitor=false",
-            "-c", "core.hooksPath=/dev/null",
+            "-c", $"core.hooksPath={nullDevice}",
             "-c", "diff.noprefix=false",
             "-c", "diff.mnemonicPrefix=false",
             "-c", "diff.relative=false",
@@ -54,7 +54,7 @@ public sealed class ReviewCoreTests
 
         Assert.Equal(Hash(bytes), identity.PatchSha256);
         Assert.Equal(repository.Git("rev-parse", $"{headCommit}^{{tree}}"), identity.HeadTree);
-        Assert.Equal("/usr/bin/git", identity.Command[0]);
+        Assert.Equal(TrustedGitPath(), identity.Command[0]);
         Assert.Contains("--no-replace-objects", identity.Command);
         Assert.Contains("--no-textconv", identity.Command);
         Assert.Contains("--ignore-submodules=none", identity.Command);
@@ -76,7 +76,7 @@ public sealed class ReviewCoreTests
         repository.Write("a.txt", "b"u8.ToArray());
         var headCommit = repository.CommitAll();
         using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
-            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 1024 * 1024);
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
 
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
             controlled, baseCommit, new string('f', 40), Identity('e'), new Dictionary<string, string>(),
@@ -92,7 +92,7 @@ public sealed class ReviewCoreTests
     }
 
     [Fact]
-    public async Task Controlled_git_ignores_worker_helpers_attributes_replacements_and_path_authority()
+    public void Controlled_git_rejects_worker_helpers_replacements_and_path_authority()
     {
         using var repository = new TinyGitRepository();
         var baseCommit = repository.Commit(new Dictionary<string, byte[]>
@@ -119,15 +119,11 @@ public sealed class ReviewCoreTests
         repository.Git("config", "filter.evil.smudge", helper);
         Directory.CreateDirectory(Path.Combine(repository.Path, ".git", "refs", "replace"));
         File.WriteAllText(Path.Combine(repository.Path, ".git", "refs", "replace", baseCommit), headCommit + "\n");
-        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
-            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 1024 * 1024);
-
-        var identity = await GitPatchIdentity.ComputeAsync(
-            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
-            TestContext.Current.CancellationToken);
+        Assert.Throws<ReviewPreflightException>(() =>
+            ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+                repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024));
 
         Assert.False(File.Exists(sentinel));
-        Assert.Equal(headCommit, identity.HeadCommit);
     }
 
     [Fact]
@@ -142,7 +138,7 @@ public sealed class ReviewCoreTests
         repository.Write("a.txt", "after\n"u8.ToArray());
         var headCommit = repository.CommitAll();
         using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
-            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 1024 * 1024);
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
 
         repository.Git("update-index", "--skip-worktree", "a.txt");
         repository.Write("a.txt", "hidden\n"u8.ToArray());
@@ -158,11 +154,25 @@ public sealed class ReviewCoreTests
             TestContext.Current.CancellationToken));
         repository.Delete("ignored.txt");
 
-        File.CreateSymbolicLink(Path.Combine(repository.Path, "outside-link"), "/etc/passwd");
+        var ownedLinkTarget = Path.Combine(Path.GetTempPath(), $"delivery-forge-link-{Guid.NewGuid():N}");
+        File.WriteAllText(ownedLinkTarget, "owned target");
+        try
+        {
+            File.CreateSymbolicLink(Path.Combine(repository.Path, "outside-link"), ownedLinkTarget);
+        }
+        catch (Exception error) when (error is PlatformNotSupportedException or UnauthorizedAccessException)
+        {
+            File.Delete(ownedLinkTarget);
+            var incomplete = new ReviewPreflightException(
+                "Symlink evidence is unsupported on this platform; review preflight is INCOMPLETE.", error);
+            Assert.Contains("INCOMPLETE", incomplete.Message, StringComparison.Ordinal);
+            return;
+        }
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
             controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
             TestContext.Current.CancellationToken));
         File.Delete(Path.Combine(repository.Path, "outside-link"));
+        File.Delete(ownedLinkTarget);
 
         Directory.CreateDirectory(Path.Combine(controlled.ControlledGitDirectory, "objects", "info"));
         File.WriteAllText(Path.Combine(controlled.ControlledGitDirectory, "objects", "info", "alternates"), "/tmp/untrusted\n");
@@ -180,7 +190,7 @@ public sealed class ReviewCoreTests
         var headCommit = repository.CommitIndex();
         repository.Write("submodule/work.txt", "nested\n"u8.ToArray());
         using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
-            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 1024 * 1024);
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
 
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
             controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
@@ -200,13 +210,13 @@ public sealed class ReviewCoreTests
         repository.Write("a.txt", "after\n"u8.ToArray());
         var headCommit = repository.CommitAll();
         using var bounded = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
-            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 8);
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 8);
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
             bounded, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
             TestContext.Current.CancellationToken));
 
         using var cancelled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
-            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 1024 * 1024);
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
@@ -223,7 +233,7 @@ public sealed class ReviewCoreTests
         using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
             repository.Path,
             Path.Combine(repository.Path, ".git"),
-            "/usr/bin/git",
+            TrustedGitPath(),
             1024 * 1024,
             () => repository.Write("a.txt", "mutated during capture\n"u8.ToArray()));
 
@@ -240,13 +250,19 @@ public sealed class ReviewCoreTests
         var evidencePolicy = EvidencePolicy();
         var host = ReviewAuthorityHost.CreateIsolatedTest(
             RootContext("run-1", request, policy, evidencePolicy.Identity), Time(1));
+        var acceptance = new ReviewAcceptanceContext(
+            "run-1", "review-request-1", request.Identity.PlanIdentity, evidencePolicy.Identity,
+            policy.ContentIdentity, policy.SourceRevision, policy.AuthorityKind,
+            "source-authority-1", TrustedSourceRoot(), request.Identity.BaseCommit, "object-view-1");
+        var registration = host.RegisterRequest("review-request-1", request, acceptance);
         var capability = host.IssueCapability(
             request.Capability,
             "capability-proof-1",
             Time(0),
             Time(2));
         var execution = host.RecordExecution(
-            "review-request-1",
+            registration,
+            capability,
             "review-execution-1",
             accepted: true,
             completed: true,
@@ -265,17 +281,7 @@ public sealed class ReviewCoreTests
         host.IssueAcceptance(
             receipt,
             normalized,
-            new ReviewAcceptanceContext(
-                "run-1",
-                "review-request-1",
-                request.Identity.PlanIdentity,
-                evidencePolicy.Identity,
-                policy.ContentIdentity,
-                policy.SourceRevision,
-                policy.AuthorityKind,
-                "source-authority-1",
-                "/trusted/source",
-                request.Identity.BaseCommit),
+            acceptance,
             ReviewEvidenceRole.Independent);
 
         var transition = new TransitionEvidence(
@@ -285,7 +291,8 @@ public sealed class ReviewCoreTests
             request.Identity.HeadTree,
             Policy: evidencePolicy,
             ReviewReceipt: receipt,
-            ReviewAuthority: host.Authority);
+            ReviewAuthority: host.Authority,
+            ReviewContext: host.CreateConsumerContext(acceptance));
         WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview,
             WorkflowState.PrAuthorized,
@@ -313,17 +320,18 @@ public sealed class ReviewCoreTests
             SourceAuthorityIdentity = "binding-source"
         };
         var host = ReviewAuthorityHost.CreateIsolatedTest(root, Time(1));
-        var capability = host.IssueCapability(request.Capability, "binding-capability", Time(0), Time(2));
-        var execution = host.RecordExecution(
-            "binding-request", "binding-execution", true, true, Identity('f'), "ship", Time(1));
-        var review = ReviewNormalizer.Normalize(request, Result(), policy, capability, execution);
-        var receipt = ContractValidator.ParseAndValidate(
-            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(review)));
         var valid = new ReviewAcceptanceContext(
             root.RunIdentity, "binding-request", root.PlanIdentity, root.EvidencePolicyIdentity,
             root.ReviewPolicyContentIdentity, root.ReviewPolicySourceRevision,
             root.ReviewPolicyAuthorityKind, root.SourceAuthorityIdentity, root.SourceRoot,
-            root.ProtectedBaseCommit);
+            root.ProtectedBaseCommit, root.ProtectedObjectViewIdentity);
+        var registration = host.RegisterRequest("binding-request", request, valid);
+        var capability = host.IssueCapability(request.Capability, "binding-capability", Time(0), Time(2));
+        var execution = host.RecordExecution(
+            registration, capability, "binding-execution", true, true, Identity('f'), "ship", Time(1));
+        var review = ReviewNormalizer.Normalize(request, Result(), policy, capability, execution);
+        var receipt = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(review)));
         var mutations = new[]
         {
             valid with { RunIdentity = "wrong" },
@@ -334,14 +342,115 @@ public sealed class ReviewCoreTests
             valid with { ReviewPolicySourceRevision = Commit('9') },
             valid with { ReviewPolicyAuthorityKind = ReviewPolicyAuthorityKind.WorkerBranch },
             valid with { SourceAuthorityIdentity = "wrong" },
-            valid with { SourceRoot = "/wrong/source" },
+            valid with { SourceRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "wrong-source")) },
             valid with { ProtectedBaseCommit = Commit('9') }
+            ,valid with { ProtectedObjectViewIdentity = "wrong-view" }
         };
 
         Assert.All(mutations, mutated => Assert.Throws<InvalidOperationException>(() =>
             host.IssueAcceptance(receipt, review, mutated, ReviewEvidenceRole.Independent)));
         host.IssueAcceptance(receipt, review, valid, ReviewEvidenceRole.Independent);
         Assert.False(host.Authority.Equals(null));
+    }
+
+    [Fact]
+    public void Registered_request_execution_and_normalized_provenance_cannot_be_rebound_or_adopted()
+    {
+        var policy = Policy();
+        var request = Request(policy);
+        var evidencePolicy = EvidencePolicy();
+        var root = RootContext("provenance-run", request, policy, evidencePolicy.Identity);
+        var context = new ReviewAcceptanceContext(
+            root.RunIdentity, "request-a", root.PlanIdentity, root.EvidencePolicyIdentity,
+            root.ReviewPolicyContentIdentity, root.ReviewPolicySourceRevision,
+            root.ReviewPolicyAuthorityKind, root.SourceAuthorityIdentity, root.SourceRoot,
+            root.ProtectedBaseCommit, root.ProtectedObjectViewIdentity);
+        var hostA = ReviewAuthorityHost.CreateIsolatedTest(root, Time(1));
+        var registration = hostA.RegisterRequest("request-a", request, context);
+        Assert.Throws<InvalidOperationException>(() => hostA.RegisterRequest(
+            "request-a", request with { Scope = "docs" }, context));
+        var capability = hostA.IssueCapability(request.Capability, "provenance-capability", Time(0), Time(2));
+        var execution = hostA.RecordExecution(
+            registration, capability, "execution-a", true, true, Identity('f'), "ship", Time(1));
+        var changedIdentity = request.Identity with { PatchSha256 = Identity('9') };
+        var rebound = ReviewNormalizer.Normalize(
+            request with { Identity = changedIdentity },
+            Result() with { Identity = changedIdentity },
+            policy, capability, execution);
+        Assert.False(rebound.AuthorityAccepted);
+
+        var normalized = ReviewNormalizer.Normalize(request, Result(), policy, capability, execution);
+        var receipt = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(normalized)));
+        var hostB = ReviewAuthorityHost.CreateIsolatedTest(root, Time(1));
+        Assert.Throws<InvalidOperationException>(() => hostB.IssueAcceptance(
+            receipt, normalized, context, ReviewEvidenceRole.Independent));
+        Assert.Throws<InvalidOperationException>(() => hostA.IssueAcceptance(
+            receipt, normalized, context, ReviewEvidenceRole.Hosted));
+    }
+
+    [Fact]
+    public void Isolated_issuer_requires_two_distinct_executions_at_actual_pr_hosted_and_merge_consumers()
+    {
+        var policy = ReviewPolicy.TrustedFixture(
+            Identity('7'),
+            [new FamilyPair("gpt", "claude"), new FamilyPair("gpt", "github-hosted")],
+            ["source"], false, new ReviewBudget(2, TimeSpan.FromMinutes(5), 20_000, 2m));
+        var independent = Request(policy);
+        var hosted = independent with
+        {
+            Capability = independent.Capability with { Family = "github-hosted" }
+        };
+        var evidencePolicy = EvidencePolicy("merge");
+        var root = RootContext("dual-run", independent, policy, evidencePolicy.Identity);
+        var host = ReviewAuthorityHost.CreateIsolatedTest(root, Time(1));
+        var independentContext = Acceptance(root, "independent-request");
+        var hostedContext = Acceptance(root, "hosted-request");
+
+        var independentCapability = host.IssueCapability(
+            independent.Capability, "independent-capability", Time(0), Time(2));
+        var hostedCapability = host.IssueCapability(
+            hosted.Capability, "hosted-capability", Time(0), Time(2));
+        var independentExecution = host.RecordExecution(
+            host.RegisterRequest("independent-request", independent, independentContext),
+            independentCapability, "independent-execution", true, true, Identity('f'), "ship", Time(1));
+        var hostedExecution = host.RecordExecution(
+            host.RegisterRequest("hosted-request", hosted, hostedContext),
+            hostedCapability, "hosted-execution", true, true, Identity('6'), "ship", Time(1));
+        var independentReview = ReviewNormalizer.Normalize(
+            independent, Result(), policy, independentCapability, independentExecution);
+        var hostedResult = Result() with
+        {
+            ReviewerFamily = "github-hosted",
+            ArtifactHash = Identity('6')
+        };
+        var hostedReview = ReviewNormalizer.Normalize(
+            hosted, hostedResult, policy, hostedCapability, hostedExecution);
+        var independentReceipt = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(independentReview)));
+        var hostedReceipt = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(hostedReview)));
+        host.IssueAcceptance(
+            independentReceipt, independentReview, independentContext, ReviewEvidenceRole.Independent);
+        host.IssueAcceptance(hostedReceipt, hostedReview, hostedContext, ReviewEvidenceRole.Hosted);
+
+        var evidence = new TransitionEvidence(
+            AuthorizationCeiling.Merge,
+            independent.Identity.BaseCommit,
+            independent.Identity.HeadCommit,
+            independent.Identity.HeadTree,
+            Policy: evidencePolicy,
+            ReviewReceipt: independentReceipt,
+            HostReviewReceipt: hostedReceipt,
+            ReviewAuthority: host.Authority,
+            ReviewContext: host.CreateConsumerContext(independentContext),
+            HostReviewContext: host.CreateConsumerContext(hostedContext));
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized, evidence);
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.CiComplete, WorkflowState.HostReviewComplete, evidence);
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.HostReviewComplete, WorkflowState.MergeAuthorized, evidence);
     }
 
     [Theory]
@@ -354,8 +463,16 @@ public sealed class ReviewCoreTests
         ReviewOutcome expected,
         int findingCount)
     {
-        var host = ReviewAuthorityHost.CreateIsolatedTest(Time(1));
         var policy = Policy();
+        var request = Request(policy);
+        var evidencePolicy = EvidencePolicy();
+        var host = ReviewAuthorityHost.CreateIsolatedTest(
+            RootContext("live-run", request, policy, evidencePolicy.Identity), Time(1));
+        var context = new ReviewAcceptanceContext(
+            "live-run", "live-request", request.Identity.PlanIdentity, evidencePolicy.Identity,
+            policy.ContentIdentity, policy.SourceRevision, policy.AuthorityKind,
+            "source-authority-1", TrustedSourceRoot(), request.Identity.BaseCommit, "object-view-1");
+        var registration = host.RegisterRequest("live-request", request, context);
         var findings = Enumerable.Range(0, findingCount)
             .Select(index => new ReviewFinding($"R{index}", "material", "finding", "A.cs:1"))
             .ToArray();
@@ -365,7 +482,7 @@ public sealed class ReviewCoreTests
             "live-request", "live-execution", "VERDICT output"u8.ToArray(), rawVerdict,
             findings, Time(1), true);
 
-        var normalized = SupportedLiveReviewProducer.Produce(host, Request(policy), policy, observation);
+        var normalized = SupportedLiveReviewProducer.Produce(host, registration, request, policy, observation);
 
         Assert.Equal(expected, normalized.Outcome);
         Assert.Equal(findings, normalized.Findings);
@@ -506,19 +623,21 @@ public sealed class ReviewCoreTests
         var evidencePolicy = EvidencePolicy();
         var host = ReviewAuthorityHost.CreateIsolatedTest(
             RootContext("reuse-run", request, policy, evidencePolicy.Identity), Time(1));
+        var acceptance = new ReviewAcceptanceContext(
+            "reuse-run", "reuse-request", request.Identity.PlanIdentity, evidencePolicy.Identity,
+            policy.ContentIdentity, policy.SourceRevision, policy.AuthorityKind,
+            "reuse-source-authority", TrustedSourceRoot(), request.Identity.BaseCommit, "object-view-1");
+        var registration = host.RegisterRequest("reuse-request", request, acceptance);
         var capability = host.IssueCapability(request.Capability, "reuse-capability", Time(0), Time(2));
         var execution = host.RecordExecution(
-            "reuse-request", "reuse-execution", true, true, Identity('f'), "ship", Time(1));
+            registration, capability, "reuse-execution", true, true, Identity('f'), "ship", Time(1));
         var receipt = ReviewNormalizer.Normalize(request, Result(), policy, capability, execution);
         var contract = ContractValidator.ParseAndValidate(
             ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(receipt)));
         host.IssueAcceptance(
             contract,
             receipt,
-            new ReviewAcceptanceContext(
-                "reuse-run", "reuse-request", request.Identity.PlanIdentity, evidencePolicy.Identity,
-                policy.ContentIdentity, policy.SourceRevision, policy.AuthorityKind,
-                "reuse-source-authority", "/trusted/source", request.Identity.BaseCommit),
+            acceptance,
             ReviewEvidenceRole.Independent);
         var reuse = host.CreateReuseContext(contract, ReviewEvidenceRole.Independent, request, capability);
         Assert.True(ReviewInvalidation.Assess(
@@ -645,8 +764,10 @@ public sealed class ReviewCoreTests
         repository.Write("policy/review.json", Encoding.UTF8.GetBytes("{}"));
         repository.CommitAll();
 
-        var source = ReviewAuthorityHost.CreateIsolatedTest().FreezeProtectedSource(
-            repository.Path, protectedBase, "test-source-authority", "/usr/bin/git");
+        var host = ReviewAuthorityHost.CreateIsolatedTest();
+        using var objectView = host.PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
+        var source = host.FreezeProtectedSource(objectView, protectedBase, "test-source-authority");
         var policy = await new ProtectedReviewPolicyResolver(source)
             .ResolveAsync("policy/review.json", TestContext.Current.CancellationToken);
 
@@ -667,10 +788,12 @@ public sealed class ReviewCoreTests
             ["policy/review.json"] = "{}"u8.ToArray()
         });
 
+        var host = ReviewAuthorityHost.CreateIsolatedTest();
+        using var objectView = host.PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
         var error = await Assert.ThrowsAsync<ReviewPolicyException>(() =>
-            new ProtectedReviewPolicyResolver(
-                    ReviewAuthorityHost.CreateIsolatedTest().FreezeProtectedSource(
-                        repository.Path, protectedBase, "test-source-authority", "/usr/bin/git"))
+            new ProtectedReviewPolicyResolver(host.FreezeProtectedSource(
+                    objectView, protectedBase, "test-source-authority"))
                 .ResolveAsync("policy/review.json", TestContext.Current.CancellationToken));
 
         Assert.Contains("malformed", error.Message, StringComparison.Ordinal);
@@ -706,8 +829,10 @@ public sealed class ReviewCoreTests
         {
             ["policy/review.json"] = Encoding.UTF8.GetBytes(json)
         });
-        var source = ReviewAuthorityHost.CreateIsolatedTest().FreezeProtectedSource(
-            repository.Path, protectedBase, "test-source-authority", "/usr/bin/git");
+        var host = ReviewAuthorityHost.CreateIsolatedTest();
+        using var objectView = host.PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
+        var source = host.FreezeProtectedSource(objectView, protectedBase, "test-source-authority");
 
         await Assert.ThrowsAsync<ReviewPolicyException>(() =>
             new ProtectedReviewPolicyResolver(source)
@@ -720,16 +845,17 @@ public sealed class ReviewCoreTests
         using var repository = new TinyGitRepository();
         var protectedBase = repository.Commit(new Dictionary<string, byte[]> { ["policy/review.json"] = "{}"u8.ToArray() });
         repository.Write("worker.txt", "worker"u8.ToArray());
-        var workerBase = repository.CommitAll();
+        repository.CommitAll();
         var host = ReviewAuthorityHost.CreateProduction(new ProductionReviewAuthorityConfiguration(
             "production-root",
             new ReviewAuthorityRootContext(
                 "run", Identity('e'), Identity('0'), Identity('7'), Commit('f'),
                 ReviewPolicyAuthorityKind.ProtectedGitBase,
-                "parent-source", repository.Path, protectedBase)));
+                "parent-source", repository.Path, protectedBase, "production-object-view")));
 
-        Assert.Throws<InvalidOperationException>(() => host.FreezeProtectedSource(
-            repository.Path, workerBase, "parent-source", "/usr/bin/git"));
+        Assert.Throws<ReviewPreflightException>(() => host.UseControlledGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), Path.Combine(repository.Path, ".git"),
+            TrustedGitPath(), "git version 0", 1024, "parent-source"));
     }
 
     [Fact]
@@ -821,8 +947,17 @@ public sealed class ReviewCoreTests
         policy.SourceRevision,
         policy.AuthorityKind,
         runIdentity == "reuse-run" ? "reuse-source-authority" : "source-authority-1",
-        "/trusted/source",
-        request.Identity.BaseCommit);
+        TrustedSourceRoot(),
+        request.Identity.BaseCommit,
+        "object-view-1");
+
+    private static ReviewAcceptanceContext Acceptance(
+        ReviewAuthorityRootContext root,
+        string requestIdentity) => new(
+        root.RunIdentity, requestIdentity, root.PlanIdentity, root.EvidencePolicyIdentity,
+        root.ReviewPolicyContentIdentity, root.ReviewPolicySourceRevision,
+        root.ReviewPolicyAuthorityKind, root.SourceAuthorityIdentity, root.SourceRoot,
+        root.ProtectedBaseCommit, root.ProtectedObjectViewIdentity);
 
     private static ReviewPolicy Policy(bool allowReuse = false) => ReviewPolicy.TrustedFixture(
         Identity('7'), [new FamilyPair("gpt", "claude")], ["source"], allowReuse,
@@ -839,6 +974,20 @@ public sealed class ReviewCoreTests
         ["git", "diff"]);
     private static string Identity(char value) => $"sha256:{new string(value, 64)}";
     private static string Commit(char value) => new(value, 40);
+    private static string TrustedSourceRoot() =>
+        Path.GetFullPath(Path.Combine(Path.GetTempPath(), "delivery-forge-trusted-source"));
+    private static string TrustedGitPath()
+    {
+        var names = OperatingSystem.IsWindows() ? new[] { "git.exe" } : new[] { "git" };
+        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                     .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+            foreach (var name in names)
+            {
+                var candidate = Path.GetFullPath(Path.Combine(directory, name));
+                if (File.Exists(candidate)) return candidate;
+            }
+        throw new ReviewPreflightException("Installed absolute Git executable is unavailable; fixture is INCOMPLETE.");
+    }
     private static string Hash(byte[] bytes) => $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
     private static DateTimeOffset Time(int seconds) =>
         DateTimeOffset.Parse("2026-10-09T00:00:00Z").AddSeconds(seconds);
@@ -861,7 +1010,7 @@ public sealed class ReviewCoreTests
         source.ProductionAccepted,
         originalExecution: false);
 
-    private static ValidatedContract EvidencePolicy()
+    private static ValidatedContract EvidencePolicy(string ceiling = "pr")
     {
         var node = JsonNode.Parse($$"""
             {
@@ -870,7 +1019,7 @@ public sealed class ReviewCoreTests
               "identity": "{{Identity('0')}}",
               "policyId": "review-tests",
               "requiredGates": ["review"],
-              "authorizedCeiling": "pr",
+              "authorizedCeiling": "{{ceiling}}",
               "requireIndependentReview": true,
               "allowedNotApplicable": [],
               "createdAt": "2026-10-09T00:00:00Z"

@@ -15,7 +15,9 @@ public sealed record TransitionEvidence(
     ValidatedContract? ReviewReceipt = null,
     ValidatedContract? PublicationReceipt = null,
     ValidatedContract? HostReviewReceipt = null,
-    ReviewAcceptanceAuthority? ReviewAuthority = null);
+    ReviewAcceptanceAuthority? ReviewAuthority = null,
+    ReviewConsumerContext? ReviewContext = null,
+    ReviewConsumerContext? HostReviewContext = null);
 
 public static class WorkflowTransition
 {
@@ -187,14 +189,21 @@ public static class WorkflowTransition
         ReviewEvidenceRole role,
         ReviewAuthorityRealm requiredReviewRealm)
     {
+        var consumerContext = role == ReviewEvidenceRole.Hosted
+            ? evidence.HostReviewContext
+            : evidence.ReviewContext;
         var requirement = new ReviewAcceptanceRequirement(
             receipt.Identity,
             role,
             requiredReviewRealm,
             evidence.BaseCommit!,
             evidence.HeadCommit!,
-            evidence.TreeId!);
-        if (evidence.ReviewAuthority is null || !evidence.ReviewAuthority.Accepts(requirement))
+            evidence.TreeId!,
+            RequirePolicy(evidence).Identity,
+            consumerContext!,
+            role == ReviewEvidenceRole.Hosted ? evidence.ReviewReceipt?.Identity : null);
+        if (evidence.ReviewAuthority is null || consumerContext is null ||
+            !evidence.ReviewAuthority.Accepts(requirement))
         {
             throw new InvalidWorkflowTransitionException(
                 "Transition requires root-issued review acceptance for the exact receipt and authority realm.");

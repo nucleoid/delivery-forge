@@ -12,7 +12,7 @@ public sealed class ReviewAuthorityHostTests
         var root = new ReviewAuthorityRootContext(
             "run", Identity('1'), Identity('2'), Identity('3'), Commit('4'),
             ReviewPolicyAuthorityKind.ProtectedGitBase,
-            "parent-source", Path.GetTempPath(), Commit('5'));
+            "parent-source", Path.GetTempPath(), Commit('5'), "object-view");
         var host = ReviewAuthorityHost.CreateProduction(
             new ProductionReviewAuthorityConfiguration("root", root));
         var fixture = new ReviewerCapability(
@@ -28,17 +28,23 @@ public sealed class ReviewAuthorityHostTests
     [Fact]
     public void Test_acceptance_is_role_specific_and_cannot_be_issued_by_production_host()
     {
-        var test = ReviewAuthorityHost.CreateIsolatedTest();
-        test.IssueTestAcceptance(Identity('a'), ReviewEvidenceRole.Independent);
-
         var root = new ReviewAuthorityRootContext(
             "run", Identity('1'), Identity('2'), Identity('3'), Commit('4'),
             ReviewPolicyAuthorityKind.ProtectedGitBase,
-            "parent-source", Path.GetTempPath(), Commit('5'));
+            "parent-source", Path.GetTempPath(), Commit('5'), "object-view");
+        var context = new ReviewAcceptanceContext(
+            root.RunIdentity, "request", root.PlanIdentity, root.EvidencePolicyIdentity,
+            root.ReviewPolicyContentIdentity, root.ReviewPolicySourceRevision,
+            root.ReviewPolicyAuthorityKind, root.SourceAuthorityIdentity, root.SourceRoot,
+            root.ProtectedBaseCommit, root.ProtectedObjectViewIdentity);
+        var test = ReviewAuthorityHost.CreateIsolatedTest(root);
+        test.IssueTestAcceptance(
+            Identity('a'), ReviewEvidenceRole.Independent, context, "execution");
+
         var production = ReviewAuthorityHost.CreateProduction(
             new ProductionReviewAuthorityConfiguration("root", root));
         Assert.Throws<InvalidOperationException>(() => production.IssueTestAcceptance(
-            Identity('a'), ReviewEvidenceRole.Independent));
+            Identity('a'), ReviewEvidenceRole.Independent, context, "execution"));
     }
 
     private static string Identity(char value) => $"sha256:{new string(value, 64)}";

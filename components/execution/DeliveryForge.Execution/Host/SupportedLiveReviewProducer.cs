@@ -31,18 +31,43 @@ public static class SupportedLiveReviewProducer
         ReviewPolicy policy,
         LiveReviewerObservation observation)
     {
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(policy);
+        ArgumentNullException.ThrowIfNull(observation);
+        var artifactHash = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(observation.RawOutput ?? []))}";
+        return ReviewNormalizer.Normalize(
+            request,
+            new ReviewResult(request.Identity, request.Capability.Family, "INCOMPLETE",
+                observation.Findings ?? [], artifactHash, observation.CompletedAt,
+                false, false, observation.Fixture, false),
+            policy);
+    }
+
+    public static NormalizedReview Produce(
+        ReviewAuthorityHost host,
+        RegisteredReviewRequest registration,
+        ReviewRequest request,
+        ReviewPolicy policy,
+        LiveReviewerObservation observation)
+    {
         ArgumentNullException.ThrowIfNull(host);
+        ArgumentNullException.ThrowIfNull(registration);
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(policy);
         ArgumentNullException.ThrowIfNull(observation);
 
         var artifactHash = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(observation.RawOutput ?? []))}";
-        var available = observation.CliAvailable && observation.RuntimeObserved &&
+        // This producer is deliberately a fixture conformance seam. A future real producer must
+        // supply host-owned observations rather than promote caller booleans to production proof.
+        var available = observation.Fixture && request.Capability.Fixture &&
+                        observation.CliAvailable && observation.RuntimeObserved &&
                         observation.AuthenticatedFirstParty && observation.RequestAccepted &&
                         observation.CompletionObserved && observation.RawOutput is { Length: > 0 } &&
                         string.Equals(observation.AdapterId, request.Capability.AdapterId, StringComparison.Ordinal) &&
                         string.Equals(observation.AdapterVersion, request.Capability.AdapterVersion, StringComparison.Ordinal) &&
                         string.Equals(observation.Scope, request.Scope, StringComparison.Ordinal) &&
+                        string.Equals(observation.RequestIdentity, registration.RequestIdentity, StringComparison.Ordinal) &&
+                        ReviewNormalizer.SameRequest(registration.Request, request) &&
                         observation.Fixture == request.Capability.Fixture;
         var verdict = available ? MapVerdict(observation.RawVerdict) : "INCOMPLETE";
         var result = new ReviewResult(
@@ -69,7 +94,8 @@ public static class SupportedLiveReviewProducer
                 observation.CapabilityValidFrom,
                 observation.CapabilityValidUntil);
             execution = host.RecordExecution(
-                observation.RequestIdentity,
+                registration,
+                capability,
                 observation.ExecutionIdentity,
                 observation.RequestAccepted,
                 observation.CompletionObserved,
