@@ -80,7 +80,7 @@ internal sealed class IdempotentCoordinationFixture(Func<DateTimeOffset> serverN
     private RenewTransportResult Renew(RenewRequest request)
     {
         var now = serverNow();
-        if (!_leases.TryGetValue(request.Lease.Resource, out var current) ||
+        if (!_leases.TryGetValue(request.Lease.Resource, out var current) || current.ExpiresAt <= now ||
             current.Owner != request.Lease.Owner || current.LeaseId != request.Lease.LeaseId || current.Fence != request.Lease.FencingToken)
             return RenewTransportResult.Uncertain("lease-lost");
         var renewed = current with { ServerTime = now, ExpiresAt = now.AddMinutes(5) };
