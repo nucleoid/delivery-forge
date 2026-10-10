@@ -9,5 +9,6 @@
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="DeliveryForge.Review.Tests" />
+    <InternalsVisibleTo Include="DeliveryForge.Execution" />
   </ItemGroup>
 </Project>

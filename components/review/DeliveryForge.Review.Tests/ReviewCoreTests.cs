@@ -32,25 +32,38 @@ public sealed class ReviewCoreTests
         repository.Write("binary.bin", [0, 9, 2, 0, 255]);
         var headCommit = repository.CommitAll();
 
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 1024 * 1024);
         var identity = await GitPatchIdentity.ComputeAsync(
-            repository.Path, baseCommit, headCommit, Identity('e'),
+            controlled, baseCommit, headCommit, Identity('e'),
             new Dictionary<string, string> { ["tests"] = Identity('a') },
             TestContext.Current.CancellationToken);
         var bytes = repository.GitBytes(
-            "-c", "core.quotepath=false", "diff", "--binary", "--full-index", "--no-color",
-            "--no-ext-diff", baseCommit, headCommit, "--");
+            "-c", "core.quotepath=false",
+            "-c", "core.fsmonitor=false",
+            "-c", "core.hooksPath=/dev/null",
+            "-c", "diff.noprefix=false",
+            "-c", "diff.mnemonicPrefix=false",
+            "-c", "diff.relative=false",
+            "-c", "diff.renames=true",
+            "-c", "diff.algorithm=myers",
+            "-c", "diff.orderFile=/dev/null",
+            "diff", "--binary", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv",
+            "--ignore-submodules=none", baseCommit, headCommit, "--");
 
         Assert.Equal(Hash(bytes), identity.PatchSha256);
         Assert.Equal(repository.Git("rev-parse", $"{headCommit}^{{tree}}"), identity.HeadTree);
-        Assert.Equal(["git", "-c", "core.quotepath=false", "diff", "--binary", "--full-index",
-            "--no-color", "--no-ext-diff", baseCommit, headCommit, "--"], identity.Command);
+        Assert.Equal("/usr/bin/git", identity.Command[0]);
+        Assert.Contains("--no-replace-objects", identity.Command);
+        Assert.Contains("--no-textconv", identity.Command);
+        Assert.Contains("--ignore-submodules=none", identity.Command);
         Assert.Contains("git version", identity.GitVersion, StringComparison.Ordinal);
         Assert.Equal(Identity('e'), identity.PlanIdentity);
         Assert.Equal(Identity('a'), identity.ArtifactIdentities["tests"]);
 
         repository.Write("dirty.txt", "dirty"u8.ToArray());
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
-            repository.Path, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
             TestContext.Current.CancellationToken));
     }
 
@@ -61,26 +74,150 @@ public sealed class ReviewCoreTests
         var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "a"u8.ToArray() });
         repository.Write("a.txt", "b"u8.ToArray());
         var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 1024 * 1024);
 
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
-            repository.Path, baseCommit, new string('f', 40), Identity('e'), new Dictionary<string, string>(),
+            controlled, baseCommit, new string('f', 40), Identity('e'), new Dictionary<string, string>(),
             TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
-            repository.Path, headCommit, baseCommit, Identity('e'), new Dictionary<string, string>(),
+            controlled, headCommit, baseCommit, Identity('e'), new Dictionary<string, string>(),
             TestContext.Current.CancellationToken));
         repository.Write("staged.txt", "staged"u8.ToArray());
         repository.Git("add", "staged.txt");
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
-            repository.Path, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Controlled_git_ignores_worker_helpers_attributes_replacements_and_path_authority()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]>
+        {
+            [".gitattributes"] = "*.txt diff=evil filter=evil\n"u8.ToArray(),
+            ["a.txt"] = "before\n"u8.ToArray()
+        });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        var sentinel = Path.Combine(repository.Path, ".git", "helper-ran");
+        var helper = Path.Combine(repository.Path, ".git", OperatingSystem.IsWindows() ? "evil.cmd" : "evil.sh");
+        if (OperatingSystem.IsWindows())
+        {
+            File.WriteAllText(helper, $"@echo ran>\"{sentinel}\"\r\n");
+        }
+        else
+        {
+            File.WriteAllText(helper, $"#!/bin/sh\nprintf ran > '{sentinel}'\n");
+            File.SetUnixFileMode(helper, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        repository.Git("config", "core.fsmonitor", helper);
+        repository.Git("config", "diff.evil.textconv", helper);
+        repository.Git("config", "filter.evil.clean", helper);
+        repository.Git("config", "filter.evil.smudge", helper);
+        Directory.CreateDirectory(Path.Combine(repository.Path, ".git", "refs", "replace"));
+        File.WriteAllText(Path.Combine(repository.Path, ".git", "refs", "replace", baseCommit), headCommit + "\n");
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 1024 * 1024);
+
+        var identity = await GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken);
+
+        Assert.False(File.Exists(sentinel));
+        Assert.Equal(headCommit, identity.HeadCommit);
+    }
+
+    [Fact]
+    public async Task Controlled_git_raw_source_check_exposes_ignored_skip_worktree_symlink_and_alternates()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]>
+        {
+            [".gitignore"] = "ignored.txt\n"u8.ToArray(),
+            ["a.txt"] = "before\n"u8.ToArray()
+        });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 1024 * 1024);
+
+        repository.Git("update-index", "--skip-worktree", "a.txt");
+        repository.Write("a.txt", "hidden\n"u8.ToArray());
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+        repository.Git("update-index", "--no-skip-worktree", "a.txt");
+        repository.Write("a.txt", "after\n"u8.ToArray());
+
+        repository.Write("ignored.txt", "ignored\n"u8.ToArray());
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+        repository.Delete("ignored.txt");
+
+        File.CreateSymbolicLink(Path.Combine(repository.Path, "outside-link"), "/etc/passwd");
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+        File.Delete(Path.Combine(repository.Path, "outside-link"));
+
+        Directory.CreateDirectory(Path.Combine(controlled.ControlledGitDirectory, "objects", "info"));
+        File.WriteAllText(Path.Combine(controlled.ControlledGitDirectory, "objects", "info", "alternates"), "/tmp/untrusted\n");
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Controlled_git_output_bound_and_cancellation_fail_typed()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "before\n"u8.ToArray() });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var bounded = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 8);
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            bounded, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+
+        using var cancelled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 1024 * 1024);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            cancelled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(), cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Controlled_git_rechecks_root_owned_quiescence_before_accepting_evidence()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "before\n"u8.ToArray() });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path,
+            Path.Combine(repository.Path, ".git"),
+            "/usr/bin/git",
+            1024 * 1024,
+            () => repository.Write("a.txt", "mutated during capture\n"u8.ToArray()));
+
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
             TestContext.Current.CancellationToken));
     }
 
     [Fact]
     public void Isolated_root_issuer_drives_the_exact_safe_receipt_and_consumer_path()
     {
-        var host = ReviewAuthorityHost.CreateIsolatedTest();
         var policy = Policy();
         var request = Request(policy);
+        var evidencePolicy = EvidencePolicy();
+        var host = ReviewAuthorityHost.CreateIsolatedTest(
+            RootContext("run-1", request, policy, evidencePolicy.Identity), Time(1));
         var capability = host.IssueCapability(
             request.Capability,
             "capability-proof-1",
@@ -101,7 +238,7 @@ public sealed class ReviewCoreTests
 
         var receipt = ContractValidator.ParseAndValidate(
             ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(normalized)));
-        Assert.Equal("PASS", JsonNode.Parse(receipt.CanonicalBytes)!["outcome"]!.GetValue<string>());
+        Assert.Equal("PASS", JsonNode.Parse(receipt.CanonicalBytes.Span)!["outcome"]!.GetValue<string>());
 
         host.IssueAcceptance(
             receipt,
@@ -110,7 +247,7 @@ public sealed class ReviewCoreTests
                 "run-1",
                 "review-request-1",
                 request.Identity.PlanIdentity,
-                EvidencePolicy().Identity,
+                evidencePolicy.Identity,
                 policy.ContentIdentity,
                 policy.SourceRevision,
                 policy.AuthorityKind,
@@ -119,18 +256,115 @@ public sealed class ReviewCoreTests
                 request.Identity.BaseCommit),
             ReviewEvidenceRole.Independent);
 
+        var transition = new TransitionEvidence(
+            AuthorizationCeiling.Pr,
+            request.Identity.BaseCommit,
+            request.Identity.HeadCommit,
+            request.Identity.HeadTree,
+            Policy: evidencePolicy,
+            ReviewReceipt: receipt,
+            ReviewAuthority: host.Authority,
+            RequiredReviewAuthorityRealm: ReviewAuthorityRealm.Test);
         WorkflowTransition.EnsureAllowed(
             WorkflowState.IndependentReview,
             WorkflowState.PrAuthorized,
-            new TransitionEvidence(
-                AuthorizationCeiling.Pr,
-                request.Identity.BaseCommit,
-                request.Identity.HeadCommit,
-                request.Identity.HeadTree,
-                Policy: EvidencePolicy(),
-                ReviewReceipt: receipt,
-                ReviewAuthority: host.Authority,
-                RequiredReviewAuthorityRealm: ReviewAuthorityRealm.Test));
+            transition);
+
+        host.RevokeCapability(capability.ProofIdentity);
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized, transition));
+        var restarted = ReviewAuthorityHost.CreateIsolatedTest(
+            RootContext("run-1", request, policy, evidencePolicy.Identity), Time(1));
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+            WorkflowState.IndependentReview,
+            WorkflowState.PrAuthorized,
+            transition with { ReviewAuthority = restarted.Authority }));
+    }
+
+    [Fact]
+    public void Root_issuer_rejects_every_mutated_acceptance_binding()
+    {
+        var policy = Policy();
+        var request = Request(policy);
+        var evidencePolicy = EvidencePolicy();
+        var root = RootContext("binding-run", request, policy, evidencePolicy.Identity) with
+        {
+            SourceAuthorityIdentity = "binding-source"
+        };
+        var host = ReviewAuthorityHost.CreateIsolatedTest(root, Time(1));
+        var capability = host.IssueCapability(request.Capability, "binding-capability", Time(0), Time(2));
+        var execution = host.RecordExecution(
+            "binding-request", "binding-execution", true, true, Identity('f'), "ship", Time(1));
+        var review = ReviewNormalizer.Normalize(request, Result(), policy, capability, execution);
+        var receipt = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(review)));
+        var valid = new ReviewAcceptanceContext(
+            root.RunIdentity, "binding-request", root.PlanIdentity, root.EvidencePolicyIdentity,
+            root.ReviewPolicyContentIdentity, root.ReviewPolicySourceRevision,
+            root.ReviewPolicyAuthorityKind, root.SourceAuthorityIdentity, root.SourceRoot,
+            root.ProtectedBaseCommit);
+        var mutations = new[]
+        {
+            valid with { RunIdentity = "wrong" },
+            valid with { RequestIdentity = "wrong" },
+            valid with { PlanIdentity = Identity('9') },
+            valid with { EvidencePolicyIdentity = Identity('9') },
+            valid with { ReviewPolicyContentIdentity = Identity('9') },
+            valid with { ReviewPolicySourceRevision = Commit('9') },
+            valid with { ReviewPolicyAuthorityKind = ReviewPolicyAuthorityKind.WorkerBranch },
+            valid with { SourceAuthorityIdentity = "wrong" },
+            valid with { SourceRoot = "/wrong/source" },
+            valid with { ProtectedBaseCommit = Commit('9') }
+        };
+
+        Assert.All(mutations, mutated => Assert.Throws<InvalidOperationException>(() =>
+            host.IssueAcceptance(receipt, review, mutated, ReviewEvidenceRole.Independent)));
+        host.IssueAcceptance(receipt, review, valid, ReviewEvidenceRole.Independent);
+        Assert.False(host.Authority.Equals(null));
+    }
+
+    [Theory]
+    [InlineData("ship", ReviewOutcome.Pass, 0)]
+    [InlineData("needs-attention", ReviewOutcome.Fail, 1)]
+    [InlineData("do-not-ship", ReviewOutcome.Fail, 1)]
+    [InlineData("anything-else", ReviewOutcome.Error, 1)]
+    public void Supported_live_producer_maps_real_verdict_grammar_and_preserves_findings(
+        string rawVerdict,
+        ReviewOutcome expected,
+        int findingCount)
+    {
+        var host = ReviewAuthorityHost.CreateIsolatedTest(Time(1));
+        var policy = Policy();
+        var findings = Enumerable.Range(0, findingCount)
+            .Select(index => new ReviewFinding($"R{index}", "material", "finding", "A.cs:1"))
+            .ToArray();
+        var observation = new LiveReviewerObservation(
+            true, true, true, true, true,
+            "fixture", "1", "source", "live-capability", Time(0), Time(2),
+            "live-request", "live-execution", "VERDICT output"u8.ToArray(), rawVerdict,
+            findings, Time(1), true);
+
+        var normalized = SupportedLiveReviewProducer.Produce(host, Request(policy), policy, observation);
+
+        Assert.Equal(expected, normalized.Outcome);
+        Assert.Equal(findings, normalized.Findings);
+        Assert.Equal(expected == ReviewOutcome.Pass, normalized.AuthorityAccepted);
+    }
+
+    [Fact]
+    public void Missing_live_configuration_remains_incomplete()
+    {
+        var policy = Policy();
+        var observation = new LiveReviewerObservation(
+            false, false, false, false, false,
+            "fixture", "1", "source", "missing", Time(0), Time(2),
+            "request", "execution", [], "ship", [], Time(1), true);
+
+        var normalized = SupportedLiveReviewProducer.Produce(
+            ReviewAuthorityHost.CreateIsolatedTest(Time(1)), Request(policy), policy, observation);
+
+        Assert.Equal(ReviewOutcome.Incomplete, normalized.Outcome);
+        Assert.False(normalized.AuthorityAccepted);
     }
 
     [Fact]
@@ -209,12 +443,19 @@ public sealed class ReviewCoreTests
             Result() with { TimedOut = true },
             Result() with { Truncated = true },
             Result() with { Findings = null },
+            Result() with { Verdict = null! },
             Result() with { Identity = identity with { HeadCommit = Commit('d') } },
             Result() with { Identity = identity with { PatchSha256 = Identity('9') } },
             Result() with { ReviewerFamily = "pi" }
         };
         Assert.All(cases, value => Assert.NotEqual(
             ReviewOutcome.Pass, ReviewNormalizer.Normalize(Request(policy), value, policy).Outcome));
+        Assert.NotEqual(
+            ReviewOutcome.Pass,
+            ReviewNormalizer.Normalize(
+                Request(policy) with { Capability = Capability() with { Scopes = null! } },
+                Result(),
+                policy).Outcome);
     }
 
     [Theory]
@@ -240,34 +481,106 @@ public sealed class ReviewCoreTests
     public void Unchanged_reuse_requires_trusted_policy_exact_identity_and_original_provenance()
     {
         var policy = Policy(true);
-        var receipt = ReviewNormalizer.Normalize(Request(policy), Result(), policy);
-        Assert.True(ReviewInvalidation.Assess(receipt, Patch(), policy, MaterialChange.None).Reusable);
+        var request = Request(policy);
+        var evidencePolicy = EvidencePolicy();
+        var host = ReviewAuthorityHost.CreateIsolatedTest(
+            RootContext("reuse-run", request, policy, evidencePolicy.Identity), Time(1));
+        var capability = host.IssueCapability(request.Capability, "reuse-capability", Time(0), Time(2));
+        var execution = host.RecordExecution(
+            "reuse-request", "reuse-execution", true, true, Identity('f'), "ship", Time(1));
+        var receipt = ReviewNormalizer.Normalize(request, Result(), policy, capability, execution);
+        var contract = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(receipt)));
+        host.IssueAcceptance(
+            contract,
+            receipt,
+            new ReviewAcceptanceContext(
+                "reuse-run", "reuse-request", request.Identity.PlanIdentity, evidencePolicy.Identity,
+                policy.ContentIdentity, policy.SourceRevision, policy.AuthorityKind,
+                "reuse-source-authority", "/trusted/source", request.Identity.BaseCommit),
+            ReviewEvidenceRole.Independent);
+        var reuse = host.CreateReuseContext(contract, ReviewEvidenceRole.Independent, request, capability);
+        Assert.True(ReviewInvalidation.Assess(
+            receipt, Patch(), policy, MaterialChange.None, reuse).Reusable);
         Assert.False(ReviewInvalidation.Assess(
-            receipt, Patch() with { HeadTree = Commit('d') }, policy, MaterialChange.None).Reusable);
+            receipt, Patch() with { HeadTree = Commit('d') }, policy, MaterialChange.None, reuse).Reusable);
+
+        var changedRequests = new[]
+        {
+            request with { Capability = request.Capability with { AdapterId = "other" } },
+            request with { Capability = request.Capability with { AdapterVersion = "2" } },
+            request with { Capability = request.Capability with { Family = "pi" } },
+            request with { Capability = request.Capability with { Fixture = false } },
+            request with { Capability = request.Capability with { Scopes = ["docs"] } },
+            request with { Scope = "docs" }
+        };
+        foreach (var changed in changedRequests)
+        {
+            var changedContext = host.CreateReuseContext(
+                contract, ReviewEvidenceRole.Independent, changed, capability);
+            var decision = ReviewInvalidation.Assess(
+                receipt, Patch(), Policy(false), MaterialChange.None, changedContext);
+            Assert.True(decision.Invalidated);
+            Assert.False(decision.Reusable);
+        }
+
         Assert.False(ReviewInvalidation.Assess(
-            WithoutOriginalExecution(receipt), Patch(), policy, MaterialChange.None).Reusable);
+            WithoutOriginalExecution(receipt), Patch(), policy, MaterialChange.None, reuse).Reusable);
+        host.RevokeCapability(capability.ProofIdentity);
+        Assert.True(ReviewInvalidation.Assess(
+            receipt, Patch(), policy, MaterialChange.None, reuse).Invalidated);
         Assert.False(ReviewInvalidation.Assess(
-            receipt, Patch(), Policy(false), MaterialChange.None).Reusable);
+            receipt, Patch(), Policy(false), MaterialChange.None, reuse).Reusable);
     }
 
     [Fact]
     public void Explicit_budget_exhaustion_pauses_and_preserves_findings()
     {
-        var ledger = new ReviewBudgetLedger(new ReviewBudget(1, TimeSpan.FromSeconds(5), 100, 1m));
-        Assert.True(ledger.TryReserve(new ReviewCost(TimeSpan.FromSeconds(4), 80, .75m), out _));
+        var ledger = ReviewBudgetLedger.FromTrustedPolicy(Policy());
+        Assert.True(ledger.TryReserve(
+            new ReviewCost(TimeSpan.FromMinutes(4), 18_000, 1.5m),
+            out var reservation,
+            out _));
         var finding = new ReviewFinding("R1", "material", "fix this", "A.cs:1");
         ledger.RecordFindings([finding]);
-        Assert.False(ledger.TryReserve(new ReviewCost(TimeSpan.FromSeconds(2), 30, .50m), out var exhausted));
-        Assert.Equal(ReviewOutcome.Incomplete, exhausted.Outcome);
-        Assert.Equal([finding], exhausted.Findings);
+        var settled = ledger.Settle(
+            reservation!,
+            new ReviewCost(TimeSpan.FromMinutes(6), 21_000, 2.5m));
+        Assert.Equal(ReviewOutcome.Incomplete, settled.Outcome);
+        Assert.Contains("exhausted", settled.Reason, StringComparison.Ordinal);
+        Assert.Equal([finding], settled.Findings);
         Assert.Equal(1, ledger.ConsumedRounds);
+        Assert.False(ledger.TryReserve(
+            new ReviewCost(TimeSpan.FromSeconds(1), 1, .01m),
+            out _,
+            out var exhausted));
+        Assert.Equal([finding], exhausted.Findings);
+    }
+
+    [Fact]
+    public void Budget_reservation_is_atomic_under_concurrency_and_every_success_settles()
+    {
+        var ledger = ReviewBudgetLedger.FromTrustedPolicy(Policy());
+        var reservations = new System.Collections.Concurrent.ConcurrentBag<ReviewBudgetReservation>();
+        Parallel.For(0, 12, iteration =>
+        {
+            if (ledger.TryReserve(
+                    new ReviewCost(TimeSpan.FromSeconds(1), 10, .01m),
+                    out var reservation,
+                    out _))
+                reservations.Add(reservation!);
+        });
+
+        Assert.Equal(2, reservations.Count);
+        foreach (var reservation in reservations)
+            ledger.Settle(reservation, new ReviewCost(TimeSpan.FromSeconds(1), 10, .01m));
+        Assert.Equal(2, ledger.ConsumedRounds);
     }
 
     [Fact]
     public void Raw_capability_and_mutable_caller_collections_cannot_gain_or_change_authority()
     {
         var capability = new ReviewerCapability("caller", "1", "claude", true, false, false, ["source"]);
-        Assert.False(capability.ProductionCapable);
 
         var artifacts = new Dictionary<string, string> { ["tests"] = Identity('1') };
         var findings = new List<ReviewFinding> { new("R1", "material", "before", "A.cs:1") };
@@ -290,7 +603,6 @@ public sealed class ReviewCoreTests
         using var repository = new TinyGitRepository();
         var protectedJson = """
             {
-              "PolicyIdentity": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
               "Fixture": false,
               "Advisory": false,
               "AllowedFamilies": [{ "Author": "gpt", "Reviewer": "claude" }],
@@ -312,7 +624,9 @@ public sealed class ReviewCoreTests
         repository.Write("policy/review.json", Encoding.UTF8.GetBytes("{}"));
         repository.CommitAll();
 
-        var policy = await new ProtectedReviewPolicyResolver(repository.Path, protectedBase)
+        var source = ReviewAuthorityHost.CreateIsolatedTest().FreezeProtectedSource(
+            repository.Path, protectedBase, "test-source-authority", "/usr/bin/git");
+        var policy = await new ProtectedReviewPolicyResolver(source)
             .ResolveAsync("policy/review.json", TestContext.Current.CancellationToken);
 
         Assert.True(policy.Trusted);
@@ -333,10 +647,68 @@ public sealed class ReviewCoreTests
         });
 
         var error = await Assert.ThrowsAsync<ReviewPolicyException>(() =>
-            new ProtectedReviewPolicyResolver(repository.Path, protectedBase)
+            new ProtectedReviewPolicyResolver(
+                    ReviewAuthorityHost.CreateIsolatedTest().FreezeProtectedSource(
+                        repository.Path, protectedBase, "test-source-authority", "/usr/bin/git"))
                 .ResolveAsync("policy/review.json", TestContext.Current.CancellationToken));
 
         Assert.Contains("malformed", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("duplicate")]
+    [InlineData("null-family")]
+    public async Task Protected_policy_duplicate_and_null_inputs_fail_typed(string malformed)
+    {
+        using var repository = new TinyGitRepository();
+        var families = malformed == "null-family"
+            ? "[null]"
+            : "[{ \"Author\": \"gpt\", \"Reviewer\": \"claude\" }]";
+        var duplicate = malformed == "duplicate" ? ", \"Fixture\": true" : string.Empty;
+        var json = $$"""
+            {
+              "Fixture": false{{duplicate}},
+              "Advisory": false,
+              "AllowedFamilies": {{families}},
+              "AllowedScopes": ["source"],
+              "AllowExactReuse": false,
+              "Budget": {
+                "MaximumRounds": 1,
+                "MaximumDuration": "00:01:00",
+                "MaximumTokens": 100,
+                "MaximumCost": 1.0
+              },
+              "ExemptionApprovers": []
+            }
+            """;
+        var protectedBase = repository.Commit(new Dictionary<string, byte[]>
+        {
+            ["policy/review.json"] = Encoding.UTF8.GetBytes(json)
+        });
+        var source = ReviewAuthorityHost.CreateIsolatedTest().FreezeProtectedSource(
+            repository.Path, protectedBase, "test-source-authority", "/usr/bin/git");
+
+        await Assert.ThrowsAsync<ReviewPolicyException>(() =>
+            new ProtectedReviewPolicyResolver(source)
+                .ResolveAsync("policy/review.json", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public void Production_source_context_rejects_worker_selected_ancestor_or_branch_base()
+    {
+        using var repository = new TinyGitRepository();
+        var protectedBase = repository.Commit(new Dictionary<string, byte[]> { ["policy/review.json"] = "{}"u8.ToArray() });
+        repository.Write("worker.txt", "worker"u8.ToArray());
+        var workerBase = repository.CommitAll();
+        var host = ReviewAuthorityHost.CreateProduction(new ProductionReviewAuthorityConfiguration(
+            "production-root",
+            new ReviewAuthorityRootContext(
+                "run", Identity('e'), Identity('0'), Identity('7'), Commit('f'),
+                ReviewPolicyAuthorityKind.ProtectedGitBase,
+                "parent-source", repository.Path, protectedBase)));
+
+        Assert.Throws<InvalidOperationException>(() => host.FreezeProtectedSource(
+            repository.Path, workerBase, "parent-source", "/usr/bin/git"));
     }
 
     [Fact]
@@ -415,6 +787,21 @@ public sealed class ReviewCoreTests
         Assert.NotEqual(ReviewOutcome.Pass,
             ReviewNormalizer.Normalize(Request(ReviewPolicy.Missing), Result(), ReviewPolicy.Missing).Outcome);
     }
+
+    private static ReviewAuthorityRootContext RootContext(
+        string runIdentity,
+        ReviewRequest request,
+        ReviewPolicy policy,
+        string evidencePolicyIdentity) => new(
+        runIdentity,
+        request.Identity.PlanIdentity,
+        evidencePolicyIdentity,
+        policy.ContentIdentity,
+        policy.SourceRevision,
+        policy.AuthorityKind,
+        runIdentity == "reuse-run" ? "reuse-source-authority" : "source-authority-1",
+        "/trusted/source",
+        request.Identity.BaseCommit);
 
     private static ReviewPolicy Policy(bool allowReuse = false) => ReviewPolicy.TrustedFixture(
         Identity('7'), [new FamilyPair("gpt", "claude")], ["source"], allowReuse,

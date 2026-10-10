@@ -8,5 +8,6 @@
     <PackageReference Include="xunit.v3" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <ProjectReference Include="../DeliveryForge.Execution/DeliveryForge.Execution.csproj" />
+    <ProjectReference Include="../../review/DeliveryForge.Review/DeliveryForge.Review.csproj" />
   </ItemGroup>
 </Project>

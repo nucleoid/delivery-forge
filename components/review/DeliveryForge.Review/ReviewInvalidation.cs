@@ -22,7 +22,8 @@ public static class ReviewInvalidation
         NormalizedReview receipt,
         PatchIdentity current,
         ReviewPolicy policy,
-        MaterialChange change)
+        MaterialChange change,
+        IssuedReviewReuseContext? issuedContext = null)
     {
         ArgumentNullException.ThrowIfNull(receipt);
         ArgumentNullException.ThrowIfNull(current);
@@ -38,8 +39,20 @@ public static class ReviewInvalidation
             receipt.Fixture != policy.Fixture ||
             receipt.Advisory != policy.Advisory)
             return new(true, false, "Review policy provenance changed.");
-        if (!receipt.OriginalExecution)
-            return new(true, false, "Original review execution provenance is unavailable.");
+        if (!receipt.OriginalExecution || !receipt.AuthorityAccepted)
+            return new(true, false, "Original issued review execution provenance is unavailable.");
+        if (issuedContext is null || !issuedContext.AcceptanceCurrent || !issuedContext.CapabilityCurrent ||
+            !ReviewNormalizer.SameIdentity(receipt.Identity, issuedContext.Request.Identity) ||
+            !string.Equals(receipt.AuthorFamily, issuedContext.Request.AuthorFamily, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(receipt.ReviewerFamily, issuedContext.Request.Capability.Family, StringComparison.OrdinalIgnoreCase) ||
+            !string.Equals(receipt.AdapterId, issuedContext.Request.Capability.AdapterId, StringComparison.Ordinal) ||
+            !string.Equals(receipt.AdapterVersion, issuedContext.Request.Capability.AdapterVersion, StringComparison.Ordinal) ||
+            !string.Equals(receipt.Scope, issuedContext.Request.Scope, StringComparison.Ordinal) ||
+            !string.Equals(receipt.CapabilityProofIdentity, issuedContext.CapabilityProofIdentity, StringComparison.Ordinal) ||
+            receipt.AuthorityRealm != issuedContext.Realm ||
+            (receipt.AuthorityRealm == DeliveryForge.Contracts.State.ReviewAuthorityRealm.Production &&
+             !receipt.ProductionAccepted))
+            return new(true, false, "Adapter, version, scope, family, capability, realm, or acceptance provenance changed.");
         if (!policy.Trusted || !policy.AllowExactReuse)
             return new(false, false, "Trusted policy does not permit exact receipt reuse.");
         if (receipt.Outcome != ReviewOutcome.Pass)

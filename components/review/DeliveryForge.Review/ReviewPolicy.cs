@@ -133,7 +133,7 @@ public sealed partial class ReviewPolicy
             !GitPattern().IsMatch(candidate.SourceRevision))
             throw new ReviewPolicyException("Review policy identities are malformed.");
         if (candidate.AllowedFamilies.Count == 0 ||
-            candidate.AllowedFamilies.Any(pair => Unknown(pair.Author) || Unknown(pair.Reviewer) ||
+            candidate.AllowedFamilies.Any(pair => pair is null || Unknown(pair.Author) || Unknown(pair.Reviewer) ||
                                                   Same(pair.Author, pair.Reviewer)) ||
             candidate.AllowedFamilies.Distinct().Count() != candidate.AllowedFamilies.Count)
             throw new ReviewPolicyException("Review family policy is empty, duplicated, unknown, or self-reviewing.");
@@ -147,10 +147,11 @@ public sealed partial class ReviewPolicy
             throw new ReviewPolicyException("Exemption approvers are malformed.");
     }
 
-    internal static bool Unknown(string value) =>
+    internal static bool Unknown(string? value) =>
         string.IsNullOrWhiteSpace(value) || string.Equals(value, "unknown", StringComparison.OrdinalIgnoreCase);
 
-    internal static bool Same(string left, string right) =>
+    internal static bool Same(string? left, string? right) =>
+        !string.IsNullOrWhiteSpace(left) && !string.IsNullOrWhiteSpace(right) &&
         string.Equals(left.Trim(), right.Trim(), StringComparison.OrdinalIgnoreCase);
 
     private static string Identity(char value) => $"sha256:{new string(value, 64)}";
@@ -162,9 +163,30 @@ public sealed partial class ReviewPolicy
     private static partial Regex GitPattern();
 }
 
-public sealed class ProtectedReviewPolicyResolver(string repositoryRoot, string protectedBaseCommit)
+public sealed class ProtectedReviewSourceContext
 {
-    private readonly string _root = Path.GetFullPath(repositoryRoot);
+    internal ProtectedReviewSourceContext(
+        string sourceRoot,
+        string protectedBaseCommit,
+        string sourceAuthorityIdentity,
+        string trustedGitExecutable)
+    {
+        SourceRoot = Path.GetFullPath(sourceRoot);
+        ProtectedBaseCommit = protectedBaseCommit;
+        SourceAuthorityIdentity = sourceAuthorityIdentity;
+        TrustedGitExecutable = Path.GetFullPath(trustedGitExecutable);
+    }
+
+    public string SourceRoot { get; }
+    public string ProtectedBaseCommit { get; }
+    public string SourceAuthorityIdentity { get; }
+    public string TrustedGitExecutable { get; }
+}
+
+public sealed class ProtectedReviewPolicyResolver(ProtectedReviewSourceContext sourceContext)
+{
+    private readonly ProtectedReviewSourceContext _source = sourceContext ??
+        throw new ArgumentNullException(nameof(sourceContext));
 
     public async Task<ReviewPolicy> ResolveAsync(
         string repositoryRelativePath,
@@ -174,14 +196,14 @@ public sealed class ProtectedReviewPolicyResolver(string repositoryRoot, string 
             repositoryRelativePath.Split(['/', '\\']).Any(segment => segment is "" or "." or ".."))
             throw new ReviewPolicyException("A safe repository-relative policy path is required.");
 
-        var exactBase = await GitTextAsync(["rev-parse", "--verify", $"{protectedBaseCommit}^{{commit}}"], cancellationToken);
-        if (!string.Equals(exactBase.Trim(), protectedBaseCommit, StringComparison.Ordinal))
+        var exactBase = await GitTextAsync(["rev-parse", "--verify", $"{_source.ProtectedBaseCommit}^{{commit}}"], cancellationToken);
+        if (!string.Equals(exactBase.Trim(), _source.ProtectedBaseCommit, StringComparison.Ordinal))
             throw new ReviewPolicyException("Git did not resolve the exact protected review-policy base.");
 
         var head = (await GitTextAsync(["rev-parse", "HEAD"], cancellationToken)).Trim();
-        await GitTextAsync(["merge-base", "--is-ancestor", protectedBaseCommit, head], cancellationToken);
+        await GitTextAsync(["merge-base", "--is-ancestor", _source.ProtectedBaseCommit, head], cancellationToken);
         var bytes = await GitBytesAsync(
-            ["show", $"{protectedBaseCommit}:{repositoryRelativePath.Replace('\\', '/')}"], cancellationToken);
+            ["show", $"{_source.ProtectedBaseCommit}:{repositoryRelativePath.Replace('\\', '/')}"], cancellationToken);
         ReviewPolicyFile candidate;
         try
         {
@@ -190,7 +212,8 @@ public sealed class ProtectedReviewPolicyResolver(string repositoryRoot, string 
                 new JsonSerializerOptions
                 {
                     PropertyNameCaseInsensitive = false,
-                    UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
+                    UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow,
+                    AllowDuplicateProperties = false
                 }) ?? throw new ReviewPolicyException("Protected review policy is empty.");
         }
         catch (JsonException error)
@@ -200,7 +223,7 @@ public sealed class ProtectedReviewPolicyResolver(string repositoryRoot, string 
 
         var contentIdentity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
         var resolved = new ReviewPolicyCandidate(
-            contentIdentity, contentIdentity, protectedBaseCommit, candidate.Fixture,
+            contentIdentity, contentIdentity, _source.ProtectedBaseCommit, candidate.Fixture,
             candidate.Advisory, candidate.AllowedFamilies, candidate.AllowedScopes,
             candidate.AllowExactReuse, candidate.Budget, candidate.ExemptionApprovers);
         return ReviewPolicy.FromVerifiedProtectedSource(resolved);
@@ -211,7 +234,8 @@ public sealed class ProtectedReviewPolicyResolver(string repositoryRoot, string 
 
     private async Task<byte[]> GitBytesAsync(IReadOnlyList<string> args, CancellationToken cancellationToken)
     {
-        var result = await GitProcess.RunAsync(_root, args, cancellationToken);
+        var result = await GitProcess.RunAsync(
+            _source.SourceRoot, args, cancellationToken, _source.TrustedGitExecutable);
         if (result.ExitCode != 0)
             throw new ReviewPolicyException($"Protected review policy Git read failed: git {string.Join(" ", args)}.");
         return result.StandardOutput;
@@ -219,7 +243,6 @@ public sealed class ProtectedReviewPolicyResolver(string repositoryRoot, string 
 
     private sealed class ReviewPolicyFile
     {
-        public required string PolicyIdentity { get; init; }
         public required bool Fixture { get; init; }
         public required bool Advisory { get; init; }
         public required IReadOnlyList<FamilyPair> AllowedFamilies { get; init; }

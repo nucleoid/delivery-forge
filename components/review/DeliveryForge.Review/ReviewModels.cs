@@ -1,3 +1,5 @@
+using DeliveryForge.Contracts.State;
+
 namespace DeliveryForge.Review;
 
 public enum ReviewOutcome
@@ -25,13 +27,123 @@ public sealed record ReviewerCapability(
     bool Supported,
     bool Fixture,
     bool Advisory,
-    IReadOnlyList<string> Scopes)
-{
-    internal bool AuthorityVerified { get; init; }
-    public bool ProductionCapable =>
-        AuthorityVerified && Supported && !Fixture && !Advisory;
+    IReadOnlyList<string> Scopes);
 
-    internal ReviewerCapability WithVerifiedAuthority() => this with { AuthorityVerified = true };
+public sealed class IssuedReviewerCapability
+{
+    internal IssuedReviewerCapability(
+        string rootIdentity,
+        string proofIdentity,
+        ReviewerCapability capability,
+        ReviewAuthorityRealm realm,
+        DateTimeOffset validFrom,
+        DateTimeOffset validUntil,
+        Func<bool> isRevoked)
+    {
+        RootIdentity = rootIdentity;
+        ProofIdentity = proofIdentity;
+        Capability = capability with { Scopes = capability.Scopes?.ToArray() ?? [] };
+        Realm = realm;
+        ValidFrom = validFrom;
+        ValidUntil = validUntil;
+        IsRevoked = isRevoked;
+    }
+
+    internal string RootIdentity { get; }
+    public string ProofIdentity { get; }
+    public ReviewerCapability Capability { get; }
+    public ReviewAuthorityRealm Realm { get; }
+    public DateTimeOffset ValidFrom { get; }
+    public DateTimeOffset ValidUntil { get; }
+    internal Func<bool> IsRevoked { get; }
+
+    internal bool Matches(ReviewerCapability capability, string scope, DateTimeOffset completedAt) =>
+        !IsRevoked() &&
+        completedAt >= ValidFrom && completedAt <= ValidUntil &&
+        string.Equals(Capability.AdapterId, capability.AdapterId, StringComparison.Ordinal) &&
+        string.Equals(Capability.AdapterVersion, capability.AdapterVersion, StringComparison.Ordinal) &&
+        ReviewPolicy.Same(Capability.Family, capability.Family) &&
+        Capability.Supported == capability.Supported &&
+        Capability.Fixture == capability.Fixture &&
+        Capability.Advisory == capability.Advisory &&
+        Capability.Scopes.SequenceEqual(capability.Scopes ?? [], StringComparer.Ordinal) &&
+        Capability.Scopes.Contains(scope, StringComparer.Ordinal);
+}
+
+public sealed class AcceptedReviewExecution
+{
+    internal AcceptedReviewExecution(
+        string rootIdentity,
+        string requestIdentity,
+        string executionIdentity,
+        bool accepted,
+        bool completed,
+        string rawArtifactHash,
+        string rawVerdict,
+        DateTimeOffset completedAt,
+        ReviewAuthorityRealm realm)
+    {
+        RootIdentity = rootIdentity;
+        RequestIdentity = requestIdentity;
+        ExecutionIdentity = executionIdentity;
+        Accepted = accepted;
+        Completed = completed;
+        RawArtifactHash = rawArtifactHash;
+        RawVerdict = rawVerdict;
+        CompletedAt = completedAt;
+        Realm = realm;
+    }
+
+    internal string RootIdentity { get; }
+    public string RequestIdentity { get; }
+    public string ExecutionIdentity { get; }
+    public bool Accepted { get; }
+    public bool Completed { get; }
+    public string RawArtifactHash { get; }
+    public string RawVerdict { get; }
+    public DateTimeOffset CompletedAt { get; }
+    public ReviewAuthorityRealm Realm { get; }
+}
+
+public sealed class IssuedReviewReuseContext
+{
+    internal IssuedReviewReuseContext(
+        string rootIdentity,
+        ReviewRequest request,
+        string capabilityProofIdentity,
+        ReviewAuthorityRealm realm,
+        Func<bool> acceptanceCurrent,
+        Func<bool> capabilityCurrent)
+    {
+        RootIdentity = rootIdentity;
+        Request = request with
+        {
+            Identity = new PatchIdentity(
+                request.Identity.BaseCommit,
+                request.Identity.HeadCommit,
+                request.Identity.HeadTree,
+                request.Identity.PatchSha256,
+                request.Identity.PlanIdentity,
+                request.Identity.ArtifactIdentities.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
+                request.Identity.GitVersion,
+                request.Identity.Command.ToArray()),
+            Capability = request.Capability with { Scopes = request.Capability.Scopes?.ToArray() ?? [] }
+        };
+        CapabilityProofIdentity = capabilityProofIdentity;
+        Realm = realm;
+        _acceptanceCurrent = acceptanceCurrent;
+        _capabilityCurrent = capabilityCurrent;
+    }
+
+    private readonly Func<bool> _acceptanceCurrent;
+    private readonly Func<bool> _capabilityCurrent;
+
+    internal string RootIdentity { get; }
+    public ReviewRequest Request { get; }
+    public string CapabilityProofIdentity { get; }
+    public ReviewAuthorityRealm Realm { get; }
+    public bool AcceptanceCurrent => _acceptanceCurrent();
+    public bool CapabilityCurrent => _capabilityCurrent();
 }
 
 public sealed record ReviewRequest(
@@ -84,7 +196,17 @@ public sealed class NormalizedReview
         bool fixture,
         bool advisory,
         bool productionAccepted,
-        bool originalExecution)
+        bool originalExecution,
+        bool authorityAccepted = false,
+        string adapterId = "",
+        string adapterVersion = "",
+        string scope = "",
+        string capabilityProofIdentity = "",
+        DateTimeOffset capabilityValidUntil = default,
+        string executionRequestIdentity = "",
+        string executionIdentity = "",
+        string rawArtifactHash = "",
+        ReviewAuthorityRealm authorityRealm = ReviewAuthorityRealm.Test)
     {
         Outcome = outcome;
         Reason = reason;
@@ -102,6 +224,16 @@ public sealed class NormalizedReview
         Advisory = advisory;
         ProductionAccepted = productionAccepted;
         OriginalExecution = originalExecution;
+        AuthorityAccepted = authorityAccepted;
+        AdapterId = adapterId;
+        AdapterVersion = adapterVersion;
+        Scope = scope;
+        CapabilityProofIdentity = capabilityProofIdentity;
+        CapabilityValidUntil = capabilityValidUntil;
+        ExecutionRequestIdentity = executionRequestIdentity;
+        ExecutionIdentity = executionIdentity;
+        RawArtifactHash = rawArtifactHash;
+        AuthorityRealm = authorityRealm;
     }
 
     public ReviewOutcome Outcome { get; }
@@ -120,4 +252,14 @@ public sealed class NormalizedReview
     public bool Advisory { get; }
     public bool ProductionAccepted { get; }
     public bool OriginalExecution { get; }
+    public bool AuthorityAccepted { get; }
+    public string AdapterId { get; }
+    public string AdapterVersion { get; }
+    public string Scope { get; }
+    public string CapabilityProofIdentity { get; }
+    public DateTimeOffset CapabilityValidUntil { get; }
+    public string ExecutionRequestIdentity { get; }
+    public string ExecutionIdentity { get; }
+    public string RawArtifactHash { get; }
+    public ReviewAuthorityRealm AuthorityRealm { get; }
 }

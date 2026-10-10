@@ -14,7 +14,7 @@ public static class ReviewReceiptSerializer
     public static ReviewReceiptContract Create(NormalizedReview review)
     {
         ArgumentNullException.ThrowIfNull(review);
-        var receiptOutcome = review.Outcome == ReviewOutcome.Pass && !review.ProductionAccepted
+        var receiptOutcome = review.Outcome == ReviewOutcome.Pass && !review.AuthorityAccepted
             ? ReviewOutcome.Incomplete
             : review.Outcome;
         var provisional = new ReviewReceiptContract(

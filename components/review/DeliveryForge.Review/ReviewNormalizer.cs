@@ -5,13 +5,26 @@ public static class ReviewNormalizer
     public static NormalizedReview Normalize(
         ReviewRequest request,
         ReviewResult result,
-        ReviewPolicy policy)
+        ReviewPolicy policy,
+        IssuedReviewerCapability? capabilityAuthority = null,
+        AcceptedReviewExecution? execution = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(result);
         ArgumentNullException.ThrowIfNull(policy);
 
         var findings = result.Findings?.ToArray() ?? [];
+        var capabilityAuthorityValid = capabilityAuthority is not null &&
+                                       request.Capability.Scopes is not null &&
+                                       capabilityAuthority.Matches(request.Capability, request.Scope, result.CompletedAt);
+        var executionAuthorityValid = execution is not null &&
+                                      capabilityAuthority is not null &&
+                                      string.Equals(execution.RootIdentity, capabilityAuthority.RootIdentity, StringComparison.Ordinal) &&
+                                      execution.Realm == capabilityAuthority.Realm &&
+                                      execution.Accepted && execution.Completed &&
+                                      string.Equals(execution.RawArtifactHash, result.ArtifactHash, StringComparison.Ordinal) &&
+                                      execution.CompletedAt == result.CompletedAt &&
+                                      VerdictMatches(execution.RawVerdict, result.Verdict);
         ReviewOutcome outcome;
         string reason;
 
@@ -30,7 +43,8 @@ public static class ReviewNormalizer
             (outcome, reason) = (ReviewOutcome.Incomplete, "The family relationship is not authorized by trusted policy.");
         else if (!request.Capability.Supported)
             (outcome, reason) = (ReviewOutcome.Incomplete, "Reviewer adapter capability is unsupported.");
-        else if (!policy.AllowedScopes.Contains(request.Scope, StringComparer.Ordinal) ||
+        else if (request.Capability.Scopes is null ||
+                 !policy.AllowedScopes.Contains(request.Scope, StringComparer.Ordinal) ||
                  !request.Capability.Scopes.Contains(request.Scope, StringComparer.Ordinal))
             (outcome, reason) = (ReviewOutcome.Incomplete, "Review scope is not authorized and capability-proven.");
         else if (!ReviewPolicy.Same(request.Capability.Family, result.ReviewerFamily))
@@ -43,6 +57,10 @@ public static class ReviewNormalizer
             (outcome, reason) = (ReviewOutcome.Incomplete, "Reviewer output was truncated.");
         else if (result.Findings is null)
             (outcome, reason) = (ReviewOutcome.Incomplete, "Reviewer findings payload is missing.");
+        else if (capabilityAuthority is not null && !capabilityAuthorityValid)
+            (outcome, reason) = (ReviewOutcome.Incomplete, "Reviewer capability authority is stale, revoked, or does not match the request.");
+        else if (execution is not null && !executionAuthorityValid)
+            (outcome, reason) = (ReviewOutcome.Incomplete, "Accepted reviewer execution does not match the result and capability authority.");
         else if (policy.Advisory || request.Capability.Advisory || result.Advisory)
             (outcome, reason) = (ReviewOutcome.Incomplete, "Advisory review evidence cannot pass.");
         else
@@ -54,10 +72,11 @@ public static class ReviewNormalizer
 
         var fixture = policy.Fixture || request.Capability.Fixture || result.Fixture;
         var advisory = policy.Advisory || request.Capability.Advisory || result.Advisory;
-        var productionAccepted =
-            outcome == ReviewOutcome.Pass &&
-            policy.Trusted && !fixture && !advisory &&
-            request.Capability.ProductionCapable;
+        var authorityAccepted =
+            outcome == ReviewOutcome.Pass && policy.Trusted && !advisory &&
+            capabilityAuthorityValid && executionAuthorityValid;
+        var productionAccepted = authorityAccepted && !fixture &&
+                                 capabilityAuthority!.Realm == DeliveryForge.Contracts.State.ReviewAuthorityRealm.Production;
 
         return new NormalizedReview(
             outcome,
@@ -75,7 +94,17 @@ public static class ReviewNormalizer
             fixture,
             advisory,
             productionAccepted,
-            originalExecution: true);
+            originalExecution: executionAuthorityValid,
+            authorityAccepted,
+            request.Capability.AdapterId,
+            request.Capability.AdapterVersion,
+            request.Scope,
+            capabilityAuthority?.ProofIdentity ?? string.Empty,
+            capabilityAuthority?.ValidUntil ?? default,
+            execution?.RequestIdentity ?? string.Empty,
+            execution?.ExecutionIdentity ?? string.Empty,
+            execution?.RawArtifactHash ?? string.Empty,
+            capabilityAuthority?.Realm ?? DeliveryForge.Contracts.State.ReviewAuthorityRealm.Test);
     }
 
     internal static bool SameIdentity(PatchIdentity left, PatchIdentity right) =>
@@ -101,8 +130,20 @@ public static class ReviewNormalizer
         identity.ArtifactIdentities.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
         identity.GitVersion,
         identity.Command.ToArray());
-    private static (ReviewOutcome, string) NormalizeVerdict(string verdict) =>
-        verdict.Trim().ToUpperInvariant() switch
+    private static bool VerdictMatches(string rawVerdict, string? normalizedVerdict)
+    {
+        var mapped = rawVerdict.Trim().ToLowerInvariant() switch
+        {
+            "ship" => "PASS",
+            "needs-attention" => "FAIL",
+            "do-not-ship" => "FAIL",
+            _ => "ERROR"
+        };
+        return string.Equals(mapped, normalizedVerdict?.Trim(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static (ReviewOutcome, string) NormalizeVerdict(string? verdict) =>
+        verdict?.Trim().ToUpperInvariant() switch
         {
             "PASS" => (ReviewOutcome.Pass, "Reviewer returned PASS."),
             "FAIL" => (ReviewOutcome.Fail, "Reviewer returned material findings."),
