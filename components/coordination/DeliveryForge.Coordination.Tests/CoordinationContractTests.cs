@@ -2,6 +2,61 @@ namespace DeliveryForge.Coordination.Tests;
 
 public sealed class CoordinationContractTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Recovery_payload_missing_acquired_lease_fails_before_cleanup(bool omitProperty)
+    {
+        var original = new FixtureCheckpointStore();
+        var transport = SingleLeaseTransport();
+        var producer = await CreateAdapterAsync(transport, checkpoints: original);
+        _ = await producer.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        Assert.Equal(2, original.Records.Count);
+        var records = original.Records.ToArray();
+        var json = System.Text.Json.Nodes.JsonNode.Parse(System.Text.Json.JsonSerializer.Serialize(records[1]))!;
+        if (omitProperty) json["Progress"]!.AsObject().Remove("Lease");
+        else json["Progress"]!["Lease"] = null;
+        records[1] = System.Text.Json.JsonSerializer.Deserialize<CoordinationCheckpointRecord>(json.ToJsonString())!;
+        var replay = new FixtureCheckpointStore { ReverseReads = true };
+        foreach (var record in records) replay.Inject(record);
+        var receiver = await CreateAdapterAsync(transport, checkpoints: replay);
+
+        await Assert.ThrowsAsync<CoordinationProtocolException>(() => receiver.RecoverForCleanupAsync(
+            records[0].Prepared!.LifecycleId, Owner, [Issue(6)], "payload-restart",
+            TestContext.Current.CancellationToken));
+        Assert.Equal(2, replay.Records.Count);
+        Assert.Single(transport.AcquireRequests);
+        Assert.Empty(transport.ReleaseRequests);
+        Assert.Empty(transport.InspectRequests);
+    }
+
+    [Fact]
+    public async Task Recovery_payload_valid_acquired_lease_retains_cleanup_identity()
+    {
+        var original = new FixtureCheckpointStore();
+        var transport = SingleLeaseTransport();
+        var producer = await CreateAdapterAsync(transport, checkpoints: original);
+        var held = await producer.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        var replay = new FixtureCheckpointStore { ReverseReads = true };
+        foreach (var record in original.Records) replay.Inject(record);
+        var receiver = await CreateAdapterAsync(transport, checkpoints: replay);
+
+        var recovered = await receiver.RecoverForCleanupAsync(original.Records[0].Prepared!.LifecycleId,
+            Owner, [Issue(6)], "valid-payload-restart", TestContext.Current.CancellationToken);
+
+        Assert.Equal(CoordinationLifecyclePhase.Cleaning, recovered.Snapshot.Phase);
+        Assert.NotNull(recovered.Continuation);
+        var retained = Assert.Single(recovered.Snapshot.Leases);
+        var expected = Assert.Single(held.Snapshot.Leases);
+        Assert.Equal(expected.LeaseId, retained.LeaseId);
+        Assert.Equal(expected.Generation, retained.Generation);
+        Assert.Equal(expected.FencingToken, retained.FencingToken);
+        Assert.Equal(TimeSpan.Zero, retained.SafeDeadline);
+        Assert.Empty(transport.ReleaseRequests);
+    }
+
     [Fact]
     public async Task Production_remains_strictly_unavailable()
     {
