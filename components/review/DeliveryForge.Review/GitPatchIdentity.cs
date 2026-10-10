@@ -386,10 +386,46 @@ public static partial class GitPatchIdentity
 
 internal sealed record GitProcessResult(int ExitCode, byte[] StandardOutput, byte[] StandardError);
 
+internal interface IGitProcess : IDisposable
+{
+    Stream? StandardInput { get; }
+    Stream StandardOutput { get; }
+    Stream StandardError { get; }
+    bool HasExited { get; }
+    int ExitCode { get; }
+    Task WaitForExitAsync(CancellationToken cancellationToken);
+    void Kill(bool entireProcessTree);
+}
+
+internal sealed record GitProcessRuntime(
+    Func<ProcessStartInfo, IGitProcess> Start,
+    TimeSpan CaptureTimeout,
+    TimeSpan CleanupTimeout)
+{
+    public static GitProcessRuntime Production { get; } = new(
+        start => new SystemGitProcess(
+            Process.Start(start) ?? throw new ReviewPreflightException("Git process could not be started.")),
+        TimeSpan.FromSeconds(30),
+        TimeSpan.FromSeconds(2));
+}
+
+internal sealed class SystemGitProcess(Process process) : IGitProcess
+{
+    public Stream? StandardInput => process.StartInfo.RedirectStandardInput
+        ? process.StandardInput.BaseStream
+        : null;
+    public Stream StandardOutput => process.StandardOutput.BaseStream;
+    public Stream StandardError => process.StandardError.BaseStream;
+    public bool HasExited => process.HasExited;
+    public int ExitCode => process.ExitCode;
+    public Task WaitForExitAsync(CancellationToken cancellationToken) =>
+        process.WaitForExitAsync(cancellationToken);
+    public void Kill(bool entireProcessTree) => process.Kill(entireProcessTree);
+    public void Dispose() => process.Dispose();
+}
+
 internal static class GitProcess
 {
-    private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(30);
-
     public static async Task<GitProcessResult> RunAsync(
         string workingDirectory,
         IReadOnlyList<string> arguments,
@@ -397,8 +433,10 @@ internal static class GitProcess
         string gitExecutable = "git",
         long maximumOutputBytes = long.MaxValue,
         byte[]? standardInput = null,
-        IReadOnlyDictionary<string, string>? extraEnvironment = null)
+        IReadOnlyDictionary<string, string>? extraEnvironment = null,
+        GitProcessRuntime? runtime = null)
     {
+        runtime ??= GitProcessRuntime.Production;
         var start = new ProcessStartInfo(gitExecutable)
         {
             WorkingDirectory = workingDirectory,
@@ -418,10 +456,10 @@ internal static class GitProcess
             foreach (var pair in extraEnvironment) start.Environment[pair.Key] = pair.Value;
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
 
-        Process process;
+        IGitProcess process;
         try
         {
-            process = Process.Start(start) ?? throw new ReviewPreflightException("Git process could not be started.");
+            process = runtime.Start(start);
         }
         catch (Exception error) when (error is Win32Exception or InvalidOperationException)
         {
@@ -433,20 +471,23 @@ internal static class GitProcess
         await using (var error = new MemoryStream())
         using (var bounded = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
         {
-            bounded.CancelAfter(Timeout);
-            var outputTask = CopyBoundedAsync(process.StandardOutput.BaseStream, output, maximumOutputBytes, bounded.Token);
-            var errorTask = CopyBoundedAsync(process.StandardError.BaseStream, error, maximumOutputBytes, bounded.Token);
+            bounded.CancelAfter(runtime.CaptureTimeout);
+            var outputTask = CopyBoundedAsync(process.StandardOutput, output, maximumOutputBytes, bounded.Token);
+            var errorTask = CopyBoundedAsync(process.StandardError, error, maximumOutputBytes, bounded.Token);
             var inputTask = standardInput is null
                 ? Task.CompletedTask
                 : WriteInputAsync(process, standardInput, bounded.Token);
+            var exitTask = process.WaitForExitAsync(bounded.Token);
             try
             {
-                await Task.WhenAll(process.WaitForExitAsync(bounded.Token), outputTask, errorTask, inputTask);
+                await Task.WhenAll(exitTask, outputTask, errorTask, inputTask);
             }
             catch (Exception cause) when (cause is OperationCanceledException or IOException)
             {
+                bounded.Cancel();
                 Exception? killFailure = null;
-                if (!process.HasExited)
+                var exited = TryHasExited(process);
+                if (!exited)
                 {
                     try { process.Kill(entireProcessTree: true); }
                     catch (Exception killError) when (killError is InvalidOperationException or Win32Exception or NotSupportedException)
@@ -454,27 +495,31 @@ internal static class GitProcess
                         killFailure = killError;
                     }
                 }
-                using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(2));
-                var exited = false;
+                using var cleanup = new CancellationTokenSource(runtime.CleanupTimeout);
                 try
                 {
                     await process.WaitForExitAsync(cleanup.Token);
-                    exited = true;
+                    exited = TryHasExited(process);
                 }
                 catch (OperationCanceledException) { }
-                catch (InvalidOperationException) { exited = process.HasExited; }
+                catch (InvalidOperationException) { exited = TryHasExited(process); }
+                var streamCloseFailed = !TryClose(process.StandardInput)
+                    | !TryClose(process.StandardOutput)
+                    | !TryClose(process.StandardError);
+                var captureTasks = Task.WhenAll(exitTask, outputTask, errorTask, inputTask);
+                var drained = false;
                 try
                 {
-                    await Task.WhenAll(outputTask, errorTask, inputTask).WaitAsync(cleanup.Token);
+                    await captureTasks.WaitAsync(cleanup.Token);
+                    drained = true;
                 }
-                catch (Exception) when (!cleanup.IsCancellationRequested) { }
-                catch (OperationCanceledException) { }
+                catch (Exception) { drained = captureTasks.IsCompleted; }
                 var reason = cancellationToken.IsCancellationRequested
                     ? "Git evidence capture was cancelled."
                     : cause is IOException
                         ? "Git evidence exceeded the frozen output bound."
-                        : $"Git evidence exceeded the {Timeout.TotalSeconds:0}-second timeout.";
-                var residual = !exited || killFailure is not null;
+                        : $"Git evidence exceeded the {runtime.CaptureTimeout.TotalSeconds:0}-second timeout.";
+                var residual = !exited || killFailure is not null || streamCloseFailed || !drained;
                 if (residual) reason += " Residual process termination is uncertain.";
                 throw new ReviewPreflightException(reason, cause, residual);
             }
@@ -482,11 +527,34 @@ internal static class GitProcess
         }
     }
 
-    private static async Task WriteInputAsync(Process process, byte[] input, CancellationToken cancellationToken)
+    private static bool TryHasExited(IGitProcess process)
     {
-        await process.StandardInput.BaseStream.WriteAsync(input, cancellationToken);
-        await process.StandardInput.BaseStream.FlushAsync(cancellationToken);
-        process.StandardInput.Close();
+        try { return process.HasExited; }
+        catch (InvalidOperationException) { return false; }
+        catch (Win32Exception) { return false; }
+    }
+
+    private static bool TryClose(Stream? stream)
+    {
+        if (stream is null) return true;
+        try
+        {
+            stream.Close();
+            return true;
+        }
+        catch (Exception error) when (error is IOException or ObjectDisposedException or NotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private static async Task WriteInputAsync(IGitProcess process, byte[] input, CancellationToken cancellationToken)
+    {
+        var standardInput = process.StandardInput
+            ?? throw new InvalidOperationException("Redirected standard input is unavailable.");
+        await standardInput.WriteAsync(input, cancellationToken);
+        await standardInput.FlushAsync(cancellationToken);
+        standardInput.Close();
     }
 
     private static async Task CopyBoundedAsync(
