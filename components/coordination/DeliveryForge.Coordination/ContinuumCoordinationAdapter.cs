@@ -163,7 +163,7 @@ public sealed class ContinuumCoordinationAdapter
                     entry.Identity, FreshRequestId());
                 if (!await PrepareAsync(intent, cancellationToken).ConfigureAwait(false))
                 {
-                    ClearIntent(lifecycle, intent);
+                    if (lifecycle.LastAppendDefiniteNoWrite) ClearIntent(lifecycle, intent);
                     return FinishFailedRenewal(lifecycle, "checkpoint-prepare-failed");
                 }
 
@@ -249,7 +249,11 @@ public sealed class ContinuumCoordinationAdapter
     {
         ArgumentNullException.ThrowIfNull(resource);
         ArgumentNullException.ThrowIfNull(owner);
-        var lifecycle = new Lifecycle(owner, [resource]) { Busy = true, Phase = CoordinationLifecyclePhase.Cleaning };
+        var lifecycle = new Lifecycle(owner, [resource], purpose: CoordinationLifecyclePurpose.Observation)
+        {
+            Busy = true,
+            Phase = CoordinationLifecyclePhase.Cleaning,
+        };
         if (!await ClaimOriginalWriterAsync(lifecycle, cancellationToken).ConfigureAwait(false))
             throw new CoordinationUncertainException("inspect-checkpoint-claim-failed");
         var intent = ReserveIntent(lifecycle, CoordinationIntentKind.Inspect, resource, null, FreshRequestId());
@@ -306,177 +310,196 @@ public sealed class ContinuumCoordinationAdapter
             if (_lifecycles.ContainsKey(lifecycleId) || !_recovering.Add(lifecycleId))
                 throw new CoordinationUncertainException("recovery-lifecycle-already-live");
         }
-        CoordinationWriterClaim claim;
         try
         {
-            claim = await InvokeBoundedAsync(() => _checkpoints.ClaimWriterAsync(
-                lifecycleId, FreshRequestId(), trustedTakeoverProof, cancellationToken)).ConfigureAwait(false)
-                ?? throw new CoordinationUncertainException("checkpoint-claim-missing");
-        }
-        catch (Exception exception) when (exception is not CoordinationException)
-        {
-            lock (_ledgerGate) _recovering.Remove(lifecycleId);
-            throw new CoordinationUncertainException("checkpoint-claim-failed");
-        }
-        IReadOnlyList<CoordinationCheckpointRecord> records;
-        try
-        {
-            records = await InvokeBoundedAsync(
-            () => _checkpoints.ReadLifecycleAsync(lifecycleId, cancellationToken)).ConfigureAwait(false)
-            ?? throw new CoordinationUncertainException("checkpoint-read-missing");
-        }
-        catch (Exception)
-        {
-            lock (_ledgerGate) _recovering.Remove(lifecycleId);
-            throw new CoordinationUncertainException("checkpoint-read-failed");
-        }
-
-        var lifecycle = new Lifecycle(owner, canonical, lifecycleId)
-        {
-            Phase = CoordinationLifecyclePhase.Cleaning,
-            WriterClaim = claim,
-            NextRecordSequence = claim.NextRecordSequence,
-        };
-        var prepared = new Dictionary<long, PreparedCoordinationIntent>();
-        var progress = new Dictionary<long, CoordinationIntentProgress>();
-        var canonicalRecords = new List<CoordinationCheckpointRecord>();
-        foreach (var group in records.GroupBy(item => item.RecordSequence).OrderBy(item => item.Key))
-        {
-            var record = group.First();
-            if (group.Any(item => item != record))
-                throw new CoordinationProtocolException("checkpoint-record-conflicting-duplicate");
-            canonicalRecords.Add(record);
-        }
-        for (var index = 0; index < canonicalRecords.Count; index++)
-        {
-            var record = canonicalRecords[index];
-            if (record.SchemaVersion != CoordinationCheckpointRecord.CurrentSchemaVersion)
-                throw new CoordinationProtocolException("checkpoint-version-unsupported");
-            if (record.RecordSequence != index + 1)
-                throw new CoordinationProtocolException("checkpoint-record-gap");
-            if (record.OperationSequence < 1 || record.ProgressRevision < 0 ||
-                !Guid.TryParseExact(record.WriterEpoch, "D", out _))
-                throw new CoordinationProtocolException("checkpoint-envelope-invalid");
-            if ((record.Prepared is null) == (record.Progress is null))
-                throw new CoordinationProtocolException("checkpoint-record-invalid");
-            if (record.Prepared is not null)
+            CoordinationWriterClaim claim;
+            try
             {
-                ValidateRecovered(record.Prepared, lifecycle);
-                if (record.OperationSequence != record.Prepared.OperationSequence ||
-                    record.Kind != record.Prepared.Kind || record.ProgressRevision != 0)
-                    throw new CoordinationProtocolException("checkpoint-prepare-envelope-invalid");
-                if (!prepared.TryAdd(record.Prepared.OperationSequence, record.Prepared))
-                    throw new CoordinationProtocolException("checkpoint-prepare-duplicate");
+                claim = await InvokeBoundedAsync(() => _checkpoints.ClaimWriterAsync(
+                    lifecycleId, FreshRequestId(), trustedTakeoverProof, cancellationToken)).ConfigureAwait(false)
+                    ?? throw new CoordinationUncertainException("checkpoint-claim-missing");
             }
-            else
+            catch (Exception exception) when (exception is not CoordinationException)
             {
-                var item = record.Progress!;
-                if (item.LifecycleId != lifecycleId || record.OperationSequence != item.OperationSequence ||
-                    record.Kind != prepared.GetValueOrDefault(item.OperationSequence)?.Kind ||
-                    record.ProgressRevision != item.Revision || item.Revision < 1)
-                    throw new CoordinationProtocolException("checkpoint-progress-invalid");
-                if (item.AdapterCode == "release-observed" &&
-                    (item.Quiescence is null || item.Quiescence.Owner != lifecycle.Owner ||
-                     string.IsNullOrWhiteSpace(item.Quiescence.IssuerId) ||
-                     string.IsNullOrWhiteSpace(item.Quiescence.SourceId) ||
-                     string.IsNullOrWhiteSpace(item.Quiescence.ClockDomainId) ||
-                     string.IsNullOrWhiteSpace(item.Quiescence.EvidenceId)))
-                    throw new CoordinationProtocolException("checkpoint-quiescence-binding-invalid");
-                if (progress.TryGetValue(item.OperationSequence, out var prior) && item.Revision <= prior.Revision)
-                    throw new CoordinationProtocolException("checkpoint-progress-transition-invalid");
-                ValidateProgressTransition(record.Kind, prior, item);
-                progress[item.OperationSequence] = item;
+                lock (_ledgerGate) _recovering.Remove(lifecycleId);
+                throw new CoordinationUncertainException("checkpoint-claim-failed");
             }
-        }
+            IReadOnlyList<CoordinationCheckpointRecord> records;
+            try
+            {
+                records = await InvokeBoundedAsync(
+                () => _checkpoints.ReadLifecycleAsync(lifecycleId, cancellationToken)).ConfigureAwait(false)
+                ?? throw new CoordinationUncertainException("checkpoint-read-missing");
+            }
+            catch (Exception)
+            {
+                lock (_ledgerGate) _recovering.Remove(lifecycleId);
+                throw new CoordinationUncertainException("checkpoint-read-failed");
+            }
 
-        if (canonicalRecords.Count == 0)
-            throw new CoordinationProtocolException("checkpoint-lifecycle-empty");
-        if (claim.LifecycleId != lifecycleId || !Guid.TryParseExact(claim.WriterEpoch, "D", out _) ||
-            claim.NextRecordSequence != canonicalRecords[^1].RecordSequence + 1)
-            throw new CoordinationProtocolException("checkpoint-claim-invalid");
+            var purposes = records.Where(record => record.Prepared is not null)
+                .Select(record => record.Prepared!.Purpose).Distinct().ToArray();
+            if (purposes.Length != 1 || !Enum.IsDefined(purposes[0]))
+                throw new CoordinationProtocolException("checkpoint-purpose-invalid");
+            var lifecycle = new Lifecycle(owner, canonical, lifecycleId, purposes[0])
+            {
+                Phase = CoordinationLifecyclePhase.Cleaning,
+                WriterClaim = claim,
+                NextRecordSequence = claim.NextRecordSequence,
+            };
+            var prepared = new Dictionary<long, PreparedCoordinationIntent>();
+            var progress = new Dictionary<long, CoordinationIntentProgress>();
+            var canonicalRecords = new List<CoordinationCheckpointRecord>();
+            foreach (var group in records.GroupBy(item => item.RecordSequence).OrderBy(item => item.Key))
+            {
+                var record = group.First();
+                if (group.Any(item => item != record))
+                    throw new CoordinationProtocolException("checkpoint-record-conflicting-duplicate");
+                canonicalRecords.Add(record);
+            }
+            for (var index = 0; index < canonicalRecords.Count; index++)
+            {
+                var record = canonicalRecords[index];
+                if (record.SchemaVersion != CoordinationCheckpointRecord.CurrentSchemaVersion)
+                    throw new CoordinationProtocolException("checkpoint-version-unsupported");
+                if (record.RecordSequence != index + 1)
+                    throw new CoordinationProtocolException("checkpoint-record-gap");
+                if (record.OperationSequence < 1 || record.ProgressRevision < 0 ||
+                    !Guid.TryParseExact(record.WriterEpoch, "D", out _))
+                    throw new CoordinationProtocolException("checkpoint-envelope-invalid");
+                if ((record.Prepared is null) == (record.Progress is null))
+                    throw new CoordinationProtocolException("checkpoint-record-invalid");
+                if (record.Prepared is not null)
+                {
+                    ValidateRecovered(record.Prepared, lifecycle);
+                    if (record.OperationSequence != record.Prepared.OperationSequence ||
+                        record.Kind != record.Prepared.Kind || record.ProgressRevision != 0)
+                        throw new CoordinationProtocolException("checkpoint-prepare-envelope-invalid");
+                    if (!prepared.TryAdd(record.Prepared.OperationSequence, record.Prepared))
+                        throw new CoordinationProtocolException("checkpoint-prepare-duplicate");
+                }
+                else
+                {
+                    var item = record.Progress!;
+                    if (item.LifecycleId != lifecycleId || record.OperationSequence != item.OperationSequence ||
+                        record.Kind != prepared.GetValueOrDefault(item.OperationSequence)?.Kind ||
+                        record.ProgressRevision != item.Revision || item.Revision < 1)
+                        throw new CoordinationProtocolException("checkpoint-progress-invalid");
+                    if (item.AdapterCode == "release-observed" &&
+                        (item.Quiescence is null || item.Quiescence.Owner != lifecycle.Owner ||
+                         string.IsNullOrWhiteSpace(item.Quiescence.IssuerId) ||
+                         string.IsNullOrWhiteSpace(item.Quiescence.SourceId) ||
+                         string.IsNullOrWhiteSpace(item.Quiescence.ClockDomainId) ||
+                         string.IsNullOrWhiteSpace(item.Quiescence.EvidenceId)))
+                        throw new CoordinationProtocolException("checkpoint-quiescence-binding-invalid");
+                    if (progress.TryGetValue(item.OperationSequence, out var prior) && item.Revision <= prior.Revision)
+                        throw new CoordinationProtocolException("checkpoint-progress-transition-invalid");
+                    ValidateProgressTransition(record.Kind, prior, item);
+                    progress[item.OperationSequence] = item;
+                }
+            }
 
-        var unresolvedLifecycle = new List<PreparedCoordinationIntent>();
-        foreach (var source in prepared.Values.OrderBy(item => item.OperationSequence))
-        {
-            progress.TryGetValue(source.OperationSequence, out var resolution);
-            if (resolution is not null && !prepared.ContainsKey(resolution.OperationSequence))
+            if (canonicalRecords.Count == 0)
+                throw new CoordinationProtocolException("checkpoint-lifecycle-empty");
+            if (claim.LifecycleId != lifecycleId || !Guid.TryParseExact(claim.WriterEpoch, "D", out _) ||
+                claim.NextRecordSequence != canonicalRecords[^1].RecordSequence + 1)
+                throw new CoordinationProtocolException("checkpoint-claim-invalid");
+
+            if (lifecycle.Purpose == CoordinationLifecyclePurpose.Observation)
+            {
+                var observation = prepared.Values.SingleOrDefault();
+                if (prepared.Count != 1 || observation?.Kind != CoordinationIntentKind.Inspect ||
+                    observation.PreviousLease is not null ||
+                    progress.Values.Any(item => item.AdapterCode != "inspected"))
+                    throw new CoordinationProtocolException("checkpoint-observation-invalid");
+                var observedLease = progress.Values.SingleOrDefault()?.Lease;
+                if (observedLease is not null)
+                {
+                    ValidateRecoveredIdentity(observedLease, observation, lifecycle);
+                    _ = RecoveredEntry(observedLease, inspection: true);
+                }
+                lifecycle.AcquisitionResolved = true;
+                lifecycle.NextSequence = observation.OperationSequence + 1;
+                lifecycle.Phase = CoordinationLifecyclePhase.Closed;
+                lifecycle.Ownership = LeaseOwnership.Released;
+                lifecycle.Reason = progress.Count == 0 ? "observation-incomplete" : "observation-complete";
+                return Release(lifecycle, []);
+            }
+
+            var recoveredIntents = new Dictionary<long, OperationIntent>();
+            foreach (var source in prepared.Values.OrderBy(item => item.OperationSequence))
+            {
+                LeaseEntry? entry = null;
+                if (source.PreviousLease is not null)
+                {
+                    ValidateRecoveredIdentity(source.PreviousLease, source, lifecycle);
+                    if (!lifecycle.Entries.TryGetValue(source.Resource, out entry))
+                    {
+                        entry = RecoveredEntry(source.PreviousLease, source.Kind == CoordinationIntentKind.Inspect);
+                        lifecycle.Entries[source.Resource] = entry;
+                    }
+                    else if (!SameIdentity(entry.Identity, source.PreviousLease))
+                    {
+                        throw new CoordinationProtocolException("checkpoint-identity-drift");
+                    }
+                }
+
+                var recoveredIntent = new OperationIntent(lifecycle, source);
+                recoveredIntents.Add(source.OperationSequence, recoveredIntent);
+                switch (source.Kind)
+                {
+                    case CoordinationIntentKind.Acquire:
+                    case CoordinationIntentKind.Renew:
+                        if (lifecycle.PendingIntent is null) lifecycle.PendingIntent = recoveredIntent;
+                        else lifecycle.DeferredIntents.Enqueue(recoveredIntent);
+                        break;
+                    case CoordinationIntentKind.Release:
+                        if (entry is null) throw new CoordinationProtocolException("checkpoint-release-identity-missing");
+                        entry.ReleaseIntent = recoveredIntent;
+                        break;
+                    case CoordinationIntentKind.Inspect:
+                        if (entry is null) throw new CoordinationProtocolException("checkpoint-inspect-identity-missing");
+                        entry.InspectIntent = recoveredIntent;
+                        break;
+                }
+
+                var prepareRecord = canonicalRecords.Single(record =>
+                    record.OperationSequence == source.OperationSequence && record.Prepared is not null);
+                ApplyCheckpointRecord(lifecycle, prepareRecord);
+                foreach (var progressRecord in canonicalRecords.Where(record =>
+                             record.OperationSequence == source.OperationSequence && record.Progress is not null)
+                             .OrderBy(record => record.ProgressRevision))
+                    ApplyCheckpointRecord(lifecycle, progressRecord);
+            }
+
+            if (progress.Keys.Any(sequence => !prepared.ContainsKey(sequence)))
                 throw new CoordinationProtocolException("checkpoint-progress-without-prepare");
+            var acquireOperations = recoveredIntents.Values
+                .Where(item => item.Prepared.Kind == CoordinationIntentKind.Acquire).ToArray();
+            lifecycle.AcquisitionResolved = acquireOperations.Length > 0 && acquireOperations.All(item => item.Resolved);
+            lifecycle.NextSequence = prepared.Keys.DefaultIfEmpty().Max() + 1;
 
-            LeaseEntry? entry = null;
-            if (source.PreviousLease is not null)
+            lock (_ledgerGate)
             {
-                ValidateRecoveredIdentity(source.PreviousLease, source, lifecycle);
-                if (!lifecycle.Entries.TryGetValue(source.Resource, out entry))
+                _recovering.Remove(lifecycle.Id);
+                lifecycle.Phase = IsClosed(lifecycle) ? CoordinationLifecyclePhase.Closed : CoordinationLifecyclePhase.Cleaning;
+                lifecycle.Ownership = lifecycle.Phase == CoordinationLifecyclePhase.Closed
+                    ? LeaseOwnership.Released
+                    : LeaseOwnership.Uncertain;
+                lifecycle.Reason = lifecycle.Phase == CoordinationLifecyclePhase.Closed
+                    ? "cleanup-complete"
+                    : "recovered-cleanup-only";
+                if (lifecycle.Phase != CoordinationLifecyclePhase.Closed)
                 {
-                    entry = RecoveredEntry(source.PreviousLease);
-                    lifecycle.Entries[source.Resource] = entry;
+                    _lifecycles.Add(lifecycle.Id, lifecycle);
+                    EnsureReleaseContinuationUnderGate(lifecycle);
                 }
-            }
-            if (resolution?.Lease is not null)
-            {
-                ValidateRecoveredIdentity(resolution.Lease, source, lifecycle);
-                if (entry is null)
-                {
-                    entry = RecoveredEntry(resolution.Lease);
-                    lifecycle.Entries[source.Resource] = entry;
-                }
-                else if (!SameIdentity(entry.Identity, resolution.Lease))
-                {
-                    throw new CoordinationProtocolException("checkpoint-identity-drift");
-                }
-            }
-
-            switch (source.Kind)
-            {
-                case CoordinationIntentKind.Acquire:
-                    if (resolution is null) unresolvedLifecycle.Add(source);
-                    break;
-                case CoordinationIntentKind.Renew:
-                    if (resolution is null) unresolvedLifecycle.Add(source);
-                    break;
-                case CoordinationIntentKind.Release:
-                    if (entry is null) throw new CoordinationProtocolException("checkpoint-release-identity-missing");
-                    entry.ReleaseIntent = RecoveredIntent(lifecycle, source);
-                    if (resolution is not null) ApplyProgress(entry.ReleaseIntent, resolution);
-                    break;
-                case CoordinationIntentKind.Inspect:
-                    if (entry is null) throw new CoordinationProtocolException("checkpoint-inspect-identity-missing");
-                    entry.InspectIntent = RecoveredIntent(lifecycle, source);
-                    if (resolution is not null) ApplyProgress(entry.InspectIntent, resolution);
-                    break;
+                return Release(lifecycle, []);
             }
         }
-
-        if (progress.Keys.Any(sequence => !prepared.ContainsKey(sequence)))
-            throw new CoordinationProtocolException("checkpoint-progress-without-prepare");
-        foreach (var unresolved in unresolvedLifecycle.OrderBy(item => item.OperationSequence))
+        finally
         {
-            var recoveredIntent = RecoveredIntent(lifecycle, unresolved);
-            if (lifecycle.PendingIntent is null) lifecycle.PendingIntent = recoveredIntent;
-            else lifecycle.DeferredIntents.Enqueue(recoveredIntent);
-        }
-
-        var acquireOperations = prepared.Values.Where(item => item.Kind == CoordinationIntentKind.Acquire).ToArray();
-        lifecycle.AcquisitionResolved = acquireOperations.Length > 0 &&
-            acquireOperations.All(item => progress.ContainsKey(item.OperationSequence));
-        lifecycle.NextSequence = prepared.Keys.DefaultIfEmpty().Max() + 1;
-
-        lock (_ledgerGate)
-        {
-            _recovering.Remove(lifecycle.Id);
-            lifecycle.Phase = IsClosed(lifecycle) ? CoordinationLifecyclePhase.Closed : CoordinationLifecyclePhase.Cleaning;
-            lifecycle.Ownership = lifecycle.Phase == CoordinationLifecyclePhase.Closed
-                ? LeaseOwnership.Released
-                : LeaseOwnership.Uncertain;
-            lifecycle.Reason = lifecycle.Phase == CoordinationLifecyclePhase.Closed
-                ? "cleanup-complete"
-                : "recovered-cleanup-only";
-            if (lifecycle.Phase != CoordinationLifecyclePhase.Closed)
-            {
-                _lifecycles.Add(lifecycle.Id, lifecycle);
-                EnsureReleaseContinuationUnderGate(lifecycle);
-            }
-            return Release(lifecycle, []);
+            lock (_ledgerGate) _recovering.Remove(lifecycleId);
         }
     }
 
@@ -757,6 +780,7 @@ public sealed class ContinuumCoordinationAdapter
         var intent = lifecycle.PendingIntent!;
         if (intent.Prepared.Kind != CoordinationIntentKind.Renew ||
             !lifecycle.Entries.TryGetValue(intent.Prepared.Resource, out var entry)) return;
+        if (!intent.PreparedWritten && !await PrepareAsync(intent, cancellationToken).ConfigureAwait(false)) return;
         if (entry.ReleaseState is LeaseReleaseState.Released or LeaseReleaseState.NotOwned)
         {
             await ResolveTerminalRenewIntentAsync(lifecycle, cancellationToken).ConfigureAwait(false);
@@ -899,7 +923,7 @@ public sealed class ContinuumCoordinationAdapter
         {
             if (lifecycle.PendingIntent is not null) throw new CoordinationUncertainException("logical-operation-overlap");
             var prepared = new PreparedCoordinationIntent(lifecycle.Id, lifecycle.NextSequence++, kind, resource,
-                lifecycle.Owner, requestId, _clock.Elapsed, _clock.DomainId, DefaultTtl, prior);
+                lifecycle.Owner, requestId, _clock.Elapsed, _clock.DomainId, DefaultTtl, prior, lifecycle.Purpose);
             var intent = new OperationIntent(lifecycle, prepared);
             lifecycle.PendingIntent = intent;
             return intent;
@@ -913,7 +937,7 @@ public sealed class ContinuumCoordinationAdapter
             if (entry.ReleaseIntent is not null) return entry.ReleaseIntent;
             var prepared = new PreparedCoordinationIntent(lifecycle.Id, lifecycle.NextSequence++, CoordinationIntentKind.Release,
                 entry.Evidence.Resource, lifecycle.Owner, FreshRequestId(), _clock.Elapsed, _clock.DomainId, DefaultTtl,
-                entry.Identity, observation);
+                entry.Identity, lifecycle.Purpose, observation);
             entry.ReleaseIntent = new OperationIntent(lifecycle, prepared);
             return entry.ReleaseIntent;
         }
@@ -925,7 +949,8 @@ public sealed class ContinuumCoordinationAdapter
         {
             if (entry.InspectIntent is not null) return entry.InspectIntent;
             var prepared = new PreparedCoordinationIntent(lifecycle.Id, lifecycle.NextSequence++, CoordinationIntentKind.Inspect,
-                entry.Evidence.Resource, lifecycle.Owner, FreshRequestId(), _clock.Elapsed, _clock.DomainId, DefaultTtl, entry.Identity);
+                entry.Evidence.Resource, lifecycle.Owner, FreshRequestId(), _clock.Elapsed, _clock.DomainId, DefaultTtl,
+                entry.Identity, lifecycle.Purpose);
             entry.InspectIntent = new OperationIntent(lifecycle, prepared);
             return entry.InspectIntent;
         }
@@ -940,9 +965,7 @@ public sealed class ContinuumCoordinationAdapter
         var record = new CoordinationCheckpointRecord(
             CoordinationCheckpointRecord.CurrentSchemaVersion, sequence, intent.Prepared.OperationSequence,
             intent.Prepared.Kind, lifecycle.WriterClaim.WriterEpoch, 0, intent.Prepared, null);
-        if (!await AppendOrReconcileAsync(lifecycle, record, cancellationToken).ConfigureAwait(false)) return false;
-        lock (_ledgerGate) intent.PreparedWritten = true;
-        return true;
+        return await AppendOrReconcileAsync(lifecycle, record, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<bool> ProgressAsync(
@@ -954,13 +977,12 @@ public sealed class ContinuumCoordinationAdapter
         var revision = intent.ProgressRevision + 1;
         var progress = new CoordinationIntentProgress(
             intent.Prepared.LifecycleId, intent.Prepared.OperationSequence, code, lease, revision, quiescence);
+        ValidateProgressTransition(intent.Prepared.Kind, intent.LastProgress, progress);
         var record = new CoordinationCheckpointRecord(
             CoordinationCheckpointRecord.CurrentSchemaVersion, lifecycle.NextRecordSequence,
             intent.Prepared.OperationSequence, intent.Prepared.Kind, lifecycle.WriterClaim.WriterEpoch,
             revision, null, progress);
-        if (!await AppendOrReconcileAsync(lifecycle, record, cancellationToken).ConfigureAwait(false)) return false;
-        ApplyProgress(intent, progress);
-        return true;
+        return await AppendOrReconcileAsync(lifecycle, record, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<bool> ClaimOriginalWriterAsync(Lifecycle lifecycle, CancellationToken cancellationToken)
@@ -991,7 +1013,6 @@ public sealed class ContinuumCoordinationAdapter
             if (await PersistAndReadBackAsync(lifecycle, indeterminate, cancellationToken).ConfigureAwait(false) ==
                 CheckpointAppendOutcome.Success)
             {
-                ApplyCheckpointRecord(lifecycle, indeterminate);
                 lock (_ledgerGate) lifecycle.IndeterminateRecord = null;
             }
             return false;
@@ -1022,6 +1043,7 @@ public sealed class ContinuumCoordinationAdapter
             if (ReferenceEquals(completed, append))
             {
                 await append.ConfigureAwait(false);
+                CommitCheckpointRecord(lifecycle, record);
                 appendOutcome = CheckpointAppendOutcome.Success;
             }
             else
@@ -1033,6 +1055,7 @@ public sealed class ContinuumCoordinationAdapter
             }
         }
         catch (CoordinationCheckpointNotWrittenException) { return CheckpointAppendOutcome.DefiniteNoWrite; }
+        catch (CoordinationProtocolException) { throw; }
         catch (Exception) { }
 
         try
@@ -1041,62 +1064,148 @@ public sealed class ContinuumCoordinationAdapter
                 () => _checkpoints.ReadLifecycleAsync(lifecycle.Id, cancellationToken)).ConfigureAwait(false);
             if (records is null) return appendOutcome;
             var matches = records.Where(item => item.RecordSequence == record.RecordSequence).ToArray();
-            if (matches.Length == 0 || matches.Any(item => item != record)) return appendOutcome;
-            lock (_ledgerGate) lifecycle.NextRecordSequence = record.RecordSequence + 1;
+            if (matches.Any(item => item != record))
+                throw new CoordinationProtocolException("checkpoint-readback-conflict");
+            if (matches.Length == 0) return appendOutcome;
+            if (appendOutcome != CheckpointAppendOutcome.Success)
+                CommitCheckpointRecord(lifecycle, record);
             return CheckpointAppendOutcome.Success;
         }
+        catch (CoordinationProtocolException) { throw; }
         catch (Exception) { return appendOutcome; }
+    }
+
+    private void CommitCheckpointRecord(Lifecycle lifecycle, CoordinationCheckpointRecord record)
+    {
+        lock (_ledgerGate)
+        {
+            if (lifecycle.NextRecordSequence == record.RecordSequence)
+                lifecycle.NextRecordSequence++;
+            else if (lifecycle.NextRecordSequence != record.RecordSequence + 1)
+                throw new CoordinationProtocolException("checkpoint-live-sequence-invalid");
+        }
+        ApplyCheckpointRecord(lifecycle, record);
     }
 
     private void ApplyCheckpointRecord(Lifecycle lifecycle, CoordinationCheckpointRecord record)
     {
-        if (record.Progress is null) return;
-        OperationIntent? intent;
+        var intent = FindIntent(lifecycle, record.OperationSequence);
+        if (intent is null)
+            throw new CoordinationProtocolException("checkpoint-live-intent-missing");
+        if (record.Prepared is not null)
+        {
+            if (record.Prepared != intent.Prepared || record.Progress is not null || record.ProgressRevision != 0)
+                throw new CoordinationProtocolException("checkpoint-live-prepare-mismatch");
+            lock (_ledgerGate) intent.PreparedWritten = true;
+            return;
+        }
+        if (record.Progress is null || record.Prepared is not null)
+            throw new CoordinationProtocolException("checkpoint-live-progress-missing");
+        ApplyProgress(intent, record.Progress);
+    }
+
+    private OperationIntent? FindIntent(Lifecycle lifecycle, long operationSequence)
+    {
         lock (_ledgerGate)
         {
-            intent = lifecycle.PendingIntent?.Prepared.OperationSequence == record.OperationSequence
+            var intent = lifecycle.PendingIntent?.Prepared.OperationSequence == operationSequence
                 ? lifecycle.PendingIntent
-                : lifecycle.DeferredIntents.FirstOrDefault(item => item.Prepared.OperationSequence == record.OperationSequence);
-            if (intent is null)
-                intent = lifecycle.Entries.Values.Select(entry =>
-                        entry.ReleaseIntent?.Prepared.OperationSequence == record.OperationSequence
-                            ? entry.ReleaseIntent
-                            : entry.InspectIntent?.Prepared.OperationSequence == record.OperationSequence
-                                ? entry.InspectIntent
-                                : null)
-                    .FirstOrDefault(item => item is not null);
+                : lifecycle.DeferredIntents.FirstOrDefault(
+                    item => item.Prepared.OperationSequence == operationSequence);
+            return intent ?? lifecycle.Entries.Values.Select(entry =>
+                    entry.ReleaseIntent?.Prepared.OperationSequence == operationSequence
+                        ? entry.ReleaseIntent
+                        : entry.InspectIntent?.Prepared.OperationSequence == operationSequence
+                            ? entry.InspectIntent
+                            : null)
+                .FirstOrDefault(item => item is not null);
         }
-        if (intent is not null) ApplyProgress(intent, record.Progress);
     }
 
     private void ApplyProgress(OperationIntent intent, CoordinationIntentProgress progress)
     {
         lock (_ledgerGate)
         {
+            if (intent.LastProgress == progress) return;
+            if (progress.Revision != intent.ProgressRevision + 1)
+                throw new CoordinationProtocolException("checkpoint-live-progress-revision-invalid");
+            ValidateProgressTransition(intent.Prepared.Kind, intent.LastProgress, progress);
             intent.ProgressRevision = progress.Revision;
-            intent.Resolved = true;
-            if (!intent.Lifecycle.Entries.TryGetValue(intent.Prepared.Resource, out var entry)) return;
+            intent.LastProgress = progress;
+
+            var lifecycle = intent.Lifecycle;
+            lifecycle.Entries.TryGetValue(intent.Prepared.Resource, out var entry);
+            if (progress.Lease is not null)
+            {
+                ValidateRecoveredIdentity(progress.Lease, intent.Prepared, lifecycle);
+                if (entry is null)
+                {
+                    entry = RecoveredEntry(progress.Lease, intent.Prepared.Kind == CoordinationIntentKind.Inspect);
+                    lifecycle.Entries[intent.Prepared.Resource] = entry;
+                }
+                else if (!SameIdentity(entry.Identity, progress.Lease))
+                {
+                    if (intent.Prepared.Kind != CoordinationIntentKind.Renew ||
+                        !SameServerIdentity(entry.Identity, progress.Lease))
+                        throw new CoordinationProtocolException("checkpoint-live-identity-drift");
+                    entry.Evidence = Evidence(progress.Lease);
+                    entry.Identity = progress.Lease;
+                }
+            }
+
             switch (progress.AdapterCode)
             {
                 case "release-observed":
+                    if (entry is not null && entry.ReleaseState is not (LeaseReleaseState.Released or LeaseReleaseState.NotOwned))
+                    {
+                        entry.ReleaseState = LeaseReleaseState.Unknown;
+                        entry.ReleaseReason = "release-observed";
+                    }
+                    return;
                 case "lease-lost":
                 case "release-uncertain":
-                    entry.ReleaseState = LeaseReleaseState.Unknown;
-                    entry.ReleaseReason = progress.AdapterCode;
-                    break;
+                    if (entry is not null && entry.ReleaseState is not (LeaseReleaseState.Released or LeaseReleaseState.NotOwned))
+                    {
+                        entry.ReleaseState = LeaseReleaseState.Unknown;
+                        entry.ReleaseReason = progress.AdapterCode;
+                    }
+                    intent.Resolved = true;
+                    return;
                 case "released":
-                    entry.ReleaseState = LeaseReleaseState.Released;
-                    entry.ReleaseReason = "released";
-                    break;
+                    if (entry is not null && entry.ReleaseState != LeaseReleaseState.NotOwned)
+                    {
+                        entry.ReleaseState = LeaseReleaseState.Released;
+                        entry.ReleaseReason = "released";
+                    }
+                    intent.Resolved = true;
+                    return;
                 case "original-not-owned":
-                    entry.ReleaseState = LeaseReleaseState.NotOwned;
-                    entry.ReleaseReason = "original-not-owned";
-                    entry.InspectIntent = null;
-                    break;
+                    if (entry is not null && entry.ReleaseState != LeaseReleaseState.Released)
+                    {
+                        entry.ReleaseState = LeaseReleaseState.NotOwned;
+                        entry.ReleaseReason = "original-not-owned";
+                        entry.InspectIntent = null;
+                    }
+                    intent.Resolved = true;
+                    return;
                 case "original-still-owned":
-                    entry.InspectIntent = null;
-                    break;
+                    if (entry is not null) entry.InspectIntent = null;
+                    intent.Resolved = true;
+                    return;
+                case "inspected" when lifecycle.Purpose == CoordinationLifecyclePurpose.Observation:
+                    intent.Resolved = true;
+                    ClearIntentUnderGate(lifecycle, intent);
+                    lifecycle.AcquisitionResolved = true;
+                    lifecycle.Phase = CoordinationLifecyclePhase.Closed;
+                    lifecycle.Ownership = LeaseOwnership.Released;
+                    lifecycle.Reason = "observation-complete";
+                    return;
             }
+
+            intent.Resolved = true;
+            ClearIntentUnderGate(lifecycle, intent);
+            if (intent.Prepared.Kind == CoordinationIntentKind.Acquire)
+                lifecycle.AcquisitionResolved = !HasUnresolvedAcquire(lifecycle);
         }
     }
 
@@ -1104,11 +1213,16 @@ public sealed class ContinuumCoordinationAdapter
     {
         lock (_ledgerGate)
         {
-            if (ReferenceEquals(lifecycle.PendingIntent, intent))
-                lifecycle.PendingIntent = lifecycle.DeferredIntents.TryDequeue(out var next) ? next : null;
+            ClearIntentUnderGate(lifecycle, intent);
             if (!preserveRelease && intent.Prepared.Kind == CoordinationIntentKind.Release &&
                 lifecycle.Entries.TryGetValue(intent.Prepared.Resource, out var entry)) entry.ReleaseIntent = intent;
         }
+    }
+
+    private static void ClearIntentUnderGate(Lifecycle lifecycle, OperationIntent intent)
+    {
+        if (ReferenceEquals(lifecycle.PendingIntent, intent))
+            lifecycle.PendingIntent = lifecycle.DeferredIntents.TryDequeue(out var next) ? next : null;
     }
 
     private Lifecycle BeginAuthorityTransition(
@@ -1382,14 +1496,15 @@ public sealed class ContinuumCoordinationAdapter
         new(evidence.Resource, evidence.Owner, evidence.LeaseId, evidence.FencingToken, evidence.Generation,
             evidence.ServerTime, evidence.ExpiresAt, evidence.SafeDeadline, evidence.RenewAt);
 
-    private static LeaseEntry RecoveredEntry(CheckpointLeaseIdentity identity)
+    private static LeaseEntry RecoveredEntry(CheckpointLeaseIdentity identity, bool inspection = false)
     {
-        return new LeaseEntry(CreateCleanupEvidence(identity.Resource, identity.Owner, identity.LeaseId,
-            identity.FencingToken, identity.ServerTime, identity.ExpiresAt, identity.Generation));
+        var evidence = inspection
+            ? CreateCleanupInspectionEvidence(identity.Resource, identity.Owner, identity.LeaseId,
+                identity.FencingToken, identity.ServerTime, identity.ExpiresAt, identity.Generation)
+            : CreateCleanupEvidence(identity.Resource, identity.Owner, identity.LeaseId,
+                identity.FencingToken, identity.ServerTime, identity.ExpiresAt, identity.Generation);
+        return new LeaseEntry(evidence);
     }
-
-    private static OperationIntent RecoveredIntent(Lifecycle lifecycle, PreparedCoordinationIntent prepared) =>
-        new(lifecycle, prepared) { PreparedWritten = true };
 
     private static bool SameServerIdentity(CheckpointLeaseIdentity left, CheckpointLeaseIdentity right) =>
         left.Resource == right.Resource && left.Owner == right.Owner && left.LeaseId == right.LeaseId &&
@@ -1404,7 +1519,7 @@ public sealed class ContinuumCoordinationAdapter
 
     private static void ValidateRecovered(PreparedCoordinationIntent intent, Lifecycle lifecycle)
     {
-        if (intent.LifecycleId != lifecycle.Id || intent.Owner != lifecycle.Owner ||
+        if (intent.LifecycleId != lifecycle.Id || intent.Owner != lifecycle.Owner || intent.Purpose != lifecycle.Purpose ||
             !lifecycle.Resources.Contains(intent.Resource) || intent.ClockDomainId.Length is < 1 or > 256 ||
             !Guid.TryParseExact(intent.RequestId, "D", out _) || intent.OperationSequence < 1 ||
             intent.Ttl != DefaultTtl)
@@ -1528,16 +1643,22 @@ public sealed class ContinuumCoordinationAdapter
 
     private sealed class Lifecycle
     {
-        public Lifecycle(LeaseOwner owner, CoordinationResource[] resources, string? id = null)
+        public Lifecycle(
+            LeaseOwner owner,
+            CoordinationResource[] resources,
+            string? id = null,
+            CoordinationLifecyclePurpose purpose = CoordinationLifecyclePurpose.Ownership)
         {
             Id = id ?? Guid.NewGuid().ToString("D");
             Owner = owner;
             Resources = resources;
+            Purpose = purpose;
         }
 
         public string Id { get; }
         public LeaseOwner Owner { get; }
         public CoordinationResource[] Resources { get; }
+        public CoordinationLifecyclePurpose Purpose { get; }
         public Dictionary<CoordinationResource, LeaseEntry> Entries { get; } = [];
         public OperationIntent? PendingIntent { get; set; }
         public Queue<OperationIntent> DeferredIntents { get; } = [];
@@ -1579,6 +1700,7 @@ public sealed class ContinuumCoordinationAdapter
         public bool PreparedWritten { get; set; }
         public bool Resolved { get; set; }
         public long ProgressRevision { get; set; }
+        public CoordinationIntentProgress? LastProgress { get; set; }
     }
 
     private enum CheckpointAppendOutcome { Success, DefiniteNoWrite, Indeterminate }

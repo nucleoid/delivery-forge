@@ -13,6 +13,7 @@ public enum LeaseReleaseState { Pending, Released, NotOwned, Unknown }
 public enum InspectionState { Available, HeldByCaller, HeldByOther }
 public enum CoordinationLifecyclePhase { Acquiring, Held, Renewing, Cleaning, Closed }
 public enum CoordinationIntentKind { Acquire, Renew, Inspect, Release }
+public enum CoordinationLifecyclePurpose { Ownership, Observation }
 
 public sealed record CoordinationCapabilities(
     string ContractVersion,
@@ -254,6 +255,7 @@ public sealed record PreparedCoordinationIntent(
     string ClockDomainId,
     TimeSpan Ttl,
     CheckpointLeaseIdentity? PreviousLease,
+    CoordinationLifecyclePurpose Purpose,
     QuiescenceEvidence? Quiescence = null);
 
 public sealed record CoordinationIntentProgress(
@@ -287,9 +289,18 @@ public interface ICoordinationCheckpointStore
     Task<CoordinationWriterClaim> ClaimWriterAsync(
         string lifecycleId, string proposedWriterEpoch, string? trustedTakeoverProof,
         CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Atomically commits the exact immutable record at the expected sequence under the current writer epoch.
+    /// Successful completion acknowledges that commit; only <see cref="CoordinationCheckpointNotWrittenException"/>
+    /// guarantees that no record was committed. Any other failure is indeterminate and must be reconciled by reading.
+    /// </summary>
     Task AppendAsync(
         CoordinationWriterClaim claim, long expectedRecordSequence, CoordinationCheckpointRecord record,
         CancellationToken cancellationToken = default);
+    /// <summary>
+    /// Returns committed records for verification and indeterminate-write reconciliation. Reads may lag a successful
+    /// append acknowledgement, but a different record at the same sequence is a protocol violation.
+    /// </summary>
     Task<IReadOnlyList<CoordinationCheckpointRecord>> ReadLifecycleAsync(
         string lifecycleId, CancellationToken cancellationToken = default);
 }

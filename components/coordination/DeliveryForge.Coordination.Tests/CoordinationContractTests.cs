@@ -962,7 +962,8 @@ public sealed class CoordinationContractTests
         await Assert.ThrowsAsync<CoordinationUncertainException>(() => store.ClaimWriterAsync(
             lifecycleId, Guid.NewGuid().ToString("D"), null, TestContext.Current.CancellationToken));
         var intent = new PreparedCoordinationIntent(lifecycleId, 1, CoordinationIntentKind.Acquire, Issue(6), Owner,
-            Guid.NewGuid().ToString("D"), TimeSpan.Zero, "clock", ContinuumCoordinationAdapter.DefaultTtl, null);
+            Guid.NewGuid().ToString("D"), TimeSpan.Zero, "clock", ContinuumCoordinationAdapter.DefaultTtl, null,
+            CoordinationLifecyclePurpose.Ownership);
         var record = new CoordinationCheckpointRecord(CoordinationCheckpointRecord.CurrentSchemaVersion, 1, 1,
             CoordinationIntentKind.Acquire, firstEpoch, 0, intent, null);
         await store.AppendAsync(first, 1, record, TestContext.Current.CancellationToken);
@@ -1137,17 +1138,81 @@ public sealed class CoordinationContractTests
         var uncertain = await adapter.AcquireAllAsync([Issue(6), Issue(7)], Owner,
             ContinuumCoordinationAdapter.DefaultTtl, TestContext.Current.CancellationToken);
         checkpoints.AfterAppend = null;
-        var cleaned = await adapter.ContinueReleaseAsync(
+        var reconciled = await adapter.ContinueReleaseAsync(
             uncertain.ReleaseContinuation!, TestContext.Current.CancellationToken);
+        Assert.Single(transport.AcquireRequests);
+        var cleaned = await adapter.ContinueReleaseAsync(
+            reconciled.Continuation!, TestContext.Current.CancellationToken);
 
         var prepares = checkpoints.Records.Where(record => record.Prepared is not null).ToArray();
         Assert.Equal(prepares.Length, prepares.Select(record => record.OperationSequence).Distinct().Count());
-        Assert.Equal(2, transport.AcquireRequests.Count);
+        Assert.True(transport.AcquireRequests.Count == 2,
+            $"acquire requests={transport.AcquireRequests.Count}; reason={cleaned.Snapshot.Reason}; records={string.Join(',', checkpoints.Records.Select(record => $"{record.RecordSequence}:{record.Kind}:{record.Progress?.AdapterCode ?? "prepare"}"))}");
         Assert.Equal(CoordinationLifecyclePhase.Closed, cleaned.Snapshot.Phase);
 
         var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
         var replay = await restarted.RecoverForCleanupAsync(
             checkpoints.Records[0].Prepared!.LifecycleId, Owner, [Issue(6), Issue(7)], "fresh-replay-proof",
+            TestContext.Current.CancellationToken);
+        Assert.Equal(CoordinationLifecyclePhase.Closed, replay.Snapshot.Phase);
+    }
+
+    [Fact]
+    public async Task Reconciled_terminal_acquire_progress_is_not_resent_or_rewritten()
+    {
+        var checkpoints = new FixtureCheckpointStore();
+        checkpoints.AfterAppend = record =>
+        {
+            if (record.RecordSequence == 1) checkpoints.FailIndeterminateBeforeNextAppend = true;
+        };
+        var transport = SingleLeaseTransport();
+        var adapter = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+
+        var uncertain = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        checkpoints.AfterAppend = null;
+        var cleaned = await adapter.ContinueReleaseAsync(
+            uncertain.ReleaseContinuation!, TestContext.Current.CancellationToken);
+
+        Assert.Single(transport.AcquireRequests);
+        Assert.Single(checkpoints.Records, record => record.Progress?.AdapterCode == "acquired");
+        Assert.Equal(CoordinationLifecyclePhase.Closed, cleaned.Snapshot.Phase);
+        var acquired = checkpoints.Records.Single(record => record.Progress?.AdapterCode == "acquired");
+        Assert.Equal(1, acquired.ProgressRevision);
+
+        var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var replay = await restarted.RecoverForCleanupAsync(
+            checkpoints.Records[0].Prepared!.LifecycleId, Owner, [Issue(6)], "terminal-progress-proof",
+            TestContext.Current.CancellationToken);
+        Assert.Equal(CoordinationLifecyclePhase.Closed, replay.Snapshot.Phase);
+    }
+
+    [Fact]
+    public async Task Indeterminate_renew_prepare_remains_reachable_until_reconciled_and_cleaned()
+    {
+        var checkpoints = new FixtureCheckpointStore();
+        var transport = SingleLeaseTransport();
+        transport.RenewResults.Enqueue(
+            RenewTransportResult.Renewed(ServerNow.AddMinutes(1), ServerNow.AddMinutes(6)));
+        var adapter = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var held = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        checkpoints.FailIndeterminateBeforeNextAppend = true;
+
+        var uncertain = await adapter.RenewAllAsync(held.Authority!, TestContext.Current.CancellationToken);
+        Assert.Empty(transport.RenewRequests);
+        var cleaned = await adapter.ContinueReleaseAsync(
+            uncertain.ReleaseContinuation!, TestContext.Current.CancellationToken);
+
+        var renewPrepare = checkpoints.Records.Single(record =>
+            record.Prepared?.Kind == CoordinationIntentKind.Renew).Prepared!;
+        Assert.Single(transport.RenewRequests);
+        Assert.Equal(renewPrepare.RequestId, transport.RenewRequests[0].RequestId);
+        Assert.Equal(CoordinationLifecyclePhase.Closed, cleaned.Snapshot.Phase);
+
+        var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var replay = await restarted.RecoverForCleanupAsync(
+            checkpoints.Records[0].Prepared!.LifecycleId, Owner, [Issue(6)], "renew-replay-proof",
             TestContext.Current.CancellationToken);
         Assert.Equal(CoordinationLifecyclePhase.Closed, replay.Snapshot.Phase);
     }
@@ -1171,6 +1236,30 @@ public sealed class CoordinationContractTests
             lifecycleId, Owner, [Issue(6)], "fresh-valid-proof", TestContext.Current.CancellationToken);
 
         Assert.Equal(CoordinationLifecyclePhase.Closed, recovered.Snapshot.Phase);
+    }
+
+    [Fact]
+    public async Task Malformed_replay_releases_local_reservation_even_after_takeover_fences_old_epoch()
+    {
+        var checkpoints = new FixtureCheckpointStore();
+        var transport = SingleLeaseTransport();
+        var original = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        _ = await original.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        var first = checkpoints.Records[0];
+        checkpoints.Inject(first with { WriterEpoch = Guid.NewGuid().ToString("D") });
+        var lifecycleId = first.Prepared!.LifecycleId;
+        var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+
+        var firstFailure = await Assert.ThrowsAsync<CoordinationProtocolException>(() =>
+            restarted.RecoverForCleanupAsync(
+                lifecycleId, Owner, [Issue(6)], "malformed-proof-1", TestContext.Current.CancellationToken));
+        var secondFailure = await Assert.ThrowsAsync<CoordinationProtocolException>(() =>
+            restarted.RecoverForCleanupAsync(
+                lifecycleId, Owner, [Issue(6)], "malformed-proof-2", TestContext.Current.CancellationToken));
+
+        Assert.Equal("checkpoint-record-conflicting-duplicate", firstFailure.Message);
+        Assert.Equal(firstFailure.Message, secondFailure.Message);
     }
 
     [Theory]
