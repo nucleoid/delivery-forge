@@ -41,11 +41,11 @@ public sealed class WorkflowTransitionTests
                 var evidence = FullEvidence(to == WorkflowState.Merged);
                 if (expected)
                 {
-                    WorkflowTransition.EnsureAllowed(from, to, evidence);
+                    WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, evidence);
                 }
                 else
                 {
-                    Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(from, to, evidence));
+                    Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, evidence));
                 }
             }
         }
@@ -57,7 +57,7 @@ public sealed class WorkflowTransitionTests
     [InlineData(WorkflowState.HostReviewComplete, WorkflowState.MergeAuthorized)]
     [InlineData(WorkflowState.MergeAuthorized, WorkflowState.Merged)]
     public void Authorization_ceiling_cannot_be_escalated(WorkflowState from, WorkflowState to) =>
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             from, to, FullEvidence(to == WorkflowState.Merged) with { Ceiling = AuthorizationCeiling.Implement }));
 
     [Theory]
@@ -77,7 +77,7 @@ public sealed class WorkflowTransitionTests
             HostReviewReceipt = missing == "host" ? null : FullEvidence().HostReviewReceipt
         };
 
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(from, to, evidence));
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, evidence));
     }
 
     [Theory]
@@ -93,16 +93,13 @@ public sealed class WorkflowTransitionTests
         var evidence = FullEvidence(to == WorkflowState.Merged) with { ReviewAuthority = null };
 
         AssertMessage("root-issued review acceptance", () =>
-            WorkflowTransition.EnsureAllowed(from, to, evidence));
+            WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, evidence));
     }
 
     [Fact]
     public void Production_authorization_rejects_isolated_test_realm_acceptance()
     {
-        var evidence = FullEvidence() with
-        {
-            RequiredReviewAuthorityRealm = ReviewAuthorityRealm.Production
-        };
+        var evidence = FullEvidence();
 
         AssertMessage("root-issued review acceptance", () => WorkflowTransition.EnsureAllowed(
             WorkflowState.IndependentReview,
@@ -117,24 +114,24 @@ public sealed class WorkflowTransitionTests
         var wrongAction = ParseFixture("publication-receipt.json");
         var wrongHead = FullEvidence() with { HeadCommit = new string('f', 40) };
 
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview, WorkflowState.PrAuthorized, FullEvidence() with { ReviewReceipt = failingReview }));
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.MergeAuthorized, WorkflowState.Merged, FullEvidence() with { PublicationReceipt = wrongAction }));
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.Evaluating, WorkflowState.IndependentReview, wrongHead));
 
         var wrongKind = FullEvidence().GateReceipts![0];
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview, WorkflowState.PrAuthorized, FullEvidence() with { ReviewReceipt = wrongKind }));
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.Evaluating, WorkflowState.IndependentReview, FullEvidence() with { TreeId = new string('e', 40) }));
     }
 
     [Fact]
     public void Implement_authority_is_required_for_execution()
     {
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.Ready, WorkflowState.Executing, FullEvidence() with { Ceiling = AuthorizationCeiling.Plan }));
     }
 
@@ -142,10 +139,10 @@ public sealed class WorkflowTransitionTests
     public void Hosted_review_and_ci_require_distinct_evidence()
     {
         var evidence = FullEvidence();
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.CiComplete, WorkflowState.HostReviewComplete,
             evidence with { ReviewReceipt = null, HostReviewReceipt = evidence.ReviewReceipt }));
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.PrPublished, WorkflowState.CiComplete,
             evidence with { CiReceipt = evidence.GateReceipts![0] }));
     }
@@ -158,11 +155,11 @@ public sealed class WorkflowTransitionTests
         var failing = MutatedFixture("review-receipt.json", node => node["outcome"] = "FAIL");
         var wrongBase = MutatedFixture("review-receipt.json", node => node["baseCommit"] = new string('f', 40));
 
-        AssertMessage("validated review-receipt", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("validated review-receipt", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.CiComplete, WorkflowState.HostReviewComplete, evidence with { ReviewReceipt = wrongKind }));
-        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.CiComplete, WorkflowState.HostReviewComplete, evidence with { ReviewReceipt = failing }));
-        AssertMessage("current head commit and tree identity", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("current head commit and tree identity", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.CiComplete, WorkflowState.HostReviewComplete, evidence with { ReviewReceipt = wrongBase }));
     }
 
@@ -178,14 +175,14 @@ public sealed class WorkflowTransitionTests
             node["createdAt"] = "2026-10-07T05:02:00Z";
         });
         AssertMessage("independent review cannot use reviewerFamily 'github-hosted'", () =>
-            WorkflowTransition.EnsureAllowed(from, to, FullEvidence() with { ReviewReceipt = hosted }));
+            WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, FullEvidence() with { ReviewReceipt = hosted }));
     }
 
     [Fact]
     public void Hosted_review_receipts_must_be_distinct_by_identity()
     {
         var evidence = FullEvidence();
-        AssertMessage("distinct from independent review", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("distinct from independent review", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.CiComplete, WorkflowState.HostReviewComplete,
             evidence with { HostReviewReceipt = evidence.ReviewReceipt }));
     }
@@ -193,7 +190,7 @@ public sealed class WorkflowTransitionTests
     [Fact]
     public void Hosted_review_requires_the_documented_reviewer_family()
     {
-        AssertMessage("reviewerFamily 'github-hosted'", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("reviewerFamily 'github-hosted'", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.CiComplete, WorkflowState.HostReviewComplete,
             FullEvidence() with
             {
@@ -209,7 +206,7 @@ public sealed class WorkflowTransitionTests
             node["reviewerFamily"] = "github-hosted";
             node["outcome"] = "FAIL";
         });
-        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.CiComplete, WorkflowState.HostReviewComplete,
             FullEvidence() with { HostReviewReceipt = failing }));
 
@@ -218,7 +215,7 @@ public sealed class WorkflowTransitionTests
             node["reviewerFamily"] = "github-hosted";
             node["treeId"] = new string('f', 40);
         });
-        AssertMessage("Receipt does not match", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("Receipt does not match", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.CiComplete, WorkflowState.HostReviewComplete,
             FullEvidence() with { HostReviewReceipt = wrongTree }));
     }
@@ -233,7 +230,7 @@ public sealed class WorkflowTransitionTests
             node["gateId"] = "build";
             node["outcome"] = "FAIL";
         });
-        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.Evaluating, WorkflowState.IndependentReview,
             evidence with { GateReceipts = [failingRequired, .. evidence.GateReceipts!.Skip(1)] }));
 
@@ -243,7 +240,7 @@ public sealed class WorkflowTransitionTests
             node["gateId"] = "ci";
             node["outcome"] = "FAIL";
         });
-        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.PrPublished, WorkflowState.CiComplete, evidence with { CiReceipt = failingCi }));
     }
 
@@ -251,7 +248,7 @@ public sealed class WorkflowTransitionTests
     public void Pr_published_requires_the_matching_publication_action()
     {
         var merged = MutatedFixture("publication-receipt.json", node => node["action"] = "MERGED");
-        AssertMessage("action PR_PUBLISHED", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("action PR_PUBLISHED", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.PrAuthorized, WorkflowState.PrPublished,
             FullEvidence() with { PublicationReceipt = merged }));
     }
@@ -261,7 +258,7 @@ public sealed class WorkflowTransitionTests
     [InlineData(WorkflowState.CiComplete, WorkflowState.HostReviewComplete)]
     public void Post_publication_evidence_transitions_reassert_pr_authority(WorkflowState from, WorkflowState to)
     {
-        AssertMessage("requires PR authority", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("requires PR authority", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             from, to, FullEvidence() with { Ceiling = AuthorizationCeiling.Plan }));
     }
 
@@ -269,7 +266,7 @@ public sealed class WorkflowTransitionTests
     public void Caller_authority_cannot_exceed_the_policy_ceiling()
     {
         var policy = MutatedFixture("evidence-policy.json", node => node["authorizedCeiling"] = "pr");
-        AssertMessage("exceeds the immutable evidence-policy ceiling", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("exceeds the immutable evidence-policy ceiling", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview, WorkflowState.PrAuthorized,
             FullEvidence() with { Ceiling = AuthorizationCeiling.Merge, Policy = policy }));
     }
@@ -279,7 +276,7 @@ public sealed class WorkflowTransitionTests
     {
         var evidence = FullEvidence();
         var gate = GateFixture(ParseFixture("evidence-policy.json").Identity, "build");
-        AssertMessage("required policy or gate identity", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("required policy or gate identity", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.Evaluating, WorkflowState.IndependentReview,
             evidence with { GateReceipts = [gate, .. evidence.GateReceipts!.Skip(1)] }));
     }
@@ -288,9 +285,9 @@ public sealed class WorkflowTransitionTests
     public void Receipt_gated_authority_requires_an_evidence_policy()
     {
         var evidence = FullEvidence();
-        AssertMessage("validated evidence-policy", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("validated evidence-policy", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview, WorkflowState.PrAuthorized, evidence with { Policy = null }));
-        AssertMessage("validated evidence-policy", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("validated evidence-policy", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview, WorkflowState.PrAuthorized,
             evidence with { Policy = evidence.ReviewReceipt }));
     }
@@ -299,7 +296,7 @@ public sealed class WorkflowTransitionTests
     public void Receipt_base_commit_must_match_current_evidence()
     {
         var receipt = MutatedFixture("review-receipt.json", node => node["baseCommit"] = new string('f', 40));
-        AssertMessage("current head commit and tree identity", () => WorkflowTransition.EnsureAllowed(
+        AssertMessage("current head commit and tree identity", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview, WorkflowState.PrAuthorized,
             FullEvidence() with { ReviewReceipt = receipt }));
     }
@@ -308,7 +305,7 @@ public sealed class WorkflowTransitionTests
     public void Immutable_policy_limits_authority_and_requires_independent_review()
     {
         var implementPolicy = MutatedFixture("evidence-policy.json", node => node["authorizedCeiling"] = "implement");
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview, WorkflowState.PrAuthorized,
             FullEvidence() with { Policy = implementPolicy }));
 
@@ -317,7 +314,7 @@ public sealed class WorkflowTransitionTests
             node["authorizedCeiling"] = "merge";
             node["requireIndependentReview"] = false;
         });
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview, WorkflowState.PrAuthorized,
             FullEvidence() with { Policy = optionalReviewPolicy }));
     }
@@ -335,9 +332,9 @@ public sealed class WorkflowTransitionTests
     [Fact]
     public void Undefined_enum_values_fail_closed()
     {
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             (WorkflowState)99, WorkflowState.Blocked, FullEvidence()));
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.Ready, WorkflowState.Executing, FullEvidence() with { Ceiling = (AuthorizationCeiling)99 }));
         Assert.Throws<ArgumentOutOfRangeException>(() => ((WorkflowState)99).ToWireValue());
     }
@@ -374,8 +371,7 @@ public sealed class WorkflowTransitionTests
                 ? MutatedFixture("publication-receipt.json", node => node["action"] = "MERGED")
                 : ParseFixture("publication-receipt.json"),
             HostReviewReceipt: hosted,
-            ReviewAuthority: authorityHost.Authority,
-            RequiredReviewAuthorityRealm: ReviewAuthorityRealm.Test);
+            ReviewAuthority: authorityHost.Authority);
     }
 
     private static ValidatedContract GateFixture(string policyIdentity, string gateId) =>

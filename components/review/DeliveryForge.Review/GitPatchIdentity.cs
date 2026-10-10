@@ -203,9 +203,11 @@ public static partial class GitPatchIdentity
             else
             {
                 bytes = await File.ReadAllBytesAsync(file, cancellationToken);
-                actualMode = OperatingSystem.IsWindows() || !File.GetUnixFileMode(file).HasFlag(UnixFileMode.UserExecute)
-                    ? "100644"
-                    : "100755";
+                actualMode = OperatingSystem.IsWindows()
+                    ? entry.Mode
+                    : !File.GetUnixFileMode(file).HasFlag(UnixFileMode.UserExecute)
+                        ? "100644"
+                        : "100755";
             }
             if (bytes.LongLength > context.MaximumEvidenceBytes || !string.Equals(actualMode, entry.Mode, StringComparison.Ordinal))
                 throw new ReviewPreflightException($"Source mode or size differs from controlled tree: {relative}.");

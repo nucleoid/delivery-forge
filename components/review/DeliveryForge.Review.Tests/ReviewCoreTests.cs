@@ -38,6 +38,7 @@ public sealed class ReviewCoreTests
             controlled, baseCommit, headCommit, Identity('e'),
             new Dictionary<string, string> { ["tests"] = Identity('a') },
             TestContext.Current.CancellationToken);
+        var nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
         var bytes = repository.GitBytes(
             "-c", "core.quotepath=false",
             "-c", "core.fsmonitor=false",
@@ -47,7 +48,7 @@ public sealed class ReviewCoreTests
             "-c", "diff.relative=false",
             "-c", "diff.renames=true",
             "-c", "diff.algorithm=myers",
-            "-c", "diff.orderFile=/dev/null",
+            "-c", $"diff.orderFile={nullDevice}",
             "diff", "--binary", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv",
             "--ignore-submodules=none", baseCommit, headCommit, "--");
 
@@ -171,6 +172,27 @@ public sealed class ReviewCoreTests
     }
 
     [Fact]
+    public async Task Controlled_git_rejects_submodule_worktrees_and_shallow_metadata()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "a\n"u8.ToArray() });
+        repository.Git("update-index", "--add", "--cacheinfo", $"160000,{baseCommit},submodule");
+        var headCommit = repository.CommitIndex();
+        repository.Write("submodule/work.txt", "nested\n"u8.ToArray());
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), "/usr/bin/git", 1024 * 1024);
+
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+
+        File.WriteAllText(Path.Combine(controlled.ControlledGitDirectory, "shallow"), baseCommit + "\n");
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public async Task Controlled_git_output_bound_and_cancellation_fail_typed()
     {
         using var repository = new TinyGitRepository();
@@ -263,19 +285,18 @@ public sealed class ReviewCoreTests
             request.Identity.HeadTree,
             Policy: evidencePolicy,
             ReviewReceipt: receipt,
-            ReviewAuthority: host.Authority,
-            RequiredReviewAuthorityRealm: ReviewAuthorityRealm.Test);
-        WorkflowTransition.EnsureAllowed(
+            ReviewAuthority: host.Authority);
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview,
             WorkflowState.PrAuthorized,
             transition);
 
         host.RevokeCapability(capability.ProofIdentity);
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview, WorkflowState.PrAuthorized, transition));
         var restarted = ReviewAuthorityHost.CreateIsolatedTest(
             RootContext("run-1", request, policy, evidencePolicy.Identity), Time(1));
-        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview,
             WorkflowState.PrAuthorized,
             transition with { ReviewAuthority = restarted.Authority }));
@@ -880,6 +901,10 @@ internal sealed class TinyGitRepository : IDisposable
     public string CommitAll()
     {
         Git("add", "-A");
+        return CommitIndex();
+    }
+    public string CommitIndex()
+    {
         Git("commit", "--quiet", "-m", "fixture");
         return Git("rev-parse", "HEAD");
     }

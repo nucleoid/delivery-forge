@@ -6,5 +6,7 @@
   <ItemGroup>
     <EmbeddedResource Include="Schemas/*.schema.json" />
     <InternalsVisibleTo Include="DeliveryForge.Execution" />
+    <InternalsVisibleTo Include="DeliveryForge.Contracts.Tests" />
+    <InternalsVisibleTo Include="DeliveryForge.Review.Tests" />
   </ItemGroup>
 </Project>
