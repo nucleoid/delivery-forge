@@ -82,7 +82,8 @@ public sealed class GitProcessTests
         var stopwatch = Stopwatch.StartNew();
         try
         {
-            await run.WaitAsync(TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
+            // Allow the configured one-second cleanup to finish before the independent test deadline.
+            await run.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
         }
         catch (Exception error)
         {
