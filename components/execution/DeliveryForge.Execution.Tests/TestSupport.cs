@@ -89,14 +89,28 @@ internal sealed class GitFixture : IAsyncDisposable
             await Task.WhenAll(outputTask, errorTask).WaitAsync(TimeSpan.FromSeconds(5), cancellationToken)
                 .ConfigureAwait(false);
         }
-        catch
+        catch (Exception originalFailure)
         {
+            var residualUncertainty = false;
             try { if (!process.HasExited) process.Kill(entireProcessTree: true); }
-            catch (Exception failure) when (failure is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+            catch (Exception failure) when (failure is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException)
+            {
+                residualUncertainty = true;
+            }
+            var exitTask = process.WaitForExitAsync(CancellationToken.None);
+            try { await exitTask.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false); }
+            catch (Exception)
+            {
+                residualUncertainty = true;
+                ObserveLateFault(exitTask);
+            }
             process.StandardOutput.Close();
             process.StandardError.Close();
-            try { await Task.WhenAll(outputTask, errorTask).WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false); }
-            catch (Exception) { }
+            var drainTask = Task.WhenAll(outputTask, errorTask);
+            try { await drainTask.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None).ConfigureAwait(false); }
+            catch (Exception) { ObserveLateFault(drainTask); }
+            if (residualUncertainty || !process.HasExited)
+                throw new InvalidOperationException("Fixture Git termination remains uncertain after bounded cleanup.", originalFailure);
             throw;
         }
         var output = await outputTask.ConfigureAwait(false);
@@ -104,6 +118,10 @@ internal sealed class GitFixture : IAsyncDisposable
         if (process.ExitCode != 0) throw new InvalidOperationException(error);
         return output;
     }
+
+    private static void ObserveLateFault(Task task) =>
+        _ = task.ContinueWith(completed => _ = completed.Exception, CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
 
     public ValueTask DisposeAsync() { Directory.Dispose(); return ValueTask.CompletedTask; }
 }
