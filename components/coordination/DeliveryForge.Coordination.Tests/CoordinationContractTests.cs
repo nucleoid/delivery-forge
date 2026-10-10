@@ -1122,6 +1122,15 @@ public sealed class CoordinationContractTests
         Assert.Empty(transport.AcquireRequests);
         Assert.Single(checkpoints.Records);
         Assert.Equal(1, checkpoints.Records[0].RecordSequence);
+
+        var reconciled = await adapter.ReconcileAcquireAsync(
+            result.AcquireContinuation!, TestContext.Current.CancellationToken);
+        _ = await adapter.ContinueReleaseAsync(
+            reconciled.ReleaseContinuation!, TestContext.Current.CancellationToken);
+
+        Assert.Empty(transport.AcquireRequests);
+        Assert.Empty(transport.ReleaseRequests);
+        Assert.Single(checkpoints.Records);
     }
 
     [Fact]
@@ -1146,8 +1155,9 @@ public sealed class CoordinationContractTests
 
         var prepares = checkpoints.Records.Where(record => record.Prepared is not null).ToArray();
         Assert.Equal(prepares.Length, prepares.Select(record => record.OperationSequence).Distinct().Count());
-        Assert.True(transport.AcquireRequests.Count == 2,
-            $"acquire requests={transport.AcquireRequests.Count}; reason={cleaned.Snapshot.Reason}; records={string.Join(',', checkpoints.Records.Select(record => $"{record.RecordSequence}:{record.Kind}:{record.Progress?.AdapterCode ?? "prepare"}"))}");
+        Assert.Single(transport.AcquireRequests);
+        Assert.Single(checkpoints.Records,
+            record => record.Progress?.AdapterCode == "abandoned-before-send");
         Assert.Equal(CoordinationLifecyclePhase.Closed, cleaned.Snapshot.Phase);
 
         var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
