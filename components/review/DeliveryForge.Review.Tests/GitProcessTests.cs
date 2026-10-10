@@ -58,6 +58,56 @@ public sealed class GitProcessTests
         Cancellation
     }
 
+    [Theory]
+    [InlineData(BlockingSeam.StandardInput)]
+    [InlineData(BlockingSeam.StandardOutput)]
+    [InlineData(BlockingSeam.ExitWait)]
+    public async Task Capture_deadline_enters_cleanup_before_noncooperative_operations_settle(
+        BlockingSeam seam)
+    {
+        var process = new NonCooperativeGitProcess(seam);
+        var run = GitProcess.RunAsync(
+            Directory.GetCurrentDirectory(),
+            ["status"],
+            TestContext.Current.CancellationToken,
+            standardInput: seam == BlockingSeam.StandardInput ? [1, 2, 3] : null,
+            runtime: new GitProcessRuntime(
+                _ => process,
+                TimeSpan.FromMilliseconds(25),
+                TimeSpan.FromMilliseconds(50)));
+        Exception? observed = null;
+        var stopwatch = Stopwatch.StartNew();
+        try
+        {
+            await run.WaitAsync(TimeSpan.FromMilliseconds(500), TestContext.Current.CancellationToken);
+        }
+        catch (Exception error)
+        {
+            observed = error;
+        }
+        finally
+        {
+            process.ReleaseAll();
+            try { await run.WaitAsync(TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken); }
+            catch (Exception) { }
+        }
+        stopwatch.Stop();
+
+        var typed = Assert.IsType<ReviewPreflightException>(observed);
+        Assert.Contains("timeout", typed.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(1), $"Cleanup returned after {stopwatch.Elapsed}.");
+        Assert.Equal(1, process.KillAttempts);
+        Assert.True(process.AllBarriersSettled);
+        Assert.True(process.Disposed);
+    }
+
+    public enum BlockingSeam
+    {
+        StandardInput,
+        StandardOutput,
+        ExitWait
+    }
+
     private sealed class PermanentlyRunningGitProcess(Stream output, Stream error) : IGitProcess
     {
         private int activeWaiters;
@@ -130,5 +180,99 @@ public sealed class GitProcessTests
                 Interlocked.Increment(ref settledReads);
             }
         }
+    }
+
+    private sealed class NonCooperativeGitProcess : IGitProcess
+    {
+        private readonly BlockingSeam seam;
+        private readonly TaskCompletionSource exitReleased = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly CloseReleasedStream input;
+        private readonly CloseReleasedStream output;
+        private bool exited;
+
+        public NonCooperativeGitProcess(BlockingSeam seam)
+        {
+            this.seam = seam;
+            input = new CloseReleasedStream(canRead: false, canWrite: true, block: seam == BlockingSeam.StandardInput);
+            output = new CloseReleasedStream(canRead: true, canWrite: false, block: seam == BlockingSeam.StandardOutput);
+        }
+
+        public Stream StandardInput => input;
+        public Stream StandardOutput => output;
+        public Stream StandardError { get; } = new MemoryStream([], writable: false);
+        public bool HasExited => exited;
+        public int ExitCode => exited ? 0 : throw new InvalidOperationException("Process has not exited.");
+        public int KillAttempts { get; private set; }
+        public bool Disposed { get; private set; }
+        public bool AllBarriersSettled => input.Settled && output.Settled && exitReleased.Task.IsCompleted;
+
+        public async Task WaitForExitAsync(CancellationToken cancellationToken)
+        {
+            if (seam == BlockingSeam.ExitWait)
+                await exitReleased.Task;
+            else
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        }
+
+        public void Kill(bool entireProcessTree)
+        {
+            KillAttempts++;
+            exited = true;
+            exitReleased.TrySetResult();
+        }
+
+        public void ReleaseAll()
+        {
+            exited = true;
+            input.Release();
+            output.Release();
+            exitReleased.TrySetResult();
+        }
+
+        public void Dispose()
+        {
+            Disposed = true;
+            ReleaseAll();
+        }
+    }
+
+    private sealed class CloseReleasedStream(bool canRead, bool canWrite, bool block) : Stream
+    {
+        private readonly TaskCompletionSource released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public bool Settled => !block || released.Task.IsCompleted;
+        public override bool CanRead => canRead;
+        public override bool CanSeek => false;
+        public override bool CanWrite => canWrite;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        public override async ValueTask<int> ReadAsync(
+            Memory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            if (block) await released.Task;
+            return 0;
+        }
+
+        public override async ValueTask WriteAsync(
+            ReadOnlyMemory<byte> buffer,
+            CancellationToken cancellationToken = default)
+        {
+            if (block) await released.Task;
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            Release();
+            base.Dispose(disposing);
+        }
+
+        public void Release() => released.TrySetResult();
     }
 }

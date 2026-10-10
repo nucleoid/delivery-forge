@@ -326,6 +326,37 @@ public sealed class WorkflowTransitionTests
                 evidence with { Policy = replacement }));
     }
 
+    [Theory]
+    [InlineData(WorkflowState.IndependentReview, WorkflowState.PrAuthorized)]
+    [InlineData(WorkflowState.PrAuthorized, WorkflowState.PrPublished)]
+    [InlineData(WorkflowState.CiComplete, WorkflowState.HostReviewComplete)]
+    [InlineData(WorkflowState.HostReviewComplete, WorkflowState.MergeAuthorized)]
+    [InlineData(WorkflowState.MergeAuthorized, WorkflowState.Merged)]
+    public void Complete_foreign_envelope_cannot_authorize_a_different_scheduled_receiver(
+        WorkflowState from,
+        WorkflowState to)
+    {
+        var foreignEnvelope = FullEvidence(to == WorkflowState.Merged);
+        var expectedRoot = new ReviewAuthorityRootContext(
+            "scheduled-run-b", "sha256:" + new string('e', 64), foreignEnvelope.Policy!.Identity,
+            "sha256:" + new string('7', 64), new string('f', 40),
+            ReviewPolicyAuthorityKind.ProtectedGitBase, "fixture-source", "/trusted/source",
+            foreignEnvelope.BaseCommit!, "fixture-object-view");
+        var expectedHost = ReviewAuthorityHost.CreateIsolatedTest(expectedRoot);
+        var expectedContext = new ReviewAcceptanceContext(
+            expectedRoot.RunIdentity, "scheduled-request-b", expectedRoot.PlanIdentity,
+            expectedRoot.EvidencePolicyIdentity, expectedRoot.ReviewPolicyContentIdentity,
+            expectedRoot.ReviewPolicySourceRevision, expectedRoot.ReviewPolicyAuthorityKind,
+            expectedRoot.SourceAuthorityIdentity, expectedRoot.SourceRoot,
+            expectedRoot.ProtectedBaseCommit, expectedRoot.ProtectedObjectViewIdentity);
+
+        // The scheduled receiver exists before dispatch, but the legacy transition API has no
+        // receiver parameter and therefore evaluates the complete foreign A envelope as A-to-A.
+        _ = expectedHost.CreateConsumerContext(expectedContext);
+        AssertMessage("root-issued review acceptance", () =>
+            WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, foreignEnvelope));
+    }
+
     [Fact]
     public void Gate_receipts_must_bind_the_supplied_policy()
     {

@@ -47,6 +47,39 @@ public sealed class ReviewAuthorityHostTests
             Identity('a'), ReviewEvidenceRole.Independent, context, "execution"));
     }
 
+    [Fact]
+    public void Same_named_host_cannot_record_a_foreign_capability()
+    {
+        var root = new ReviewAuthorityRootContext(
+            "run", Identity('1'), Identity('2'), Identity('3'), Commit('4'),
+            ReviewPolicyAuthorityKind.ProtectedGitBase,
+            "parent-source", Path.GetTempPath(), Commit('5'), "object-view");
+        var configuration = new ProductionReviewAuthorityConfiguration("same-root-name", root);
+        var hostA = ReviewAuthorityHost.CreateProduction(configuration);
+        var hostB = ReviewAuthorityHost.CreateProduction(configuration);
+        var capability = new ReviewerCapability(
+            "adapter", "1", "claude", true, false, false, ["source"]);
+        var request = new ReviewRequest(
+            new PatchIdentity(
+                Commit('5'), Commit('6'), Commit('7'), Identity('8'), root.PlanIdentity,
+                new Dictionary<string, string> { ["tests"] = Identity('9') },
+                "git version fixture", ["git", "diff"]),
+            "gpt", capability, "source", root.ReviewPolicyContentIdentity);
+        var context = new ReviewAcceptanceContext(
+            root.RunIdentity, "request", root.PlanIdentity, root.EvidencePolicyIdentity,
+            root.ReviewPolicyContentIdentity, root.ReviewPolicySourceRevision,
+            root.ReviewPolicyAuthorityKind, root.SourceAuthorityIdentity, root.SourceRoot,
+            root.ProtectedBaseCommit, root.ProtectedObjectViewIdentity);
+        var registration = hostB.RegisterRequest("request", request, context);
+        var foreignCapability = hostA.IssueCapability(
+            capability, "capability", DateTimeOffset.Parse("2026-10-10T00:00:00Z"),
+            DateTimeOffset.Parse("2026-10-10T00:05:00Z"));
+
+        Assert.Throws<ArgumentException>(() => hostB.RecordExecution(
+            registration, foreignCapability, "execution", true, true, Identity('a'), "ship",
+            DateTimeOffset.Parse("2026-10-10T00:01:00Z")));
+    }
+
     private static string Identity(char value) => $"sha256:{new string(value, 64)}";
     private static string Commit(char value) => new(value, 40);
 }

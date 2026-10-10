@@ -243,6 +243,49 @@ public sealed class ReviewCoreTests
     }
 
     [Fact]
+    public async Task Controlled_git_recheck_rejects_staged_only_change_with_restored_working_bytes()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "before\n"u8.ToArray() });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path,
+            Path.Combine(repository.Path, ".git"),
+            TrustedGitPath(),
+            1024 * 1024,
+            () =>
+            {
+                repository.Write("a.txt", "staged-only\n"u8.ToArray());
+                repository.Git("add", "a.txt");
+                repository.Write("a.txt", "after\n"u8.ToArray());
+            });
+
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Controlled_git_recheck_rejects_same_tree_head_drift()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "before\n"u8.ToArray() });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path,
+            Path.Combine(repository.Path, ".git"),
+            TrustedGitPath(),
+            1024 * 1024,
+            () => repository.Git("commit", "--quiet", "--allow-empty", "-m", "same-tree drift"));
+
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
     public void Isolated_root_issuer_drives_the_exact_safe_receipt_and_consumer_path()
     {
         var policy = Policy();
@@ -738,6 +781,40 @@ public sealed class ReviewCoreTests
     }
 
     [Fact]
+    public void Issued_and_normalized_returned_collections_are_not_mutable_backing_objects()
+    {
+        var policy = Policy();
+        var request = Request(policy);
+        var evidencePolicy = EvidencePolicy();
+        var root = RootContext("immutable-run", request, policy, evidencePolicy.Identity);
+        var host = ReviewAuthorityHost.CreateIsolatedTest(root, Time(1));
+        var context = Acceptance(root, "immutable-request");
+        var registration = host.RegisterRequest("immutable-request", request, context);
+        var capability = host.IssueCapability(request.Capability, "immutable-capability", Time(0), Time(2));
+        var execution = host.RecordExecution(
+            registration, capability, "immutable-execution", true, true, Identity('f'),
+            "needs-attention", Time(1));
+        var finding = new ReviewFinding("R1", "material", "before", "A.cs:1");
+        var normalized = ReviewNormalizer.Normalize(
+            request,
+            Result() with { Verdict = "FAIL", Findings = [finding] },
+            policy,
+            capability,
+            execution);
+
+        Assert.Throws<NotSupportedException>(() =>
+            ((IDictionary<string, string>)registration.Request.Identity.ArtifactIdentities)["tests"] = Identity('9'));
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<string>)registration.Request.Identity.Command)[0] = "evil");
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<string>)capability.Capability.Scopes)[0] = "docs");
+        Assert.Throws<NotSupportedException>(() =>
+            ((IDictionary<string, string>)normalized.Identity.ArtifactIdentities)["tests"] = Identity('9'));
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<ReviewFinding>)normalized.Findings)[0] = finding with { Code = "R2" });
+    }
+
+    [Fact]
     public async Task Protected_policy_resolver_freezes_exact_base_and_ignores_worker_branch_edits()
     {
         using var repository = new TinyGitRepository();
@@ -777,6 +854,32 @@ public sealed class ReviewCoreTests
         Assert.Equal(policy.ContentIdentity, policy.PolicyIdentity);
         Assert.NotEqual(Identity('7'), policy.PolicyIdentity);
         Assert.Contains(new FamilyPair("gpt", "claude"), policy.AllowedFamilies);
+
+        var productionCapability = Capability() with { Fixture = false };
+        var productionRequest = Request(policy) with { Capability = productionCapability };
+        var productionRoot = new ReviewAuthorityRootContext(
+            "production-run", productionRequest.Identity.PlanIdentity, Identity('0'),
+            policy.ContentIdentity, policy.SourceRevision, policy.AuthorityKind,
+            "production-source", repository.Path, productionRequest.Identity.BaseCommit,
+            "production-object-view");
+        var productionHost = ReviewAuthorityHost.CreateProduction(
+            new ProductionReviewAuthorityConfiguration("production-root", productionRoot));
+        var productionContext = Acceptance(productionRoot, "production-request");
+        var productionRegistration = productionHost.RegisterRequest(
+            "production-request", productionRequest, productionContext);
+        var issuedCapability = productionHost.IssueCapability(
+            productionCapability, "production-capability", Time(0), Time(2));
+        var productionExecution = productionHost.RecordExecution(
+            productionRegistration, issuedCapability, "production-execution", true, true,
+            Identity('f'), "ship", Time(1));
+        var productionResult = new ReviewResult(
+            productionRequest.Identity, "claude", "PASS", [], Identity('f'), Time(1),
+            TimedOut: false, Truncated: false, Fixture: false, Advisory: false);
+        var crossRealm = ReviewNormalizer.Normalize(
+            productionRequest, productionResult, policy, issuedCapability, productionExecution);
+
+        Assert.False(crossRealm.AuthorityAccepted);
+        Assert.False(crossRealm.ProductionAccepted);
     }
 
     [Fact]
