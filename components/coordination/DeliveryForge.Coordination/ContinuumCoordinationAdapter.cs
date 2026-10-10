@@ -197,12 +197,7 @@ public sealed class ContinuumCoordinationAdapter
                 }
                 catch (CoordinationException) { return FinishFailedRenewal(lifecycle, "renew-response-invalid"); }
 
-                lock (_ledgerGate)
-                {
-                    entry.Evidence = renewed;
-                    entry.Identity = Identity(renewed);
-                }
-                if (!await ProgressAsync(intent, "renewed", entry.Identity, cancellationToken).ConfigureAwait(false))
+                if (!await ProgressAsync(intent, "renewed", Identity(renewed), cancellationToken).ConfigureAwait(false))
                     return FinishFailedRenewal(lifecycle, "checkpoint-progress-failed");
                 ClearIntent(lifecycle, intent);
             }
@@ -349,6 +344,7 @@ public sealed class ContinuumCoordinationAdapter
                 Phase = CoordinationLifecyclePhase.Cleaning,
                 WriterClaim = claim,
                 NextRecordSequence = claim.NextRecordSequence,
+                RecoveryOnly = true,
             };
             var prepared = new Dictionary<long, PreparedCoordinationIntent>();
             var progress = new Dictionary<long, CoordinationIntentProgress>();
@@ -424,7 +420,7 @@ public sealed class ContinuumCoordinationAdapter
                 lifecycle.AcquisitionResolved = true;
                 lifecycle.NextSequence = observation.OperationSequence + 1;
                 lifecycle.Phase = CoordinationLifecyclePhase.Closed;
-                lifecycle.Ownership = LeaseOwnership.Released;
+                lifecycle.Ownership = LeaseOwnership.CleanupComplete;
                 lifecycle.Reason = progress.Count == 0 ? "observation-incomplete" : "observation-complete";
                 return Release(lifecycle, []);
             }
@@ -487,7 +483,7 @@ public sealed class ContinuumCoordinationAdapter
                 _recovering.Remove(lifecycle.Id);
                 lifecycle.Phase = IsClosed(lifecycle) ? CoordinationLifecyclePhase.Closed : CoordinationLifecyclePhase.Cleaning;
                 lifecycle.Ownership = lifecycle.Phase == CoordinationLifecyclePhase.Closed
-                    ? LeaseOwnership.Released
+                    ? ClosedOwnership(lifecycle)
                     : LeaseOwnership.Uncertain;
                 lifecycle.Reason = lifecycle.Phase == CoordinationLifecyclePhase.Closed
                     ? "cleanup-complete"
@@ -542,6 +538,9 @@ public sealed class ContinuumCoordinationAdapter
                         lifecycle.Busy = false;
                         lifecycle.AcquisitionResolved = true;
                         lifecycle.Phase = IsClosed(lifecycle) ? CoordinationLifecyclePhase.Closed : CoordinationLifecyclePhase.Cleaning;
+                        lifecycle.Ownership = lifecycle.Phase == CoordinationLifecyclePhase.Closed
+                            ? ClosedOwnership(lifecycle)
+                            : LeaseOwnership.Uncertain;
                         lifecycle.Reason = lifecycle.Phase == CoordinationLifecyclePhase.Closed ? "contended" : "cleanup-required";
                         if (lifecycle.Phase == CoordinationLifecyclePhase.Closed) CloseUnderGate(lifecycle);
                         else EnsureReleaseContinuationUnderGate(lifecycle);
@@ -683,7 +682,7 @@ public sealed class ContinuumCoordinationAdapter
         lifecycle.Busy = false;
         lifecycle.Phase = IsClosed(lifecycle) ? CoordinationLifecyclePhase.Closed : CoordinationLifecyclePhase.Cleaning;
         lifecycle.Ownership = lifecycle.Phase == CoordinationLifecyclePhase.Closed
-            ? LeaseOwnership.Released
+            ? ClosedOwnership(lifecycle)
             : LeaseOwnership.Uncertain;
         lifecycle.Reason = lifecycle.Phase == CoordinationLifecyclePhase.Closed ? "cleanup-complete" : code;
         if (lifecycle.Phase == CoordinationLifecyclePhase.Closed)
@@ -747,7 +746,9 @@ public sealed class ContinuumCoordinationAdapter
             {
                 lifecycle.Busy = false;
                 lifecycle.Phase = IsClosed(lifecycle) ? CoordinationLifecyclePhase.Closed : CoordinationLifecyclePhase.Cleaning;
-                lifecycle.Ownership = lifecycle.Phase == CoordinationLifecyclePhase.Closed ? LeaseOwnership.Released : LeaseOwnership.Uncertain;
+                lifecycle.Ownership = lifecycle.Phase == CoordinationLifecyclePhase.Closed
+                    ? ClosedOwnership(lifecycle)
+                    : LeaseOwnership.Uncertain;
                 lifecycle.Reason = lifecycle.Phase == CoordinationLifecyclePhase.Closed ? "cleanup-complete" : "cleanup-uncertain";
                 if (lifecycle.Phase == CoordinationLifecyclePhase.Closed) CloseUnderGate(lifecycle);
                 else EnsureReleaseContinuationUnderGate(lifecycle);
@@ -835,12 +836,7 @@ public sealed class ContinuumCoordinationAdapter
                     prior.FencingToken, result.ServerTime.Value, result.ExpiresAt.Value, prior.Generation);
                 if (renewed.ExpiresAt <= prior.ExpiresAt || renewed.ServerTime <= prior.ServerTime)
                     throw new CoordinationProtocolException("renewal-did-not-progress");
-                lock (_ledgerGate)
-                {
-                    entry.Evidence = renewed;
-                    entry.Identity = Identity(renewed);
-                }
-                if (await ProgressAsync(intent, "renewed-cleanup-only", entry.Identity, cancellationToken).ConfigureAwait(false))
+                if (await ProgressAsync(intent, "renewed-cleanup-only", Identity(renewed), cancellationToken).ConfigureAwait(false))
                     ClearIntent(lifecycle, intent);
                 return;
             }
@@ -1186,13 +1182,14 @@ public sealed class ContinuumCoordinationAdapter
                     entry = RecoveredEntry(progress.Lease, intent.Prepared.Kind == CoordinationIntentKind.Inspect);
                     lifecycle.Entries[intent.Prepared.Resource] = entry;
                 }
+                else if (intent.Prepared.Kind == CoordinationIntentKind.Renew &&
+                         progress.AdapterCode is "renewed" or "renewed-cleanup-only")
+                {
+                    ApplyRenewalProgress(lifecycle, entry, intent, progress);
+                }
                 else if (!SameIdentity(entry.Identity, progress.Lease))
                 {
-                    if (intent.Prepared.Kind != CoordinationIntentKind.Renew ||
-                        !SameServerIdentity(entry.Identity, progress.Lease))
-                        throw new CoordinationProtocolException("checkpoint-live-identity-drift");
-                    entry.Evidence = Evidence(progress.Lease);
-                    entry.Identity = progress.Lease;
+                    throw new CoordinationProtocolException("checkpoint-live-identity-drift");
                 }
             }
 
@@ -1219,6 +1216,11 @@ public sealed class ContinuumCoordinationAdapter
                     {
                         entry.ReleaseState = LeaseReleaseState.Released;
                         entry.ReleaseReason = "released";
+                        if (entry.InspectIntent is not null)
+                        {
+                            entry.InspectIntent.Resolved = true;
+                            entry.InspectIntent = null;
+                        }
                     }
                     intent.Resolved = true;
                     return;
@@ -1227,6 +1229,7 @@ public sealed class ContinuumCoordinationAdapter
                     {
                         entry.ReleaseState = LeaseReleaseState.NotOwned;
                         entry.ReleaseReason = "original-not-owned";
+                        if (entry.ReleaseIntent is not null) entry.ReleaseIntent.Resolved = true;
                         entry.InspectIntent = null;
                     }
                     intent.Resolved = true;
@@ -1240,7 +1243,7 @@ public sealed class ContinuumCoordinationAdapter
                     ClearIntentUnderGate(lifecycle, intent);
                     lifecycle.AcquisitionResolved = true;
                     lifecycle.Phase = CoordinationLifecyclePhase.Closed;
-                    lifecycle.Ownership = LeaseOwnership.Released;
+                    lifecycle.Ownership = LeaseOwnership.CleanupComplete;
                     lifecycle.Reason = "observation-complete";
                     return;
             }
@@ -1556,6 +1559,29 @@ public sealed class ContinuumCoordinationAdapter
     private static bool SameIdentity(CheckpointLeaseIdentity left, CheckpointLeaseIdentity right) =>
         SameServerIdentity(left, right) && left.Generation == right.Generation;
 
+    private static void ApplyRenewalProgress(
+        Lifecycle lifecycle,
+        LeaseEntry entry,
+        OperationIntent intent,
+        CoordinationIntentProgress progress)
+    {
+        var previous = intent.Prepared.PreviousLease;
+        var renewed = progress.Lease!;
+        if (previous is null || !SameIdentity(previous, renewed) ||
+            renewed.ServerTime <= previous.ServerTime || renewed.ExpiresAt <= previous.ExpiresAt ||
+            renewed.ExpiresAt - renewed.ServerTime != DefaultTtl)
+            throw new CoordinationProtocolException("checkpoint-renewal-evidence-invalid");
+        if (progress.AdapterCode == "renewed" &&
+            (renewed.SafeDeadline <= previous.SafeDeadline || renewed.RenewAt <= previous.RenewAt))
+            throw new CoordinationProtocolException("checkpoint-renewal-clock-progress-invalid");
+
+        entry.Evidence = lifecycle.RecoveryOnly
+            ? CreateCleanupEvidence(renewed.Resource, renewed.Owner, renewed.LeaseId, renewed.FencingToken,
+                renewed.ServerTime, renewed.ExpiresAt, renewed.Generation)
+            : Evidence(renewed);
+        entry.Identity = Identity(entry.Evidence);
+    }
+
     private static LeaseEvidence Evidence(CheckpointLeaseIdentity identity) =>
         new(identity.Resource, identity.Owner, identity.LeaseId, identity.FencingToken,
             identity.ServerTime, identity.ExpiresAt, identity.SafeDeadline, identity.RenewAt, identity.Generation);
@@ -1603,8 +1629,17 @@ public sealed class ContinuumCoordinationAdapter
             entry.ReleaseState == LeaseReleaseState.Pending && _clock.Elapsed < entry.Evidence.SafeDeadline);
 
     private static bool IsClosed(Lifecycle lifecycle) =>
-        lifecycle.AcquisitionResolved && lifecycle.PendingIntent is null && lifecycle.DeferredIntents.Count == 0 && lifecycle.Entries.Values.All(entry =>
-            entry.ReleaseState is LeaseReleaseState.Released or LeaseReleaseState.NotOwned);
+        !lifecycle.CheckpointCorrupt && lifecycle.IndeterminateRecord is null &&
+        lifecycle.AcquisitionResolved && lifecycle.PendingIntent is null && lifecycle.DeferredIntents.Count == 0 &&
+        lifecycle.Entries.Values.All(entry =>
+            entry.ReleaseState is LeaseReleaseState.Released or LeaseReleaseState.NotOwned &&
+            (entry.ReleaseIntent is null || entry.ReleaseIntent.Resolved) &&
+            (entry.InspectIntent is null || entry.InspectIntent.Resolved));
+
+    private static LeaseOwnership ClosedOwnership(Lifecycle lifecycle) =>
+        lifecycle.Entries.Count > 0 && lifecycle.Entries.Values.All(entry => entry.ReleaseState == LeaseReleaseState.Released)
+            ? LeaseOwnership.Released
+            : LeaseOwnership.CleanupComplete;
 
     private static bool HasUnresolvedAcquire(Lifecycle lifecycle) =>
         lifecycle.PendingIntent?.Prepared.Kind == CoordinationIntentKind.Acquire ||
@@ -1721,6 +1756,7 @@ public sealed class ContinuumCoordinationAdapter
         public CoordinationCheckpointRecord? IndeterminateRecord { get; set; }
         public bool LastAppendDefiniteNoWrite { get; set; }
         public bool CheckpointCorrupt { get; set; }
+        public bool RecoveryOnly { get; set; }
     }
 
     private sealed class LeaseEntry

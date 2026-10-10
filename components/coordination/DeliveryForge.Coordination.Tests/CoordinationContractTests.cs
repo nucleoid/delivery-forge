@@ -1301,7 +1301,7 @@ public sealed class CoordinationContractTests
         Assert.Equal(live.ServerTime, replay.ServerTime);
         Assert.Equal(live.ExpiresAt, replay.ExpiresAt);
         Assert.Equal(TimeSpan.Zero, replay.SafeDeadline);
-        Assert.Equal(TimeSpan.Zero, replay.RenewAt);
+        Assert.Equal(TimeSpan.MinValue, replay.RenewAt);
         Assert.NotNull(recovered.Continuation);
         Assert.Empty(transport.ReleaseRequests);
     }
@@ -1318,6 +1318,8 @@ public sealed class CoordinationContractTests
 
         Assert.Equal(CoordinationLifecyclePhase.Closed, released.Snapshot.Phase);
         Assert.Equal(LeaseOwnership.Released, released.Snapshot.Ownership);
+        Assert.Equal(4, (int)LeaseOwnership.Released);
+        Assert.Equal(5, (int)LeaseOwnership.CleanupComplete);
         Assert.All(released.Leases, item => Assert.Equal(LeaseReleaseState.Released, item.State));
 
         var absentTransport = TwoLeaseTransport();
@@ -1332,7 +1334,7 @@ public sealed class CoordinationContractTests
         var notOwned = await absent.ReleaseAllAsync(absentHeld.Authority!, TestContext.Current.CancellationToken);
 
         Assert.Equal(CoordinationLifecyclePhase.Closed, notOwned.Snapshot.Phase);
-        Assert.NotEqual(LeaseOwnership.Released, notOwned.Snapshot.Ownership);
+        Assert.Equal(LeaseOwnership.CleanupComplete, notOwned.Snapshot.Ownership);
         Assert.All(notOwned.Leases, item => Assert.Equal(LeaseReleaseState.NotOwned, item.State));
         Assert.Equal(["lease-b", "lease-a"], absentTransport.ReleaseRequests.Select(item => item.LeaseId));
         Assert.DoesNotContain(absentTransport.ReleaseRequests, item => item.LeaseId == "replacement");
@@ -1347,7 +1349,7 @@ public sealed class CoordinationContractTests
         var mixedResult = await mixed.ReleaseAllAsync(mixedHeld.Authority!, TestContext.Current.CancellationToken);
 
         Assert.Equal(CoordinationLifecyclePhase.Closed, mixedResult.Snapshot.Phase);
-        Assert.NotEqual(LeaseOwnership.Released, mixedResult.Snapshot.Ownership);
+        Assert.Equal(LeaseOwnership.CleanupComplete, mixedResult.Snapshot.Ownership);
         Assert.Contains(mixedResult.Leases, item => item.State == LeaseReleaseState.Released);
         Assert.Contains(mixedResult.Leases, item => item.State == LeaseReleaseState.NotOwned);
     }

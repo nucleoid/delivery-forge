@@ -7,7 +7,15 @@ namespace DeliveryForge.Coordination;
 
 public enum CoordinationOperation { Acquire, Renew, Inspect, Release }
 public enum CoordinationAvailability { Available, Unavailable, Incomplete }
-public enum LeaseOwnership { Held, Contended, Uncertain, Lost, Released }
+public enum LeaseOwnership
+{
+    Held,
+    Contended,
+    Uncertain,
+    Lost,
+    Released,
+    CleanupComplete = 5,
+}
 public enum TransportOutcome { Acquired, Renewed, Inspected, Released, Contended, LeaseLost, Uncertain }
 public enum LeaseReleaseState { Pending, Released, NotOwned, Unknown }
 public enum InspectionState { Available, HeldByCaller, HeldByOther }
