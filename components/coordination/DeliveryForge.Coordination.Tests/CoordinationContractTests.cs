@@ -23,7 +23,9 @@ public sealed class CoordinationContractTests
         var acquired = original.Records[1].Progress!;
         var prepared = original.Records[0].Prepared! with
         {
-            OperationSequence = 2, Kind = kind, PreviousLease = acquired.Lease,
+            OperationSequence = 2,
+            Kind = kind,
+            PreviousLease = acquired.Lease,
             RequestId = Guid.NewGuid().ToString("D")
         };
         var replay = new FixtureCheckpointStore { ReverseReads = true };
