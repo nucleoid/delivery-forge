@@ -32,6 +32,7 @@ public sealed record ReviewerCapability(
 public sealed class IssuedReviewerCapability
 {
     internal IssuedReviewerCapability(
+        object issuer,
         string rootIdentity,
         string proofIdentity,
         ReviewerCapability capability,
@@ -40,15 +41,17 @@ public sealed class IssuedReviewerCapability
         DateTimeOffset validUntil,
         Func<bool> isRevoked)
     {
+        Issuer = issuer;
         RootIdentity = rootIdentity;
         ProofIdentity = proofIdentity;
-        Capability = capability with { Scopes = capability.Scopes?.ToArray() ?? [] };
+        Capability = ReviewNormalizer.FreezeCapability(capability);
         Realm = realm;
         ValidFrom = validFrom;
         ValidUntil = validUntil;
         IsRevoked = isRevoked;
     }
 
+    internal object Issuer { get; }
     internal string RootIdentity { get; }
     public string ProofIdentity { get; }
     public ReviewerCapability Capability { get; }
@@ -57,9 +60,11 @@ public sealed class IssuedReviewerCapability
     public DateTimeOffset ValidUntil { get; }
     internal Func<bool> IsRevoked { get; }
 
+    internal bool IsCurrent(DateTimeOffset observedAt) =>
+        !IsRevoked() && observedAt >= ValidFrom && observedAt <= ValidUntil;
+
     internal bool Matches(ReviewerCapability capability, string scope, DateTimeOffset completedAt) =>
-        !IsRevoked() &&
-        completedAt >= ValidFrom && completedAt <= ValidUntil &&
+        IsCurrent(completedAt) &&
         string.Equals(Capability.AdapterId, capability.AdapterId, StringComparison.Ordinal) &&
         string.Equals(Capability.AdapterVersion, capability.AdapterVersion, StringComparison.Ordinal) &&
         ReviewPolicy.Same(Capability.Family, capability.Family) &&
@@ -162,19 +167,7 @@ public sealed class IssuedReviewReuseContext
         Func<bool> capabilityCurrent)
     {
         RootIdentity = rootIdentity;
-        Request = request with
-        {
-            Identity = new PatchIdentity(
-                request.Identity.BaseCommit,
-                request.Identity.HeadCommit,
-                request.Identity.HeadTree,
-                request.Identity.PatchSha256,
-                request.Identity.PlanIdentity,
-                request.Identity.ArtifactIdentities.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
-                request.Identity.GitVersion,
-                request.Identity.Command.ToArray()),
-            Capability = request.Capability with { Scopes = request.Capability.Scopes?.ToArray() ?? [] }
-        };
+        Request = ReviewNormalizer.FreezeRequest(request);
         CapabilityProofIdentity = capabilityProofIdentity;
         Realm = realm;
         _acceptanceCurrent = acceptanceCurrent;
@@ -253,18 +246,22 @@ public sealed class NormalizedReview
         string executionIdentity = "",
         string rawArtifactHash = "",
         ReviewAuthorityRealm authorityRealm = ReviewAuthorityRealm.Test,
-        ReviewAuthorityProvenance? provenance = null)
+        ReviewAuthorityProvenance? provenance = null,
+        object? policySourceOwner = null,
+        ReviewAuthorityRealm policySourceRealm = ReviewAuthorityRealm.Test,
+        string policySourceAuthorityIdentity = "",
+        string policyProtectedObjectViewIdentity = "")
     {
         Outcome = outcome;
         Reason = reason;
-        Identity = identity;
+        Identity = ReviewNormalizer.Freeze(identity);
         PolicyIdentity = policyIdentity;
         PolicyContentIdentity = policyContentIdentity;
         PolicySourceRevision = policySourceRevision;
         PolicyAuthorityKind = policyAuthorityKind;
         AuthorFamily = authorFamily;
         ReviewerFamily = reviewerFamily;
-        Findings = findings.ToArray();
+        Findings = ReviewNormalizer.FreezeFindings(findings);
         ArtifactHash = artifactHash;
         CompletedAt = completedAt;
         Fixture = fixture;
@@ -282,6 +279,10 @@ public sealed class NormalizedReview
         RawArtifactHash = rawArtifactHash;
         AuthorityRealm = authorityRealm;
         Provenance = provenance;
+        PolicySourceOwner = policySourceOwner;
+        PolicySourceRealm = policySourceRealm;
+        PolicySourceAuthorityIdentity = policySourceAuthorityIdentity;
+        PolicyProtectedObjectViewIdentity = policyProtectedObjectViewIdentity;
     }
 
     public ReviewOutcome Outcome { get; }
@@ -311,4 +312,20 @@ public sealed class NormalizedReview
     public string RawArtifactHash { get; }
     public ReviewAuthorityRealm AuthorityRealm { get; }
     internal ReviewAuthorityProvenance? Provenance { get; }
+    internal object? PolicySourceOwner { get; }
+    public ReviewAuthorityRealm PolicySourceRealm { get; }
+    public string PolicySourceAuthorityIdentity { get; }
+    public string PolicyProtectedObjectViewIdentity { get; }
+
+    internal bool PolicySourceMatches(
+        object issuer,
+        ReviewAuthorityRealm realm,
+        string sourceAuthorityIdentity,
+        string protectedObjectViewIdentity) =>
+        PolicySourceOwner is null
+            ? realm == ReviewAuthorityRealm.Test
+            : ReferenceEquals(PolicySourceOwner, issuer) &&
+              PolicySourceRealm == realm &&
+              string.Equals(PolicySourceAuthorityIdentity, sourceAuthorityIdentity, StringComparison.Ordinal) &&
+              string.Equals(PolicyProtectedObjectViewIdentity, protectedObjectViewIdentity, StringComparison.Ordinal);
 }

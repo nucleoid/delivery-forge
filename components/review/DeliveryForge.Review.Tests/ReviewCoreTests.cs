@@ -127,7 +127,7 @@ public sealed class ReviewCoreTests
     }
 
     [Fact]
-    public async Task Controlled_git_raw_source_check_exposes_ignored_skip_worktree_symlink_and_alternates()
+    public async Task Controlled_git_raw_source_check_exposes_ignored_and_skip_worktree_entries()
     {
         using var repository = new TinyGitRepository();
         var baseCommit = repository.Commit(new Dictionary<string, byte[]>
@@ -153,29 +153,57 @@ public sealed class ReviewCoreTests
             controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
             TestContext.Current.CancellationToken));
         repository.Delete("ignored.txt");
+    }
+
+    [Fact]
+    public async Task Controlled_git_symlink_conformance_exercises_the_actual_producer_or_reports_unproved()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "before\n"u8.ToArray() });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
 
         var ownedLinkTarget = Path.Combine(Path.GetTempPath(), $"delivery-forge-link-{Guid.NewGuid():N}");
+        var link = Path.Combine(repository.Path, "outside-link");
         File.WriteAllText(ownedLinkTarget, "owned target");
         try
         {
-            File.CreateSymbolicLink(Path.Combine(repository.Path, "outside-link"), ownedLinkTarget);
+            File.CreateSymbolicLink(link, ownedLinkTarget);
         }
         catch (Exception error) when (error is PlatformNotSupportedException or UnauthorizedAccessException)
         {
             File.Delete(ownedLinkTarget);
-            var incomplete = new ReviewPreflightException(
-                "Symlink evidence is unsupported on this platform; review preflight is INCOMPLETE.", error);
-            Assert.Contains("INCOMPLETE", incomplete.Message, StringComparison.Ordinal);
-            return;
+            Assert.Skip($"Symlink producer conformance is unproved on this platform: {error.GetType().Name}.");
         }
-        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
-            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
-            TestContext.Current.CancellationToken));
-        File.Delete(Path.Combine(repository.Path, "outside-link"));
-        File.Delete(ownedLinkTarget);
+        try
+        {
+            await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+                controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+                TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            if (File.Exists(link)) File.Delete(link);
+            if (File.Exists(ownedLinkTarget)) File.Delete(ownedLinkTarget);
+        }
+    }
+
+    [Fact]
+    public async Task Controlled_git_rejects_alternates_independently_of_symlink_support()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "before\n"u8.ToArray() });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
 
         Directory.CreateDirectory(Path.Combine(controlled.ControlledGitDirectory, "objects", "info"));
-        File.WriteAllText(Path.Combine(controlled.ControlledGitDirectory, "objects", "info", "alternates"), "/tmp/untrusted\n");
+        File.WriteAllText(
+            Path.Combine(controlled.ControlledGitDirectory, "objects", "info", "alternates"),
+            Path.Combine(repository.Path, "untrusted-objects") + Environment.NewLine);
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
             controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
             TestContext.Current.CancellationToken));
@@ -297,6 +325,7 @@ public sealed class ReviewCoreTests
             "run-1", "review-request-1", request.Identity.PlanIdentity, evidencePolicy.Identity,
             policy.ContentIdentity, policy.SourceRevision, policy.AuthorityKind,
             "source-authority-1", TrustedSourceRoot(), request.Identity.BaseCommit, "object-view-1");
+        var receiver = host.CreateTransitionReceiver(acceptance);
         var registration = host.RegisterRequest("review-request-1", request, acceptance);
         var capability = host.IssueCapability(
             request.Capability,
@@ -339,7 +368,15 @@ public sealed class ReviewCoreTests
         WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview,
             WorkflowState.PrAuthorized,
-            transition);
+            transition,
+            receiver);
+
+        var replacementPolicy = EvidencePolicy("merge");
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.IndependentReview,
+            WorkflowState.PrAuthorized,
+            transition with { Policy = replacementPolicy },
+            receiver));
 
         host.RevokeCapability(capability.ProofIdentity);
         Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
@@ -449,6 +486,7 @@ public sealed class ReviewCoreTests
         var host = ReviewAuthorityHost.CreateIsolatedTest(root, Time(1));
         var independentContext = Acceptance(root, "independent-request");
         var hostedContext = Acceptance(root, "hosted-request");
+        var receiver = host.CreateTransitionReceiver(independentContext, hostedContext);
 
         var independentCapability = host.IssueCapability(
             independent.Capability, "independent-capability", Time(0), Time(2));
@@ -485,15 +523,23 @@ public sealed class ReviewCoreTests
             Policy: evidencePolicy,
             ReviewReceipt: independentReceipt,
             HostReviewReceipt: hostedReceipt,
+            PublicationReceipt: PublicationReceipt(independent.Identity, "PR_PUBLISHED"),
             ReviewAuthority: host.Authority,
             ReviewContext: host.CreateConsumerContext(independentContext),
             HostReviewContext: host.CreateConsumerContext(hostedContext));
         WorkflowTransition.EnsureAllowedForIsolatedTest(
-            WorkflowState.IndependentReview, WorkflowState.PrAuthorized, evidence);
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized, evidence, receiver);
         WorkflowTransition.EnsureAllowedForIsolatedTest(
-            WorkflowState.CiComplete, WorkflowState.HostReviewComplete, evidence);
+            WorkflowState.PrAuthorized, WorkflowState.PrPublished, evidence, receiver);
         WorkflowTransition.EnsureAllowedForIsolatedTest(
-            WorkflowState.HostReviewComplete, WorkflowState.MergeAuthorized, evidence);
+            WorkflowState.CiComplete, WorkflowState.HostReviewComplete, evidence, receiver);
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.HostReviewComplete, WorkflowState.MergeAuthorized, evidence, receiver);
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.MergeAuthorized,
+            WorkflowState.Merged,
+            evidence with { PublicationReceipt = PublicationReceipt(independent.Identity, "MERGED") },
+            receiver);
     }
 
     [Theory]
@@ -1126,6 +1172,26 @@ public sealed class ReviewCoreTests
               "requireIndependentReview": true,
               "allowedNotApplicable": [],
               "createdAt": "2026-10-09T00:00:00Z"
+            }
+            """)!.AsObject();
+        node["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(node.ToJsonString()));
+        return ContractValidator.ParseAndValidate(Encoding.UTF8.GetBytes(node.ToJsonString()));
+    }
+
+    private static ValidatedContract PublicationReceipt(PatchIdentity identity, string action)
+    {
+        var node = JsonNode.Parse($$"""
+            {
+              "schemaVersion": "1.0.0",
+              "kind": "publication-receipt",
+              "identity": "{{Identity('0')}}",
+              "baseCommit": "{{identity.BaseCommit}}",
+              "headCommit": "{{identity.HeadCommit}}",
+              "treeId": "{{identity.HeadTree}}",
+              "action": "{{action}}",
+              "remoteRef": "refs/pull/8/head",
+              "resultId": "https://example.invalid/pr/8",
+              "createdAt": "2026-10-09T00:00:01Z"
             }
             """)!.AsObject();
         node["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(node.ToJsonString()));

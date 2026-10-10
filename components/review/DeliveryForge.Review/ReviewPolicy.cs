@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
+using DeliveryForge.Contracts.State;
 
 namespace DeliveryForge.Review;
 
@@ -48,7 +49,11 @@ public sealed partial class ReviewPolicy
         IEnumerable<string> allowedScopes,
         bool allowExactReuse,
         ReviewBudget budget,
-        IEnumerable<string> exemptionApprovers)
+        IEnumerable<string> exemptionApprovers,
+        object? sourceOwner = null,
+        ReviewAuthorityRealm sourceRealm = ReviewAuthorityRealm.Test,
+        string sourceAuthorityIdentity = "",
+        string protectedObjectViewIdentity = "")
     {
         PolicyIdentity = policyIdentity;
         ContentIdentity = contentIdentity;
@@ -62,6 +67,10 @@ public sealed partial class ReviewPolicy
         AllowExactReuse = allowExactReuse;
         Budget = budget;
         ExemptionApprovers = Array.AsReadOnly(exemptionApprovers.ToArray());
+        SourceOwner = sourceOwner;
+        SourceRealm = sourceRealm;
+        SourceAuthorityIdentity = sourceAuthorityIdentity;
+        ProtectedObjectViewIdentity = protectedObjectViewIdentity;
     }
 
     public static ReviewPolicy Missing { get; } = new(
@@ -80,6 +89,11 @@ public sealed partial class ReviewPolicy
     public bool AllowExactReuse { get; }
     public ReviewBudget Budget { get; }
     public IReadOnlyList<string> ExemptionApprovers { get; }
+    internal object? SourceOwner { get; }
+    public ReviewAuthorityRealm SourceRealm { get; }
+    public string SourceAuthorityIdentity { get; }
+    public string ProtectedObjectViewIdentity { get; }
+    internal bool HasSourceProvenance => SourceOwner is not null;
 
     public static ReviewPolicy Resolve(ReviewPolicyCandidate candidate, ReviewPolicyAuthority authority)
     {
@@ -103,22 +117,48 @@ public sealed partial class ReviewPolicy
         return Create(candidate, ReviewPolicyAuthorityKind.Caller, trusted: true);
     }
 
-    internal static ReviewPolicy FromVerifiedProtectedSource(ReviewPolicyCandidate candidate)
+    internal static ReviewPolicy FromVerifiedProtectedSource(
+        ReviewPolicyCandidate candidate,
+        ProtectedReviewSourceContext source)
     {
         Validate(candidate);
         if (candidate.Fixture || candidate.Advisory)
             throw new ReviewPolicyException("A protected production policy cannot be fixture or advisory.");
-        return Create(candidate, ReviewPolicyAuthorityKind.ProtectedGitBase, trusted: true);
+        return Create(
+            candidate,
+            ReviewPolicyAuthorityKind.ProtectedGitBase,
+            trusted: true,
+            source.ObjectView.QuiescenceAuthority,
+            source.ObjectView.SourceRealm,
+            source.SourceAuthorityIdentity,
+            source.ProtectedObjectViewIdentity);
     }
 
     private static ReviewPolicy Create(
         ReviewPolicyCandidate candidate,
         ReviewPolicyAuthorityKind authorityKind,
-        bool trusted) =>
+        bool trusted,
+        object? sourceOwner = null,
+        ReviewAuthorityRealm sourceRealm = ReviewAuthorityRealm.Test,
+        string sourceAuthorityIdentity = "",
+        string protectedObjectViewIdentity = "") =>
         new(candidate.PolicyIdentity, candidate.ContentIdentity, candidate.SourceRevision, authorityKind,
             trusted, candidate.Fixture, candidate.Advisory, candidate.AllowedFamilies,
             candidate.AllowedScopes, candidate.AllowExactReuse, candidate.Budget,
-            candidate.ExemptionApprovers);
+            candidate.ExemptionApprovers, sourceOwner, sourceRealm, sourceAuthorityIdentity,
+            protectedObjectViewIdentity);
+
+    internal bool SourceMatches(
+        object issuer,
+        ReviewAuthorityRealm realm,
+        string sourceAuthorityIdentity,
+        string protectedObjectViewIdentity) =>
+        SourceOwner is null
+            ? realm == ReviewAuthorityRealm.Test
+            : ReferenceEquals(SourceOwner, issuer) &&
+              SourceRealm == realm &&
+              string.Equals(SourceAuthorityIdentity, sourceAuthorityIdentity, StringComparison.Ordinal) &&
+              string.Equals(ProtectedObjectViewIdentity, protectedObjectViewIdentity, StringComparison.Ordinal);
 
     private static void Validate(ReviewPolicyCandidate candidate)
     {
@@ -229,7 +269,7 @@ public sealed class ProtectedReviewPolicyResolver(ProtectedReviewSourceContext s
             contentIdentity, contentIdentity, _source.ProtectedBaseCommit, candidate.Fixture,
             candidate.Advisory, candidate.AllowedFamilies, candidate.AllowedScopes,
             candidate.AllowExactReuse, candidate.Budget, candidate.ExemptionApprovers);
-        return ReviewPolicy.FromVerifiedProtectedSource(resolved);
+        return ReviewPolicy.FromVerifiedProtectedSource(resolved, _source);
     }
 
     private async Task<string> GitTextAsync(IReadOnlyList<string> args, CancellationToken cancellationToken) =>

@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
+using DeliveryForge.Contracts.State;
 
 namespace DeliveryForge.Review;
 
@@ -20,6 +21,8 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         string sourceAuthorityIdentity,
         string frozenHeadCommit,
         string protectedObjectViewIdentity,
+        ReviewAuthorityRealm sourceRealm,
+        byte[] workerIndexHash,
         object quiescenceAuthority,
         Action? dispose = null,
         Action? beforeFinalRecheck = null)
@@ -33,6 +36,8 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         SourceAuthorityIdentity = sourceAuthorityIdentity;
         FrozenHeadCommit = frozenHeadCommit;
         ProtectedObjectViewIdentity = protectedObjectViewIdentity;
+        SourceRealm = sourceRealm;
+        WorkerIndexHash = workerIndexHash.ToArray();
         QuiescenceAuthority = quiescenceAuthority;
         _dispose = dispose;
         BeforeFinalRecheck = beforeFinalRecheck;
@@ -47,6 +52,8 @@ public sealed class ControlledGitEvidenceContext : IDisposable
     public string SourceAuthorityIdentity { get; }
     public string FrozenHeadCommit { get; }
     public string ProtectedObjectViewIdentity { get; }
+    public ReviewAuthorityRealm SourceRealm { get; }
+    internal byte[] WorkerIndexHash { get; }
     internal object QuiescenceAuthority { get; }
     internal Action? BeforeFinalRecheck { get; }
 
@@ -148,7 +155,7 @@ public static partial class GitPatchIdentity
             $"--work-tree={context.SourceRoot}",
             .. args
         ];
-        return new PatchIdentity(
+        return ReviewNormalizer.Freeze(new PatchIdentity(
             baseCommit,
             headCommit,
             headTree,
@@ -157,7 +164,7 @@ public static partial class GitPatchIdentity
             artifactIdentities.OrderBy(pair => pair.Key, StringComparer.Ordinal)
                 .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
             version,
-            recorded);
+            recorded));
     }
 
     private static void ValidateControlledMetadata(ControlledGitEvidenceContext context)
@@ -183,6 +190,7 @@ public static partial class GitPatchIdentity
         string headTree,
         CancellationToken cancellationToken)
     {
+        await VerifyWorkerHeadAndIndexAsync(context, cancellationToken);
         var listing = await ControlledGit(
             context,
             ["ls-tree", "-r", "-z", "--full-tree", headCommit],
@@ -227,6 +235,26 @@ public static partial class GitPatchIdentity
         if (tracked.Keys.Any(path => !seen.Contains(path)))
             throw new ReviewPreflightException("Tracked source entries are missing from the assigned source root.");
         return fingerprint.GetHashAndReset();
+    }
+
+    private static async Task VerifyWorkerHeadAndIndexAsync(
+        ControlledGitEvidenceContext context,
+        CancellationToken cancellationToken)
+    {
+        var currentHead = Text(await Git(
+            context,
+            context.WorkerGitDirectory,
+            ["rev-parse", "--verify", "HEAD^{commit}"],
+            cancellationToken));
+        if (!string.Equals(currentHead, context.FrozenHeadCommit, StringComparison.Ordinal))
+            throw new ReviewPreflightException("Worker HEAD changed after the parent-owned source snapshot was frozen.");
+
+        var indexPath = Path.Combine(context.WorkerGitDirectory, "index");
+        if (!File.Exists(indexPath))
+            throw new ReviewPreflightException("Worker index is unavailable for source snapshot verification.");
+        var currentIndexHash = SHA256.HashData(await File.ReadAllBytesAsync(indexPath, cancellationToken));
+        if (!CryptographicOperations.FixedTimeEquals(currentIndexHash, context.WorkerIndexHash))
+            throw new ReviewPreflightException("Worker index changed after the parent-owned source snapshot was frozen.");
     }
 
     private static IEnumerable<string> EnumerateSourceEntries(string root)
@@ -478,54 +506,101 @@ internal static class GitProcess
                 ? Task.CompletedTask
                 : WriteInputAsync(process, standardInput, bounded.Token);
             var exitTask = process.WaitForExitAsync(bounded.Token);
-            try
+            var captureTasks = new[] { exitTask, outputTask, errorTask, inputTask };
+            var aggregate = Task.WhenAll(captureTasks);
+            var deadline = Task.Delay(runtime.CaptureTimeout);
+            var cancellationSignal = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            using var cancellationRegistration = cancellationToken.Register(
+                static state => ((TaskCompletionSource)state!).TrySetResult(),
+                cancellationSignal);
+            var pending = captureTasks.ToHashSet();
+            Exception? cause = null;
+            var deadlineTriggered = false;
+            while (pending.Count > 0)
             {
-                await Task.WhenAll(exitTask, outputTask, errorTask, inputTask);
-            }
-            catch (Exception cause) when (cause is OperationCanceledException or IOException)
-            {
-                bounded.Cancel();
-                Exception? killFailure = null;
-                var exited = TryHasExited(process);
-                if (!exited)
+                var completed = await Task.WhenAny(pending.Append(deadline).Append(cancellationSignal.Task));
+                if (ReferenceEquals(completed, deadline))
                 {
-                    try { process.Kill(entireProcessTree: true); }
-                    catch (Exception killError) when (killError is InvalidOperationException or Win32Exception or NotSupportedException)
-                    {
-                        killFailure = killError;
-                    }
+                    deadlineTriggered = true;
+                    cause = new OperationCanceledException("Git capture deadline elapsed.");
+                    break;
                 }
-                using var cleanup = new CancellationTokenSource(runtime.CleanupTimeout);
+                if (ReferenceEquals(completed, cancellationSignal.Task))
+                {
+                    cause = new OperationCanceledException(cancellationToken);
+                    break;
+                }
+
+                pending.Remove(completed);
+                if (completed.IsFaulted)
+                {
+                    cause = completed.Exception?.GetBaseException() ??
+                            new InvalidOperationException("Git capture task faulted without an exception.");
+                    break;
+                }
+                if (completed.IsCanceled)
+                {
+                    cause = new OperationCanceledException(bounded.Token);
+                    deadlineTriggered = !cancellationToken.IsCancellationRequested;
+                    break;
+                }
+            }
+
+            if (cause is null)
+            {
+                await aggregate;
+                return new GitProcessResult(process.ExitCode, output.ToArray(), error.ToArray());
+            }
+
+            bounded.Cancel();
+            Exception? killFailure = null;
+            var exited = TryHasExited(process);
+            if (!exited)
+            {
+                try { process.Kill(entireProcessTree: true); }
+                catch (Exception killError) when (killError is InvalidOperationException or Win32Exception or NotSupportedException)
+                {
+                    killFailure = killError;
+                }
+            }
+            var streamCloseFailed = !TryClose(process.StandardInput)
+                | !TryClose(process.StandardOutput)
+                | !TryClose(process.StandardError);
+            var drainDeadline = Task.Delay(runtime.CleanupTimeout);
+            var drainWinner = await Task.WhenAny(aggregate, drainDeadline);
+            var drained = ReferenceEquals(drainWinner, aggregate);
+            if (drained)
+            {
                 try
                 {
-                    await process.WaitForExitAsync(cleanup.Token);
-                    exited = TryHasExited(process);
+                    await aggregate;
                 }
-                catch (OperationCanceledException) { }
-                catch (InvalidOperationException) { exited = TryHasExited(process); }
-                var streamCloseFailed = !TryClose(process.StandardInput)
-                    | !TryClose(process.StandardOutput)
-                    | !TryClose(process.StandardError);
-                var captureTasks = Task.WhenAll(exitTask, outputTask, errorTask, inputTask);
-                var drained = false;
-                try
-                {
-                    await captureTasks.WaitAsync(cleanup.Token);
-                    drained = true;
-                }
-                catch (Exception) { drained = captureTasks.IsCompleted; }
-                var reason = cancellationToken.IsCancellationRequested
-                    ? "Git evidence capture was cancelled."
-                    : cause is IOException
-                        ? "Git evidence exceeded the frozen output bound."
-                        : $"Git evidence exceeded the {runtime.CaptureTimeout.TotalSeconds:0}-second timeout.";
-                var residual = !exited || killFailure is not null || streamCloseFailed || !drained;
-                if (residual) reason += " Residual process termination is uncertain.";
-                throw new ReviewPreflightException(reason, cause, residual);
+                catch (Exception) { }
             }
-            return new GitProcessResult(process.ExitCode, output.ToArray(), error.ToArray());
+            else
+            {
+                ObserveLateFault(aggregate);
+            }
+            exited = TryHasExited(process);
+            var reason = cancellationToken.IsCancellationRequested
+                ? "Git evidence capture was cancelled."
+                : cause is IOException
+                    ? "Git evidence exceeded the frozen output bound."
+                    : deadlineTriggered
+                        ? $"Git evidence exceeded the {runtime.CaptureTimeout.TotalSeconds:0}-second timeout."
+                        : "Git evidence capture failed.";
+            var residual = !exited || killFailure is not null || streamCloseFailed || !drained;
+            if (residual) reason += " Residual process termination is uncertain.";
+            throw new ReviewPreflightException(reason, cause, residual);
         }
     }
+
+    private static void ObserveLateFault(Task task) =>
+        _ = task.ContinueWith(
+            static completed => _ = completed.Exception,
+            CancellationToken.None,
+            TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.OnlyOnFaulted,
+            TaskScheduler.Default);
 
     private static bool TryHasExited(IGitProcess process)
     {

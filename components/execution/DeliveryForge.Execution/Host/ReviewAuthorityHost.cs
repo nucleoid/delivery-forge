@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Security.Cryptography;
 using System.Text.Json;
 using DeliveryForge.Contracts.State;
 using DeliveryForge.Contracts.Validation;
@@ -45,6 +46,7 @@ public sealed class ReviewAuthorityHost
     private readonly ReviewAuthorityRootContext? _rootContext;
     private readonly object _issuer = new();
     private readonly ConcurrentDictionary<string, byte> _revokedCapabilities = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<string, IssuedReviewerCapability> _capabilities = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, RegisteredReviewRequest> _requests = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<(string ReceiptIdentity, ReviewEvidenceRole Role), AcceptanceEntry> _acceptances = new();
 
@@ -143,10 +145,15 @@ public sealed class ReviewAuthorityHost
         var frozenHead = ReadGitOutput(
             trustedGitExecutable, sourceRoot,
             ["--no-replace-objects", $"--git-dir={workerGitDirectory}", "rev-parse", "--verify", "HEAD^{commit}"]);
+        var workerIndex = Path.Combine(workerGitDirectory, "index");
+        if (!File.Exists(workerIndex))
+            throw new ReviewPreflightException("Fixture Git preparation requires a parent-readable raw index snapshot.");
+        var workerIndexHash = SHA256.HashData(File.ReadAllBytes(workerIndex));
         var objectViewIdentity = $"test-object-view:{Guid.NewGuid():N}";
         return new ControlledGitEvidenceContext(
             sourceRoot, workerGitDirectory, controlled, trustedGitExecutable, version,
-            maximumEvidenceBytes, _rootIdentity, frozenHead, objectViewIdentity, _issuer,
+            maximumEvidenceBytes, _rootIdentity, frozenHead, objectViewIdentity, _realm,
+            workerIndexHash, _issuer,
             () => { if (Directory.Exists(controlled)) Directory.Delete(controlled, recursive: true); },
             beforeFinalRecheck);
     }
@@ -183,7 +190,8 @@ public sealed class ReviewAuthorityHost
             !capability.Supported || capability.Advisory ||
             (_realm == ReviewAuthorityRealm.Production && capability.Fixture))
             throw new InvalidOperationException("Reviewer capability evidence is incomplete or incompatible with the authority realm.");
-        return new IssuedReviewerCapability(
+        var issued = new IssuedReviewerCapability(
+            _issuer,
             _rootIdentity,
             proofIdentity,
             capability,
@@ -191,6 +199,9 @@ public sealed class ReviewAuthorityHost
             validFrom,
             validUntil,
             () => _revokedCapabilities.ContainsKey(proofIdentity));
+        if (!_capabilities.TryAdd(proofIdentity, issued))
+            throw new InvalidOperationException("Reviewer capability proof identity was already issued and cannot be rebound.");
+        return issued;
     }
 
     public void RevokeCapability(string proofIdentity) =>
@@ -232,7 +243,10 @@ public sealed class ReviewAuthorityHost
         ArgumentNullException.ThrowIfNull(registration);
         ArgumentNullException.ThrowIfNull(capability);
         if (!ReferenceEquals(registration.Issuer, _issuer) ||
-            !string.Equals(capability.RootIdentity, _rootIdentity, StringComparison.Ordinal) ||
+            !ReferenceEquals(capability.Issuer, _issuer) ||
+            !_capabilities.TryGetValue(capability.ProofIdentity, out var registeredCapability) ||
+            !ReferenceEquals(registeredCapability, capability) ||
+            !capability.IsCurrent(completedAt) ||
             !_requests.TryGetValue(registration.RequestIdentity, out var current) ||
             !ReferenceEquals(current, registration) ||
             string.IsNullOrWhiteSpace(executionIdentity) ||
@@ -261,6 +275,25 @@ public sealed class ReviewAuthorityHost
             context.SourceAuthorityIdentity, context.ProtectedObjectViewIdentity);
     }
 
+    public ReviewTransitionReceiver CreateTransitionReceiver(
+        ReviewAcceptanceContext independentContext,
+        ReviewAcceptanceContext? hostedContext = null)
+    {
+        ArgumentNullException.ThrowIfNull(independentContext);
+        if (_rootContext is null || !MatchesRootContext(_rootContext, independentContext) ||
+            (hostedContext is not null && !MatchesRootContext(_rootContext, hostedContext)) ||
+            string.IsNullOrWhiteSpace(independentContext.RequestIdentity) ||
+            (hostedContext is not null &&
+             (string.IsNullOrWhiteSpace(hostedContext.RequestIdentity) ||
+              string.Equals(independentContext.RequestIdentity, hostedContext.RequestIdentity, StringComparison.Ordinal))))
+            throw new InvalidOperationException("Transition receiver requires distinct root-frozen request bindings.");
+        return new ReviewTransitionReceiver(
+            Authority,
+            _realm,
+            CreateConsumerContext(independentContext),
+            hostedContext is null ? null : CreateConsumerContext(hostedContext));
+    }
+
     public void IssueAcceptance(
         ValidatedContract receipt,
         NormalizedReview review,
@@ -278,6 +311,10 @@ public sealed class ReviewAuthorityHost
             provenance.Registration.Role != role ||
             !ReferenceEquals(provenance.Execution.Registration, provenance.Registration) ||
             !ReferenceEquals(provenance.Execution.Capability, provenance.Capability) ||
+            !ReferenceEquals(provenance.Capability.Issuer, _issuer) ||
+            !_capabilities.TryGetValue(provenance.Capability.ProofIdentity, out var registeredCapability) ||
+            !ReferenceEquals(registeredCapability, provenance.Capability) ||
+            !provenance.Capability.IsCurrent(_testNow ?? DateTimeOffset.UtcNow) ||
             review.AuthorityRealm != _realm ||
             string.IsNullOrWhiteSpace(review.CapabilityProofIdentity) ||
             string.IsNullOrWhiteSpace(review.ExecutionIdentity) ||
@@ -293,6 +330,10 @@ public sealed class ReviewAuthorityHost
             !Path.IsPathFullyQualified(context.SourceRoot) ||
             !string.Equals(review.Identity.BaseCommit, context.ProtectedBaseCommit, StringComparison.Ordinal))
             throw new InvalidOperationException("Review acceptance does not bind complete issued provenance.");
+
+        if (!review.PolicySourceMatches(
+                _issuer, _realm, context.SourceAuthorityIdentity, context.ProtectedObjectViewIdentity))
+            throw new InvalidOperationException("Review acceptance policy source does not match the root-frozen realm and protected object view.");
 
         if (_rootContext is null || !MatchesRootContext(_rootContext, context))
             throw new InvalidOperationException("Review acceptance does not match the root-frozen run, policy, or source authority.");
@@ -322,8 +363,7 @@ public sealed class ReviewAuthorityHost
             review.Identity.BaseCommit,
             review.Identity.HeadCommit,
             review.Identity.HeadTree,
-            review.CapabilityProofIdentity,
-            review.CapabilityValidUntil,
+            provenance.Capability,
             context,
             provenance.Execution.ExecutionIdentity);
         if (!_acceptances.TryAdd((receipt.Identity, role), entry))
@@ -356,7 +396,9 @@ public sealed class ReviewAuthorityHost
             capability.ProofIdentity,
             _realm,
             () => Accepts(requirement),
-            () => string.Equals(capability.RootIdentity, _rootIdentity, StringComparison.Ordinal) &&
+            () => ReferenceEquals(capability.Issuer, _issuer) &&
+                  _capabilities.TryGetValue(capability.ProofIdentity, out var registered) &&
+                  ReferenceEquals(registered, capability) &&
                   capability.Matches(
                       currentRequest.Capability,
                       currentRequest.Scope,
@@ -378,8 +420,8 @@ public sealed class ReviewAuthorityHost
             throw new ArgumentException("A valid receipt identity and review role are required.");
         _acceptances.TryAdd(
             (receiptIdentity, role),
-            new AcceptanceEntry(receiptIdentity, role, _realm, "*", "*", "*", string.Empty,
-                DateTimeOffset.MaxValue, context, executionIdentity));
+            new AcceptanceEntry(receiptIdentity, role, _realm, "*", "*", "*",
+                null, context, executionIdentity));
     }
 
     private bool Accepts(ReviewAcceptanceRequirement requirement)
@@ -392,8 +434,10 @@ public sealed class ReviewAuthorityHost
             entry.Context is null ||
             !string.Equals(requirement.EvidencePolicyIdentity, entry.Context.EvidencePolicyIdentity, StringComparison.Ordinal) ||
             !MatchesConsumer(entry.Context, requirement.ConsumerContext) ||
-            (!string.IsNullOrEmpty(entry.CapabilityProofIdentity) &&
-             _revokedCapabilities.ContainsKey(entry.CapabilityProofIdentity)))
+            (entry.Capability is not null &&
+             (!ReferenceEquals(entry.Capability.Issuer, _issuer) ||
+              !_capabilities.TryGetValue(entry.Capability.ProofIdentity, out var registered) ||
+              !ReferenceEquals(registered, entry.Capability))))
             return false;
 
         var now = _testNow ?? DateTimeOffset.UtcNow;
@@ -404,7 +448,7 @@ public sealed class ReviewAuthorityHost
                 string.Equals(independent.ExecutionIdentity, entry.ExecutionIdentity, StringComparison.Ordinal))
                 return false;
         }
-        return entry.CapabilityValidUntil >= now &&
+        return (entry.Capability is null || entry.Capability.IsCurrent(now)) &&
                (entry.BaseCommit == "*" || string.Equals(entry.BaseCommit, requirement.BaseCommit, StringComparison.Ordinal)) &&
                (entry.HeadCommit == "*" || string.Equals(entry.HeadCommit, requirement.HeadCommit, StringComparison.Ordinal)) &&
                (entry.TreeId == "*" || string.Equals(entry.TreeId, requirement.TreeId, StringComparison.Ordinal));
@@ -484,8 +528,7 @@ public sealed class ReviewAuthorityHost
         string BaseCommit,
         string HeadCommit,
         string TreeId,
-        string CapabilityProofIdentity,
-        DateTimeOffset CapabilityValidUntil,
+        IssuedReviewerCapability? Capability,
         ReviewAcceptanceContext? Context,
         string ExecutionIdentity);
 }

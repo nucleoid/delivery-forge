@@ -70,3 +70,28 @@ public sealed class ReviewAcceptanceAuthority
 
     internal bool Accepts(ReviewAcceptanceRequirement requirement) => _lookup(requirement);
 }
+
+/// <summary>
+/// Root-constructed authority and expected consumer bindings for one scheduled
+/// workflow receiver. Review evidence is evaluated against this pinned receiver;
+/// callers cannot replace it by supplying a different evidence envelope.
+/// </summary>
+public sealed class ReviewTransitionReceiver
+{
+    internal ReviewTransitionReceiver(
+        ReviewAcceptanceAuthority authority,
+        ReviewAuthorityRealm realm,
+        ReviewConsumerContext independentContext,
+        ReviewConsumerContext? hostedContext)
+    {
+        Authority = authority ?? throw new ArgumentNullException(nameof(authority));
+        Realm = realm;
+        IndependentContext = independentContext ?? throw new ArgumentNullException(nameof(independentContext));
+        HostedContext = hostedContext;
+    }
+
+    internal ReviewAcceptanceAuthority Authority { get; }
+    internal ReviewAuthorityRealm Realm { get; }
+    internal ReviewConsumerContext IndependentContext { get; }
+    internal ReviewConsumerContext? HostedContext { get; }
+}

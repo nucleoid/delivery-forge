@@ -352,9 +352,11 @@ public sealed class WorkflowTransitionTests
 
         // The scheduled receiver exists before dispatch, but the legacy transition API has no
         // receiver parameter and therefore evaluates the complete foreign A envelope as A-to-A.
-        _ = expectedHost.CreateConsumerContext(expectedContext);
+        var receiver = expectedHost.CreateTransitionReceiver(
+            expectedContext,
+            expectedContext with { RequestIdentity = "scheduled-hosted-request-b" });
         AssertMessage("root-issued review acceptance", () =>
-            WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, foreignEnvelope));
+            WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, foreignEnvelope, receiver));
     }
 
     [Fact]

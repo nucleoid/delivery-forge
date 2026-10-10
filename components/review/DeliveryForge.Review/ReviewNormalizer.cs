@@ -1,3 +1,5 @@
+using System.Collections.ObjectModel;
+
 namespace DeliveryForge.Review;
 
 public static class ReviewNormalizer
@@ -26,6 +28,12 @@ public static class ReviewNormalizer
                                       string.Equals(execution.RawArtifactHash, result.ArtifactHash, StringComparison.Ordinal) &&
                                       execution.CompletedAt == result.CompletedAt &&
                                       VerdictMatches(execution.RawVerdict, result.Verdict);
+        var policySourceValid = execution is null || capabilityAuthority is null ||
+                                policy.SourceMatches(
+                                    execution.Registration.Issuer,
+                                    capabilityAuthority.Realm,
+                                    execution.Registration.ProtectedSourceIdentity,
+                                    execution.Registration.ProtectedObjectViewIdentity);
         ReviewOutcome outcome;
         string reason;
 
@@ -62,6 +70,8 @@ public static class ReviewNormalizer
             (outcome, reason) = (ReviewOutcome.Incomplete, "Reviewer capability authority is stale, revoked, or does not match the request.");
         else if (execution is not null && !executionAuthorityValid)
             (outcome, reason) = (ReviewOutcome.Incomplete, "Accepted reviewer execution does not match the result and capability authority.");
+        else if (!policySourceValid)
+            (outcome, reason) = (ReviewOutcome.Incomplete, "Review policy source realm, owner, or protected object view does not match the issued execution.");
         else if (policy.Advisory || request.Capability.Advisory || result.Advisory)
             (outcome, reason) = (ReviewOutcome.Incomplete, "Advisory review evidence cannot pass.");
         else
@@ -75,9 +85,10 @@ public static class ReviewNormalizer
         var advisory = policy.Advisory || request.Capability.Advisory || result.Advisory;
         var authorityAccepted =
             outcome == ReviewOutcome.Pass && policy.Trusted && !advisory &&
-            capabilityAuthorityValid && executionAuthorityValid;
+            capabilityAuthorityValid && executionAuthorityValid && policySourceValid;
         var productionAccepted = authorityAccepted && !fixture &&
-                                 capabilityAuthority!.Realm == DeliveryForge.Contracts.State.ReviewAuthorityRealm.Production;
+                                 capabilityAuthority!.Realm == DeliveryForge.Contracts.State.ReviewAuthorityRealm.Production &&
+                                 policy.SourceRealm == DeliveryForge.Contracts.State.ReviewAuthorityRealm.Production;
 
         return new NormalizedReview(
             outcome,
@@ -112,7 +123,11 @@ public static class ReviewNormalizer
                     execution.Registration,
                     capabilityAuthority!,
                     execution)
-                : null);
+                : null,
+            policy.SourceOwner,
+            policy.SourceRealm,
+            policy.SourceAuthorityIdentity,
+            policy.ProtectedObjectViewIdentity);
     }
 
     internal static bool SameIdentity(PatchIdentity left, PatchIdentity right) =>
@@ -135,14 +150,21 @@ public static class ReviewNormalizer
         identity.HeadTree,
         identity.PatchSha256,
         identity.PlanIdentity,
-        identity.ArtifactIdentities.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
+        new ReadOnlyDictionary<string, string>(
+            identity.ArtifactIdentities.ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal)),
         identity.GitVersion,
-        identity.Command.ToArray());
+        Array.AsReadOnly(identity.Command.ToArray()));
+
+    internal static ReviewerCapability FreezeCapability(ReviewerCapability capability) =>
+        capability with { Scopes = Array.AsReadOnly((capability.Scopes ?? []).ToArray()) };
+
+    internal static IReadOnlyList<ReviewFinding> FreezeFindings(IEnumerable<ReviewFinding> findings) =>
+        Array.AsReadOnly(findings.ToArray());
 
     internal static ReviewRequest FreezeRequest(ReviewRequest request) => new(
         Freeze(request.Identity),
         request.AuthorFamily,
-        request.Capability with { Scopes = request.Capability.Scopes?.ToArray() ?? [] },
+        FreezeCapability(request.Capability),
         request.Scope,
         request.PolicyIdentity);
 
