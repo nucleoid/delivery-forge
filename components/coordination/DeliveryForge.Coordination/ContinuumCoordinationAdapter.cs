@@ -403,6 +403,7 @@ public sealed class ContinuumCoordinationAdapter
                     if (progress.TryGetValue(item.OperationSequence, out var prior) && item.Revision <= prior.Revision)
                         throw new CoordinationProtocolException("checkpoint-progress-transition-invalid");
                     ValidateProgressTransition(record.Kind, prior, item);
+                    ValidateProgressPayload(prepared[item.OperationSequence], lifecycle, item);
                     progress[item.OperationSequence] = item;
                 }
             }
@@ -1212,11 +1213,13 @@ public sealed class ContinuumCoordinationAdapter
             if (progress.Revision != intent.ProgressRevision + 1)
                 throw new CoordinationProtocolException("checkpoint-live-progress-revision-invalid");
             ValidateProgressTransition(intent.Prepared.Kind, intent.LastProgress, progress);
+            var lifecycle = intent.Lifecycle;
+            ValidateProgressPayload(intent.Prepared, lifecycle, progress);
+            lifecycle.Entries.TryGetValue(intent.Prepared.Resource, out var entry);
+            if (progress.Lease is not null && entry is not null && !SameIdentity(entry.Identity, progress.Lease))
+                throw new CoordinationProtocolException("checkpoint-live-identity-drift");
             intent.ProgressRevision = progress.Revision;
             intent.LastProgress = progress;
-
-            var lifecycle = intent.Lifecycle;
-            lifecycle.Entries.TryGetValue(intent.Prepared.Resource, out var entry);
             if (progress.Lease is not null)
             {
                 ValidateRecoveredIdentity(progress.Lease, intent.Prepared, lifecycle);
@@ -1608,7 +1611,19 @@ public sealed class ContinuumCoordinationAdapter
         OperationIntent intent,
         CoordinationIntentProgress progress)
     {
-        var previous = intent.Prepared.PreviousLease;
+        var renewed = progress.Lease!;
+        ValidateRenewalProgress(intent.Prepared, progress);
+
+        entry.Evidence = lifecycle.RecoveryOnly
+            ? CreateCleanupEvidence(renewed.Resource, renewed.Owner, renewed.LeaseId, renewed.FencingToken,
+                renewed.ServerTime, renewed.ExpiresAt, renewed.Generation)
+            : Evidence(renewed);
+        entry.Identity = Identity(entry.Evidence);
+    }
+
+    private static void ValidateRenewalProgress(PreparedCoordinationIntent prepared, CoordinationIntentProgress progress)
+    {
+        var previous = prepared.PreviousLease;
         var renewed = progress.Lease!;
         if (previous is null || !SameIdentity(previous, renewed) ||
             renewed.ServerTime <= previous.ServerTime || renewed.ExpiresAt <= previous.ExpiresAt ||
@@ -1618,11 +1633,41 @@ public sealed class ContinuumCoordinationAdapter
             (renewed.SafeDeadline <= previous.SafeDeadline || renewed.RenewAt <= previous.RenewAt))
             throw new CoordinationProtocolException("checkpoint-renewal-clock-progress-invalid");
 
-        entry.Evidence = lifecycle.RecoveryOnly
-            ? CreateCleanupEvidence(renewed.Resource, renewed.Owner, renewed.LeaseId, renewed.FencingToken,
-                renewed.ServerTime, renewed.ExpiresAt, renewed.Generation)
-            : Evidence(renewed);
-        entry.Identity = Identity(entry.Evidence);
+    }
+
+    private static void ValidateProgressPayload(
+        PreparedCoordinationIntent prepared, Lifecycle lifecycle, CoordinationIntentProgress progress)
+    {
+        if (progress.LifecycleId != prepared.LifecycleId || progress.OperationSequence != prepared.OperationSequence)
+            throw new CoordinationProtocolException("checkpoint-progress-binding-invalid");
+        var noLease = progress.AdapterCode is "contended" or "abandoned-before-send";
+        var optionalLease = progress.AdapterCode == "inspected" && lifecycle.Purpose == CoordinationLifecyclePurpose.Observation;
+        if (noLease ? progress.Lease is not null : !optionalLease && progress.Lease is null)
+            throw new CoordinationProtocolException("checkpoint-progress-lease-shape-invalid");
+        if (progress.AdapterCode == "inspected" && !optionalLease)
+            throw new CoordinationProtocolException("checkpoint-progress-purpose-invalid");
+        if (progress.AdapterCode == "release-observed")
+        {
+            var evidence = progress.Quiescence;
+            if (evidence is null || !evidence.Quiescent || evidence.Owner != lifecycle.Owner ||
+                string.IsNullOrWhiteSpace(evidence.IssuerId) || string.IsNullOrWhiteSpace(evidence.SourceId) ||
+                string.IsNullOrWhiteSpace(evidence.ClockDomainId) || string.IsNullOrWhiteSpace(evidence.EvidenceId))
+                throw new CoordinationProtocolException("checkpoint-quiescence-binding-invalid");
+        }
+        else if (progress.Quiescence is not null)
+            throw new CoordinationProtocolException("checkpoint-progress-quiescence-forbidden");
+        if (progress.Lease is not { } lease) return;
+        ValidateRecoveredIdentity(lease, prepared, lifecycle);
+        // Constructors validate lease syntax and time evidence without changing reducer state.
+        _ = RecoveredEntry(lease, prepared.Kind == CoordinationIntentKind.Inspect);
+        if (prepared.Kind is CoordinationIntentKind.Renew or CoordinationIntentKind.Release ||
+            prepared.Kind == CoordinationIntentKind.Inspect && lifecycle.Purpose == CoordinationLifecyclePurpose.Ownership)
+        {
+            if (prepared.PreviousLease is null || !SameIdentity(prepared.PreviousLease, lease))
+                throw new CoordinationProtocolException("checkpoint-progress-predecessor-invalid");
+        }
+        if (progress.AdapterCode is "renewed" or "renewed-cleanup-only")
+            ValidateRenewalProgress(prepared, progress);
     }
 
     private static LeaseEvidence Evidence(CheckpointLeaseIdentity identity) =>
