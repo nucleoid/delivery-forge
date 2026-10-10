@@ -513,6 +513,24 @@ public sealed class GitRepositoryContextTests : IDisposable
     }
 
     [Fact]
+    public async Task Repeated_symlink_with_different_remaining_path_can_still_resolve_in_tree()
+    {
+        InitializeRepository();
+        File.WriteAllText(Path.Combine(_root, "target"), "inside");
+        Run("git", "add target");
+        AddCommittedSymlink("d", ".");
+        AddCommittedSymlink("x", "d/d/target");
+        Run("git", "commit -q -m repeated-safe-symlink");
+        var reader = new GitRepositoryContextReader();
+        var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
+
+        var file = await reader.ReadFileAsync(context, "x", TestContext.Current.CancellationToken);
+
+        Assert.Equal(SymlinkResolution.InTree, file.SymlinkResolution);
+        Assert.False(file.EscapesWorktree);
+    }
+
+    [Fact]
     public async Task Windows_text_collapse_escape_wins_over_an_in_tree_posix_resolution()
     {
         InitializeRepository();
