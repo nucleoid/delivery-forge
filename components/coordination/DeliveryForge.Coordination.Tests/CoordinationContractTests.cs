@@ -29,9 +29,13 @@ public sealed class CoordinationContractTests
         var replay = new FixtureCheckpointStore { ReverseReads = true };
         foreach (var record in original.Records) replay.Inject(record);
         var epoch = original.Records[0].WriterEpoch;
+        var quiescence = code == "release-observed"
+            ? await new RecordingQuiescenceSource(new FakeMonotonicClock("payload-clock"), [true])
+                .ObserveAsync(Owner, TestContext.Current.CancellationToken)
+            : null;
         replay.Inject(new CoordinationCheckpointRecord(1, 3, 2, kind, epoch, 0, prepared, null));
         replay.Inject(new CoordinationCheckpointRecord(1, 4, 2, kind, epoch, 1, null,
-            new CoordinationIntentProgress(prepared.LifecycleId, 2, code, null)));
+            new CoordinationIntentProgress(prepared.LifecycleId, 2, code, null, Quiescence: quiescence)));
         var receiver = await CreateAdapterAsync(transport, checkpoints: replay);
 
         var failure = await Assert.ThrowsAsync<CoordinationProtocolException>(() => receiver.RecoverForCleanupAsync(
