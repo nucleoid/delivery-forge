@@ -158,6 +158,7 @@ internal sealed class FixtureCheckpointStore : ICoordinationCheckpointStore
     public bool FailNextProgress { get; set; }
     public bool FailAfterNextAppend { get; set; }
     public bool FailIndeterminateBeforeNextAppend { get; set; }
+    public Func<CoordinationCheckpointRecord, bool>? FailAfterAppendWhen { get; set; }
     public bool ReturnNullNextClaim { get; set; }
     public FixtureReadBehavior NextReadBehavior { get; set; }
     public bool ReverseReads { get; set; }
@@ -246,7 +247,7 @@ internal sealed class FixtureCheckpointStore : ICoordinationCheckpointStore
                 throw new CoordinationUncertainException("fixture-cas-conflict");
             _records.Add(JsonSerializer.SerializeToUtf8Bytes(record, Json));
             AfterAppend?.Invoke(record);
-            if (FailAfterNextAppend)
+            if (FailAfterNextAppend || FailAfterAppendWhen?.Invoke(record) == true)
             {
                 FailAfterNextAppend = false;
                 throw new IOException("fixture-ambiguous-append");
