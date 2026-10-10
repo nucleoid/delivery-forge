@@ -4,6 +4,7 @@ using DeliveryForge.Contracts.Models;
 using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Contracts.State;
 using DeliveryForge.Contracts.Validation;
+using DeliveryForge.Execution.Host;
 
 namespace DeliveryForge.Contracts.Tests;
 
@@ -77,6 +78,36 @@ public sealed class WorkflowTransitionTests
         };
 
         Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(from, to, evidence));
+    }
+
+    [Theory]
+    [InlineData(WorkflowState.IndependentReview, WorkflowState.PrAuthorized)]
+    [InlineData(WorkflowState.PrAuthorized, WorkflowState.PrPublished)]
+    [InlineData(WorkflowState.CiComplete, WorkflowState.HostReviewComplete)]
+    [InlineData(WorkflowState.HostReviewComplete, WorkflowState.MergeAuthorized)]
+    [InlineData(WorkflowState.MergeAuthorized, WorkflowState.Merged)]
+    public void Every_review_authorizing_transition_requires_root_issued_acceptance(
+        WorkflowState from,
+        WorkflowState to)
+    {
+        var evidence = FullEvidence(to == WorkflowState.Merged) with { ReviewAuthority = null };
+
+        AssertMessage("root-issued review acceptance", () =>
+            WorkflowTransition.EnsureAllowed(from, to, evidence));
+    }
+
+    [Fact]
+    public void Production_authorization_rejects_isolated_test_realm_acceptance()
+    {
+        var evidence = FullEvidence() with
+        {
+            RequiredReviewAuthorityRealm = ReviewAuthorityRealm.Production
+        };
+
+        AssertMessage("root-issued review acceptance", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.IndependentReview,
+            WorkflowState.PrAuthorized,
+            evidence));
     }
 
     [Fact]
@@ -325,6 +356,11 @@ public sealed class WorkflowTransitionTests
         var gates = new[] { "build", "test", "review" }
             .Select(gateId => GateFixture(policy.Identity, gateId))
             .ToArray();
+        var review = ParseFixture("review-receipt.json");
+        var hosted = MutatedFixture("review-receipt.json", node => node["reviewerFamily"] = "github-hosted");
+        var authorityHost = ReviewAuthorityHost.CreateIsolatedTest();
+        authorityHost.IssueTestAcceptance(review.Identity, ReviewEvidenceRole.Independent);
+        authorityHost.IssueTestAcceptance(hosted.Identity, ReviewEvidenceRole.Hosted);
         return new TransitionEvidence(
             AuthorizationCeiling.Merge,
             BaseCommit: "6304c90f83df3cdb918dff03f6358dcf4a939d16",
@@ -333,11 +369,13 @@ public sealed class WorkflowTransitionTests
             Policy: policy,
             GateReceipts: gates,
             CiReceipt: GateFixture(policy.Identity, "ci"),
-            ReviewReceipt: ParseFixture("review-receipt.json"),
+            ReviewReceipt: review,
             PublicationReceipt: merged
                 ? MutatedFixture("publication-receipt.json", node => node["action"] = "MERGED")
                 : ParseFixture("publication-receipt.json"),
-            HostReviewReceipt: MutatedFixture("review-receipt.json", node => node["reviewerFamily"] = "github-hosted"));
+            HostReviewReceipt: hosted,
+            ReviewAuthority: authorityHost.Authority,
+            RequiredReviewAuthorityRealm: ReviewAuthorityRealm.Test);
     }
 
     private static ValidatedContract GateFixture(string policyIdentity, string gateId) =>
