@@ -14,7 +14,9 @@ public sealed record TransitionEvidence(
     ValidatedContract? CiReceipt = null,
     ValidatedContract? ReviewReceipt = null,
     ValidatedContract? PublicationReceipt = null,
-    ValidatedContract? HostReviewReceipt = null);
+    ValidatedContract? HostReviewReceipt = null,
+    ReviewAcceptanceAuthority? ReviewAuthority = null,
+    ReviewAuthorityRealm RequiredReviewAuthorityRealm = ReviewAuthorityRealm.Production);
 
 public static class WorkflowTransition
 {
@@ -147,6 +149,7 @@ public static class WorkflowTransition
         {
             throw new InvalidWorkflowTransitionException("Hosted review requires reviewerFamily 'github-hosted'.");
         }
+        RequireReviewAcceptance(evidence, evidence.HostReviewReceipt!, ReviewEvidenceRole.Hosted);
     }
 
     private static void RequireIndependentReview(TransitionEvidence evidence)
@@ -156,6 +159,26 @@ public static class WorkflowTransition
         if (review.RootElement.GetProperty("reviewerFamily").GetString() == "github-hosted")
         {
             throw new InvalidWorkflowTransitionException("The independent review cannot use reviewerFamily 'github-hosted'.");
+        }
+        RequireReviewAcceptance(evidence, evidence.ReviewReceipt!, ReviewEvidenceRole.Independent);
+    }
+
+    private static void RequireReviewAcceptance(
+        TransitionEvidence evidence,
+        ValidatedContract receipt,
+        ReviewEvidenceRole role)
+    {
+        var requirement = new ReviewAcceptanceRequirement(
+            receipt.Identity,
+            role,
+            evidence.RequiredReviewAuthorityRealm,
+            evidence.BaseCommit!,
+            evidence.HeadCommit!,
+            evidence.TreeId!);
+        if (evidence.ReviewAuthority is null || !evidence.ReviewAuthority.Accepts(requirement))
+        {
+            throw new InvalidWorkflowTransitionException(
+                "Transition requires root-issued review acceptance for the exact receipt and authority realm.");
         }
     }
 
