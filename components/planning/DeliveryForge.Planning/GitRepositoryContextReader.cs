@@ -313,6 +313,7 @@ public sealed class GitRepositoryContextReader
             resolved = parent.ToList();
             pending = new Queue<string>(SplitPosixTarget(target, budget).Concat(remaining));
         }
+        var expandedStates = new HashSet<(string Path, string Remaining)>();
         while (pending.Count > 0)
         {
             budget.VisitSegment();
@@ -334,9 +335,13 @@ public sealed class GitRepositoryContextReader
 
             if (entry.Mode == "120000")
             {
+                // A path alone is insufficient: the same link can legitimately appear
+                // again with different remaining traversal (including a later escape).
+                if (!expandedStates.Add((candidate, string.Join('/', pending))))
+                    return SymlinkResolution.Cycle;
                 if (!budget.FollowSymlink())
                 {
-                    return SymlinkResolution.Cycle;
+                    return SymlinkResolution.BoundExceeded;
                 }
                 var nestedTarget = Encoding.UTF8.GetString(await ReadBlobAsync(context, entry.ObjectId, cancellationToken, budget));
                 if (string.IsNullOrEmpty(nestedTarget) || PortableMaterial.IsAbsolutePath(nestedTarget))
