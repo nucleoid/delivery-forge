@@ -157,6 +157,9 @@ internal sealed class FixtureCheckpointStore : ICoordinationCheckpointStore
     public bool FailNextPrepare { get; set; }
     public bool FailNextProgress { get; set; }
     public bool FailAfterNextAppend { get; set; }
+    public bool FailIndeterminateBeforeNextAppend { get; set; }
+    public bool ReturnNullNextClaim { get; set; }
+    public FixtureReadBehavior NextReadBehavior { get; set; }
     public bool ReverseReads { get; set; }
     public Action<CoordinationCheckpointRecord>? AfterAppend { get; set; }
     public TaskCompletionSource? DelayNextAppend { get; set; }
@@ -168,6 +171,11 @@ internal sealed class FixtureCheckpointStore : ICoordinationCheckpointStore
         string lifecycleId, string proposedWriterEpoch, string? trustedTakeoverProof,
         CancellationToken cancellationToken = default)
     {
+        if (ReturnNullNextClaim)
+        {
+            ReturnNullNextClaim = false;
+            return Task.FromResult<CoordinationWriterClaim>(null!);
+        }
         lock (_records)
         {
             if (_epochs.ContainsKey(lifecycleId))
@@ -208,6 +216,11 @@ internal sealed class FixtureCheckpointStore : ICoordinationCheckpointStore
     {
         lock (_records)
         {
+            if (FailIndeterminateBeforeNextAppend)
+            {
+                FailIndeterminateBeforeNextAppend = false;
+                throw new IOException("fixture-ambiguous-before-append");
+            }
             if (record.Prepared is not null && FailNextPrepare)
             {
                 FailNextPrepare = false;
@@ -243,10 +256,24 @@ internal sealed class FixtureCheckpointStore : ICoordinationCheckpointStore
     }
 
     public Task<IReadOnlyList<CoordinationCheckpointRecord>> ReadLifecycleAsync(
-        string lifecycleId, CancellationToken cancellationToken = default) =>
-        Task.FromResult<IReadOnlyList<CoordinationCheckpointRecord>>((ReverseReads
+        string lifecycleId, CancellationToken cancellationToken = default)
+    {
+        var behavior = NextReadBehavior;
+        NextReadBehavior = FixtureReadBehavior.Current;
+        var records = (ReverseReads
             ? Records.Where(record => LifecycleId(record) == lifecycleId).Reverse()
-            : Records.Where(record => LifecycleId(record) == lifecycleId)).ToArray());
+            : Records.Where(record => LifecycleId(record) == lifecycleId)).ToArray();
+        return behavior switch
+        {
+            FixtureReadBehavior.Null => Task.FromResult<IReadOnlyList<CoordinationCheckpointRecord>>(null!),
+            FixtureReadBehavior.Throw => Task.FromException<IReadOnlyList<CoordinationCheckpointRecord>>(
+                new IOException("fixture-read-failed")),
+            FixtureReadBehavior.Lag => Task.FromResult<IReadOnlyList<CoordinationCheckpointRecord>>(records.SkipLast(1).ToArray()),
+            FixtureReadBehavior.Conflict => Task.FromResult<IReadOnlyList<CoordinationCheckpointRecord>>(
+                records.Length == 0 ? records : [.. records.SkipLast(1), Conflicting(records[^1])]),
+            _ => Task.FromResult<IReadOnlyList<CoordinationCheckpointRecord>>(records),
+        };
+    }
 
     public void Inject(CoordinationCheckpointRecord record) =>
         _records.Add(JsonSerializer.SerializeToUtf8Bytes(record, Json));
@@ -257,4 +284,9 @@ internal sealed class FixtureCheckpointStore : ICoordinationCheckpointStore
     private static CoordinationCheckpointRecord RoundTrip(byte[] bytes) =>
         JsonSerializer.Deserialize<CoordinationCheckpointRecord>(bytes, Json) ??
         throw new InvalidOperationException("fixture-checkpoint-roundtrip-failed");
+
+    private static CoordinationCheckpointRecord Conflicting(CoordinationCheckpointRecord record) =>
+        record with { WriterEpoch = Guid.NewGuid().ToString("D") };
 }
+
+public enum FixtureReadBehavior { Current, Null, Throw, Lag, Conflict }

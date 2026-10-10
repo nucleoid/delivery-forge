@@ -1086,6 +1086,118 @@ public sealed class CoordinationContractTests
             checkpoints.Records.Select(record => record.RecordSequence));
     }
 
+    [Theory]
+    [InlineData(FixtureReadBehavior.Null)]
+    [InlineData(FixtureReadBehavior.Throw)]
+    [InlineData(FixtureReadBehavior.Lag)]
+    public async Task Acknowledged_append_consumes_its_slot_when_optional_readback_is_degraded(
+        FixtureReadBehavior behavior)
+    {
+        var checkpoints = new FixtureCheckpointStore { NextReadBehavior = behavior };
+        var transport = SingleLeaseTransport();
+        var adapter = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+
+        var acquired = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+
+        Assert.NotNull(acquired.Authority);
+        Assert.Single(transport.AcquireRequests);
+        Assert.Equal([1L, 2L], checkpoints.Records.Select(record => record.RecordSequence));
+        Assert.Equal([0L, 1L], checkpoints.Records.Select(record => record.ProgressRevision));
+    }
+
+    [Fact]
+    public async Task Contradictory_readback_after_ack_is_protocol_failure_and_never_authorizes_rpc()
+    {
+        var checkpoints = new FixtureCheckpointStore { NextReadBehavior = FixtureReadBehavior.Conflict };
+        var transport = SingleLeaseTransport();
+        var adapter = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+
+        var result = await adapter.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+
+        Assert.Null(result.Authority);
+        Assert.Equal(CoordinationLifecyclePhase.Cleaning, result.Snapshot.Phase);
+        Assert.Empty(transport.AcquireRequests);
+        Assert.Single(checkpoints.Records);
+        Assert.Equal(1, checkpoints.Records[0].RecordSequence);
+    }
+
+    [Fact]
+    public async Task Different_release_record_reconciles_pinned_acquire_prepare_without_duplicate_operation()
+    {
+        var checkpoints = new FixtureCheckpointStore();
+        checkpoints.AfterAppend = record =>
+        {
+            if (record.RecordSequence == 2) checkpoints.FailIndeterminateBeforeNextAppend = true;
+        };
+        var transport = TwoLeaseTransport();
+        var adapter = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+
+        var uncertain = await adapter.AcquireAllAsync([Issue(6), Issue(7)], Owner,
+            ContinuumCoordinationAdapter.DefaultTtl, TestContext.Current.CancellationToken);
+        checkpoints.AfterAppend = null;
+        var cleaned = await adapter.ContinueReleaseAsync(
+            uncertain.ReleaseContinuation!, TestContext.Current.CancellationToken);
+
+        var prepares = checkpoints.Records.Where(record => record.Prepared is not null).ToArray();
+        Assert.Equal(prepares.Length, prepares.Select(record => record.OperationSequence).Distinct().Count());
+        Assert.Equal(2, transport.AcquireRequests.Count);
+        Assert.Equal(CoordinationLifecyclePhase.Closed, cleaned.Snapshot.Phase);
+
+        var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var replay = await restarted.RecoverForCleanupAsync(
+            checkpoints.Records[0].Prepared!.LifecycleId, Owner, [Issue(6), Issue(7)], "fresh-replay-proof",
+            TestContext.Current.CancellationToken);
+        Assert.Equal(CoordinationLifecyclePhase.Closed, replay.Snapshot.Phase);
+    }
+
+    [Fact]
+    public async Task Failed_recovery_always_releases_local_reservation_for_fresh_retry()
+    {
+        var checkpoints = new FixtureCheckpointStore();
+        var transport = SingleLeaseTransport();
+        var original = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        var held = await original.AcquireAllAsync([Issue(6)], Owner, ContinuumCoordinationAdapter.DefaultTtl,
+            TestContext.Current.CancellationToken);
+        _ = await original.ReleaseAllAsync(held.Authority!, TestContext.Current.CancellationToken);
+        var lifecycleId = checkpoints.Records[0].Prepared!.LifecycleId;
+        var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        checkpoints.ReturnNullNextClaim = true;
+
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() => restarted.RecoverForCleanupAsync(
+            lifecycleId, Owner, [Issue(6)], "unused-null-proof", TestContext.Current.CancellationToken));
+        var recovered = await restarted.RecoverForCleanupAsync(
+            lifecycleId, Owner, [Issue(6)], "fresh-valid-proof", TestContext.Current.CancellationToken);
+
+        Assert.Equal(CoordinationLifecyclePhase.Closed, recovered.Snapshot.Phase);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Public_inspection_journal_recovers_as_terminal_observation_without_cleanup_rpc(bool callerOwns)
+    {
+        var checkpoints = new FixtureCheckpointStore();
+        var transport = new RecordingTransport(CoordinationContractFixture.Capabilities());
+        transport.InspectResults.Enqueue(callerOwns
+            ? InspectTransportResult.HeldByCaller("observed-lease", "7", ServerNow, ServerNow.AddSeconds(45))
+            : InspectTransportResult.Available());
+        var adapter = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+        _ = await adapter.InspectAsync(Issue(6), Owner, TestContext.Current.CancellationToken);
+        var lifecycleId = checkpoints.Records[0].Prepared!.LifecycleId;
+        var requestCount = transport.InspectRequests.Count;
+        var restarted = await CreateAdapterAsync(transport, checkpoints: checkpoints);
+
+        var recovered = await restarted.RecoverForCleanupAsync(
+            lifecycleId, Owner, [Issue(6)], "observation-replay-proof", TestContext.Current.CancellationToken);
+
+        Assert.Equal(CoordinationLifecyclePhase.Closed, recovered.Snapshot.Phase);
+        Assert.Equal(requestCount, transport.InspectRequests.Count);
+        Assert.Empty(transport.ReleaseRequests);
+        Assert.Null(recovered.Continuation);
+    }
+
     [Fact]
     public async Task Rejected_same_adapter_recovery_does_not_claim_or_fence_the_live_writer()
     {
