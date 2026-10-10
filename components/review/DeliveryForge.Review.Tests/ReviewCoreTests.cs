@@ -380,13 +380,13 @@ public sealed class ReviewCoreTests
 
         host.RevokeCapability(capability.ProofIdentity);
         Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
-            WorkflowState.IndependentReview, WorkflowState.PrAuthorized, transition));
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized, transition, receiver));
         var restarted = ReviewAuthorityHost.CreateIsolatedTest(
             RootContext("run-1", request, policy, evidencePolicy.Identity), Time(1));
         Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.IndependentReview,
             WorkflowState.PrAuthorized,
-            transition with { ReviewAuthority = restarted.Authority }));
+            transition with { ReviewAuthority = restarted.Authority }, receiver));
     }
 
     [Fact]
@@ -540,6 +540,88 @@ public sealed class ReviewCoreTests
             WorkflowState.Merged,
             evidence with { PublicationReceipt = PublicationReceipt(independent.Identity, "MERGED") },
             receiver);
+
+        var edges = new[]
+        {
+            (WorkflowState.IndependentReview, WorkflowState.PrAuthorized),
+            (WorkflowState.PrAuthorized, WorkflowState.PrPublished),
+            (WorkflowState.CiComplete, WorkflowState.HostReviewComplete),
+            (WorkflowState.HostReviewComplete, WorkflowState.MergeAuthorized),
+            (WorkflowState.MergeAuthorized, WorkflowState.Merged)
+        };
+        TransitionEvidence ForEdge(TransitionEvidence supplied, WorkflowState target) => target == WorkflowState.Merged
+            ? supplied with { PublicationReceipt = PublicationReceipt(independent.Identity, "MERGED") }
+            : supplied;
+
+        (TransitionEvidence Evidence, ReviewTransitionReceiver Receiver) IssueChain(
+            ReviewAuthorityHost issuer, ReviewAuthorityRootContext issuerRoot, string prefix)
+        {
+            var independentBinding = Acceptance(issuerRoot, prefix + "-independent-request");
+            var hostedBinding = Acceptance(issuerRoot, prefix + "-hosted-request");
+            var independentArtifact = Identity(prefix == "foreign" ? '1' : '3');
+            var hostedArtifact = Identity(prefix == "foreign" ? '2' : '4');
+            var pinned = issuer.CreateTransitionReceiver(independentBinding, hostedBinding);
+            var independentProof = issuer.IssueCapability(
+                independent.Capability, prefix + "-independent-capability", Time(0), Time(2));
+            var hostedProof = issuer.IssueCapability(
+                hosted.Capability, prefix + "-hosted-capability", Time(0), Time(2));
+            var independentRun = issuer.RecordExecution(
+                issuer.RegisterRequest(independentBinding.RequestIdentity, independent, independentBinding),
+                independentProof, prefix + "-independent-execution", true, true, independentArtifact, "ship", Time(1));
+            var hostedRun = issuer.RecordExecution(
+                issuer.RegisterRequest(hostedBinding.RequestIdentity, hosted, hostedBinding),
+                hostedProof, prefix + "-hosted-execution", true, true, hostedArtifact, "ship", Time(1));
+            var independentNormalized = ReviewNormalizer.Normalize(
+                independent, Result() with { ArtifactHash = independentArtifact }, policy, independentProof, independentRun);
+            var hostedNormalized = ReviewNormalizer.Normalize(
+                hosted, hostedResult with { ArtifactHash = hostedArtifact }, policy, hostedProof, hostedRun);
+            Assert.True(independentNormalized.AuthorityAccepted);
+            Assert.True(hostedNormalized.AuthorityAccepted);
+            var independentDocument = ContractValidator.ParseAndValidate(
+                ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(independentNormalized)));
+            var hostedDocument = ContractValidator.ParseAndValidate(
+                ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(hostedNormalized)));
+            issuer.IssueAcceptance(independentDocument, independentNormalized, independentBinding,
+                ReviewEvidenceRole.Independent);
+            issuer.IssueAcceptance(hostedDocument, hostedNormalized, hostedBinding, ReviewEvidenceRole.Hosted);
+            return (evidence with
+            {
+                ReviewReceipt = independentDocument,
+                HostReviewReceipt = hostedDocument,
+                ReviewAuthority = issuer.Authority,
+                ReviewContext = issuer.CreateConsumerContext(independentBinding),
+                HostReviewContext = issuer.CreateConsumerContext(hostedBinding)
+            }, pinned);
+        }
+
+        var foreignRoot = root with { RunIdentity = "foreign-dual-run" };
+        var foreignIssuer = ReviewAuthorityHost.CreateIsolatedTest(foreignRoot, Time(1));
+        var foreign = IssueChain(foreignIssuer, foreignRoot, "foreign");
+        var otherRequest = IssueChain(host, root, "other-request");
+        foreach (var (from, to) in edges)
+        {
+            // Each foreign envelope is intact and authorizes its independently pinned receiver.
+            WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, ForEdge(foreign.Evidence, to), foreign.Receiver);
+            WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, ForEdge(otherRequest.Evidence, to), otherRequest.Receiver);
+            Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+                from, to, ForEdge(foreign.Evidence, to), receiver));
+            Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+                from, to, ForEdge(otherRequest.Evidence, to), receiver));
+        }
+
+        host.RevokeCapability(hostedCapability.ProofIdentity);
+        foreach (var (from, to) in edges)
+        {
+            if (to is WorkflowState.PrAuthorized or WorkflowState.PrPublished)
+                WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, ForEdge(evidence, to), receiver);
+            else
+                Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+                    from, to, ForEdge(evidence, to), receiver));
+        }
+        host.RevokeCapability(independentCapability.ProofIdentity);
+        foreach (var (from, to) in edges)
+            Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+                from, to, ForEdge(evidence, to), receiver));
     }
 
     [Theory]
