@@ -96,6 +96,43 @@ public sealed class WorkflowTransitionTests
             WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, evidence));
     }
 
+    [Theory]
+    [InlineData(WorkflowState.IndependentReview, WorkflowState.PrAuthorized)]
+    [InlineData(WorkflowState.PrAuthorized, WorkflowState.PrPublished)]
+    [InlineData(WorkflowState.CiComplete, WorkflowState.HostReviewComplete)]
+    [InlineData(WorkflowState.HostReviewComplete, WorkflowState.MergeAuthorized)]
+    [InlineData(WorkflowState.MergeAuthorized, WorkflowState.Merged)]
+    public void Rehashed_schema_valid_pass_cannot_replace_issued_independent_receipt(
+        WorkflowState from,
+        WorkflowState to)
+    {
+        var forged = MutatedFixture("review-receipt.json", node =>
+            node["createdAt"] = "2026-10-07T05:03:00Z");
+        var evidence = FullEvidence(to == WorkflowState.Merged) with { ReviewReceipt = forged };
+
+        AssertMessage("root-issued review acceptance", () =>
+            WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, evidence));
+    }
+
+    [Theory]
+    [InlineData(WorkflowState.CiComplete, WorkflowState.HostReviewComplete)]
+    [InlineData(WorkflowState.HostReviewComplete, WorkflowState.MergeAuthorized)]
+    [InlineData(WorkflowState.MergeAuthorized, WorkflowState.Merged)]
+    public void Rehashed_schema_valid_pass_cannot_replace_separately_issued_host_receipt(
+        WorkflowState from,
+        WorkflowState to)
+    {
+        var forged = MutatedFixture("review-receipt.json", node =>
+        {
+            node["reviewerFamily"] = "github-hosted";
+            node["createdAt"] = "2026-10-07T05:03:00Z";
+        });
+        var evidence = FullEvidence(to == WorkflowState.Merged) with { HostReviewReceipt = forged };
+
+        AssertMessage("root-issued review acceptance", () =>
+            WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, evidence));
+    }
+
     [Fact]
     public void Production_authorization_rejects_isolated_test_realm_acceptance()
     {
