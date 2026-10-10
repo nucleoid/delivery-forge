@@ -1063,7 +1063,7 @@ public sealed class CoordinationContractTests
     }
 
     [Fact]
-    public async Task Late_checkpoint_append_is_reconciled_in_place_before_any_rpc_or_new_slot()
+    public async Task Late_never_sent_prepare_is_reconciled_and_abandoned_before_any_rpc_or_new_slot()
     {
         var barrier = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var checkpoints = new FixtureCheckpointStore { DelayNextAppend = barrier };
@@ -1081,8 +1081,10 @@ public sealed class CoordinationContractTests
         var reconciled = await adapter.ReconcileAcquireAsync(
             uncertain.AcquireContinuation!, TestContext.Current.CancellationToken);
 
-        Assert.Single(transport.AcquireRequests);
+        Assert.Empty(transport.AcquireRequests);
         Assert.NotNull(reconciled.ReleaseContinuation);
+        Assert.Single(checkpoints.Records,
+            record => record.Progress?.AdapterCode == "abandoned-before-send");
         Assert.Equal(Enumerable.Range(1, checkpoints.Records.Count).Select(value => (long)value),
             checkpoints.Records.Select(record => record.RecordSequence));
     }
