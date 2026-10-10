@@ -6,6 +6,7 @@ using DeliveryForge.Contracts.Models;
 using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Contracts.State;
 using DeliveryForge.Contracts.Validation;
+using DeliveryForge.Execution.Host;
 
 namespace DeliveryForge.Review.Tests;
 
@@ -75,12 +76,71 @@ public sealed class ReviewCoreTests
     }
 
     [Fact]
+    public void Isolated_root_issuer_drives_the_exact_safe_receipt_and_consumer_path()
+    {
+        var host = ReviewAuthorityHost.CreateIsolatedTest();
+        var policy = Policy();
+        var request = Request(policy);
+        var capability = host.IssueCapability(
+            request.Capability,
+            "capability-proof-1",
+            Time(0),
+            Time(2));
+        var execution = host.RecordExecution(
+            "review-request-1",
+            "review-execution-1",
+            accepted: true,
+            completed: true,
+            rawArtifactHash: Identity('f'),
+            rawVerdict: "ship",
+            completedAt: Time(1));
+
+        var normalized = ReviewNormalizer.Normalize(request, Result(), policy, capability, execution);
+        Assert.True(normalized.AuthorityAccepted);
+        Assert.False(normalized.ProductionAccepted);
+
+        var receipt = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(normalized)));
+        Assert.Equal("PASS", JsonNode.Parse(receipt.CanonicalBytes)!["outcome"]!.GetValue<string>());
+
+        host.IssueAcceptance(
+            receipt,
+            normalized,
+            new ReviewAcceptanceContext(
+                "run-1",
+                "review-request-1",
+                request.Identity.PlanIdentity,
+                EvidencePolicy().Identity,
+                policy.ContentIdentity,
+                policy.SourceRevision,
+                policy.AuthorityKind,
+                "source-authority-1",
+                "/trusted/source",
+                request.Identity.BaseCommit),
+            ReviewEvidenceRole.Independent);
+
+        WorkflowTransition.EnsureAllowed(
+            WorkflowState.IndependentReview,
+            WorkflowState.PrAuthorized,
+            new TransitionEvidence(
+                AuthorizationCeiling.Pr,
+                request.Identity.BaseCommit,
+                request.Identity.HeadCommit,
+                request.Identity.HeadTree,
+                Policy: EvidencePolicy(),
+                ReviewReceipt: receipt,
+                ReviewAuthority: host.Authority,
+                RequiredReviewAuthorityRealm: ReviewAuthorityRealm.Test));
+    }
+
+    [Fact]
     public void Trusted_fixture_policy_accepts_explicit_different_family_but_not_production()
     {
         var policy = Policy();
         var normalized = ReviewNormalizer.Normalize(Request(policy), Result(), policy);
         Assert.Equal(ReviewOutcome.Pass, normalized.Outcome);
         Assert.False(normalized.ProductionAccepted);
+        Assert.False(normalized.AuthorityAccepted);
         Assert.True(normalized.Fixture);
     }
 
