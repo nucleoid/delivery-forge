@@ -154,7 +154,7 @@ public sealed class ReviewAuthorityHost
             sourceRoot, workerGitDirectory, controlled, trustedGitExecutable, version,
             maximumEvidenceBytes, _rootIdentity, frozenHead, objectViewIdentity, _realm,
             workerIndexHash, _issuer,
-            () => { if (Directory.Exists(controlled)) Directory.Delete(controlled, recursive: true); },
+            () => FixtureDirectoryCleanup.Delete(controlled),
             beforeFinalRecheck);
     }
 

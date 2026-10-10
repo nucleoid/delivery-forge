@@ -13,6 +13,36 @@ namespace DeliveryForge.Review.Tests;
 public sealed class ReviewCoreTests
 {
     [Fact]
+    public void Fixture_cleanup_removes_owned_readonly_objects_and_preserves_outside_targets()
+    {
+        var container = Path.Combine(Path.GetTempPath(), "delivery-forge-cleanup-proof", Guid.NewGuid().ToString("N"));
+        var owned = Path.Combine(container, "owned");
+        var outside = Path.Combine(container, "outside");
+        Directory.CreateDirectory(Path.Combine(owned, "objects"));
+        Directory.CreateDirectory(outside);
+        var objectFile = Path.Combine(owned, "objects", "object");
+        var outsideFile = Path.Combine(outside, "preserve");
+        File.WriteAllText(objectFile, "owned object");
+        File.WriteAllText(outsideFile, "outside object");
+        File.SetAttributes(objectFile, File.GetAttributes(objectFile) | FileAttributes.ReadOnly);
+        File.SetAttributes(outsideFile, File.GetAttributes(outsideFile) | FileAttributes.ReadOnly);
+        var outsideAttributes = File.GetAttributes(outsideFile);
+        try
+        {
+            try { Directory.CreateSymbolicLink(Path.Combine(owned, "outside-link"), outside); }
+            catch (Exception error) when (error is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+            {
+                TestContext.Current.SendDiagnosticMessage("Cleanup symlink conformance is unproved on this host: {0}", error.GetType().Name);
+            }
+            FixtureDirectoryCleanup.Delete(owned);
+            Assert.False(Directory.Exists(owned));
+            Assert.Equal("outside object", File.ReadAllText(outsideFile));
+            Assert.Equal(outsideAttributes, File.GetAttributes(outsideFile));
+        }
+        finally { FixtureDirectoryCleanup.Delete(container); }
+    }
+
+    [Fact]
     public async Task Patch_identity_binds_exact_binary_full_index_bytes_and_clean_committed_head()
     {
         using var repository = new TinyGitRepository();
@@ -553,7 +583,7 @@ public sealed class ReviewCoreTests
             ? supplied with { PublicationReceipt = PublicationReceipt(independent.Identity, "MERGED") }
             : supplied;
 
-        (TransitionEvidence Evidence, ReviewTransitionReceiver Receiver) IssueChain(
+        (TransitionEvidence Evidence, ReviewTransitionReceiver Receiver, string IndependentProof) IssueChain(
             ReviewAuthorityHost issuer, ReviewAuthorityRootContext issuerRoot, string prefix)
         {
             var independentBinding = Acceptance(issuerRoot, prefix + "-independent-request");
@@ -591,7 +621,7 @@ public sealed class ReviewCoreTests
                 ReviewAuthority = issuer.Authority,
                 ReviewContext = issuer.CreateConsumerContext(independentBinding),
                 HostReviewContext = issuer.CreateConsumerContext(hostedBinding)
-            }, pinned);
+            }, pinned, independentProof.ProofIdentity);
         }
 
         var foreignRoot = root with { RunIdentity = "foreign-dual-run" };
@@ -608,6 +638,12 @@ public sealed class ReviewCoreTests
             Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
                 from, to, ForEdge(otherRequest.Evidence, to), receiver));
         }
+
+        // Hosted proof remains current, so every failure below isolates independent revocation.
+        host.RevokeCapability(otherRequest.IndependentProof);
+        foreach (var (from, to) in edges)
+            Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+                from, to, ForEdge(otherRequest.Evidence, to), otherRequest.Receiver));
 
         host.RevokeCapability(hostedCapability.ProofIdentity);
         foreach (var (from, to) in edges)
@@ -1334,5 +1370,5 @@ internal sealed class TinyGitRepository : IDisposable
         if (process.ExitCode != 0) throw new InvalidOperationException(error);
         return output.ToArray();
     }
-    public void Dispose() { if (Directory.Exists(Path)) Directory.Delete(Path, true); }
+    public void Dispose() => FixtureDirectoryCleanup.Delete(Path);
 }
