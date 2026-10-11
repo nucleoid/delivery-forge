@@ -167,6 +167,10 @@ public sealed class LocalSingleScheduler
         finally { _serial.Release(); }
     }
 
+    // Cleanup-only cold entry: never returns a reservation or resumes terminal work.
+    public Task<bool> ReconcileColdTerminalAsync(CancellationToken cancellationToken = default) =>
+        throw new NotImplementedException("Fresh cold terminal reconciliation is not yet implemented.");
+
     public async Task<bool> ReconcileCleanupAsync(CancellationToken cancellationToken = default)
     {
         Interlocked.Increment(ref _controlGeneration);

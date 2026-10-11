@@ -6,7 +6,13 @@ namespace DeliveryForge.Scheduling.Tests;
 
 internal sealed class PlanningRepository : IDisposable
 {
-    public string Root { get; } = Path.Combine(Path.GetTempPath(), "delivery-forge-local-scheduling-" + Guid.NewGuid().ToString("N"));
+    public string Root { get; }
+    private readonly bool _ownsRoot;
+    public PlanningRepository(string? existingRoot = null)
+    {
+        Root = existingRoot ?? Path.Combine(Path.GetTempPath(), "delivery-forge-local-scheduling-" + Guid.NewGuid().ToString("N"));
+        _ownsRoot = existingRoot is null;
+    }
     public string Checkout => Path.Combine(Root, "repository");
     public string GitExecutable { get; } = FindGit();
     public GitRepositoryContextReader Reader => new(GitExecutable);
@@ -27,11 +33,11 @@ internal sealed class PlanningRepository : IDisposable
         return await GitAsync(Checkout, "rev-parse", "HEAD");
     }
 
-    public async Task<FrozenPlan> FreezeAsync()
+    public async Task<FrozenPlan> FreezeAsync(DateTimeOffset? frozenAt = null)
     {
         var context = await Reader.ReadAsync(Checkout, "refs/heads/main", TestContext.Current.CancellationToken);
         var file = await Reader.ReadFileAsync(context, "README.md", TestContext.Current.CancellationToken);
-        var now = DateTimeOffset.UtcNow;
+        var now = frozenAt ?? DateTimeOffset.UtcNow;
         var request = new PlanningRequest("nucleoid/delivery-forge", "#9", "implement", "Exercise local single scheduling",
             ["README.md"], ["excluded"], ["Exact identities and bounded execution"], "implement");
         EvidenceItem[] evidence = [EvidenceItem.FromRepositoryFile(file, now, [])];
@@ -54,7 +60,7 @@ internal sealed class PlanningRepository : IDisposable
 
     public void Dispose()
     {
-        if (!_cleanupSafe || !Directory.Exists(Root)) return;
+        if (!_ownsRoot || !_cleanupSafe || !Directory.Exists(Root)) return;
         var enumeration = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
         foreach (var file in Directory.EnumerateFiles(Root, "*", enumeration)) File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
         Directory.Delete(Root, recursive: true);
