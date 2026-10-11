@@ -42,6 +42,7 @@ public sealed class Crap4CSharpObservedContractTests
     [InlineData(true, "fail", "completed", 1, 1, 1, 0)]
     [InlineData(true, "pass", "completed", 2, 1, 1, 0)]
     [InlineData(false, "unknown", "operationalError", 2, 1, 0, 1)]
+    [InlineData(false, "unknown", "cancelled", 2, 1, 0, 1)]
     [InlineData(true, "pass", "completed", 0, 1, 2, -1)]
     [InlineData(true, "pass", "completed", 0, 1, 0, 2)]
     [InlineData(true, "pass", "completed", 0, 2, 1, 0)]
