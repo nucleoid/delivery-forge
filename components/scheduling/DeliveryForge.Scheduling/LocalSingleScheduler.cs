@@ -42,6 +42,7 @@ public sealed class LocalSingleScheduler
     private bool _relinquished;
     private int _paused;
     private int _stopped;
+    private long _controlGeneration;
     [System.Text.Json.Serialization.JsonIgnore]
     public string CleanupLimitation { get; private set; } = "";
 
@@ -168,6 +169,7 @@ public sealed class LocalSingleScheduler
 
     public async Task<bool> ReconcileCleanupAsync(CancellationToken cancellationToken = default)
     {
+        Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _stopped, 1);
         await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -216,7 +218,7 @@ public sealed class LocalSingleScheduler
             }
             catch (Exception exception)
             {
-                CleanupLimitation = "Reservation failed: " + exception.GetType().Name + ": " + exception.Message;
+                CleanupLimitation = "Reservation failed: " + DescribeFailure(exception);
                 Interlocked.Exchange(ref _stopped, 1);
                 if (_nativeQuiescenceKnown) Release(); else _uncertain = true;
                 throw;
@@ -268,12 +270,13 @@ public sealed class LocalSingleScheduler
             if (_relinquished || _uncertain || Volatile.Read(ref _stopped) != 0 || Volatile.Read(ref _paused) == 0 || !_prepared ||
                 !ReferenceEquals(reservation, _ticket) || !_laneHeld || _resources is null)
                 throw new SchedulingException("Resume requires this live parent's paused ticket; checkpoint data cannot recreate it.");
+            var controlGeneration = Interlocked.Read(ref _controlGeneration);
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             deadline.CancelAfter(Remaining());
             await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
+            EnsureResumeGeneration(controlGeneration);
             await PersistAsync("resuming", deadline.Token).ConfigureAwait(false);
-            if (_relinquished || Volatile.Read(ref _stopped) != 0)
-                throw new SchedulingException("Stop or parent transfer arrived before resume control; no host send is authorized.");
+            EnsureResumeGeneration(controlGeneration);
             var resumed = await _execution.ResumeAsync(_worker.RunId, _controlTimeout, deadline.Token).ConfigureAwait(false);
             if (resumed.Reconciliation.Action != ReconciliationAction.ResumeDispatch || resumed.Record is null)
             {
@@ -285,9 +288,10 @@ public sealed class LocalSingleScheduler
             if (prepared.Request.PlanIdentity != _worker.PlanIdentity || prepared.Request.AuthorizationCeiling != _worker.AuthorizationCeiling ||
                 prepared.Request.RequestIdentity != WorkerEnvelope.ComputeRequestIdentity(prepared.Request))
                 throw new SchedulingException("Recovered worker differs from the immutable parent plan or ceiling.");
-            if (Volatile.Read(ref _stopped) != 0) throw new SchedulingException("Stop arrived during resume reconciliation.");
+            EnsureResumeGeneration(controlGeneration);
             Interlocked.Exchange(ref _paused, 0);
             await PersistAsync("resumed", deadline.Token).ConfigureAwait(false);
+            EnsureResumeGeneration(controlGeneration);
             return prepared.Request;
         }
         catch { _uncertain = true; throw; }
@@ -296,6 +300,7 @@ public sealed class LocalSingleScheduler
 
     public async Task PauseAsync(CancellationToken cancellationToken = default)
     {
+        Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _paused, 1);
         await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -314,6 +319,7 @@ public sealed class LocalSingleScheduler
 
     public async Task<bool> StopAsync(CancellationToken cancellationToken = default)
     {
+        Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _stopped, 1);
         await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -334,7 +340,7 @@ public sealed class LocalSingleScheduler
             Release();
             return true;
         }
-        catch (Exception exception) { CleanupLimitation = exception.GetType().Name + ": " + exception.Message; _uncertain = true; return false; }
+        catch (Exception exception) { CleanupLimitation = DescribeFailure(exception); _uncertain = true; return false; }
         finally { _serial.Release(); }
     }
 
@@ -343,7 +349,7 @@ public sealed class LocalSingleScheduler
         foreach (var runId in await _store.DiscoverRunIdsAsync(cancellationToken).ConfigureAwait(false))
         {
             if (recoveringSameRun && (runId == _worker.RunId || runId == JournalRunId)) continue;
-            if (ObservedClosedRuns.ContainsKey(Path.Combine(_store.RootPath, runId))) continue;
+            if (ObservedClosedRuns.ContainsKey(ClosedNamespaceKey(runId))) continue;
             var recovery = await _store.RecoverAsync(runId, cancellationToken).ConfigureAwait(false);
             if (recovery.Records.Any(record => record.Kind is "local-scheduler-checkpoint" or "worker-prepared"))
                 throw new SchedulingException("Prior local run requires fresh child/writer/host reconciliation; stored terminal or active claims cannot authorize another run.");
@@ -389,8 +395,19 @@ public sealed class LocalSingleScheduler
     }
     private void MarkObservedClosed()
     {
-        ObservedClosedRuns.TryAdd(Path.Combine(_store.RootPath, _worker.RunId), 0);
-        ObservedClosedRuns.TryAdd(Path.Combine(_store.RootPath, JournalRunId), 0);
+        ObservedClosedRuns.TryAdd(ClosedNamespaceKey(_worker.RunId), 0);
+        ObservedClosedRuns.TryAdd(ClosedNamespaceKey(JournalRunId), 0);
+    }
+    private string ClosedNamespaceKey(string runId) => Path.Combine(_store.RootPath, "runs", _store.GetRunNamespaceIdentity(runId));
+    private void EnsureResumeGeneration(long expected)
+    {
+        if (_relinquished || Volatile.Read(ref _stopped) != 0 || Interlocked.Read(ref _controlGeneration) != expected)
+            throw new SchedulingException("Pause, stop or parent transfer arrived during resume; no dispatch request can be returned.");
+    }
+    private static string DescribeFailure(Exception exception)
+    {
+        var diagnostic = exception.GetType().Name + ": " + exception.Message;
+        return diagnostic.Length <= 4096 ? diagnostic : diagnostic[..4096];
     }
     private static bool SameDemand(RunDemand saved, RunDemand actual) => saved is not null && saved.Slots == actual.Slots &&
         saved.TimeLimit == actual.TimeLimit && saved.TokenLimit == actual.TokenLimit && saved.CostLimit == actual.CostLimit &&

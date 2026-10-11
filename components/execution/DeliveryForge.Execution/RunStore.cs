@@ -155,9 +155,13 @@ public sealed class RunStore
     }
 
     private string GetRunDirectory(string runId)
+        => Path.Combine(_root, "runs", GetRunNamespaceIdentity(runId));
+
+    // Namespace identity is data, not proof of an active/closed run or permission to dispatch.
+    public string GetRunNamespaceIdentity(string runId)
     {
-        var digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(runId)));
-        return Path.Combine(_root, "runs", digest);
+        ValidateName(runId, nameof(runId));
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(runId)));
     }
 
     private static void RejectReparseAncestors(string path)
