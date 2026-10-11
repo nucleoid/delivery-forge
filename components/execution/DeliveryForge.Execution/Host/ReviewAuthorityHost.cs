@@ -110,6 +110,8 @@ public sealed class ReviewAuthorityHost
         // On any refusal retain the owned view for diagnostics; deleting it is not process closure proof.
         _ = Remaining();
         var source = host.FreezeProtectedSource(view, protectedBase, view.SourceAuthorityIdentity);
+        // Typed resolver refusals propagate verbatim, including actual owner capture diagnostics.
+        // No catch may convert residual uncertainty into a plain timeout/cancellation or closure proof.
         var policy = await new ProtectedReviewPolicyResolver(source).ResolveBoundedAsync(
             configuration.RelativePolicyPath, Remaining(), cancellationToken).ConfigureAwait(false);
         _ = Remaining();

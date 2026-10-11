@@ -242,91 +242,105 @@ public sealed class ProtectedReviewPolicyResolver(ProtectedReviewSourceContext s
             if (left <= TimeSpan.Zero) throw new TimeoutException("Original protected-policy allowance expired.");
             return left;
         }
-        _ = Remaining();
-        if (string.IsNullOrWhiteSpace(repositoryRelativePath) || Path.IsPathFullyQualified(repositoryRelativePath) ||
-            repositoryRelativePath.Split(['/', '\\']).Any(segment => segment is "" or "." or ".."))
-            throw new ReviewPolicyException("A safe repository-relative policy path is required.");
-        var view = _source.ObjectView;
-        if (view.MaximumEvidenceBytes <= 0 || view.MaximumEvidenceBytes > 16 * 1024 * 1024)
-            throw new ReviewPolicyException("Protected resolver byte allowance is unsupported.");
-        var git = view.ControlledGitDirectory;
-        var objects = Path.Combine(git, "objects");
-        RequirePlain(git); RequirePlain(objects);
-        if (!Directory.Exists(objects) || File.Exists(Path.Combine(objects, "info", "alternates")) ||
-            File.Exists(Path.Combine(git, "info", "grafts")) || File.Exists(Path.Combine(git, "shallow")) || Directory.Exists(Path.Combine(git, "refs", "replace")))
-            throw new ReviewPolicyException("Protected object view contains unsupported authority.");
-        var config = Path.Combine(git, "config");
-        RequirePlain(config);
-        using (var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
-        {
-            bound.CancelAfter(Remaining());
-            try
-            {
-                await using var file = new FileStream(config, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous);
-                if (file.Length > 1024 * 1024) throw new ReviewPolicyException("Protected configuration exceeds1MiB.");
-                using var captured = new MemoryStream(); var buffer = new byte[4096];
-                while (true)
-                {
-                    _ = Remaining(); var count = await file.ReadAsync(buffer.AsMemory(), bound.Token).ConfigureAwait(false);
-                    if (count == 0) break;
-                    if (captured.Length + count > 1024 * 1024) throw new ReviewPolicyException("Protected configuration grew past1MiB.");
-                    captured.Write(buffer, 0, count);
-                }
-                var text = StrictBoundedText(captured.ToArray());
-                if (new[] { "include", "promisor", "partialclone", "alternates", "worktree" }.Any(value => text.Contains(value, StringComparison.OrdinalIgnoreCase)))
-                    throw new ReviewPolicyException("Protected view contains external configuration.");
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
-            { throw new TimeoutException("Original protected-policy configuration allowance expired."); }
-        }
-        _ = Remaining(); RequirePlain(config);
-        var executor = new ProcessCommandExecutor();
-        async Task<byte[]> Git(IReadOnlyList<string> args)
-        {
-            var prefix = new[] { "--no-replace-objects", $"--git-dir={git}", $"--work-tree={view.SourceRoot}",
-                "-c", "core.fsmonitor=false", "-c", $"core.hooksPath={(OperatingSystem.IsWindows() ? "NUL" : "/dev/null")}" };
-            var nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
-            var environment = new Dictionary<string, string>
-            {
-                ["GIT_DIR"] = git, ["GIT_COMMON_DIR"] = git, ["GIT_WORK_TREE"] = view.SourceRoot,
-                ["GIT_OBJECT_DIRECTORY"] = objects, ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "", ["GIT_INDEX_FILE"] = Path.Combine(git, "resolver-unused-index"),
-                ["GIT_CONFIG"] = config, ["GIT_CONFIG_COUNT"] = "0", ["GIT_CONFIG_PARAMETERS"] = "", ["GIT_CONFIG_NOSYSTEM"] = "1",
-                ["GIT_CONFIG_GLOBAL"] = nullDevice, ["GIT_CONFIG_SYSTEM"] = nullDevice, ["GIT_GRAFT_FILE"] = nullDevice,
-                ["GIT_NO_REPLACE_OBJECTS"] = "1", ["GIT_NO_LAZY_FETCH"] = "1", ["GIT_TERMINAL_PROMPT"] = "0"
-            };
-            var capture = await executor.ExecuteBoundedCaptureAsync(new(view.TrustedGitExecutable, prefix.Concat(args).ToArray(), view.SourceRoot, environment),
-                Remaining(), checked((int)view.MaximumEvidenceBytes), cancellationToken).ConfigureAwait(false);
-            cancellationToken.ThrowIfCancellationRequested();
-            if (capture.Command.Cancelled) throw new OperationCanceledException("Protected-policy command cancelled.", cancellationToken);
-            if (capture.Command.TimedOut) throw new TimeoutException("Original protected-policy command allowance expired.");
-            if (capture.CaptureBoundExceeded || capture.Command.ExitCode != 0 || !capture.Command.OwnedProcessQuiescent ||
-                !capture.RootExitObserved || !capture.StandardOutputDrainCompleted || !capture.StandardErrorDrainCompleted)
-                throw new ReviewPolicyException("Protected-policy command capture was incomplete, over quota, or not physically settled.");
-            _ = Remaining(); RequirePlain(git); RequirePlain(objects); RequirePlain(config);
-            return capture.StandardOutputBytes;
-        }
-        var exactBase = StrictBoundedText(await Git(["rev-parse", "--verify", $"{_source.ProtectedBaseCommit}^{{commit}}"])).Trim();
-        if (exactBase != _source.ProtectedBaseCommit) throw new ReviewPolicyException("Protected base did not resolve exactly.");
-        var objectId = StrictBoundedText(await Git(["rev-parse", $"{_source.ProtectedBaseCommit}:{repositoryRelativePath.Replace('\\', '/')}"])).Trim();
-        var type = StrictBoundedText(await Git(["cat-file", "-t", objectId])).Trim();
-        var sizeText = StrictBoundedText(await Git(["cat-file", "-s", objectId])).Trim();
-        if (type != "blob" || !long.TryParse(sizeText, out var size) || size < 0 || size > view.MaximumEvidenceBytes)
-            throw new ReviewPolicyException("Protected policy is not a bounded blob.");
-        var bytes = await Git(["cat-file", "blob", objectId]);
-        if (bytes.LongLength != size) throw new ReviewPolicyException("Protected policy blob size changed.");
-        ReviewPolicyFile filePolicy;
+        BoundedCommandCaptureResult? lastCapture = null;
         try
         {
-            filePolicy = JsonSerializer.Deserialize<ReviewPolicyFile>(StrictBoundedText(bytes), new JsonSerializerOptions
-            { PropertyNameCaseInsensitive = false, UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow, AllowDuplicateProperties = false })
-                ?? throw new ReviewPolicyException("Protected review policy is empty.");
+            _ = Remaining();
+            if (string.IsNullOrWhiteSpace(repositoryRelativePath) || Path.IsPathFullyQualified(repositoryRelativePath) ||
+                repositoryRelativePath.Split(['/', '\\']).Any(segment => segment is "" or "." or ".."))
+                throw new ReviewPolicyException("A safe repository-relative policy path is required.");
+            var view = _source.ObjectView;
+            if (view.MaximumEvidenceBytes <= 0 || view.MaximumEvidenceBytes > 16 * 1024 * 1024)
+                throw new ReviewPolicyException("Protected resolver byte allowance is unsupported.");
+            var git = view.ControlledGitDirectory;
+            var objects = Path.Combine(git, "objects");
+            RequirePlain(git); RequirePlain(objects);
+            if (!Directory.Exists(objects) || File.Exists(Path.Combine(objects, "info", "alternates")) ||
+                File.Exists(Path.Combine(git, "info", "grafts")) || File.Exists(Path.Combine(git, "shallow")) || Directory.Exists(Path.Combine(git, "refs", "replace")))
+                throw new ReviewPolicyException("Protected object view contains unsupported authority.");
+            var config = Path.Combine(git, "config");
+            RequirePlain(config);
+            using (var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                bound.CancelAfter(Remaining());
+                try
+                {
+                    await using var file = new FileStream(config, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous);
+                    if (file.Length > 1024 * 1024) throw new ReviewPolicyException("Protected configuration exceeds1MiB.");
+                    using var captured = new MemoryStream(); var buffer = new byte[4096];
+                    while (true)
+                    {
+                        _ = Remaining(); var count = await file.ReadAsync(buffer.AsMemory(), bound.Token).ConfigureAwait(false);
+                        if (count == 0) break;
+                        if (captured.Length + count > 1024 * 1024) throw new ReviewPolicyException("Protected configuration grew past1MiB.");
+                        captured.Write(buffer, 0, count);
+                    }
+                    var text = StrictBoundedText(captured.ToArray());
+                    if (new[] { "include", "promisor", "partialclone", "alternates", "worktree" }.Any(value => text.Contains(value, StringComparison.OrdinalIgnoreCase)))
+                        throw new ReviewPolicyException("Protected view contains external configuration.");
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                { throw new TimeoutException("Original protected-policy configuration allowance expired."); }
+            }
+            _ = Remaining(); RequirePlain(config);
+            var executor = new ProcessCommandExecutor();
+            async Task<byte[]> Git(IReadOnlyList<string> args)
+            {
+                var prefix = new[] { "--no-replace-objects", $"--git-dir={git}", $"--work-tree={view.SourceRoot}",
+                    "-c", "core.fsmonitor=false", "-c", $"core.hooksPath={(OperatingSystem.IsWindows() ? "NUL" : "/dev/null")}" };
+                var nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+                var environment = new Dictionary<string, string>
+                {
+                    ["GIT_DIR"] = git, ["GIT_COMMON_DIR"] = git, ["GIT_WORK_TREE"] = view.SourceRoot,
+                    ["GIT_OBJECT_DIRECTORY"] = objects, ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "", ["GIT_INDEX_FILE"] = Path.Combine(git, "resolver-unused-index"),
+                    ["GIT_CONFIG"] = config, ["GIT_CONFIG_COUNT"] = "0", ["GIT_CONFIG_PARAMETERS"] = "", ["GIT_CONFIG_NOSYSTEM"] = "1",
+                    ["GIT_CONFIG_GLOBAL"] = nullDevice, ["GIT_CONFIG_SYSTEM"] = nullDevice, ["GIT_GRAFT_FILE"] = nullDevice,
+                    ["GIT_NO_REPLACE_OBJECTS"] = "1", ["GIT_NO_LAZY_FETCH"] = "1", ["GIT_TERMINAL_PROMPT"] = "0"
+                };
+                var invocation = new CommandInvocation(view.TrustedGitExecutable, prefix.Concat(args).ToArray(), view.SourceRoot, environment);
+                var allowance = Remaining();
+                // An unexpected new dispatch exception must not borrow a previous command's settled observation.
+                lastCapture = null;
+                var capture = await executor.ExecuteBoundedCaptureAsync(invocation,
+                    allowance, checked((int)view.MaximumEvidenceBytes), cancellationToken).ConfigureAwait(false);
+                lastCapture = capture; // Preserve actual physical uncertainty BEFORE choosing cancellation/timeout semantics.
+                if (cancellationToken.IsCancellationRequested || capture.Command.Cancelled || capture.Command.TimedOut ||
+                    capture.CaptureBoundExceeded || capture.Command.ExitCode != 0 || !capture.Command.OwnedProcessQuiescent ||
+                    !capture.RootExitObserved || !capture.StandardOutputDrainCompleted || !capture.StandardErrorDrainCompleted)
+                    throw ProtectedPolicyReadFailure.Create(capture, cancellationToken,
+                        "Protected-policy command refused; actual capture/settlement observations retained.");
+                _ = Remaining(); RequirePlain(git); RequirePlain(objects); RequirePlain(config);
+                return capture.StandardOutputBytes;
+            }
+            var exactBase = StrictBoundedText(await Git(["rev-parse", "--verify", $"{_source.ProtectedBaseCommit}^{{commit}}"])).Trim();
+            if (exactBase != _source.ProtectedBaseCommit) throw new ReviewPolicyException("Protected base did not resolve exactly.");
+            var objectId = StrictBoundedText(await Git(["rev-parse", $"{_source.ProtectedBaseCommit}:{repositoryRelativePath.Replace('\\', '/')}"])).Trim();
+            var type = StrictBoundedText(await Git(["cat-file", "-t", objectId])).Trim();
+            var sizeText = StrictBoundedText(await Git(["cat-file", "-s", objectId])).Trim();
+            if (type != "blob" || !long.TryParse(sizeText, out var size) || size < 0 || size > view.MaximumEvidenceBytes)
+                throw new ReviewPolicyException("Protected policy is not a bounded blob.");
+            var bytes = await Git(["cat-file", "blob", objectId]);
+            if (bytes.LongLength != size) throw new ReviewPolicyException("Protected policy blob size changed.");
+            ReviewPolicyFile filePolicy;
+            try
+            {
+                filePolicy = JsonSerializer.Deserialize<ReviewPolicyFile>(StrictBoundedText(bytes), new JsonSerializerOptions
+                { PropertyNameCaseInsensitive = false, UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow, AllowDuplicateProperties = false })
+                    ?? throw new ReviewPolicyException("Protected review policy is empty.");
+            }
+            catch (JsonException exception) { throw new ReviewPolicyException("Protected review policy is malformed.", exception); }
+            _ = Remaining();
+            var identity = "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes));
+            var result = ReviewPolicy.FromVerifiedProtectedSource(new(identity, identity, _source.ProtectedBaseCommit, filePolicy.Fixture,
+                filePolicy.Advisory, filePolicy.AllowedFamilies, filePolicy.AllowedScopes, filePolicy.AllowExactReuse, filePolicy.Budget, filePolicy.ExemptionApprovers), _source);
+            _ = Remaining(); return result;
         }
-        catch (JsonException exception) { throw new ReviewPolicyException("Protected review policy is malformed.", exception); }
-        _ = Remaining();
-        var identity = "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes));
-        var result = ReviewPolicy.FromVerifiedProtectedSource(new(identity, identity, _source.ProtectedBaseCommit, filePolicy.Fixture,
-            filePolicy.Advisory, filePolicy.AllowedFamilies, filePolicy.AllowedScopes, filePolicy.AllowExactReuse, filePolicy.Budget, filePolicy.ExemptionApprovers), _source);
-        _ = Remaining(); return result;
+        catch (Exception failure) when (lastCapture is not null &&
+            failure is (OperationCanceledException or TimeoutException or ReviewPolicyException or IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException))
+        {
+            if (failure.InnerException is ProtectedPolicyCaptureDiagnosticException) throw;
+            throw ProtectedPolicyReadFailure.Attach(failure, lastCapture!, cancellationToken);
+        }
     }
 
     private static void RequirePlain(string path)
