@@ -294,6 +294,32 @@ public sealed class ReviewAuthorityHost
             hostedContext is null ? null : CreateConsumerContext(hostedContext));
     }
 
+    // Explicit fixture-only bridge. Its RED stub must not alter production acceptance.
+    public void EnsureContractFixtureTransition(
+        DeliveryForge.Contracts.Models.WorkflowState from,
+        DeliveryForge.Contracts.Models.WorkflowState to,
+        TransitionEvidence evidence,
+        ReviewTransitionReceiver receiver) =>
+        throw new InvalidOperationException("Fixture transition bridge is not implemented at this RED checkpoint.");
+
+    // Fixture setup support, not a live policy resolver or production authority path.
+    public ReviewPolicy CreateContractFixturePolicy(
+        IReadOnlyList<FamilyPair> families,
+        IReadOnlyList<string> scopes,
+        bool allowExactReuse,
+        ReviewBudget budget)
+    {
+        if (_realm != ReviewAuthorityRealm.Test || _rootContext is null)
+            throw new InvalidOperationException("Contract fixture policy requires an isolated root-configured test host.");
+        var policy = ReviewPolicy.TrustedFixture(
+            _rootContext.ReviewPolicyContentIdentity, families, scopes, allowExactReuse, budget);
+        if (policy.ContentIdentity != _rootContext.ReviewPolicyContentIdentity ||
+            policy.SourceRevision != _rootContext.ReviewPolicySourceRevision ||
+            policy.AuthorityKind != _rootContext.ReviewPolicyAuthorityKind)
+            throw new InvalidOperationException("Root policy provenance does not match the pure contract fixture policy.");
+        return policy;
+    }
+
     public void IssueAcceptance(
         ValidatedContract receipt,
         NormalizedReview review,
