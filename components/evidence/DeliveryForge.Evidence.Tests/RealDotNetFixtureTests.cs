@@ -40,7 +40,12 @@ public sealed class RealDotNetFixtureTests
                 ["--version"], ["--help"], "10.0.401", "trx-v1", true),
             TestContext.Current.CancellationToken);
         var capability = detection.Capability;
-        Assert.True(capability.Supported);
+        Assert.True(capability.Supported,
+            $"Dotnet capability: executable={dotnet}; observed={capability.Version}; " +
+            $"version exit={detection.VersionResult?.ExitCode}; " +
+            $"version output={detection.VersionResult?.StandardOutput} {detection.VersionResult?.StandardError}; " +
+            $"help exit={detection.HelpResult?.ExitCode}; " +
+            $"help output={detection.HelpResult?.StandardOutput} {detection.HelpResult?.StandardError}");
         Assert.Equal("10.0.401", capability.Version);
         var project = System.IO.Path.Combine(temp.Path, "Subject.Tests", "Subject.Tests.csproj");
         var redTrx = System.IO.Path.Combine(temp.Path, "red.trx");

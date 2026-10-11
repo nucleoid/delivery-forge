@@ -1,0 +1,6 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>DeliveryForge.Coordination</AssemblyName>
+    <RootNamespace>DeliveryForge.Coordination</RootNamespace>
+  </PropertyGroup>
+</Project>

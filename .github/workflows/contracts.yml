@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "components/contracts/**"
+      - "components/coordination/**"
       - "components/execution/**"
       - "components/evidence/**"
       - "components/planning/**"
