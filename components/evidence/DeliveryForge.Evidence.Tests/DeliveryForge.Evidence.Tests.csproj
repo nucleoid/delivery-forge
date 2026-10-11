@@ -11,6 +11,6 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="Fixtures/**/*.cs" />
-    <None Include="Fixtures/**/*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="Fixtures/**/*" Exclude="Fixtures/**/bin/**/*;Fixtures/**/obj/**/*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
