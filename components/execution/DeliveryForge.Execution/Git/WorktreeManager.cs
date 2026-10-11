@@ -15,6 +15,20 @@ public sealed record WorktreeObservation(
 
 public sealed class WorktreeManager
 {
+    private readonly string _gitExecutable;
+    public WorktreeManager(string? gitExecutablePath = null)
+    {
+        if (gitExecutablePath is not null)
+        {
+            if (!Path.IsPathFullyQualified(gitExecutablePath) || !File.Exists(gitExecutablePath)) throw new WorktreeBoundaryException("Configured Git executable must be an existing absolute trusted path.");
+            _gitExecutable = Path.GetFullPath(gitExecutablePath);
+            return;
+        }
+        var name = OperatingSystem.IsWindows() ? "git.exe" : "git";
+        _gitExecutable = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
+            .Where(Path.IsPathFullyQualified).Select(path => Path.Combine(path, name)).FirstOrDefault(File.Exists)
+            ?? throw new WorktreeBoundaryException("No absolute Git executable was discovered on the trusted parent PATH.");
+    }
     internal bool IsSameDirectory(string left, string right) =>
         string.Equals(CanonicalPath(left), CanonicalPath(right), PathComparison());
 
@@ -39,6 +53,21 @@ public sealed class WorktreeManager
         var observedRoot = CanonicalPath((await GitAsync(worktree, cancellationToken, "rev-parse", "--show-toplevel").ConfigureAwait(false)).Trim());
         if (!string.Equals(target, observedRoot, PathComparison()))
             throw new WorktreeBoundaryException("Assigned path is not the exact Git worktree root.");
+    }
+
+    public async Task ValidateUnprovisionedPathsAsync(string parentCheckout, string worktree, string resultDirectory, CancellationToken cancellationToken = default)
+    {
+        ValidateDestination(parentCheckout, worktree);
+        RejectSymlinkAncestors(resultDirectory);
+        RejectRepositoryAncestors(resultDirectory);
+        RejectParentOrNested(CanonicalPath(parentCheckout), CanonicalPath(resultDirectory));
+        if (Directory.Exists(worktree) || File.Exists(worktree) || Directory.Exists(resultDirectory) || File.Exists(resultDirectory))
+            throw new WorktreeBoundaryException("Unstarted cleanup refuses existing or ambiguous worktree/result paths; their absence alone is not closure proof.");
+        var registered = await GitAsync(parentCheckout, cancellationToken, "worktree", "list", "--porcelain", "-z").ConfigureAwait(false);
+        var paths = registered.Split('\0').Where(item => item.StartsWith("worktree ", StringComparison.Ordinal)).Select(item => item[9..]).ToArray();
+        if (paths.Length == 0 || paths.Any(path => !Path.IsPathFullyQualified(path)) ||
+            paths.Any(path => string.Equals(CanonicalPath(path), CanonicalPath(worktree), PathComparison())))
+            throw new WorktreeBoundaryException("Git worktree registration is missing/ambiguous or still names the supposedly unstarted destination.");
     }
 
     public async Task PrepareAsync(string parentCheckout, string destination, string baseCommit, CancellationToken cancellationToken = default)
@@ -160,31 +189,68 @@ public sealed class WorktreeManager
             throw new WorktreeBoundaryException($"Out-of-scope writes detected: {string.Join(", ", outside)}.");
     }
 
-    private static async Task<string> GitAsync(string cwd, CancellationToken cancellationToken, params string[] arguments)
+    private async Task<string> GitAsync(string cwd, CancellationToken cancellationToken, params string[] arguments)
     {
         var (exitCode, stdout, stderr) = await RunGitAsync(cwd, cancellationToken, arguments).ConfigureAwait(false);
         if (exitCode != 0) throw new WorktreeBoundaryException($"Git failed: {stderr}");
         return stdout;
     }
 
-    private static async Task<int> GitExitCodeAsync(string cwd, CancellationToken cancellationToken, params string[] arguments)
+    private async Task<int> GitExitCodeAsync(string cwd, CancellationToken cancellationToken, params string[] arguments)
     {
         var (exitCode, _, _) = await RunGitAsync(cwd, cancellationToken, arguments).ConfigureAwait(false);
         return exitCode;
     }
 
-    private static async Task<(int ExitCode, string Stdout, string Stderr)> RunGitAsync(
-        string cwd, CancellationToken cancellationToken, params string[] arguments)
+    private Task<(int ExitCode, string Stdout, string Stderr)> RunGitAsync(
+        string cwd, CancellationToken cancellationToken, params string[] arguments) =>
+        RunGitCoreAsync(cwd, cancellationToken, disableFilters: true, arguments);
+
+    private async Task<(int ExitCode, string Stdout, string Stderr)> RunGitCoreAsync(
+        string cwd, CancellationToken cancellationToken, bool disableFilters, params string[] arguments)
     {
-        var start = new ProcessStartInfo("git")
+        var filterNames = new HashSet<string>(StringComparer.Ordinal);
+        if (disableFilters)
+        {
+            var configuration = await RunGitCoreAsync(cwd, cancellationToken, false, "config", "--includes", "--name-only", "--get-regexp", "^filter\\.").ConfigureAwait(false);
+            if (configuration.ExitCode is not (0 or 1) || configuration.Stdout.Length > 65536)
+                throw new WorktreeBoundaryException("Effective Git filters could not be inspected within the finite boundary.");
+            foreach (var key in configuration.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(key => key.TrimEnd('\r')))
+            {
+                var separator = key.LastIndexOf('.');
+                if (!key.StartsWith("filter.", StringComparison.OrdinalIgnoreCase) || separator <= 7 || key.Any(char.IsControl))
+                    throw new WorktreeBoundaryException("Git filter configuration keys are ambiguous.");
+                var name = key[7..separator];
+                if (name.Length > 256 || name.Contains('=')) throw new WorktreeBoundaryException("Git filter name is unsupported.");
+                filterNames.Add(name);
+                if (filterNames.Count > 128) throw new WorktreeBoundaryException("Git filters exceed the finite configuration bound.");
+            }
+        }
+        var start = new ProcessStartInfo(_gitExecutable)
         {
             WorkingDirectory = cwd,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false
         };
-        start.Environment.Remove("GIT_DIR");
-        start.Environment.Remove("GIT_WORK_TREE");
+        foreach (var name in new[] { "GIT_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_CONFIG", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT" }) start.Environment.Remove(name);
+        foreach (var name in start.Environment.Keys.Where(name => name.StartsWith("GIT_CONFIG_KEY_", StringComparison.Ordinal) || name.StartsWith("GIT_CONFIG_VALUE_", StringComparison.Ordinal)).ToArray()) start.Environment.Remove(name);
+        var disabledHooks = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+        start.Environment["GIT_NO_REPLACE_OBJECTS"] = "1";
+        start.Environment["GIT_GRAFT_FILE"] = disabledHooks;
+        start.Environment["GIT_NO_LAZY_FETCH"] = "1";
+        start.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        start.ArgumentList.Add("-c"); start.ArgumentList.Add("core.hooksPath=" + disabledHooks);
+        start.ArgumentList.Add("-c"); start.ArgumentList.Add("core.fsmonitor=false");
+        // Checkout/status use literal repository bytes, never external content-filter processes.
+        foreach (var filter in filterNames)
+        {
+            foreach (var setting in new[] { "process=", "smudge=", "clean=", "required=false" })
+            {
+                start.ArgumentList.Add("-c");
+                start.ArgumentList.Add("filter." + filter + "." + setting);
+            }
+        }
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new WorktreeBoundaryException("Could not start Git.");
         var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);

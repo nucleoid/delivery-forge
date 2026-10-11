@@ -517,6 +517,7 @@ public sealed record PlanDraft(
 
 public sealed class FrozenPlan
 {
+    private readonly string _repositoryRoot;
     private readonly byte[] _canonicalBytes;
     private readonly byte[] _planContractBytes;
 
@@ -529,6 +530,7 @@ public sealed class FrozenPlan
         string? supersedes,
         string repository,
         string workItem,
+        string repositoryRoot,
         string baseReference,
         bool baseReferenceExactBranchVerified,
         bool baseReferenceWasDetached,
@@ -547,6 +549,7 @@ public sealed class FrozenPlan
         Supersedes = supersedes;
         Repository = repository;
         WorkItem = workItem;
+        _repositoryRoot = Path.GetFullPath(repositoryRoot);
         BaseReference = baseReference;
         BaseReferenceExactBranchVerified = baseReferenceExactBranchVerified;
         BaseReferenceWasDetached = baseReferenceWasDetached;
@@ -583,6 +586,10 @@ public sealed class FrozenPlan
         {
             throw new PlanningException("Base reconciliation requires a reader-issued repository context.");
         }
+        if (!string.Equals(_repositoryRoot, Path.GetFullPath(current.RepositoryRoot), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+        {
+            return WithBaseDrift("Repository checkout root differs from the in-memory frozen planning context; fresh parent reconciliation is required.");
+        }
         if (!string.Equals(BaseReference, current.RequestedRef, StringComparison.Ordinal) ||
             !RepositoryContext.IsFreshnessBearingReference(BaseReference) ||
             !RepositoryContext.IsFreshnessBearingReference(current.RequestedRef) ||
@@ -612,6 +619,7 @@ public sealed class FrozenPlan
             Supersedes,
             Repository,
             WorkItem,
+            _repositoryRoot,
             BaseReference,
             BaseReferenceExactBranchVerified,
             BaseReferenceWasDetached,

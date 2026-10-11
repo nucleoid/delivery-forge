@@ -226,6 +226,7 @@ public static class PlanFreezer
             supersedes,
             request.Repository,
             request.WorkItem,
+            draft.Repository.RepositoryRoot,
             draft.Repository.RequestedRef,
             draft.Repository.ExactBranchReferenceVerified,
             draft.Repository.DetachedHead,

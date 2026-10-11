@@ -3,7 +3,7 @@ using System.Text;
 
 namespace DeliveryForge.Planning;
 
-public sealed class GitRepositoryContextReader
+public sealed partial class GitRepositoryContextReader
 {
     private const int MaximumGitOutputBytes = 16 * 1024 * 1024;
     private const int MaximumSymlinkTargetBytes = 4 * 1024;
@@ -540,6 +540,7 @@ public sealed class GitRepositoryContextReader
             startInfo.Environment.Remove(variable);
         }
         startInfo.Environment["GIT_NO_REPLACE_OBJECTS"] = "1";
+        startInfo.Environment["GIT_GRAFT_FILE"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
         startInfo.Environment["GIT_LITERAL_PATHSPECS"] = "1";
         startInfo.Environment["GIT_NO_LAZY_FETCH"] = "1";
         startInfo.Environment["GIT_TERMINAL_PROMPT"] = "0";
