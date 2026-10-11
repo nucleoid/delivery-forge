@@ -6,7 +6,7 @@
   "fixture": true,
   "productionCertified": false,
   "firstFullRealRunCertified": false,
-  "stage": "initial parent GREEN12/12; next public native/corruption/coordination-fixture RED specification; no new behavior before compiled RED",
+  "stage": "initial parent GREEN12/12; focused boundary/fixture-host RED7FAIL1PASS confirmed; next GREEN20 candidate pending validation",
   "seed": 11017,
   "budget": { "maximumScenarioSeconds": 120, "maximumCommandSeconds": 15, "maximumOwnedChildSeconds": 30, "cpuCores": 2, "memoryMiB": 4096, "tokens": 1000, "cost": 0 },
   "runtimeArtifacts": "components/end-to-end/artifacts/test-runs/<unique-owned-runId>",

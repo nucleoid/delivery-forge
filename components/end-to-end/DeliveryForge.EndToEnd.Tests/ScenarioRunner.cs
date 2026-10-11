@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.Security.Cryptography;
 using DeliveryForge.Coordination;
 using DeliveryForge.Evidence;
 using DeliveryForge.Execution;
@@ -59,6 +60,29 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
             limitations = ["Real durable-file contract scenario only; no worker/reviewer/tool/full-profile certification.",
                 "Scheduler/publication golden path awaits actual integrated owner interfaces."];
         }
+        else if (name == "recovery.interrupted-command")
+        {
+            var execution = await run.ExecuteBoundedChildCommandAsync(TimeSpan.FromMilliseconds(200), deadline.Token);
+            var record = await run.Store.AppendAsync(run.RunId, "scenario-command", new
+            {
+                fixture = true, integratedBaseCommit = run.IntegratedSource.Commit,
+                implementationHead = run.IntegratedSource.HeadCommit, execution
+            }, deadline.Token);
+            receiptIds.Add(record.Sha256);
+            invariants["real-command-deadline-observed"] = execution.TimedOut && !execution.Cancelled;
+            invariants["command-owned-quiescent"] = execution.OwnedProcessQuiescent;
+            outcome = invariants["real-command-deadline-observed"] && execution.OwnedProcessQuiescent
+                ? GateOutcome.Incomplete : GateOutcome.Error;
+            limitations = ["Actual interrupted owned native command; observed timeout is non-pass and its bytes are retained.",
+                "A native sleep is process-boundary evidence, not a host worker or installed quality-tool certificate."];
+        }
+        else if (name == "recovery.immutable-record-corruption")
+        {
+            var corrupt = await RejectCorruptRecordAsync(receiptIds, deadline.Token);
+            invariants["immutable-corruption-rejected"] = corrupt;
+            outcome = corrupt ? GateOutcome.Error : GateOutcome.Incomplete;
+            limitations = ["Corrupt immutable bytes were rejected; independent diagnostic evidence does not repair or authorize the corrupt history."];
+        }
         else
         {
             limitations = ["This scenario remains planned and has no executed behavior evidence: " + name,
@@ -96,5 +120,26 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
         var recovery = await new RunStore(Path.Combine(run.Root, "receipts")).RecoverAsync(run.RunId, cancellationToken);
         return recovery.PointerWasRecovered && recovery.Latest?.Sha256 == after.Sha256 &&
             recovery.Records.Select(record => record.Sha256).SequenceEqual([before.Sha256, after.Sha256]);
+    }
+
+    private async Task<bool> RejectCorruptRecordAsync(List<string> receiptIds, CancellationToken cancellationToken)
+    {
+        var corruptRunId = run.RunId + "-corrupt-fixture";
+        var original = await run.Store.AppendAsync(corruptRunId, "fixture-checkpoint",
+            new { fixture = true, phase = "original", integratedBaseCommit = run.IntegratedSource.Commit }, cancellationToken);
+        await File.AppendAllTextAsync(original.Path, "\ncorrupt-bytes", cancellationToken);
+        var observedHash = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(original.Path, cancellationToken)));
+        var rejected = false;
+        try { await new RunStore(Path.Combine(run.Root, "receipts")).RecoverAsync(corruptRunId, cancellationToken); }
+        catch (RunStoreCorruptionException) { rejected = true; }
+        var diagnostic = await run.Store.AppendAsync(run.RunId, "scenario-corruption-observation", new
+        {
+            fixture = true, corruptRunId, corruptRecordPath = original.Path,
+            expectedSha256 = original.Sha256, observedSha256 = observedHash,
+            typedCorruptionRejected = rejected, integratedBaseCommit = run.IntegratedSource.Commit,
+            implementationHead = run.IntegratedSource.HeadCommit
+        }, cancellationToken);
+        receiptIds.Add(diagnostic.Sha256);
+        return rejected && original.Sha256 != observedHash;
     }
 }

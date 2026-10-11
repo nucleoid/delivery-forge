@@ -95,6 +95,24 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
     }
 
     public OwnedProcess StartBoundedChild()
+        => Processes.StartOwned(BoundedChildLaunch(), RunId);
+
+    public async Task<CommandResult> ExecuteBoundedChildCommandAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromSeconds(1)) throw new ArgumentOutOfRangeException(nameof(timeout));
+        var launch = BoundedChildLaunch();
+        CommandResult result;
+        try
+        {
+            result = await new ProcessCommandExecutor().ExecuteAsync(new(launch.Executable, launch.Arguments, Root), timeout, cancellationToken);
+        }
+        catch { _commandsQuiescent = false; throw; }
+        _commandsQuiescent &= result.OwnedProcessQuiescent;
+        await WriteNewJsonAsync($"command-{++_commandSequence:D4}.json", new { launch, result }, CancellationToken.None);
+        return result;
+    }
+
+    private static ProcessLaunch BoundedChildLaunch()
     {
         ProcessLaunch launch;
         if (OperatingSystem.IsWindows())
@@ -107,7 +125,7 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
             launch = new(FindExecutable("sleep"), ["30"]);
         }
         else throw new PlatformNotSupportedException("The owned process fixture supports Windows and Linux only.");
-        return Processes.StartOwned(launch, RunId);
+        return launch;
     }
 
     public void MarkAssertionsPassed() => _assertionsPassed = true;
