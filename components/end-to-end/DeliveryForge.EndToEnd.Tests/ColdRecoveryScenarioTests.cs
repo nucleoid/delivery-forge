@@ -83,7 +83,7 @@ public sealed class ColdRecoveryScenarioTests
                 Assert.Equal(started, record.Payload.GetProperty("startedAtUtc").GetDateTimeOffset());
                 Assert.Equal(expires, record.Payload.GetProperty("expiresAtUtc").GetDateTimeOffset());
             });
-            Assert.Empty(history.Records.Where(record => record.Kind == "worker-completed"));
+            Assert.DoesNotContain(history.Records, record => record.Kind == "worker-completed");
         }
         if (scenario == "cold.paused-new-ticket")
         {
@@ -100,7 +100,7 @@ public sealed class ColdRecoveryScenarioTests
         else if (!delayed)
         {
             Assert.Equal(0, payload.GetProperty("resumeHostCalls").GetInt32());
-            Assert.Empty(history.Records.Where(record => record.Kind == "resumed"));
+            Assert.DoesNotContain(history.Records, record => record.Kind == "resumed");
         }
         if (scenario == "cold.base-drift")
         {
@@ -121,7 +121,7 @@ public sealed class ColdRecoveryScenarioTests
                 Assert.Single(history.Records, record => record.Kind == "worker-completed");
             else
             {
-                Assert.Empty(history.Records.Where(record => record.Kind == "worker-completed"));
+                Assert.DoesNotContain(history.Records, record => record.Kind == "worker-completed");
                 Assert.Equal("IdentityUnknown", payload.GetProperty("freshControllerProcessOutcome").GetString());
             }
         }
