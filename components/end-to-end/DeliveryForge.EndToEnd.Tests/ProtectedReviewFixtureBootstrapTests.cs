@@ -15,6 +15,76 @@ namespace DeliveryForge.EndToEnd.Tests;
 
 public sealed class ProtectedReviewFixtureBootstrapTests
 {
+    [Fact(Timeout = 120_000)]
+    public async Task Bounded_protected_resolver_returns_actual_protected_policy_with_original_source_provenance()
+    {
+        using var wall = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        wall.CancelAfter(TimeSpan.FromSeconds(120));
+        await using var run = await OwnedScenarioRun.CreateAsync(wall.Token);
+        run.RetainArtifacts("Bounded protected resolver real source positive RED retained.");
+        var setup = await Setup(run, wall.Token);
+        using var view = await PrepareBoundedResolverSource(run, setup, wall.Token);
+        var started = Stopwatch.GetTimestamp();
+        var policy = await view.Resolver.ResolveBoundedAsync("policy/review.json", TimeSpan.FromSeconds(15), wall.Token);
+        Assert.True(policy.Trusted);
+        Assert.False(policy.Fixture);
+        Assert.Equal(ReviewAuthorityRealm.Test, policy.SourceRealm);
+        Assert.Equal(setup.BaseCommit, policy.SourceRevision);
+        Assert.Equal(setup.ProtectedPolicySha256, policy.ContentIdentity);
+        Assert.Equal(view.Source.SourceAuthorityIdentity, policy.SourceAuthorityIdentity);
+        Assert.Equal(view.Source.ProtectedObjectViewIdentity, policy.ProtectedObjectViewIdentity);
+        Assert.True(Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(15));
+    }
+
+    [Fact(Timeout = 120_000)]
+    public async Task Bounded_protected_resolver_precancelled_caller_refuses_without_issuing_policy()
+    {
+        using var wall = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        wall.CancelAfter(TimeSpan.FromSeconds(120));
+        await using var run = await OwnedScenarioRun.CreateAsync(wall.Token);
+        run.RetainArtifacts("Bounded protected resolver caller cancellation RED retained.");
+        var setup = await Setup(run, wall.Token);
+        using var view = await PrepareBoundedResolverSource(run, setup, wall.Token);
+        using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(wall.Token); cancelled.Cancel();
+        var started = Stopwatch.GetTimestamp();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => view.Resolver.ResolveBoundedAsync(
+            "policy/review.json", TimeSpan.FromSeconds(15), cancelled.Token));
+        Assert.True(Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(15));
+    }
+
+    [Fact(Timeout = 120_000)]
+    public async Task Bounded_protected_resolver_expired_original_allowance_refuses_without_late_policy()
+    {
+        using var wall = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        wall.CancelAfter(TimeSpan.FromSeconds(120));
+        await using var run = await OwnedScenarioRun.CreateAsync(wall.Token);
+        run.RetainArtifacts("Bounded protected resolver exhausted original allowance RED retained.");
+        var setup = await Setup(run, wall.Token);
+        using var view = await PrepareBoundedResolverSource(run, setup, wall.Token);
+        var started = Stopwatch.GetTimestamp();
+        await Assert.ThrowsAsync<TimeoutException>(() => view.Resolver.ResolveBoundedAsync(
+            "policy/review.json", TimeSpan.FromTicks(1), wall.Token));
+        // This bounds the observation; it does not claim hard realtime return within one tick.
+        Assert.True(Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(15));
+    }
+
+    private sealed record BoundedResolverSource(ControlledGitEvidenceContext View, ProtectedReviewSourceContext Source,
+        ProtectedReviewPolicyResolver Resolver) : IDisposable
+    { public void Dispose() => View.Dispose(); }
+    private static async Task<BoundedResolverSource> PrepareBoundedResolverSource(OwnedScenarioRun run, SetupResult setup, CancellationToken token)
+    {
+        var host = ReviewAuthorityHost.CreateIsolatedTest();
+        var input = setup.Configuration;
+        var preparation = await host.PrepareIsolatedTestGitEvidenceAsync(input.SourceRoot, input.WorkerGitDirectory, input.TrustedGitExecutable,
+            input.MaximumEvidenceBytes, TimeSpan.FromSeconds(15), token);
+        if (preparation.Context is null || preparation.Observation.Outcome != ReviewGitPreparationOutcome.Prepared)
+            throw new InvalidOperationException("Actual bounded resolver source preparation failed: " + preparation.Observation.Reason);
+        var source = host.FreezeProtectedSource(preparation.Context, setup.BaseCommit, preparation.Context.SourceAuthorityIdentity);
+        await run.WriteNewJsonAsync("bounded-resolver-real-source.json", new
+        { fixture = true, preparation.Observation, source.SourceAuthorityIdentity, source.ProtectedObjectViewIdentity, source.ProtectedBaseCommit }, token);
+        return new(preparation.Context, source, new(source));
+    }
+
     [Theory(Timeout = 120_000)]
     [InlineData("same-issuer-positive")]
     [InlineData("foreign-policy")]

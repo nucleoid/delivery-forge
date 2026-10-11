@@ -226,6 +226,11 @@ public sealed class ProtectedReviewPolicyResolver(ProtectedReviewSourceContext s
     private readonly ProtectedReviewSourceContext _source = sourceContext ??
         throw new ArgumentNullException(nameof(sourceContext));
 
+    // Additive entire-lifetime path. The legacy resolver is not a bounded capture fallback.
+    public Task<ReviewPolicy> ResolveBoundedAsync(string repositoryRelativePath, TimeSpan entireBudget,
+        CancellationToken cancellationToken = default) => Task.FromException<ReviewPolicy>(new NotImplementedException(
+            "Protected policy reads sharing one original deadline and actual owner byte capture are RED."));
+
     public async Task<ReviewPolicy> ResolveAsync(
         string repositoryRelativePath,
         CancellationToken cancellationToken = default)
