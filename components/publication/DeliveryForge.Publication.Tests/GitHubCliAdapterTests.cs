@@ -445,8 +445,13 @@ public sealed class GitHubCliAdapterTests
                 {
                     var context = AppShape is "absent-required-app" or "legacy" ||
                         AppShape.StartsWith("legacy-", StringComparison.Ordinal) && AppShape != "legacy-check-only" ? "ci" : "unrelated";
-                    body = new JsonObject { ["state"] = "success", ["total_count"] = 1, ["statuses"] = new JsonArray(new JsonObject
-                        { ["context"] = context, ["state"] = "success" }) }.ToJsonString();
+                    body = new JsonObject
+                    {
+                        ["state"] = "success",
+                        ["total_count"] = 1,
+                        ["statuses"] = new JsonArray(new JsonObject
+                        { ["context"] = context, ["state"] = "success" })
+                    }.ToJsonString();
                 }
             }
             if (RulesShape is not null)
@@ -461,8 +466,12 @@ public sealed class GitHubCliAdapterTests
             if ((EmptyStatuses || AppShape == "legacy-check-only") && endpoint.Contains("/status", StringComparison.Ordinal))
                 body = "{\"state\":\"pending\",\"total_count\":0,\"statuses\":[]}";
             if (SameNameStatusState is not null && endpoint.Contains("/status", StringComparison.Ordinal))
-                body = new JsonObject { ["state"] = SameNameStatusState, ["total_count"] = 1,
-                    ["statuses"] = new JsonArray(new JsonObject { ["context"] = "ci", ["state"] = SameNameStatusState }) }.ToJsonString();
+                body = new JsonObject
+                {
+                    ["state"] = SameNameStatusState,
+                    ["total_count"] = 1,
+                    ["statuses"] = new JsonArray(new JsonObject { ["context"] = "ci", ["state"] = SameNameStatusState })
+                }.ToJsonString();
             if (ActionsShape is not null)
             {
                 if (endpoint.Contains("/actions/runs/", StringComparison.Ordinal) && endpoint.Contains("/jobs", StringComparison.Ordinal)) body = ActionsJobs();
@@ -474,10 +483,15 @@ public sealed class GitHubCliAdapterTests
         {
             JsonObject Required(string context, int integration) => new()
             {
-                ["type"] = "required_status_checks", ["ruleset_id"] = integration,
-                ["ruleset_source_type"] = "Repository", ["ruleset_source"] = RepositoryTarget.Repository,
-                ["parameters"] = new JsonObject { ["strict_required_status_checks_policy"] = true,
-                    ["required_status_checks"] = new JsonArray(new JsonObject { ["context"] = context, ["integration_id"] = integration }) }
+                ["type"] = "required_status_checks",
+                ["ruleset_id"] = integration,
+                ["ruleset_source_type"] = "Repository",
+                ["ruleset_source"] = RepositoryTarget.Repository,
+                ["parameters"] = new JsonObject
+                {
+                    ["strict_required_status_checks_policy"] = true,
+                    ["required_status_checks"] = new JsonArray(new JsonObject { ["context"] = context, ["integration_id"] = integration })
+                }
             };
             if (RulesShape == "invalid-shape") return "[{}]";
             if (RulesShape == "unsupported-type") return "[{\"type\":\"future_opaque_protection\"}]";
@@ -501,8 +515,14 @@ public sealed class GitHubCliAdapterTests
         private string RuleRuns()
         {
             JsonObject Run(string name, int app, string conclusion) => new()
-            { ["id"] = app, ["name"] = name, ["head_sha"] = PublicationFixture.Commit('b'), ["status"] = "completed",
-                ["conclusion"] = conclusion, ["app"] = new JsonObject { ["id"] = app } };
+            {
+                ["id"] = app,
+                ["name"] = name,
+                ["head_sha"] = PublicationFixture.Commit('b'),
+                ["status"] = "completed",
+                ["conclusion"] = conclusion,
+                ["app"] = new JsonObject { ["id"] = app }
+            };
             var runs = new JsonArray();
             if (ActionsShape is not null)
             {
@@ -524,11 +544,14 @@ public sealed class GitHubCliAdapterTests
             var runs = new JsonArray();
             if (ActionsShape != "missing-run") runs.Add(new JsonObject
             {
-                ["id"] = 700, ["check_suite_id"] = ActionsShape == "wrong-suite" ? 901 : 900,
+                ["id"] = 700,
+                ["check_suite_id"] = ActionsShape == "wrong-suite" ? 901 : 900,
                 ["head_sha"] = PublicationFixture.Commit(ActionsShape == "wrong-head" ? '9' : 'b'),
                 ["event"] = ActionsShape is "workflow_dispatch" or "push" or "pull_request" or "pull_request_review" or
                     "pull_request_target" or "deployment" or "deployment_status" ? ActionsShape : "pull_request",
-                ["status"] = "completed", ["conclusion"] = "success", ["run_attempt"] = 1,
+                ["status"] = "completed",
+                ["conclusion"] = "success",
+                ["run_attempt"] = 1,
                 ["repository"] = new JsonObject { ["full_name"] = ActionsShape == "foreign-repository" ? "foreign/other" : RepositoryTarget.Repository },
                 ["url"] = "https://api.github.com/repos/" + RepositoryTarget.Repository + "/actions/runs/700"
             });
@@ -539,8 +562,12 @@ public sealed class GitHubCliAdapterTests
             var jobs = new JsonArray();
             if (ActionsShape != "missing-job") jobs.Add(new JsonObject
             {
-                ["id"] = 500, ["run_id"] = 700, ["head_sha"] = PublicationFixture.Commit('b'), ["name"] = "security",
-                ["status"] = "completed", ["conclusion"] = "success",
+                ["id"] = 500,
+                ["run_id"] = 700,
+                ["head_sha"] = PublicationFixture.Commit('b'),
+                ["name"] = "security",
+                ["status"] = "completed",
+                ["conclusion"] = "success",
                 ["check_run_url"] = "https://api.github.com/repos/" + RepositoryTarget.Repository + "/check-runs/" +
                     (ActionsShape == "wrong-check-association" ? "501" : "500"),
                 ["run_url"] = "https://api.github.com/repos/" + RepositoryTarget.Repository + "/actions/runs/700"
@@ -562,8 +589,14 @@ public sealed class GitHubCliAdapterTests
         {
             JsonObject Run(int? app, string conclusion)
             {
-                var run = new JsonObject { ["id"] = app ?? 1, ["name"] = "ci", ["head_sha"] = PublicationFixture.Commit('b'),
-                    ["status"] = "completed", ["conclusion"] = conclusion };
+                var run = new JsonObject
+                {
+                    ["id"] = app ?? 1,
+                    ["name"] = "ci",
+                    ["head_sha"] = PublicationFixture.Commit('b'),
+                    ["status"] = "completed",
+                    ["conclusion"] = conclusion
+                };
                 if (app is not null) run["app"] = new JsonObject { ["id"] = app.Value };
                 return run;
             }
@@ -592,12 +625,23 @@ public sealed class GitHubCliAdapterTests
             var marker = "delivery-forge-publication:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(PublicationKey)));
             return new JsonObject
             {
-                ["number"] = 10, ["html_url"] = "https://github.com/" + RepositoryTarget.Repository + "/pull/10",
-                ["head"] = new JsonObject { ["sha"] = PublicationFixture.Commit('b'), ["ref"] = "work",
-                    ["repo"] = new JsonObject { ["full_name"] = RepositoryTarget.Repository } },
-                ["base"] = new JsonObject { ["sha"] = PublicationFixture.Commit('a'), ["ref"] = "main",
-                    ["repo"] = new JsonObject { ["full_name"] = RepositoryTarget.Repository } },
-                ["body"] = "<!-- " + marker + " -->", ["state"] = merged ? "closed" : "open", ["auto_merge"] = null,
+                ["number"] = 10,
+                ["html_url"] = "https://github.com/" + RepositoryTarget.Repository + "/pull/10",
+                ["head"] = new JsonObject
+                {
+                    ["sha"] = PublicationFixture.Commit('b'),
+                    ["ref"] = "work",
+                    ["repo"] = new JsonObject { ["full_name"] = RepositoryTarget.Repository }
+                },
+                ["base"] = new JsonObject
+                {
+                    ["sha"] = PublicationFixture.Commit('a'),
+                    ["ref"] = "main",
+                    ["repo"] = new JsonObject { ["full_name"] = RepositoryTarget.Repository }
+                },
+                ["body"] = "<!-- " + marker + " -->",
+                ["state"] = merged ? "closed" : "open",
+                ["auto_merge"] = null,
                 ["merged_at"] = merged ? "2026-10-11T00:00:01Z" : null,
                 ["merge_commit_sha"] = merged ? PublicationFixture.Commit('d') : null
             };

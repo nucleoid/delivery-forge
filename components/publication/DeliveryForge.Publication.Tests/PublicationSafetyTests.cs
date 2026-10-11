@@ -108,7 +108,8 @@ public sealed class PublicationSafetyTests(PublicationFixture fixture) : IClassF
         var lane = Lane(fixture.Definition(AuthorizationCeiling.Implement));
         var revision = fixture.Authority.IssueReconciledRevision(lane.Run, fixture.Definition() with
         {
-            RevisionIdentity = "revision-2", PriorRevisionIdentity = lane.Run.Definition.RevisionIdentity
+            RevisionIdentity = "revision-2",
+            PriorRevisionIdentity = lane.Run.Definition.RevisionIdentity
         });
         Assert.Equal(AuthorizationCeiling.Implement, lane.Run.Definition.Ceiling);
         Assert.Equal(AuthorizationCeiling.Merge, revision.Definition.Ceiling);

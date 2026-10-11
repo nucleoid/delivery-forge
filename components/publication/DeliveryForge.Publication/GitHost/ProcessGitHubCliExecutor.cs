@@ -18,8 +18,12 @@ public sealed class ProcessGitHubCliExecutor(GitHubReadConfiguration configurati
         var budget = mutation ? configuration.ActionTimeout : configuration.ReadTimeout;
         var start = new ProcessStartInfo(configuration.ExecutablePath)
         {
-            WorkingDirectory = configuration.WorkingDirectory, UseShellExecute = false, CreateNoWindow = true,
-            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true
+            WorkingDirectory = configuration.WorkingDirectory,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
         };
         start.Environment["GH_HOST"] = "github.com";
         start.Environment["GH_PROMPT_DISABLED"] = "1";

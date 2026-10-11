@@ -202,11 +202,16 @@ public sealed class PublicationService
     {
         var node = new JsonObject
         {
-            ["schemaVersion"] = "1.0.0", ["kind"] = "publication-receipt", ["identity"] = "sha256:" + new string('0', 64),
-            ["baseCommit"] = i.BaseCommit, ["headCommit"] = i.HeadCommit, ["treeId"] = i.TreeId,
+            ["schemaVersion"] = "1.0.0",
+            ["kind"] = "publication-receipt",
+            ["identity"] = "sha256:" + new string('0', 64),
+            ["baseCommit"] = i.BaseCommit,
+            ["headCommit"] = i.HeadCommit,
+            ["treeId"] = i.TreeId,
             ["action"] = i.Action == PublicationAction.MergeNormal ? "MERGED" : "PR_PUBLISHED",
             ["remoteRef"] = i.Action == PublicationAction.MergeNormal ? i.Target.TargetRef : i.Target.SourceRef,
-            ["resultId"] = resultId, ["createdAt"] = i.CreatedAt.UtcDateTime.ToString("O", CultureInfo.InvariantCulture)
+            ["resultId"] = resultId,
+            ["createdAt"] = i.CreatedAt.UtcDateTime.ToString("O", CultureInfo.InvariantCulture)
         };
         node["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(node.ToJsonString()));
         return ContractValidator.ParseAndValidate(Encoding.UTF8.GetBytes(node.ToJsonString()));

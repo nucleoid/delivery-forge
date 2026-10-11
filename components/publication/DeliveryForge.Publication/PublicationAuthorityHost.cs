@@ -72,8 +72,10 @@ public sealed class PublicationAuthorityHost
         using var policy = JsonDocument.Parse(definition.Policy.CanonicalBytes);
         var ceiling = policy.RootElement.GetProperty("authorizedCeiling").GetString() switch
         {
-            "plan" => AuthorizationCeiling.Plan, "implement" => AuthorizationCeiling.Implement,
-            "pr" => AuthorizationCeiling.Pr, "merge" => AuthorizationCeiling.Merge,
+            "plan" => AuthorizationCeiling.Plan,
+            "implement" => AuthorizationCeiling.Implement,
+            "pr" => AuthorizationCeiling.Pr,
+            "merge" => AuthorizationCeiling.Merge,
             _ => throw new ArgumentException("The root policy ceiling is undefined.")
         };
         if (definition.Ceiling > ceiling || !policy.RootElement.GetProperty("requireIndependentReview").GetBoolean())
