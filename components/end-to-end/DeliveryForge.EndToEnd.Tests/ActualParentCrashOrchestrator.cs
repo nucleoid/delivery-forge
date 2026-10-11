@@ -65,7 +65,8 @@ internal static class ActualParentCrashOrchestrator
         if (recovery.Process.ExitCode != 0) throw new InvalidOperationException("Fresh actual recovery driver failed; no safe-state result established.");
         var recoveryReport = Path.Combine(driverRoot, "recovery-result.json");
         _ = await ReadPlain(recoveryReport, driverRoot, token);
-        if (!sentinelBytes.SequenceEqual(await File.ReadAllBytesAsync(sentinelPath, token))) throw new IOException("Outside crash sentinel changed.");
+        var currentSentinelBytes = await File.ReadAllBytesAsync(sentinelPath, token);
+        if (!sentinelBytes.SequenceEqual(currentSentinelBytes)) throw new IOException("Outside crash sentinel changed.");
         var observation = Path.Combine(artifacts.Root, "actual-parent-termination-observation.json");
         await WriteNew(observation, JsonSerializer.SerializeToUtf8Bytes(new
         {
