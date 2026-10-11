@@ -101,6 +101,47 @@ public sealed class CertifiedMutationReportTests
         Assert.Throws<MutationReportFormatException>(() => Mutate4CSharpReportV2.ReadData("{"u8));
         Assert.Throws<MutationReportFormatException>(() => Mutate4CSharpReportV2.ReadData(new byte[Mutate4CSharpReportV2.MaximumReportBytes + 1]));
     }
+
+    [Theory]
+    [InlineData("expectedMembers")]
+    [InlineData("accountedMembers")]
+    public async Task Incomplete_report_rejects_decoded_equal_members_with_distinct_JSON_spellings(string property)
+    {
+        var node = JsonNode.Parse(await MutationReportInputs.ReadAsync("strong"))!.AsObject();
+        var condition = new JsonObject
+        {
+            ["code"] = "OVERALL_DEADLINE_EXCEEDED",
+            ["message"] = "The overall deadline was exceeded."
+        };
+        node["incompleteConditions"] = new JsonArray(condition);
+        node["reasons"] = new JsonArray(condition.DeepClone());
+        node["outcome"] = "INCOMPLETE";
+        node["exitCode"] = 4;
+        // A real producer-format incomplete control keeps its whole original ledger and
+        // accounting. This prevents a different reducer/refusal failure masking uniqueness.
+        var control = Mutate4CSharpReportV2.ReadData(Encoding.UTF8.GetBytes(node.ToJsonString()));
+        Assert.Equal(GateOutcome.Incomplete, control.ClaimedOutcome);
+        Assert.Equal(4, control.ClaimedExitCode);
+
+        var accounting = node["suites"]![0]!["accounting"]!;
+        var parent = property == "expectedMembers" ? accounting["configuration"]! : accounting;
+        var member = parent[property]![0]!.GetValue<string>();
+        Assert.True(char.IsAsciiLetter(member[0]));
+        parent[property] = new JsonArray(member, member);
+        var serialized = JsonSerializer.Serialize(member);
+        var escaped = "\"\\u" + ((int)member[0]).ToString("x4", System.Globalization.CultureInfo.InvariantCulture) + serialized[2..];
+        var fragment = "\"" + property + "\":[" + serialized + "," + serialized + "]";
+        var replacement = "\"" + property + "\":[" + serialized + "," + escaped + "]";
+        var text = node.ToJsonString();
+        Assert.Contains(fragment, text, StringComparison.Ordinal);
+        var bytes = Encoding.UTF8.GetBytes(text.Replace(fragment, replacement, StringComparison.Ordinal));
+        using var decoded = JsonDocument.Parse(bytes);
+        var parsedAccounting = decoded.RootElement.GetProperty("suites")[0].GetProperty("accounting");
+        var parsedMembers = (property == "expectedMembers" ? parsedAccounting.GetProperty("configuration") : parsedAccounting).GetProperty(property);
+        Assert.Equal(parsedMembers[0].GetString(), parsedMembers[1].GetString());
+        Assert.NotEqual(parsedMembers[0].GetRawText(), parsedMembers[1].GetRawText());
+        Assert.Throws<MutationReportFormatException>(() => Mutate4CSharpReportV2.ReadData(bytes));
+    }
 }
 
 internal static class MutationReportInputs
