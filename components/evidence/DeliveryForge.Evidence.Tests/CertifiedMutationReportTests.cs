@@ -94,7 +94,7 @@ public sealed class CertifiedMutationReportTests
         var parent = property == "expectedMembers" ? accounting["configuration"]! : accounting;
         var firstMember = parent[property]![0]!.GetValue<string>();
         const string secondMember = "Distinct.Tests.dll";
-        Assert.NotEqual(firstMember, secondMember);
+        Assert.NotEqual(secondMember, firstMember);
         parent[property] = new JsonArray(firstMember, secondMember);
         var first = JsonSerializer.Serialize(firstMember);
         var fragment = "\"" + property + "\":[" + first + ",\"Distinct.Tests.dll\"]";
