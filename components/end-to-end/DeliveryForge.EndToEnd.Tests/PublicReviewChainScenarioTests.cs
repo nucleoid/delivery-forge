@@ -124,7 +124,7 @@ public sealed class PublicReviewChainScenarioTests
         var file = await artifacts.Reader.ReadFileAsync(context, "subject.txt", token);
         var now = DateTimeOffset.UtcNow;
         var request = new PlanningRequest("fixture/delivery-forge", "#11", "implement", "Public review-chain fixture",
-            ["subject.txt"], ["excluded"], ["Pure fixture review policy, no production provenance"], "implement");
+            ["subject.txt"], ["excluded"], ["Pure fixture review policy; explicit initial PR ceiling, no publication execution or production provenance"], "pr");
         EvidenceItem[] evidence = [EvidenceItem.FromRepositoryFile(file, now, [])];
         var plan = PlanFreezer.Freeze(new(request, context, evidence, [new("subject.txt", "fixture", "review candidate")], [new("#11", [], "root")],
             [new("test", new("dotnet", [PlanCommandArgument.Literal("test")]), "PASS")],
@@ -133,7 +133,7 @@ public sealed class PublicReviewChainScenarioTests
         var policyNode = new JsonObject
         {
             ["schemaVersion"] = "1.0.0", ["kind"] = "evidence-policy", ["policyId"] = "issue11-public-review-fixture",
-            ["requiredGates"] = new JsonArray("test"), ["authorizedCeiling"] = "implement", ["requireIndependentReview"] = true,
+            ["requiredGates"] = new JsonArray("test"), ["authorizedCeiling"] = "pr", ["requireIndependentReview"] = true,
             ["allowedNotApplicable"] = new JsonArray(), ["createdAt"] = now.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture)
         };
         policyNode["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(policyNode.ToJsonString()));
