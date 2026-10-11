@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
 using DeliveryForge.Execution;
@@ -317,19 +318,25 @@ internal static class ColdRecoveryOrchestrator
     internal static async Task WaitForActualExitAsync(OwnedScenarioRun artifacts, ProcessControl processes, ProcessIdentity identity, CancellationToken cancellationToken)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        var started = Stopwatch.GetTimestamp();
         var observations = new List<ProcessControlResult>();
         Exception? pollFailure = null;
         try
         {
-        while (true)
-        {
-            var observed = processes.Observe(identity);
-            if (observations.Count >= 256) throw new InvalidOperationException("Actual child exit sampler exceeded its finite observation bound.");
-            observations.Add(observed);
-            if (observed.Outcome == ProcessControlOutcome.AlreadyExited) return;
-            if (observed.Outcome != ProcessControlOutcome.LiveOwned) throw new InvalidOperationException("Actual child exit is uncertain: " + observed.Reason);
-            await Task.Delay(20, deadline.Token);
-        }
+            while (true)
+            {
+                CheckOriginalBudget();
+                if (observations.Count >= 256) throw new InvalidOperationException("Actual child exit sampler exceeded its finite observation bound.");
+                var observed = processes.Observe(identity);
+                observations.Add(observed);
+                CheckOriginalBudget(); // A blocking observation returning late cannot become terminal success.
+                if (observed.Outcome == ProcessControlOutcome.AlreadyExited) return;
+                if (observed.Outcome is not (ProcessControlOutcome.LiveOwned or ProcessControlOutcome.IdentityUnknown))
+                    throw new InvalidOperationException("Actual child exit remains unsupported: " + observed.Reason);
+                // Unknown stays non-authorizing. No control/completion/cleanup/relaunch
+                // occurs while this fixed original controller is sampled for fresh exit.
+                await Task.Delay(20, deadline.Token);
+            }
         }
         catch (Exception exception) { pollFailure = exception; throw; }
         finally
@@ -344,6 +351,12 @@ internal static class ColdRecoveryOrchestrator
                 artifacts.RetainArtifacts("Actual exit poll diagnostic write failed: " + diagnosticFailure.GetType().Name);
                 if (pollFailure is null) throw;
             }
+        }
+        void CheckOriginalBudget()
+        {
+            deadline.Token.ThrowIfCancellationRequested();
+            if (Stopwatch.GetElapsedTime(started) >= TimeSpan.FromSeconds(5))
+                throw new OperationCanceledException("Original finite child-exit observation budget expired.", deadline.Token);
         }
     }
     private static void RequirePlainOwnedResult(OwnedEphemeralRuntime runtime, string path, bool requireAbsent = true)
