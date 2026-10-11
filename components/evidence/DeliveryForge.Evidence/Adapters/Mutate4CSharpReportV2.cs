@@ -141,8 +141,13 @@ internal static class Mutate4CSharpReportV2
         if (enumerated is null) AddReason(expectedReasons, "ENUMERATION_INCOMPLETE", "The mutation-site total is unknown.");
         var totals = new Dictionary<string, int>(StringComparer.Ordinal)
         {
-            ["KILLED"] = 0, ["SURVIVED"] = 0, ["UNCOVERED"] = 0, ["COMPILE_INVALID"] = 0,
-            ["ERROR"] = 0, ["OMITTED"] = 0, ["UNSTABLE"] = 0
+            ["KILLED"] = 0,
+            ["SURVIVED"] = 0,
+            ["UNCOVERED"] = 0,
+            ["COMPILE_INVALID"] = 0,
+            ["ERROR"] = 0,
+            ["OMITTED"] = 0,
+            ["UNSTABLE"] = 0
         };
         var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var unit in units)
@@ -170,9 +175,14 @@ internal static class Mutate4CSharpReportV2
         var executed = totals["KILLED"] + totals["SURVIVED"] + totals["COMPILE_INVALID"] + errors;
         var expectedCounts = new Dictionary<string, int>(StringComparer.Ordinal)
         {
-            ["selected"] = units.Length, ["executed"] = executed, ["killed"] = totals["KILLED"],
-            ["survived"] = totals["SURVIVED"], ["freshUncovered"] = totals["UNCOVERED"],
-            ["omitted"] = totals["OMITTED"], ["compileInvalid"] = totals["COMPILE_INVALID"], ["errors"] = errors
+            ["selected"] = units.Length,
+            ["executed"] = executed,
+            ["killed"] = totals["KILLED"],
+            ["survived"] = totals["SURVIVED"],
+            ["freshUncovered"] = totals["UNCOVERED"],
+            ["omitted"] = totals["OMITTED"],
+            ["compileInvalid"] = totals["COMPILE_INVALID"],
+            ["errors"] = errors
         };
         foreach (var count in expectedCounts) Require(Integer(counts, count.Key) == count.Value, "Counts contradict complete unit ledger.");
         Require(enumerated is null || enumerated == units.Length, "Enumeration contradicts ledger.");

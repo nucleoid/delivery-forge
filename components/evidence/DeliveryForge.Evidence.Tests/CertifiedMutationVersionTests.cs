@@ -33,6 +33,6 @@ public sealed class CertifiedMutationVersionTests
         Assert.Equal(stdout.Trim(), detected.Capability.Version);
         Assert.True(detected.Capability.Fixture);
         Assert.Contains('+', detected.Capability.Version);
-        Assert.Contains('-' , detected.Capability.Version);
+        Assert.Contains('-', detected.Capability.Version);
     }
 }
