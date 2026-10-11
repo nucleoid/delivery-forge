@@ -4,7 +4,7 @@ using Xunit;
 
 namespace DeliveryForge.Scheduling.Tests;
 
-public sealed class WaveAndRecoveryTests : IDisposable
+public sealed partial class WaveAndRecoveryTests : IDisposable
 {
     private readonly string _root = Path.Combine(Path.GetTempPath(), "delivery-forge-waves-" + Guid.NewGuid().ToString("N"));
     private static CancellationToken Cancellation => TestContext.Current.CancellationToken;

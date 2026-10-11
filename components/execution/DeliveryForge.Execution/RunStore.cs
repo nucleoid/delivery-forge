@@ -34,6 +34,9 @@ public sealed class RunStore
             var sequence = (recovery.Latest?.Sequence ?? 0) + 1;
             var document = JsonSerializer.SerializeToUtf8Bytes(
                 new PersistedRecord<T>(runId, sequence, kind, DateTimeOffset.UtcNow, payload), _json);
+            if (document.Length > 16 * 1024 * 1024 || recovery.Records.Count >= 4096 ||
+                recovery.Records.Sum(record => new FileInfo(record.Path).Length) + document.Length > 64 * 1024 * 1024)
+                throw new RunStoreCorruptionException("Appending would exceed the finite recoverable run history bounds.");
             var hash = Convert.ToHexStringLower(SHA256.HashData(document));
             var fileName = $"{sequence:D12}-sha256-{hash}.json";
             var target = Path.Combine(runDirectory, fileName);
