@@ -21,11 +21,14 @@ if (mode == "child")
 }
 if (mode is not ("root-exit" or "root-hold")) throw new ArgumentException("Unknown owned helper mode.");
 var host = Environment.ProcessPath ?? throw new InvalidOperationException("Actual host path unavailable.");
-var childInfo = new ProcessStartInfo(host) { WorkingDirectory = directory, UseShellExecute = false, CreateNoWindow = true };
+// .NET Windows StartWithCreateProcess sets STARTF_USESTDHANDLES when any stream is redirected,
+// binding the unredirected stdout/stderr to the root's actual standard handles (no proxy output).
+var childInfo = new ProcessStartInfo(host) { WorkingDirectory = directory, UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true };
 childInfo.ArgumentList.Add(Assembly.GetExecutingAssembly().Location);
 childInfo.ArgumentList.Add("child"); childInfo.ArgumentList.Add(directory); childInfo.ArgumentList.Add(nonce);
 // Child inherits the root's actual redirected standard handles; no fixture-written stdout/TRX/results.
 using var child = Process.Start(childInfo) ?? throw new InvalidOperationException("Real descendant did not start.");
+child.StandardInput.Close();
 var entry = Path.Combine(directory, "child-entered-" + nonce);
 while (!File.Exists(entry))
 {
