@@ -15,6 +15,22 @@ namespace DeliveryForge.EndToEnd.Tests;
 
 public sealed class PublicReviewChainScenarioTests
 {
+    [Fact(Timeout = 120_000)]
+    public async Task Frozen_plan_and_review_patch_join_the_same_actual_protected_base()
+    {
+        var started = Stopwatch.GetTimestamp();
+        using var wall = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        wall.CancelAfter(TimeSpan.FromSeconds(120));
+        await using var artifacts = await OwnedScenarioRun.CreateAsync(wall.Token);
+        artifacts.RetainArtifacts("Actual frozen-plan/review-patch base join regression evidence retained.");
+        var setup = await Setup(artifacts, started, wall.Token);
+        Assert.Equal(setup.BaseCommit, setup.Plan.BaseCommit);
+        Assert.Equal(setup.BaseCommit, setup.ActualPatch.BaseCommit);
+        Assert.Equal(setup.HeadCommit, setup.ActualPatch.HeadCommit);
+        Assert.Equal(setup.HeadTree, setup.ActualPatch.HeadTree);
+        Assert.True(Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(120));
+    }
+
     [Theory(Timeout = 120_000)]
     [InlineData("marked-positive")]
     [InlineData("strict-same-family")]
