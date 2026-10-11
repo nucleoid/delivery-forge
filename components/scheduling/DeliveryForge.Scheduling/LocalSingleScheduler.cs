@@ -39,6 +39,7 @@ public sealed class LocalSingleScheduler
     private long _allocatedAt;
     private DateTimeOffset _startedAtUtc;
     private DateTimeOffset _expiresAtUtc;
+    private LocalRunTimeBudget? _timeBudget;
     private bool _relinquished;
     private int _paused;
     private int _stopped;
@@ -146,6 +147,7 @@ public sealed class LocalSingleScheduler
                 _allocatedAt = Stopwatch.GetTimestamp();
                 _startedAtUtc = saved.StartedAtUtc;
                 _expiresAtUtc = saved.ExpiresAtUtc;
+                _timeBudget = LocalRunTimeBudget.Adopt(_demand.TimeLimit, _startedAtUtc, _expiresAtUtc, DateTimeOffset.UtcNow);
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 deadline.CancelAfter(Remaining());
                 await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
@@ -168,8 +170,69 @@ public sealed class LocalSingleScheduler
     }
 
     // Cleanup-only cold entry: never returns a reservation or resumes terminal work.
-    public Task<bool> ReconcileColdTerminalAsync(CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException("Fresh cold terminal reconciliation is not yet implemented.");
+    public async Task<bool> ReconcileColdTerminalAsync(CancellationToken cancellationToken = default)
+    {
+        Interlocked.Increment(ref _controlGeneration);
+        Interlocked.Exchange(ref _stopped, 1);
+        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var cleanupLaneHeld = false;
+        try
+        {
+            if (_laneHeld || _ticket is not null || _resources is not null || _prepared || _relinquished)
+                throw new SchedulingException("Cold terminal cleanup cannot replace a live parent's reservation or paused transfer.");
+            if (!await LocalParentLane.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+                throw new SchedulingException("Cold terminal observation requires the sole available local parent lane.");
+            cleanupLaneHeld = true;
+            ObservedClosedRuns.TryRemove(ClosedNamespaceKey(_worker.RunId), out _);
+            ObservedClosedRuns.TryRemove(ClosedNamespaceKey(JournalRunId), out _);
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(TimeSpan.FromMinutes(2)); // Cleanup remains possible after the original dispatch lifetime expires.
+            var journal = await _store.RecoverAsync(JournalRunId, deadline.Token).ConfigureAwait(false);
+            var record = journal.Records.LastOrDefault(item => item.Kind == "local-scheduler-checkpoint")
+                ?? throw new SchedulingException("Cold cleanup requires the immutable original local scheduler journal.");
+            var saved = _store.ReadPayload<LocalCheckpoint>(record);
+            if (saved.Version != 2 || saved.Profile != "local-single" ||
+                saved.Phase is not ("reserved" or "prepared" or "paused" or "paused-transfer" or "recovered-paused" or "resuming" or "resumed" or "stopped") ||
+                saved.RunId != _worker.RunId || saved.PlanIdentity != _plan.Identity || saved.RequestPlanIdentity != _plan.ContractIdentity ||
+                saved.BaseCommit != _worker.BaseCommit || saved.RequestIdentity != WorkerEnvelope.PrepareWorker(_worker).RequestIdentity ||
+                saved.Ceiling != _worker.AuthorizationCeiling || saved.BudgetPolicyIdentity != _budget.PolicyIdentity || !SameDemand(saved.Demand, _demand) ||
+                saved.StartedAtUtc == default || saved.ExpiresAtUtc - saved.StartedAtUtc != _demand.TimeLimit)
+                throw new SchedulingException("Cold cleanup journal/namespace/request/plan/resource identity is unknown or differs.");
+            var execution = await _store.RecoverAsync(_worker.RunId, deadline.Token).ConfigureAwait(false);
+            var preparedRecord = execution.Records.SingleOrDefault(item => item.Kind == "worker-prepared")
+                ?? throw new SchedulingException("Cold terminal cleanup requires the original immutable prepared worker.");
+            var prepared = _store.ReadPayload<PreparedWorkerRecord>(preparedRecord);
+            if (prepared.Request.RunId != _worker.RunId || prepared.Request.RequestIdentity != saved.RequestIdentity ||
+                prepared.Request.RequestIdentity != WorkerEnvelope.ComputeRequestIdentity(prepared.Request))
+                throw new SchedulingException("Cold cleanup worker differs from the exact original local request.");
+            await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
+            if (!await _execution.AwaitPendingControlSettlementAsync(_worker.RunId, _controlTimeout, deadline.Token).ConfigureAwait(false))
+                throw new SchedulingException("Pending host controls cannot be outrun by cold terminal cleanup.");
+            var observed = await _execution.ReconcileTerminalStopAsync(_worker.RunId, _controlTimeout, deadline.Token).ConfigureAwait(false);
+            if (!observed.Quiescent || _execution.HasPendingControlOperations(_worker.RunId))
+                throw new SchedulingException("Fresh child/writer/bound host observations did not prove terminal closure.");
+            _startedAtUtc = saved.StartedAtUtc;
+            _expiresAtUtc = saved.ExpiresAtUtc;
+            Interlocked.Exchange(ref _paused, 0);
+            await PersistAsync("stopped", deadline.Token).ConfigureAwait(false);
+            MarkObservedClosed();
+            _uncertain = false;
+            CleanupLimitation = "";
+            return true;
+        }
+        catch (Exception exception)
+        {
+            CleanupLimitation = DescribeFailure(exception);
+            return false;
+        }
+        finally
+        {
+            // There was no adopted reservation. Unproved histories still block this store through discovery;
+            // transient observation serialization must not strand unrelated stores or manufacture capacity.
+            if (cleanupLaneHeld) LocalParentLane.Release();
+            _serial.Release();
+        }
+    }
 
     public async Task<bool> ReconcileCleanupAsync(CancellationToken cancellationToken = default)
     {
@@ -216,6 +279,7 @@ public sealed class LocalSingleScheduler
                 _allocatedAt = Stopwatch.GetTimestamp();
                 _startedAtUtc = DateTimeOffset.UtcNow;
                 _expiresAtUtc = _startedAtUtc + _demand.TimeLimit;
+                _timeBudget = LocalRunTimeBudget.Adopt(_demand.TimeLimit, _startedAtUtc, _expiresAtUtc, _startedAtUtc);
                 await PersistAsync("reserved", deadline.Token).ConfigureAwait(false);
                 _ticket = new LocalDispatchReservation(_worker.RunId);
                 return _ticket;
@@ -377,13 +441,8 @@ public sealed class LocalSingleScheduler
 
     private TimeSpan Remaining()
     {
-        var now = DateTimeOffset.UtcNow;
-        if (now < _startedAtUtc) throw new SchedulingException("Local budget clock moved backwards; fresh reconciliation is required.");
-        var monotonic = _demand.TimeLimit - Stopwatch.GetElapsedTime(_allocatedAt);
-        var wall = _expiresAtUtc - now;
-        var remaining = monotonic < wall ? monotonic : wall;
-        if (remaining <= TimeSpan.Zero) throw new SchedulingException("The immutable finite local run time budget is exhausted.");
-        return remaining;
+        return (_timeBudget ?? throw new SchedulingException("No positively observed local lifetime has been adopted."))
+            .Remaining(Stopwatch.GetElapsedTime(_allocatedAt), DateTimeOffset.UtcNow);
     }
     private string JournalRunId => _worker.RunId + "-scheduler";
     private void EnsureControls()

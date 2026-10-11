@@ -199,6 +199,17 @@ public sealed class ExecutionCoordinator : IDisposable
     public Task<QuiescenceResult> ReconcileStopAsync(string runId, TimeSpan deadline, CancellationToken cancellationToken = default) =>
         RunExclusiveAsync(runId, () => QuiesceAndRecordAsync(runId, WorkflowState.Stopped, "stopped", deadline, cancellationToken, reconcileTerminal: true), cancellationToken);
 
+    // This cold cleanup entry cannot turn an active or unknown journal into terminal authority.
+    public Task<QuiescenceResult> ReconcileTerminalStopAsync(string runId, TimeSpan deadline, CancellationToken cancellationToken = default) =>
+        RunExclusiveAsync(runId, async () =>
+        {
+            ThrowIfDisposed();
+            var recovered = await _store.RecoverAsync(runId, cancellationToken).ConfigureAwait(false);
+            if (GetState(recovered) is not (WorkflowState.Stopped or WorkflowState.Blocked or WorkflowState.Failed or WorkflowState.LocalComplete))
+                throw new WorkerEnvelopeException("Cold terminal cleanup requires a known terminal worker history; stored state is not quiescence proof.");
+            return await QuiesceAndRecordAsync(runId, WorkflowState.Stopped, "stopped", deadline, cancellationToken, reconcileTerminal: true).ConfigureAwait(false);
+        }, cancellationToken);
+
     public Task<QuiescenceResult> ReconcilePausedAsync(string runId, TimeSpan deadline, CancellationToken cancellationToken = default) =>
         RunExclusiveAsync(runId, async () =>
         {
