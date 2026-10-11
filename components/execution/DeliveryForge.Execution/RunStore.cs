@@ -23,11 +23,13 @@ public sealed class RunStore
         ValidateName(runId, nameof(runId));
         ValidateName(kind, nameof(kind));
         var runDirectory = GetRunDirectory(runId);
+        RejectReparseAncestors(runDirectory);
         var appendLock = AppendLocks.GetOrAdd(runDirectory, _ => new SemaphoreSlim(1, 1));
         await appendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             Directory.CreateDirectory(runDirectory);
+            RejectReparseAncestors(runDirectory);
             var recovery = await RecoverAsync(runId, cancellationToken).ConfigureAwait(false);
             var sequence = (recovery.Latest?.Sequence ?? 0) + 1;
             var document = JsonSerializer.SerializeToUtf8Bytes(
@@ -64,6 +66,7 @@ public sealed class RunStore
     public async Task<IReadOnlyList<string>> DiscoverRunIdsAsync(CancellationToken cancellationToken = default)
     {
         var runs = Path.Combine(_root, "runs");
+        RejectReparseAncestors(runs);
         if (!Directory.Exists(runs)) return [];
         var directories = Directory.EnumerateDirectories(runs).Take(4097).ToArray();
         if (directories.Length > 4096) throw new RunStoreCorruptionException("Run registry exceeds the finite discovery bound.");
@@ -90,10 +93,19 @@ public sealed class RunStore
     {
         ValidateName(runId, nameof(runId));
         var runDirectory = GetRunDirectory(runId);
+        RejectReparseAncestors(runDirectory);
         if (!Directory.Exists(runDirectory)) return new RunRecovery([], null, false);
         var records = new List<StoredRunRecord>();
-        foreach (var path in Directory.EnumerateFiles(runDirectory, "*-sha256-*.json").Order(StringComparer.Ordinal))
+        var paths = Directory.EnumerateFiles(runDirectory, "*-sha256-*.json").Take(4097).ToArray();
+        if (paths.Length > 4096) throw new RunStoreCorruptionException("Immutable run history exceeds the finite record bound.");
+        long totalBytes = 0;
+        foreach (var path in paths.Order(StringComparer.Ordinal))
         {
+            RejectReparseFile(path);
+            var length = new FileInfo(path).Length;
+            totalBytes = checked(totalBytes + length);
+            if (length > 16 * 1024 * 1024 || totalBytes > 64 * 1024 * 1024)
+                throw new RunStoreCorruptionException("Immutable run history exceeds the finite recovery byte bound.");
             var (fileSequence, expectedHash) = ParseFileIdentity(path);
             var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
             var actualHash = Convert.ToHexStringLower(SHA256.HashData(bytes));
@@ -124,6 +136,7 @@ public sealed class RunStore
 
         var latest = records.LastOrDefault();
         var pointerPath = Path.Combine(runDirectory, "current.json");
+        if (File.Exists(pointerPath)) RejectReparseFile(pointerPath);
         if (latest is null && File.Exists(pointerPath))
             throw new RunStoreCorruptionException("Run pointer references an immutable history that is missing.");
         var pointerRecovered = !await PointerMatchesAsync(runDirectory, latest, cancellationToken).ConfigureAwait(false);
@@ -142,6 +155,19 @@ public sealed class RunStore
     {
         var digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(runId)));
         return Path.Combine(_root, "runs", digest);
+    }
+
+    private static void RejectReparseAncestors(string path)
+    {
+        for (var directory = new DirectoryInfo(Path.GetFullPath(path)); directory is not null; directory = directory.Parent)
+            if (directory.Exists && (directory.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new RunStoreCorruptionException("Run storage cannot traverse a reparse/symlink ancestor.");
+    }
+
+    private static void RejectReparseFile(string path)
+    {
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            throw new RunStoreCorruptionException("Immutable run storage cannot read a reparse/symlink file.");
     }
 
     private static async Task<bool> PointerMatchesAsync(string runDirectory, StoredRunRecord? latest, CancellationToken cancellationToken)

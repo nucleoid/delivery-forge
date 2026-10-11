@@ -20,7 +20,7 @@ public sealed class SchedulingTicket
 public sealed class Scheduler
 {
     public static Task<Scheduler> CreateProductionAsync(RunStore store, CancellationToken cancellationToken = default) =>
-        Task.FromException<Scheduler>(new NotImplementedException("Production requires real deployed coordination; no fixture promotion is permitted."));
+        Task.FromException<Scheduler>(new SchedulingException("INCOMPLETE: production distributed scheduling requires deployed, configured, authenticated, capability-proven Continuum ownership. Local lanes and fixture tickets cannot satisfy it."));
 
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> CreationLocks = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private readonly SemaphoreSlim _serial = new(1, 1);
