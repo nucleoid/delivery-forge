@@ -11,6 +11,7 @@ public sealed class ProcessGitHubCliExecutor(GitHubReadConfiguration configurati
 
     public async Task<GitHubCliResult> ExecuteAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         ValidateConfiguration(configuration);
         if (!PinMatches(configuration)) throw new PublicationUnavailableException("Pinned GitHub CLI executable bytes changed.");
         var mutation = arguments.Count > 1 && arguments[0] == "pr" && arguments[1] is "create" or "edit" or "merge";
@@ -28,6 +29,7 @@ public sealed class ProcessGitHubCliExecutor(GitHubReadConfiguration configurati
         start.Environment.Remove("GH_REPO");
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var process = new Process { StartInfo = start };
+        cancellationToken.ThrowIfCancellationRequested();
         try { if (!process.Start()) return new(null, "", "CLI did not start."); }
         catch (Exception error) when (error is Win32Exception or InvalidOperationException)
         { return new(null, "", "CLI startup unavailable."); }

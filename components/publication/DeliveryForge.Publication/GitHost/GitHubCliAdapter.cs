@@ -11,7 +11,8 @@ namespace DeliveryForge.Publication.GitHost;
 public sealed class GitHubCliAdapter : IGitHostAdapter
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> RefLocks = new(StringComparer.Ordinal);
-    private static readonly ConcurrentDictionary<string, Task> UnsettledCommands = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, Task<GitHubCliResult>> UnsettledCommands = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, byte> PhysicalUncertainty = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<(ParentDisposableGitHubAuthority Parent, string Resource, string Key), PublicationIntent> Attempts = new();
     private readonly GitHubReadConfiguration? configuration;
     private readonly IGitHubCliExecutor? executor;
@@ -68,10 +69,16 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
         {
             entered = await mutex.WaitAsync(configuration!.ActionTimeout, cancellationToken).ConfigureAwait(false);
             if (!entered) return new(GitHostMutationOutcome.Uncertain, null);
+            if (PhysicalUncertainty.ContainsKey(resource)) return new(GitHostMutationOutcome.Uncertain, null);
             if (UnsettledCommands.TryGetValue(resource, out var unsettled))
             {
                 if (!unsettled.IsCompleted) return new(GitHostMutationOutcome.Uncertain, null);
                 ProcessGitHubCliExecutor.ObserveLate(unsettled);
+                if (!unsettled.IsCompletedSuccessfully || unsettled.Result.ResidualProcessUncertain)
+                {
+                    PhysicalUncertainty.TryAdd(resource, 0);
+                    return new(GitHostMutationOutcome.Uncertain, null);
+                }
                 UnsettledCommands.TryRemove(resource, out _);
             }
             var snapshot = await ReadSnapshot(intent.Target, intent.IdempotencyKey, cancellationToken).ConfigureAwait(false);
@@ -117,6 +124,11 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
             GitHubCliResult response;
             try { response = await pendingCommand.WaitAsync(configuration.ActionTimeout, cancellationToken).ConfigureAwait(false); }
             catch { actionDeadline.Cancel(); throw; }
+            if (response.ResidualProcessUncertain)
+            {
+                PhysicalUncertainty.TryAdd(resource, 0);
+                return new(GitHostMutationOutcome.Uncertain, null);
+            }
             // Non-zero exit can follow a committed effect; it never authorizes retry.
             var readback = await ReadSnapshot(intent.Target, intent.IdempotencyKey, cancellationToken).ConfigureAwait(false);
             return Completed(readback, intent)
@@ -132,7 +144,18 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
             }
             return new(dispatched ? GitHostMutationOutcome.Uncertain : GitHostMutationOutcome.Rejected, null);
         }
-        finally { if (entered) mutex.Release(); }
+        finally
+        {
+            // Task completion and remote readback cannot certify physical process settlement.
+            // No public reset exists: an executor reporting residual uncertainty permanently fences this process's ref.
+            if (dispatched && pendingCommand is not null)
+            {
+                if (!pendingCommand.IsCompleted) UnsettledCommands[resource] = pendingCommand;
+                else if (!pendingCommand.IsCompletedSuccessfully || pendingCommand.Result.ResidualProcessUncertain)
+                    PhysicalUncertainty.TryAdd(resource, 0);
+            }
+            if (entered) mutex.Release();
+        }
     }
 
     private async Task<Snapshot> ReadSnapshot(PublicationTarget target, string key, CancellationToken cancellationToken)
@@ -191,8 +214,17 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
                 r.TryGetProperty("required_pull_request_reviews", out var reviews) && reviews.ValueKind == JsonValueKind.Object)
             {
                 var contexts = required.GetProperty("contexts").EnumerateArray().Select(x => x.GetString()!).ToHashSet(StringComparer.Ordinal);
+                var requirements = contexts.ToDictionary(name => name, _ => (int?)null, StringComparer.Ordinal);
                 if (required.TryGetProperty("checks", out var requiredChecks))
-                    foreach (var item in requiredChecks.EnumerateArray()) contexts.Add(item.GetProperty("context").GetString()!);
+                    foreach (var item in requiredChecks.EnumerateArray())
+                    {
+                        var name = item.GetProperty("context").GetString()!;
+                        var app = item.GetProperty("app_id").GetInt32();
+                        if (app != -1 && app <= 0) throw Unavailable();
+                        if (requirements.TryGetValue(name, out var priorApp) && priorApp is not null && priorApp != app) throw Unavailable();
+                        requirements[name] = app;
+                        contexts.Add(name);
+                    }
                 if (contexts.Count > 0 && contexts.All(x => !string.IsNullOrWhiteSpace(x)))
                 {
                     protection = GitHostProtection.RequiredAndObserved;
@@ -207,10 +239,21 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
                         var name = s.GetProperty("context").GetString()!;
                         if (seenStatuses.Add(name) && s.GetProperty("state").GetString() == "success") passed.Add(name);
                     }
-                    foreach (var check in checkRuns.EnumerateArray())
-                        if (check.GetProperty("status").GetString() == "completed" && check.GetProperty("conclusion").GetString() == "success")
-                            passed.Add(check.GetProperty("name").GetString()!);
-                    checks = complete && contexts.IsSubsetOf(passed) && status.RootElement.GetProperty("state").GetString() == "success"
+                    bool Satisfies(KeyValuePair<string, int?> requirement)
+                    {
+                        var matchingRuns = checkRuns.EnumerateArray().Where(check => check.GetProperty("name").GetString() == requirement.Key).ToArray();
+                        if (requirement.Value is null && passed.Contains(requirement.Key)) return true;
+                        if (matchingRuns.Length == 0) return false;
+                        if (requirement.Value is not null && matchingRuns.Any(check =>
+                            !check.TryGetProperty("app", out var app) || app.ValueKind != JsonValueKind.Object ||
+                            !app.TryGetProperty("id", out var id) || !id.TryGetInt32(out var appId) || appId <= 0)) return false;
+                        var authorizedRuns = matchingRuns.Where(check => requirement.Value is null || requirement.Value == -1 ||
+                            check.GetProperty("app").GetProperty("id").GetInt32() == requirement.Value).ToArray();
+                        return authorizedRuns.Length > 0 && authorizedRuns.All(check =>
+                            check.GetProperty("head_sha").GetString() == sourceHead &&
+                            check.GetProperty("status").GetString() == "completed" && check.GetProperty("conclusion").GetString() == "success");
+                    }
+                    checks = complete && requirements.All(Satisfies) && status.RootElement.GetProperty("state").GetString() == "success"
                         ? GitHostChecks.Passing : GitHostChecks.Pending;
                 }
                 else protection = GitHostProtection.Missing;
