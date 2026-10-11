@@ -19,6 +19,9 @@ public sealed class SchedulingTicket
 // This fixture model has no execution-host port. It cannot dispatch a real worker or prove production ownership.
 public sealed class Scheduler
 {
+    public static Task<Scheduler> CreateProductionAsync(RunStore store, CancellationToken cancellationToken = default) =>
+        Task.FromException<Scheduler>(new NotImplementedException("Production requires real deployed coordination; no fixture promotion is permitted."));
+
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> CreationLocks = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private readonly SemaphoreSlim _serial = new(1, 1);
     private readonly string _runId;

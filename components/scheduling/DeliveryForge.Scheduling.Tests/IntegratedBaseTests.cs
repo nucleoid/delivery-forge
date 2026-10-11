@@ -62,6 +62,20 @@ public sealed class IntegratedBaseTests : IDisposable
         await Commit("base");
     }
 
+    [Fact]
+    public async Task IncompleteHistory_shallow_snapshot_and_missing_commit_cannot_establish_ancestry()
+    {
+        await Initialize();
+        var reader = new GitRepositoryContextReader(_git);
+        var context = await reader.ReadAsync(_root, "refs/heads/main", TestContext.Current.CancellationToken);
+        await Assert.ThrowsAsync<PlanningException>(() => reader.IsAncestorAsync(context, new string('0', 40), TestContext.Current.CancellationToken));
+        var shallow = Path.Combine(_root, "shallow");
+        await Git("clone", "-q", "--depth=1", new Uri(Path.GetFullPath(_root)).AbsoluteUri, shallow);
+        var retained = await reader.ReadAsync(shallow, "refs/heads/main", TestContext.Current.CancellationToken);
+        Assert.True(retained.Shallow);
+        await Assert.ThrowsAsync<PlanningException>(() => reader.IsAncestorAsync(retained, retained.Commit, TestContext.Current.CancellationToken));
+    }
+
     private async Task<string> Commit(string content)
     {
         await File.WriteAllTextAsync(Path.Combine(_root, "tracked.txt"), content, TestContext.Current.CancellationToken);
