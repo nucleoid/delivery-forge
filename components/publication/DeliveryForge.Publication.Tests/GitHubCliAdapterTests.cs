@@ -274,6 +274,75 @@ public sealed class GitHubCliAdapterTests
         Assert.Equal(1, runner.Mutations);
     }
 
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("failed")]
+    [InlineData("wrong-integration")]
+    [InlineData("multiple-layers-missing")]
+    [InlineData("tail-queue")]
+    [InlineData("tail-check")]
+    [InlineData("unbounded-pages")]
+    [InlineData("invalid-shape")]
+    [InlineData("unsupported-type")]
+    [InlineData("truncated")]
+    public async Task Applicable_rules_must_be_complete_and_every_required_integration_must_pass(string shape)
+    {
+        var target = Target with { Repository = "fixture/forge-disposable-rules-" + Guid.NewGuid().ToString("N") };
+        var runner = new CliFixtureRunner { RepositoryTarget = target, RulesShape = shape };
+        var parent = Parent(target);
+        var result = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
+            .MergeNormalAsync(Mutation(target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Rejected, result.Outcome);
+        Assert.Equal(0, runner.Mutations);
+    }
+
+    [Theory]
+    [InlineData("complete")]
+    [InlineData("multiple-layers-pass")]
+    public async Task Complete_supported_ruleset_requirements_are_a_positive_control(string shape)
+    {
+        var target = Target with { Repository = "fixture/forge-disposable-rules-control-" + Guid.NewGuid().ToString("N") };
+        var runner = new CliFixtureRunner { RepositoryTarget = target, RulesShape = shape };
+        var parent = Parent(target);
+        var result = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
+            .MergeNormalAsync(Mutation(target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Confirmed, result.Outcome);
+        Assert.Equal(1, runner.Mutations);
+    }
+
+    [Theory]
+    [InlineData("correct-app")]
+    [InlineData("explicit-any-app")]
+    [InlineData("legacy-check-only")]
+    public async Task Required_successful_check_runs_need_no_unrelated_commit_status(string shape)
+    {
+        var target = Target with { Repository = "fixture/forge-disposable-empty-status-" + Guid.NewGuid().ToString("N") };
+        var runner = new CliFixtureRunner { RepositoryTarget = target, AppShape = shape, EmptyStatuses = true };
+        var parent = Parent(target);
+        var result = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
+            .MergeNormalAsync(Mutation(target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Confirmed, result.Outcome);
+        Assert.Equal(1, runner.Mutations);
+    }
+
+    [Theory]
+    [InlineData("correct-app", "failure")]
+    [InlineData("correct-app", "pending")]
+    [InlineData("explicit-any-app", "failure")]
+    [InlineData("explicit-any-app", "pending")]
+    [InlineData("legacy-both-success", "failure")]
+    [InlineData("legacy-both-success", "pending")]
+    public async Task Passing_check_does_not_mask_required_same_name_status(string shape, string state)
+    {
+        var target = Target with { Repository = "fixture/forge-disposable-status-conjunction-" + Guid.NewGuid().ToString("N") };
+        var runner = new CliFixtureRunner { RepositoryTarget = target, AppShape = shape, SameNameStatusState = state };
+        var parent = Parent(target);
+        var result = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
+            .MergeNormalAsync(Mutation(target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Rejected, result.Outcome);
+        Assert.Equal(0, runner.Mutations);
+    }
+
     private sealed class CliFixtureRunner : IGitHubCliExecutor
     {
         public List<IReadOnlyList<string>> Calls { get; } = [];
@@ -286,6 +355,9 @@ public sealed class GitHubCliAdapterTests
         public PublicationTarget RepositoryTarget { get; set; } = Target;
         public string PublicationKey { get; set; } = "cli-key";
         public string? AppShape { get; set; }
+        public string? RulesShape { get; set; }
+        public bool EmptyStatuses { get; set; }
+        public string? SameNameStatusState { get; set; }
         public TaskCompletionSource ReleaseMutation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task<GitHubCliResult>? MutationTask { get; private set; }
         private bool merged;
@@ -335,7 +407,60 @@ public sealed class GitHubCliAdapterTests
                         { ["context"] = context, ["state"] = "success" }) }.ToJsonString();
                 }
             }
+            if (RulesShape is not null)
+            {
+                if (endpoint.Contains("/rules/branches/", StringComparison.Ordinal))
+                {
+                    if (RulesShape == "truncated") return new(null, "[", "fixture truncated rules", TimedOut: true);
+                    body = RulePage(endpoint);
+                }
+                if (endpoint.Contains("/check-runs", StringComparison.Ordinal)) body = RuleRuns();
+            }
+            if ((EmptyStatuses || AppShape == "legacy-check-only") && endpoint.EndsWith("/status", StringComparison.Ordinal))
+                body = "{\"state\":\"pending\",\"total_count\":0,\"statuses\":[]}";
+            if (SameNameStatusState is not null && endpoint.EndsWith("/status", StringComparison.Ordinal))
+                body = new JsonObject { ["state"] = SameNameStatusState, ["total_count"] = 1,
+                    ["statuses"] = new JsonArray(new JsonObject { ["context"] = "ci", ["state"] = SameNameStatusState }) }.ToJsonString();
             return new(0, body, "");
+        }
+        private string RulePage(string endpoint)
+        {
+            JsonObject Required(string context, int integration) => new()
+            {
+                ["type"] = "required_status_checks", ["ruleset_id"] = integration,
+                ["ruleset_source_type"] = "Repository", ["ruleset_source"] = RepositoryTarget.Repository,
+                ["parameters"] = new JsonObject { ["strict_required_status_checks_policy"] = true,
+                    ["required_status_checks"] = new JsonArray(new JsonObject { ["context"] = context, ["integration_id"] = integration }) }
+            };
+            if (RulesShape == "invalid-shape") return "[{}]";
+            if (RulesShape == "unsupported-type") return "[{\"type\":\"future_opaque_protection\"}]";
+            var rules = new JsonArray();
+            if (RulesShape is "tail-queue" or "tail-check" or "unbounded-pages")
+            {
+                var explicitPage = endpoint.Contains("per_page=100", StringComparison.Ordinal);
+                var secondPage = endpoint.Contains("page=2", StringComparison.Ordinal);
+                if (!secondPage || RulesShape == "unbounded-pages")
+                    for (var index = 0; index < (explicitPage ? 100 : 30); index++) rules.Add(Required("security", 123));
+                else if (RulesShape == "tail-queue") rules.Add(new JsonObject { ["type"] = "merge_queue" });
+                else rules.Add(Required("tail-security", 789));
+            }
+            else
+            {
+                rules.Add(Required("security", 123));
+                if (RulesShape is "multiple-layers-missing" or "multiple-layers-pass") rules.Add(Required("audit", 456));
+            }
+            return rules.ToJsonString();
+        }
+        private string RuleRuns()
+        {
+            JsonObject Run(string name, int app, string conclusion) => new()
+            { ["id"] = app, ["name"] = name, ["head_sha"] = PublicationFixture.Commit('b'), ["status"] = "completed",
+                ["conclusion"] = conclusion, ["app"] = new JsonObject { ["id"] = app } };
+            var runs = new JsonArray();
+            if (RulesShape != "missing") runs.Add(Run("security", RulesShape == "wrong-integration" ? 999 : 123,
+                RulesShape == "failed" ? "failure" : "success"));
+            if (RulesShape == "multiple-layers-pass") runs.Add(Run("audit", 456, "success"));
+            return new JsonObject { ["total_count"] = runs.Count, ["check_runs"] = runs }.ToJsonString();
         }
         private string AppProtection()
         {
