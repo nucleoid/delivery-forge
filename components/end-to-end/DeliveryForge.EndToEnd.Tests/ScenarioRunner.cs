@@ -24,6 +24,12 @@ public sealed record ScenarioResult(GateOutcome Outcome, ScenarioProfile Profile
 // Remaining scenario behavior is added only after separate compiled RED slices and actual owner integration.
 public sealed class ScenarioRunner(OwnedScenarioRun run)
 {
+    private readonly OwnedEphemeralRuntime? _runtime;
+    public ScenarioRunner(OwnedScenarioRun run, OwnedEphemeralRuntime runtime) : this(run)
+    {
+        if (!runtime.BelongsTo(run)) throw new ArgumentException("Runtime belongs to another live fixture owner.", nameof(runtime));
+        _runtime = runtime;
+    }
     public async Task<ScenarioResult> RunAsync(string name, ScenarioOptions options, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(run);
@@ -99,6 +105,12 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
             outcome = GateOutcome.Incomplete;
             limitations = ["Actual Git/file/owned native sleep safety observations with public fixture/local scheduling APIs.",
                 "Reservation-only local admission and fixture bookkeeping; no native worker, model, quality PASS, distributed ownership or full-profile certificate."];
+        }
+        else if (name is "execution.real-provision" or "execution.pause-live-child" or "execution.stop-terminal" or
+            "execution.unknown-host" or "cleanup.changed-owner-marker" or "cleanup.foreign-reparse-entry")
+        {
+            if (_runtime is null) throw new InvalidOperationException("Native fixture scenarios require their live owned runtime reference.");
+            throw new NotImplementedException("Native execution and owned runtime cleanup require compiled public-boundary RED.");
         }
         else
         {
