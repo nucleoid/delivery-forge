@@ -1,7 +1,10 @@
 using System.Collections.ObjectModel;
 using System.Security.Cryptography;
+using System.Text.Json;
+using DeliveryForge.Contracts.Validation;
 using DeliveryForge.Coordination;
 using DeliveryForge.Evidence;
+using DeliveryForge.Evidence.Adapters;
 using DeliveryForge.Execution;
 
 namespace DeliveryForge.EndToEnd.Tests;
@@ -85,7 +88,10 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
         }
         else if (name is "quality.worker-policy-shadow" or "quality.caller-baseline-gaming" or "quality.incomplete-mutation-preview")
         {
-            throw new NotImplementedException("Public quality safety orchestration requires compiled behavior RED before implementation.");
+            var observedQuality = await ObserveQualitySafetyAsync(name, receiptIds, invariants, deadline.Token);
+            outcome = observedQuality.Outcome;
+            limitations = [observedQuality.Reason, .. observedQuality.Limitations,
+                "Owned untrusted-input admission only; no actual quality producer, quality PASS or full-profile certificate."];
         }
         else
         {
@@ -107,6 +113,117 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
             run.IntegratedSource.HeadCommit, captured.Seed, captured.Budget, observed, receiptIds.AsReadOnly(), limitations);
         await run.WriteNewJsonAsync("scenario-" + Guid.NewGuid().ToString("N") + ".json", result, deadline.Token);
         return result;
+    }
+
+    private async Task<NormalizedEvidence> ObserveQualitySafetyAsync(string name, List<string> receiptIds,
+        Dictionary<string, bool> invariants, CancellationToken cancellationToken)
+    {
+        var inputPath = Path.Combine(run.Root, "quality-input.json");
+        var inputBytes = await ReadBoundedQualityFileAsync(inputPath, cancellationToken);
+        using var input = JsonDocument.Parse(inputBytes);
+        var root = input.RootElement;
+        var protectedBase = root.GetProperty("ProtectedBaseCommit").GetString()!;
+        if (protectedBase.Length is not (40 or 64) || !protectedBase.All(Uri.IsHexDigit))
+            throw new InvalidDataException("Quality policy requires an exact immutable Git object ID.");
+        var policyPath = root.GetProperty("PolicyPath").GetString()!;
+        var candidatePath = ResolveQualityPath(root.GetProperty("CandidatePath").GetString()!);
+        _ = ResolveQualityPath(policyPath);
+        var context = await run.Reader.ReadAsync(run.Checkout, protectedBase, cancellationToken);
+        var protectedFile = await run.Reader.ReadFileAsync(context, policyPath, cancellationToken);
+        var policy = await new ProtectedGitPolicyResolver(new OwnedPolicyGitExecutor(run), run.Checkout, protectedBase)
+            .ResolveAsync(policyPath, cancellationToken);
+        var candidate = await ReadBoundedQualityFileAsync(candidatePath, cancellationToken);
+        var candidateHash = Convert.ToHexStringLower(SHA256.HashData(candidate));
+        var policyHash = Convert.ToHexStringLower(SHA256.HashData(protectedFile.Bytes));
+        invariants["protected-policy-retained"] = policy.SourceRevision == context.Commit &&
+            policy.PolicyIdentity == root.GetProperty("PolicyIdentity").GetString() &&
+            policy.ContentIdentity == "sha256:" + policyHash &&
+            policy.RequiredGates.SequenceEqual(new[] { "test", "coverage", "mutation" });
+
+        NormalizedEvidence normalized;
+        if (name == "quality.worker-policy-shadow")
+        {
+            var shadow = ContractValidator.ParseAndValidate(candidate);
+            invariants["worker-policy-not-authority"] = shadow.Identity != policy.PolicyIdentity &&
+                invariants["protected-policy-retained"];
+            normalized = NormalizedEvidence.Incomplete(
+                "Worker-branch policy and NA exemptions cannot replace the actual protected base policy; required producer receipts are absent.");
+        }
+        else if (name == "quality.caller-baseline-gaming")
+        {
+            using var baselineDocument = JsonDocument.Parse(candidate);
+            var data = baselineDocument.RootElement;
+            var previous = ReadMetrics(data.GetProperty("metrics"));
+            var current = ReadMetrics(data.GetProperty("current"));
+            // This public constructor cannot register protected baseline authority, even with exact source/nonfixture claims.
+            var baseline = new ReviewedBaseline(data.GetProperty("baselineIdentity").GetString()!,
+                data.GetProperty("policyIdentity").GetString()!, data.GetProperty("sourceRevision").GetString()!,
+                "sha256:" + candidateHash, data.GetProperty("fixture").GetBoolean(), previous);
+            normalized = BaselineComparer.Compare(current, baseline, policy);
+            invariants["caller-baseline-not-authority"] = normalized.Outcome == GateOutcome.Incomplete && !normalized.ProductionCapable;
+            invariants["claimed-nonfixture-not-authority"] = !baseline.Fixture && !normalized.ProductionCapable;
+        }
+        else
+        {
+            normalized = new Mutate4CSharpAdapter().Normalize(candidate,
+                ToolCapability.Unsupported("mutate4csharp", "No installed-outcome certification supplied by this fixture input."));
+            invariants["mutation-certification-unavailable"] = normalized.Outcome == GateOutcome.Incomplete && !normalized.ProductionCapable;
+            invariants["preview-success-not-authority"] = normalized.Outcome != GateOutcome.Pass && !normalized.ProductionCapable;
+        }
+        if (!invariants["protected-policy-retained"])
+            normalized = NormalizedEvidence.Error("Protected fixture policy/source bytes did not match the pinned parent setup.");
+        else if (normalized.Outcome == GateOutcome.Pass)
+            normalized = NormalizedEvidence.Incomplete("Input-only no-regression/preview observations cannot certify an actual quality producer.");
+        var record = await run.Store.AppendAsync(run.RunId, "scenario-quality-observation", new
+        {
+            fixture = true, productionCertified = false, firstFullRealRunCertified = false, scenario = name,
+            protectedBaseCommit = context.Commit, protectedBaseTree = context.Tree,
+            observedHeadCommit = context.HeadCommit, observedHeadTree = context.HeadTree, context.Dirty,
+            policyIdentity = policy.PolicyIdentity, policySha256 = policyHash, policy.RequiredGates,
+            candidatePath, candidateSha256 = candidateHash,
+            inputSha256 = Convert.ToHexStringLower(SHA256.HashData(inputBytes)),
+            ownerOutcome = normalized.Outcome.ToString(), ownerReason = normalized.Reason,
+            ownerProductionCapable = normalized.ProductionCapable,
+            integratedBaseCommit = run.IntegratedSource.Commit, implementationHead = run.IntegratedSource.HeadCommit,
+            limitation = "Untrusted input/policy admission only; no tool execution or producer capability fabricated."
+        }, cancellationToken);
+        receiptIds.Add(record.Sha256);
+        return normalized;
+    }
+
+    private string ResolveQualityPath(string relative)
+    {
+        if (string.IsNullOrWhiteSpace(relative) || relative.Length > 4096 || Path.IsPathRooted(relative) || relative.Contains(':') ||
+            relative.Split(['/', '\\']).Any(part => part is "" or "." or ".."))
+            throw new InvalidDataException("Quality input must use a plain owned relative path.");
+        return Path.GetFullPath(Path.Combine(run.Checkout, relative));
+    }
+
+    private static async Task<byte[]> ReadBoundedQualityFileAsync(string path, CancellationToken cancellationToken)
+    {
+        for (var directory = new DirectoryInfo(Path.GetDirectoryName(path)!); directory is not null; directory = directory.Parent)
+            if (directory.Exists && (directory.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new InvalidDataException("Quality input crosses a reparse ancestor.");
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0 || new FileInfo(path).Length > 64 * 1024)
+            throw new InvalidDataException("Quality input is not a bounded plain file.");
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous);
+        using var bytes = new MemoryStream();
+        var buffer = new byte[4096];
+        while (true)
+        {
+            var read = await stream.ReadAsync(buffer, cancellationToken);
+            if (read == 0) return bytes.ToArray();
+            if (bytes.Length + read > 64 * 1024) throw new InvalidDataException("Quality input grew beyond its finite byte bound.");
+            bytes.Write(buffer, 0, read);
+        }
+    }
+
+    private static IReadOnlyDictionary<string, decimal> ReadMetrics(JsonElement data)
+    {
+        if (data.ValueKind != JsonValueKind.Object || data.EnumerateObject().Take(129).Count() > 128)
+            throw new InvalidDataException("Untrusted metric input exceeds its finite object bound.");
+        return new ReadOnlyDictionary<string, decimal>(data.EnumerateObject()
+            .ToDictionary(property => property.Name, property => property.Value.GetDecimal(), StringComparer.Ordinal));
     }
 
     private async Task<bool> RecoverTornPointerAsync(List<string> receiptIds, CancellationToken cancellationToken)
