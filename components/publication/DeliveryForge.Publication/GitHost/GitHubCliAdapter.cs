@@ -242,8 +242,13 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
                     bool Satisfies(KeyValuePair<string, int?> requirement)
                     {
                         var matchingRuns = checkRuns.EnumerateArray().Where(check => check.GetProperty("name").GetString() == requirement.Key).ToArray();
-                        if (requirement.Value is null && passed.Contains(requirement.Key)) return true;
-                        if (matchingRuns.Length == 0) return false;
+                        if (requirement.Value is null)
+                        {
+                            // GitHub requires both when a commit status and check share a required name.
+                            if (seenStatuses.Contains(requirement.Key) && !passed.Contains(requirement.Key)) return false;
+                            if (matchingRuns.Length == 0) return passed.Contains(requirement.Key);
+                        }
+                        else if (matchingRuns.Length == 0) return false;
                         if (requirement.Value is not null && matchingRuns.Any(check =>
                             !check.TryGetProperty("app", out var app) || app.ValueKind != JsonValueKind.Object ||
                             !app.TryGetProperty("id", out var id) || !id.TryGetInt32(out var appId) || appId <= 0)) return false;
