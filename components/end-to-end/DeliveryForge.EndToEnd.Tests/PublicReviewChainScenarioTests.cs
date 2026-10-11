@@ -134,7 +134,7 @@ public sealed class PublicReviewChainScenarioTests
         {
             ["schemaVersion"] = "1.0.0", ["kind"] = "evidence-policy", ["policyId"] = "issue11-public-review-fixture",
             ["requiredGates"] = new JsonArray("test"), ["authorizedCeiling"] = "implement", ["requireIndependentReview"] = true,
-            ["allowedNotApplicable"] = new JsonArray(), ["createdAt"] = now.ToString("O")
+            ["allowedNotApplicable"] = new JsonArray(), ["createdAt"] = now.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture)
         };
         policyNode["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(policyNode.ToJsonString()));
         var policyBytes = CanonicalJson.Canonicalize(Encoding.UTF8.GetBytes(policyNode.ToJsonString()));
