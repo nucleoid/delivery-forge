@@ -42,9 +42,9 @@ internal sealed class WindowsOwnedProcessImage : IDisposable
                 if (initial == 0) return Exited();
                 if (initial != 258) return Unknown("Original handle liveness is unknown; Win32=" + Marshal.GetLastPInvokeError());
                 if (!GetProcessTimes(_handle, out var created, out _, out _, out _))
-                    return Unknown("Original handle creation time unavailable; Win32=" + Marshal.GetLastPInvokeError());
+                    return MetadataUnavailable("Original handle creation time unavailable; Win32=" + Marshal.GetLastPInvokeError());
                 var fileTime = ((ulong)created.High << 32) | created.Low;
-                if (fileTime > long.MaxValue) return Unknown("Original creation FILETIME is outside the supported UTC range.");
+                if (fileTime > long.MaxValue) return MetadataUnavailable("Original creation FILETIME is outside the supported UTC range.");
                 var ticks = DateTime.FromFileTimeUtc((long)fileTime).Ticks;
                 string? image = null;
                 for (var capacity = 512; capacity <= 32768; capacity *= 2)
@@ -54,27 +54,49 @@ internal sealed class WindowsOwnedProcessImage : IDisposable
                     if (QueryFullProcessImageName(_handle, 0, buffer, ref length))
                     {
                         if (length == 0 || length >= capacity || buffer.Length != length)
-                            return Unknown("Original image query returned empty or truncated data.");
+                            return MetadataUnavailable("Original image query returned empty or truncated data.");
                         image = buffer.ToString(0, checked((int)length));
-                        if (!Path.IsPathFullyQualified(image)) return Unknown("Original kernel image is not an absolute Win32 path.");
+                        if (!Path.IsPathFullyQualified(image)) return MetadataUnavailable("Original kernel image is not an absolute Win32 path.");
                         image = Path.GetFullPath(image);
                         break;
                     }
                     var error = Marshal.GetLastPInvokeError();
-                    if (error != 122 || capacity == 32768) return Unknown("Original image query unavailable; Win32=" + error);
+                    if (error != 122 || capacity == 32768) return MetadataUnavailable("Original image query unavailable; Win32=" + error);
                 }
                 var final = WaitForSingleObject(_handle, 0);
                 if (final == 0) return Exited();
                 if (final != 258 || !IsOriginalAssociation()) return Unknown("Original process liveness/association changed during observation.");
-                return image is null ? Unknown("Original image exceeded its finite character bound.") :
+                return image is null ? MetadataUnavailable("Original image exceeded its finite character bound.") :
                     new(ProcessControlOutcome.LiveOwned, _requested, image, ticks, "windows-owned-handle-image",
                         "Executable image and UTC creation identity sampled through the original privately pinned process handle.") { RequestedLaunchComplete = _requestedComplete };
             }
             catch (Exception exception) when (exception is InvalidOperationException or ArgumentException or DllNotFoundException or EntryPointNotFoundException or PlatformNotSupportedException)
             {
-                return Unknown("Original process image observation unavailable: " + exception.GetType().Name);
+                return MetadataUnavailable("Original process image observation unavailable: " + exception.GetType().Name);
             }
             finally { if (pinned) _handle.DangerousRelease(); }
+        }
+    }
+
+    // Called only under Read's original lifetime lock/pin. Metadata failure is never
+    // an exit condition: only this fresh same-handle signal can establish exit.
+    private OwnedProcessImageObservation MetadataUnavailable(string preservedFailure)
+    {
+        if (!IsOriginalAssociation()) return Unknown(preservedFailure + "; original association unavailable.");
+        try
+        {
+            var waited = WaitForSingleObject(_handle, 0);
+            var waitError = waited == uint.MaxValue ? Marshal.GetLastPInvokeError() : 0;
+            if (!IsOriginalAssociation()) return Unknown(preservedFailure + "; original association changed after exit sample.");
+            if (waited == 0)
+                return new(ProcessControlOutcome.AlreadyExited, _requested, "", 0, "windows-owned-handle-image",
+                    preservedFailure + "; fresh original privately pinned handle is signaled.") { RequestedLaunchComplete = _requestedComplete };
+            if (waited == 258) return Unknown(preservedFailure + "; fresh original handle remains nonsignaled.");
+            return Unknown(preservedFailure + "; fresh exit sample unavailable, wait=" + waited + ", Win32=" + waitError);
+        }
+        catch (Exception exception) when (exception is InvalidOperationException or ArgumentException or DllNotFoundException or EntryPointNotFoundException or PlatformNotSupportedException)
+        {
+            return Unknown(preservedFailure + "; fresh original exit sample unavailable: " + exception.GetType().Name);
         }
     }
 
