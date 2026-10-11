@@ -11,7 +11,7 @@ public sealed class CalculatorTests
     public async Task Adds_two_numbers()
     {
         var directory = Environment.GetEnvironmentVariable("DELIVERY_FORGE_FIXTURE_BARRIER_DIRECTORY");
-        if (directory is not null)
+        if (!string.IsNullOrEmpty(directory))
         {
             var nonce = Environment.GetEnvironmentVariable("DELIVERY_FORGE_FIXTURE_BARRIER_NONCE")
                 ?? throw new InvalidOperationException("Enabled fixture barrier requires its fresh nonce.");
