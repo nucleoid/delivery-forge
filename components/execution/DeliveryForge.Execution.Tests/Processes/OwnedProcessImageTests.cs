@@ -38,7 +38,9 @@ public sealed class OwnedProcessImageTests
             await WriteNew(root, "image-observation.json", new { fixture = true, requested, selected, createdLink, child.Identity, observed });
             Assert.Equal(ProcessControlOutcome.LiveOwned, observed.Outcome);
             Assert.Equal(requested, observed.RequestedLaunch);
+            Assert.True(observed.RequestedLaunchComplete);
             Assert.Equal(child.Identity.PlatformStartIdentity, observed.PlatformStartIdentity);
+            Assert.Equal(child.Process.StartTime.ToUniversalTime().Ticks, observed.PlatformStartIdentity);
             Assert.Equal(child.Identity.ExecutablePath, observed.ObservedImagePath);
             Assert.Equal(OperatingSystem.IsWindows() ? "windows-owned-handle-image" : "linux-owned-image", observed.Stage);
             Assert.NotEmpty(observed.Reason);
