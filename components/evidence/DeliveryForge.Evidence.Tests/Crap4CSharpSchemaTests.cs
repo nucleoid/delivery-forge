@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text;
 using System.Text.Json.Nodes;
 using DeliveryForge.Evidence.Adapters;
 
@@ -78,6 +79,38 @@ public sealed class Crap4CSharpSchemaTests
 
     private static JsonNode Positive() =>
         JsonNode.Parse(Crap4CSharpObservedContractTests.Report(true, "pass", "completed", 0, 1, 1, 0))!;
+
+    [Fact]
+    public void Duplicate_metric_identity_cannot_replace_an_omitted_row()
+    {
+        var root = JsonNode.Parse(Crap4CSharpObservedContractTests.Report(true, "pass", "completed", 0, 2, 2, 0))!;
+        root["evaluation"]!["metrics"]![1] = root["evaluation"]!["metrics"]![0]!.DeepClone();
+        Assert.Equal(GateOutcome.Error, Normalize(root).Outcome);
+    }
+
+    [Theory]
+    [InlineData("operationalError")]
+    [InlineData("cancelled")]
+    [InlineData("skipped")]
+    [InlineData("fail")]
+    public void Required_nonpassing_check_cannot_coexist_with_pass(string status)
+    {
+        var root = Positive();
+        root["evaluation"]!["checks"] = JsonSerializer.SerializeToNode(new[] {
+            new { name = "required-work", status, reason = "fixture.nonpass", required = true } });
+        Assert.Equal(GateOutcome.Error, Normalize(root).Outcome);
+    }
+
+    [Fact]
+    public void Fractional_integer_token_is_not_validated_through_rounded_double()
+    {
+        var json = Positive().ToJsonString();
+        Assert.Contains("\"complexity\":1", json, StringComparison.Ordinal);
+        json = json.Replace("\"complexity\":1", "\"complexity\":1.000000000000000000000001", StringComparison.Ordinal);
+        var result = new Crap4CSharpAdapter().Normalize(Encoding.UTF8.GetBytes(json),
+            new ToolCapability("crap4csharp", "0.1.0+1129c9d3280168b294f9fed1542f81ca716c6d53", "1.0", true, true));
+        Assert.Equal(GateOutcome.Error, result.Outcome);
+    }
 
     [Theory]
     [InlineData(false, GateOutcome.Pass)]
