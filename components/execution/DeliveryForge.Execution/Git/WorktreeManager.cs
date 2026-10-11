@@ -125,6 +125,11 @@ public sealed class WorktreeManager
         }
     }
 
+    // Low-level cleanup mechanics only. This never authorizes deletion, dispatch or takeover;
+    // callers still need current ownership, Git registration, quiescence and path proof.
+    public WriterLease RecoverWriterWithDeleteSharing(string worktree, string runId, string writerToken) =>
+        throw new NotImplementedException("Cleanup-only delete-sharing writer recovery requires compiled owner RED.");
+
     public async Task<WorktreeObservation> ObserveAsync(string worktree, CancellationToken cancellationToken = default)
     {
         var root = CanonicalPath(worktree);
@@ -405,6 +410,9 @@ public sealed class WriterLease : IDisposable
 
     public string RunId { get; }
     public string WriterToken { get; }
+    public string DiagnosticLockPath => _path;
+    public IReadOnlyList<byte> GetDiagnosticBytes() =>
+        throw new NotImplementedException("Bounded immutable diagnostics must read the already-held lease.");
 
     internal void Abandon()
     {
