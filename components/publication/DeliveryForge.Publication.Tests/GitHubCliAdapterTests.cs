@@ -58,7 +58,7 @@ public sealed class GitHubCliAdapterTests
         var adapter = new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant());
         var result = await adapter.MergeNormalAsync(Mutation(), TestContext.Current.CancellationToken);
         Assert.Equal(GitHostMutationOutcome.Confirmed, result.Outcome);
-        var call = Assert.Single(runner.Calls.Where(call => call.Count > 1 && call[0] == "pr" && call[1] == "merge"));
+        var call = Assert.Single(runner.Calls, call => call.Count > 1 && call[0] == "pr" && call[1] == "merge");
         Assert.Contains("--merge", call);
         Assert.Contains("--match-head-commit", call);
         Assert.Contains(PublicationFixture.Commit('b'), call);
@@ -75,7 +75,7 @@ public sealed class GitHubCliAdapterTests
         var result = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
             .CreateOrUpdatePrAsync(Mutation(PublicationAction.CreateOrUpdatePr), TestContext.Current.CancellationToken);
         Assert.Equal(GitHostMutationOutcome.Confirmed, result.Outcome);
-        var call = Assert.Single(runner.Calls.Where(call => call.Count > 1 && call[0] == "pr" && call[1] == "create"));
+        var call = Assert.Single(runner.Calls, call => call.Count > 1 && call[0] == "pr" && call[1] == "create");
         Assert.Contains("--head", call);
         Assert.Contains("--repo", call);
         Assert.Contains("--base", call);
