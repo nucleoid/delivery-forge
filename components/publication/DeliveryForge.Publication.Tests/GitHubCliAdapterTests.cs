@@ -244,6 +244,36 @@ public sealed class GitHubCliAdapterTests
         Assert.Equal(1, runner.Mutations);
     }
 
+    [Theory]
+    [InlineData("legacy-failed")]
+    [InlineData("legacy-pending")]
+    [InlineData("legacy-cancelled")]
+    [InlineData("legacy-wrong-head")]
+    public async Task Legacy_success_status_cannot_mask_same_name_unacceptable_check_run(string shape)
+    {
+        var target = Target with { Repository = "fixture/forge-disposable-conjunction-" + Guid.NewGuid().ToString("N") };
+        var runner = new CliFixtureRunner { RepositoryTarget = target, AppShape = shape };
+        var parent = Parent(target);
+        var result = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
+            .MergeNormalAsync(Mutation(target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Rejected, result.Outcome);
+        Assert.Equal(0, runner.Mutations);
+    }
+
+    [Theory]
+    [InlineData("legacy-both-success")]
+    [InlineData("legacy-check-only")]
+    public async Task Legacy_successful_same_name_conjunction_or_check_only_is_a_positive_control(string shape)
+    {
+        var target = Target with { Repository = "fixture/forge-disposable-conjunction-control-" + Guid.NewGuid().ToString("N") };
+        var runner = new CliFixtureRunner { RepositoryTarget = target, AppShape = shape };
+        var parent = Parent(target);
+        var result = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
+            .MergeNormalAsync(Mutation(target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Confirmed, result.Outcome);
+        Assert.Equal(1, runner.Mutations);
+    }
+
     private sealed class CliFixtureRunner : IGitHubCliExecutor
     {
         public List<IReadOnlyList<string>> Calls { get; } = [];
@@ -299,7 +329,8 @@ public sealed class GitHubCliAdapterTests
                 if (endpoint.Contains("/check-runs", StringComparison.Ordinal)) body = AppRuns();
                 if (endpoint.EndsWith("/status", StringComparison.Ordinal))
                 {
-                    var context = AppShape is "absent-required-app" or "legacy" ? "ci" : "unrelated";
+                    var context = AppShape is "absent-required-app" or "legacy" ||
+                        AppShape.StartsWith("legacy-", StringComparison.Ordinal) && AppShape != "legacy-check-only" ? "ci" : "unrelated";
                     body = new JsonObject { ["state"] = "success", ["statuses"] = new JsonArray(new JsonObject
                         { ["context"] = context, ["state"] = "success" }) }.ToJsonString();
                 }
@@ -309,7 +340,7 @@ public sealed class GitHubCliAdapterTests
         private string AppProtection()
         {
             var required = new JsonObject { ["contexts"] = new JsonArray("ci") };
-            if (AppShape != "legacy")
+            if (AppShape != "legacy" && AppShape?.StartsWith("legacy-", StringComparison.Ordinal) != true)
             {
                 var check = new JsonObject { ["context"] = "ci" };
                 if (AppShape != "missing-required-app") check["app_id"] = AppShape == "explicit-any-app" ? -1 : 123;
@@ -327,7 +358,14 @@ public sealed class GitHubCliAdapterTests
                 return run;
             }
             var runs = new JsonArray();
-            if (AppShape is not ("absent-required-app" or "legacy"))
+            if (AppShape?.StartsWith("legacy-", StringComparison.Ordinal) == true)
+            {
+                var run = Run(123, AppShape == "legacy-failed" ? "failure" : AppShape == "legacy-cancelled" ? "cancelled" : "success");
+                if (AppShape == "legacy-pending") { run["status"] = "in_progress"; run["conclusion"] = null; }
+                if (AppShape == "legacy-wrong-head") run["head_sha"] = PublicationFixture.Commit('9');
+                runs.Add(run);
+            }
+            else if (AppShape is not ("absent-required-app" or "legacy"))
             {
                 if (AppShape == "required-failing-wrong-passing") runs.Add(Run(123, "failure"));
                 runs.Add(Run(AppShape == "correct-app" ? 123 : AppShape == "missing-observed-app" ? null : 999, "success"));
