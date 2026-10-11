@@ -82,6 +82,10 @@ public sealed class CoordinationContractFixtureHost
         }
     }
 
+    // RED checkpoint: owner renewal must preserve reference lineage and never expose the adapter.
+    public Task<CoordinationFixtureObservation<RenewalResult>> RenewAsync(DispatchAuthority authority, CancellationToken cancellationToken = default) =>
+        throw new NotImplementedException("Contract-fixture renewal requires compiled behavior RED before delegation.");
+
     public Task<CoordinationFixtureObservation<ReleaseResult>> ReleaseAsync(DispatchAuthority authority, CancellationToken cancellationToken = default) =>
         SerialAsync(async () =>
         {

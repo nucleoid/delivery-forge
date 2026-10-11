@@ -5,7 +5,7 @@ using DeliveryForge.Coordination;
 namespace DeliveryForge.EndToEnd.Tests;
 
 // Allowed external coordination fake. No network/service endpoint or production capability is supplied.
-internal sealed class CountingCoordinationFixtureTransport(bool marked = true) : ICoordinationTransport
+internal sealed class CountingCoordinationFixtureTransport(bool marked = true, bool progressingRenewal = false, bool malformedAcquire = false) : ICoordinationTransport
 {
     private readonly List<string> _calls = [];
     private LeaseOwner? _owner;
@@ -31,13 +31,17 @@ internal sealed class CountingCoordinationFixtureTransport(bool marked = true) :
         _owner = request.Owner;
         _lease = "fixture-lease-" + Guid.NewGuid().ToString("N");
         var server = DateTimeOffset.Parse("2030-01-01T00:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
+        if (malformedAcquire) return Task.FromResult(AcquireTransportResult.Acquired(_lease, "01", server, server + request.Ttl));
         return Task.FromResult(AcquireTransportResult.Acquired(_lease, "1", server, server + request.Ttl));
     }
 
     public Task<RenewTransportResult> RenewAsync(RenewRequest request, CancellationToken cancellationToken = default)
     {
         _calls.Add("renew");
-        return Task.FromResult(RenewTransportResult.Uncertain("Renewal is outside this initial fixture seam."));
+        if (request.Lease.Owner != _owner || request.Lease.LeaseId != _lease)
+            return Task.FromResult(RenewTransportResult.Uncertain("Fixture owner/lease mismatch."));
+        var server = request.Lease.ServerTime + (progressingRenewal ? TimeSpan.FromSeconds(100) : TimeSpan.Zero);
+        return Task.FromResult(RenewTransportResult.Renewed(server, server + TimeSpan.FromSeconds(300)));
     }
 
     public Task<InspectTransportResult> InspectAsync(InspectRequest request, CancellationToken cancellationToken = default)
@@ -61,6 +65,20 @@ internal sealed class FixtureMonotonicClock(string domain) : IMonotonicClock
     private readonly long _origin = Stopwatch.GetTimestamp();
     public string DomainId { get; } = domain;
     public TimeSpan Elapsed => Stopwatch.GetElapsedTime(_origin);
+}
+
+// Virtual time is confined to coordination deadline logic. Native process observations remain real.
+internal sealed class AdvancingFixtureClock(string domain) : IMonotonicClock
+{
+    private readonly long _origin = Stopwatch.GetTimestamp();
+    private long _offsetTicks;
+    public string DomainId { get; } = domain;
+    public TimeSpan Elapsed => Stopwatch.GetElapsedTime(_origin) + TimeSpan.FromTicks(Interlocked.Read(ref _offsetTicks));
+    public void Advance(TimeSpan amount)
+    {
+        if (amount <= TimeSpan.Zero || amount > TimeSpan.FromSeconds(301)) throw new ArgumentOutOfRangeException(nameof(amount));
+        Interlocked.Add(ref _offsetTicks, amount.Ticks);
+    }
 }
 
 // Quiescence is derived from the real public process controller, never from a caller success flag.
