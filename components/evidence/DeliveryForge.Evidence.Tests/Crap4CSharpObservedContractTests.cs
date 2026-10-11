@@ -24,6 +24,7 @@ public sealed class Crap4CSharpObservedContractTests
     [Theory]
     [InlineData(true, "pass", "completed", 0, 1, 1, 0, GateOutcome.Pass)]
     [InlineData(true, "fail", "completed", 2, 1, 1, 0, GateOutcome.Fail)]
+    [InlineData(true, "fail", "completed", 2, 2, 1, 1, GateOutcome.Fail)]
     [InlineData(false, "unknown", "operationalError", 1, 1, 0, 1, GateOutcome.Incomplete)]
     [InlineData(false, "unknown", "cancelled", 1, 1, 0, 1, GateOutcome.Incomplete)]
     [InlineData(true, "pass", "completed", 0, 1, 0, 1, GateOutcome.Incomplete)]
