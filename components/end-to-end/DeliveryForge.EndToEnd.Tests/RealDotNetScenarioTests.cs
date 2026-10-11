@@ -76,10 +76,20 @@ public sealed class RealDotNetScenarioTests(RealDotNetScenarioFixture fixture)
         Assert.Equal(gate.Before, gate.After);
         Assert.True(Path.IsPathFullyQualified(gate.Invocation.FileName));
         Assert.True(File.Exists(gate.ReceiptPath));
-        Assert.Equal("gate-receipt", ContractValidator.ParseAndValidate(File.ReadAllBytes(gate.ReceiptPath)).SchemaName);
+        var receiptBytes = await File.ReadAllBytesAsync(gate.ReceiptPath, TestContext.Current.CancellationToken);
+        Assert.Equal("gate-receipt", ContractValidator.ParseAndValidate(receiptBytes).SchemaName);
+        using var receipt = JsonDocument.Parse(receiptBytes);
+        var gateId = name == RealDotNetFixturePhase.MissingCoverage ? "coverage" : "test";
+        Assert.Equal(gateId, receipt.RootElement.GetProperty("gateId").GetString());
+        var receiptDirectory = Path.GetDirectoryName(Path.GetFullPath(gate.ReceiptPath))!;
+        Assert.Equal("receipts", Path.GetFileName(receiptDirectory));
+        // GateRunner publishes artifacts in the gate directory and append-only receipts in its receipts child.
+        var artifactDirectory = Directory.GetParent(receiptDirectory)!.FullName;
+        Assert.Equal(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(phase.ProvenancePath))!, gateId), artifactDirectory);
         foreach (var file in new[] { "stdout.txt", "stderr.txt", "evidence.trx" })
         {
-            var bytes = await File.ReadAllBytesAsync(Path.Combine(Path.GetDirectoryName(gate.ReceiptPath)!, file), TestContext.Current.CancellationToken);
+            Assert.Equal(gate.ArtifactHashes[file], receipt.RootElement.GetProperty("artifactHashes").GetProperty(file).GetString());
+            var bytes = await File.ReadAllBytesAsync(Path.Combine(artifactDirectory, file), TestContext.Current.CancellationToken);
             Assert.Equal("sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes)), gate.ArtifactHashes[file]);
         }
         Assert.Contains("--disable-build-servers", gate.Invocation.Arguments);
