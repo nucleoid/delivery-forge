@@ -17,5 +17,8 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="../scenario-matrix.json" Link="scenario-matrix.json" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Remove="Fixtures/RealDotNet/**/*.cs" />
+    <None Remove="Fixtures/RealDotNet/**/*" />
+    <None Include="Fixtures/RealDotNet/**/*" Exclude="Fixtures/RealDotNet/**/bin/**/*;Fixtures/RealDotNet/**/obj/**/*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
