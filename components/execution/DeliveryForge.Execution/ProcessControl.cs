@@ -16,6 +16,7 @@ public sealed record ProcessControlResult(ProcessControlOutcome Outcome, string 
 public sealed class ProcessControl : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<int, OwnedProcess> _owned = new();
+    private int _disposed;
 
     public OwnedProcess StartOwned(ProcessLaunch launch, string? runId = null)
     {
@@ -54,8 +55,13 @@ public sealed class ProcessControl : IAsyncDisposable
             .Select(owned => owned.Identity).ToArray();
 
     // Observation only: the snapshot cannot register/adopt a process or mint control authority.
-    public IReadOnlyList<ProcessIdentity> GetAllOwnedIdentities() =>
-        _owned.Values.Select(owned => owned.Identity).ToArray();
+    public IReadOnlyList<ProcessIdentity> GetAllOwnedIdentities()
+    {
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        var snapshot = _owned.Values.Select(owned => owned.Identity).ToArray();
+        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
+        return snapshot;
+    }
 
     public ProcessControlResult Observe(ProcessIdentity expected)
     {
@@ -119,6 +125,7 @@ public sealed class ProcessControl : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
+        Interlocked.Exchange(ref _disposed, 1);
         foreach (var owned in _owned.Values)
         {
             try

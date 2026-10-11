@@ -19,12 +19,14 @@ public sealed class CleanupWriterFenceTests
         Assert.Throws<WorktreeBoundaryException>(() => manager.AcquireWriter(worktree, "foreign-run", "foreign-token"));
         Assert.Throws<WorktreeBoundaryException>(() => manager.RecoverWriter(worktree, "owned-run", "owned-token"));
         Assert.Throws<WorktreeBoundaryException>(() => manager.RecoverWriterWithDeleteSharing(worktree, "owned-run", "owned-token"));
-        Assert.Equal(Path.Combine(gitDirectory, "delivery-forge-writer.lock"), cleanup.DiagnosticLockPath);
+        Assert.Equal(Path.GetFullPath(Path.Combine(gitDirectory, "delivery-forge-writer.lock")), Path.GetFullPath(cleanup.DiagnosticLockPath));
         var diagnostics = cleanup.GetDiagnosticBytes();
         Assert.Equal("owned-run\nowned-token\n", Encoding.UTF8.GetString(diagnostics.ToArray()));
         Assert.False(diagnostics is byte[], "A caller must not mutate the owner-held diagnostic byte array.");
         Assert.Throws<NotSupportedException>(() => ((IList<byte>)diagnostics)[0] = 0);
         Assert.Equal("owned-run\nowned-token\n", Encoding.UTF8.GetString(cleanup.GetDiagnosticBytes().ToArray()));
+        cleanup.Dispose();
+        Assert.Throws<ObjectDisposedException>(() => cleanup.GetDiagnosticBytes());
     }
 
     [Fact(Timeout = 120_000)]
@@ -72,6 +74,10 @@ public sealed class CleanupWriterFenceTests
         Assert.Throws<WorktreeBoundaryException>(() => manager.RecoverWriter(worktree, "owned-run", "owned-token"));
         Assert.Throws<WorktreeBoundaryException>(() => manager.RecoverWriterWithDeleteSharing(worktree, "owned-run", "owned-token"));
         Assert.EndsWith("unexpected-third-line\n", await File.ReadAllTextAsync(path, TestContext.Current.CancellationToken));
+        var oversizedRunId = new string('x', 8193);
+        using (var oversized = manager.AcquireWriter(repository.Path, oversizedRunId, "token"))
+            Assert.Throws<WorktreeBoundaryException>(() => oversized.GetDiagnosticBytes());
+        Assert.Throws<WorktreeBoundaryException>(() => manager.RecoverWriterWithDeleteSharing(repository.Path, oversizedRunId, "token"));
     }
 }
 

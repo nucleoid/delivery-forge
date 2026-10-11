@@ -198,16 +198,27 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
                 if (!observation.IsClean) return false;
             }
             else if (registered.Contains(Worktree, comparison)) return false;
-            await ArchiveAsync(cancellationToken);
-            if (!File.ReadAllBytes(MarkerPath).SequenceEqual(_markerBytes) || Processes.GetAllOwnedIdentities().Any(identity => Processes.Observe(identity).Outcome != ProcessControlOutcome.AlreadyExited)) return false;
+            if (!await ArchiveAsync(cancellationToken, writerFence)) return false;
+            if (!HasPlainOwnedArchiveRoot() || !HasSafeOwnedInventory(allowedEntries) ||
+                Processes.GetAllOwnedIdentities().Any(identity => Processes.Observe(identity).Outcome != ProcessControlOutcome.AlreadyExited)) return false;
+            if (_binding is not null)
+            {
+                if (_execution!.HasPendingControlOperations(_binding.RunId)) return false;
+                var fresh = await _control!.ControlAsync(_binding, AgentControlAction.Stop, TimeSpan.FromSeconds(2), cancellationToken);
+                if (fresh.Binding != _binding || !fresh.CapabilitySupported || fresh.Activity != AgentActivityState.Quiescent ||
+                    fresh.Action != AgentControlAction.Stop || string.IsNullOrWhiteSpace(fresh.EvidenceReference)) return false;
+            }
+            var currentRegistration = (await GitAsync(cancellationToken, "worktree", "list", "--porcelain", "-z")).Split('\0')
+                .Where(item => item.StartsWith("worktree ", StringComparison.Ordinal)).Select(item => Path.GetFullPath(item[9..])).ToArray();
+            if (currentRegistration.Length != registered.Length || currentRegistration.Any(path => !registered.Contains(path, comparison))) return false;
+            if (Directory.Exists(Worktree) && (!(await Worktrees.ObserveAsync(Worktree, cancellationToken)).IsClean ||
+                writerFence is null || !IsPlainOwnedArchivePath(writerFence.DiagnosticLockPath))) return false;
             if (Directory.Exists(Worktree)) await GitAsync(cancellationToken, "worktree", "remove", "--force", Worktree);
             var finalRegistered = await GitAsync(cancellationToken, "worktree", "list", "--porcelain", "-z");
             if (finalRegistered.Replace('\\', '/').Contains(Worktree.Replace('\\', '/'), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) return false;
             RequirePlainOutsideRepositories(Root);
             if (!File.ReadAllBytes(MarkerPath).SequenceEqual(_markerBytes)) return false;
-            if (Directory.EnumerateFileSystemEntries(Root, "*", SearchOption.AllDirectories)
-                .Any(path => (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0 ||
-                    !allowedEntries.Contains(Path.GetRelativePath(Root, path)))) return false;
+            if (!HasSafeOwnedInventory(allowedEntries)) return false;
             foreach (var file in Directory.EnumerateFiles(Root, "*", SearchOption.AllDirectories))
                 File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
             if (Processes.GetAllOwnedIdentities().Any(identity => Processes.Observe(identity).Outcome != ProcessControlOutcome.AlreadyExited)) return false;
@@ -227,7 +238,7 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
     {
         if (!registered.Contains(Worktree, comparison) || _writerRunId is null || _writerToken is null)
             throw new IOException("Worktree lacks the exact registered live-owner writer binding.");
-        return Worktrees.RecoverWriter(Worktree, _writerRunId, _writerToken);
+        return Worktrees.RecoverWriterWithDeleteSharing(Worktree, _writerRunId, _writerToken);
     }
 
     private void CaptureOwnedManifest()
@@ -282,7 +293,7 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
         await ArchiveAsync(deadline.Token);
     }
 
-    private async Task ArchiveAsync(CancellationToken cancellationToken)
+    private async Task<bool> ArchiveAsync(CancellationToken cancellationToken, WriterLease? writerFence = null)
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (FixtureArchiveEntryBarrier is { } barrier) await barrier(cancellationToken);
@@ -291,7 +302,7 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
             _artifacts.RetainArtifacts("Archive refused: runtime root/ancestor/marker ownership cannot be established.");
             await _artifacts.WriteNewJsonAsync("runtime-archive-refused-" + Guid.NewGuid().ToString("N") + ".json",
                 new { fixture = true, Root, retained = true, reason = "Root/ancestor/marker ownership uncertain; no source enumeration or copy performed." }, cancellationToken);
-            return;
+            return false;
         }
         var archive = Path.Combine(_artifacts.Root, "runtime-archive-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(archive);
@@ -314,11 +325,18 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
                 if (!HasPlainOwnedArchiveRoot() || !IsPlainOwnedArchivePath(entry))
                     throw new IOException("Archive file ownership changed; no copy performed.");
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
-                File.Copy(entry, target, overwrite: false);
+                if (writerFence is not null && string.Equals(Path.GetFullPath(entry), writerFence.DiagnosticLockPath,
+                    OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                {
+                    await using var destination = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    await destination.WriteAsync(writerFence.GetDiagnosticBytes().ToArray(), cancellationToken);
+                }
+                else File.Copy(entry, target, overwrite: false);
             }
         }
         await _artifacts.WriteNewJsonAsync("runtime-archive-index-" + Guid.NewGuid().ToString("N") + ".json",
             new { fixture = true, Root, archive, count, bytes }, cancellationToken);
+        return true;
     }
 
     private bool HasPlainOwnedArchiveRoot()
@@ -341,6 +359,24 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
             if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) return false;
             if (string.Equals(current, Root, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) return true;
         }
+    }
+
+    private bool HasSafeOwnedInventory(HashSet<string> allowedEntries)
+    {
+        if (!HasPlainOwnedArchiveRoot()) return false;
+        var pending = new Stack<string>(); pending.Push(Root);
+        var count = 0;
+        while (pending.TryPop(out var directory))
+        {
+            if (!IsPlainOwnedArchivePath(directory)) return false;
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+            {
+                if (++count > 2048 || !allowedEntries.Contains(Path.GetRelativePath(Root, entry)) ||
+                    (File.GetAttributes(entry) & FileAttributes.ReparsePoint) != 0) return false;
+                if (Directory.Exists(entry)) pending.Push(entry);
+            }
+        }
+        return true;
     }
 
     private static void RequirePlainOutsideRepositories(string path)
