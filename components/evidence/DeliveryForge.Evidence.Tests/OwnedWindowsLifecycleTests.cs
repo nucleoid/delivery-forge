@@ -8,6 +8,62 @@ namespace DeliveryForge.Evidence.Tests;
 public sealed class OwnedWindowsLifecycleTests
 {
     [Fact(Timeout = 120_000)]
+    public async Task Caller_cancelled_during_real_argument_preparation_never_creates_or_resumes_command_body()
+    {
+        using var bound = Bound();
+        if (!OperatingSystem.IsWindows()) { await AssertUnsupportedWindowsProof("root-hold", bound.Token); return; }
+        var run = await TreeRun.CreateAsync("root-hold", bound.Token);
+        using var caller = CancellationTokenSource.CreateLinkedTokenSource(bound.Token);
+        var preparation = new PreparationArguments(run.Invocation.Arguments, () => caller.Cancel());
+        // Setup has already recorded only the real ordinary args; enumeration of this wrapper happens inside Execute.
+        var invocation = run.Invocation with { Arguments = preparation };
+        var started = Stopwatch.GetTimestamp();
+        var result = await new ProcessCommandExecutor().ExecuteAsync(invocation, TimeSpan.FromSeconds(15), caller.Token);
+        await run.WriteObservationAsync(result, Stopwatch.GetElapsedTime(started), bound.Token);
+        Assert.Equal(1, preparation.PreparationCalls);
+        Assert.True(result.Cancelled);
+        Assert.False(result.TimedOut);
+        Assert.Null(result.ExitCode);
+        Assert.False(result.LifecycleDiagnostics?.OwnedTree?.CreationOwned ?? false);
+        Assert.False(File.Exists(Path.Combine(invocation.WorkingDirectory, "child-entered-" + run.Nonce)));
+        Assert.DoesNotContain("actual-root-entered:" + run.Nonce, result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    [Fact(Timeout = 120_000)]
+    public async Task Original_timeout_expired_during_real_argument_preparation_never_creates_or_resumes_command_body()
+    {
+        using var bound = Bound();
+        if (!OperatingSystem.IsWindows()) { await AssertUnsupportedWindowsProof("root-hold", bound.Token); return; }
+        var run = await TreeRun.CreateAsync("root-hold", bound.Token);
+        var preparation = new PreparationArguments(run.Invocation.Arguments, () => Thread.Sleep(50));
+        var invocation = run.Invocation with { Arguments = preparation };
+        var started = Stopwatch.GetTimestamp();
+        var result = await new ProcessCommandExecutor().ExecuteAsync(invocation, TimeSpan.FromMilliseconds(10), bound.Token);
+        await run.WriteObservationAsync(result, Stopwatch.GetElapsedTime(started), bound.Token);
+        Assert.Equal(1, preparation.PreparationCalls);
+        Assert.True(result.TimedOut);
+        Assert.False(result.Cancelled);
+        Assert.Null(result.ExitCode);
+        Assert.False(result.LifecycleDiagnostics?.OwnedTree?.CreationOwned ?? false);
+        Assert.False(File.Exists(Path.Combine(invocation.WorkingDirectory, "child-entered-" + run.Nonce)));
+        Assert.DoesNotContain("actual-root-entered:" + run.Nonce, result.StandardOutput, StringComparison.Ordinal);
+    }
+
+    private sealed class PreparationArguments(IReadOnlyList<string> actual, Action duringPreparation) : IReadOnlyList<string>
+    {
+        public int PreparationCalls { get; private set; }
+        public int Count => actual.Count;
+        public string this[int index] => actual[index];
+        public IEnumerator<string> GetEnumerator()
+        {
+            if (++PreparationCalls != 1) throw new InvalidOperationException("Fixture preparation wrapper was enumerated more than once.");
+            duringPreparation();
+            foreach (var argument in actual) yield return argument;
+        }
+        System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
+    }
+
+    [Fact(Timeout = 120_000)]
     public async Task Exited_root_with_real_descendant_holding_pipes_times_out_and_settles_whole_owned_tree()
     {
         using var bound = Bound();
