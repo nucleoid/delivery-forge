@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
+using DeliveryForge.Contracts.State;
 using DeliveryForge.Evidence;
 using DeliveryForge.Execution.Host;
 using DeliveryForge.Review;
