@@ -10,6 +10,7 @@ on:
       - "components/planning/**"
       - "components/review/**"
       - "components/publication/**"
+      - "components/scheduling/**"
       - "DeliveryForge.slnx"
       - "Directory.*.props"
       - "global.json"
