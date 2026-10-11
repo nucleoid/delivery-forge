@@ -6,5 +6,6 @@
   <ItemGroup>
     <ProjectReference Include="../../contracts/DeliveryForge.Contracts/DeliveryForge.Contracts.csproj" />
     <EmbeddedResource Include="Vendor/Crap4CSharp/result-schema-v1.json" LogicalName="DeliveryForge.Evidence.Crap4CSharp.result-schema-v1.json" />
+    <EmbeddedResource Include="Vendor/Mutate4CSharp/evaluation-report-v2.schema.json" LogicalName="DeliveryForge.Evidence.Mutate4CSharp.evaluation-report-v2.schema.json" />
   </ItemGroup>
 </Project>

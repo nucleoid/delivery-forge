@@ -1,0 +1,125 @@
+{
+  "schemaVersion": "2",
+  "runId": "format-only-weak",
+  "generatedAtUtc": "2026-01-01T00:00:00Z",
+  "mode": "check",
+  "selection": {
+    "inputs": [
+      "src/Example/Flag.cs"
+    ],
+    "kind": "inputs",
+    "baseRevision": null
+  },
+  "scopePlan": {
+    "files": [],
+    "projectUnits": [],
+    "selectionKind": "inputs",
+    "exclusions": [],
+    "baseCommit": null,
+    "schemaVersion": "1",
+    "root": "format-only-repository",
+    "isComplete": true,
+    "reasons": []
+  },
+  "policy": {
+    "allowNotApplicable": false,
+    "mutationCap": 4,
+    "stabilityRepetitions": 1,
+    "overallDeadlineSeconds": 240,
+    "mutantTimeoutSeconds": 30,
+    "maxWorkers": 1,
+    "baselineTimeoutSeconds": 60
+  },
+  "baseline": "GREEN",
+  "suites": [
+    {
+      "suiteId": "suite:v1:59cff946e0beaffe2aeb6e3783b39be7fca4be2b31d6cf2862fc3385da3d1b0f",
+      "baseline": "GREEN",
+      "evidence": [
+        {
+          "summary": "Explicit format-only suite data; nothing was executed.",
+          "diagnostics": null,
+          "kind": "SUITE_BASELINE"
+        }
+      ],
+      "accounting": {
+        "runId": "format-only-weak",
+        "snapshotId": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "configuration": {
+          "id": "format-tests",
+          "path": "tests/Example.Tests/Example.Tests.csproj",
+          "runner": "vstest",
+          "framework": "net10.0",
+          "configuration": "Release",
+          "expectedMembers": [
+            "Example.Tests.dll"
+          ]
+        },
+        "accountedMembers": [
+          "Example.Tests.dll"
+        ],
+        "coverageReportSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+        "coverageReportLength": 1,
+        "coverageIdentity": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        "pathMap": "baseline-clone-to-snapshot-v1",
+        "collectedFresh": true
+      }
+    }
+  ],
+  "units": [
+    {
+      "unitId": "mutation:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "evaluationUnitId": "evaluation:v1:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "disposition": "SURVIVED",
+      "evidence": [
+        {
+          "kind": "FORMAT_ONLY",
+          "summary": "Decoder data only; no mutation was executed.",
+          "diagnostics": null
+        }
+      ]
+    }
+  ],
+  "counts": {
+    "compileInvalid": 0,
+    "enumerated": 1,
+    "survived": 1,
+    "killed": 0,
+    "executed": 1,
+    "selected": 1,
+    "errors": 0,
+    "omitted": 0,
+    "freshUncovered": 0
+  },
+  "incompleteConditions": [],
+  "reasons": [
+    {
+      "code": "SURVIVED_MUTATION",
+      "message": "Evaluation unit mutation:v1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa survived."
+    }
+  ],
+  "evidence": [
+    {
+      "summary": "Explicit format-only data, not execution proof.",
+      "diagnostics": null,
+      "kind": "FORMAT_ONLY"
+    },
+    {
+      "summary": "Explicit format-only configured set.",
+      "diagnostics": [
+        "suiteCount=1",
+        "suiteSet=sha256:281cdee6d37270382d51aa1d27d6be876de9b419547ff2343d73ce3699e20d2b"
+      ],
+      "kind": "CHECK_CONFIGURATION"
+    },
+    {
+      "summary": "Explicit format-only identity, not a captured source.",
+      "diagnostics": [
+        "captureId=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      ],
+      "kind": "INPUT_SNAPSHOT"
+    }
+  ],
+  "outcome": "FAIL",
+  "exitCode": 3
+}
