@@ -107,6 +107,16 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
             limitations = ["Actual Git/file/owned native sleep safety observations with public fixture/local scheduling APIs.",
                 "Reservation-only local admission and fixture bookkeeping; no native worker, model, quality PASS, distributed ownership or full-profile certificate."];
         }
+        else if (name is "cold.paused-new-ticket" or "cold.held-original-writer" or "cold.base-drift" or
+            "cold.missing-required-artifact" or "cold.foreign-fresh-host" or "cold.stopped-no-resume" or
+            "cold.delayed-completion-retained-controller" or "cold.delayed-completion-fresh-controller")
+        {
+            if (_runtime is null) throw new InvalidOperationException("Cold fixture scenarios require their actual live owned runtime.");
+            await ColdRecoveryOrchestrator.ObserveAsync(run, _runtime, name, receiptIds, invariants, deadline.Token);
+            outcome = GateOutcome.Incomplete;
+            limitations = ["Fresh store/coordinator fixture lifetime only, explicitly marked external control port; no OS parent crash or model-worker proof.",
+                "Retained original controller and fully fresh unknown controller are distinct; data never adopts native ownership."];
+        }
         else if (name is "execution.real-provision" or "execution.pause-live-child" or "execution.stop-terminal" or
             "execution.unknown-host" or "cleanup.changed-owner-marker" or "cleanup.foreign-reparse-entry")
         {
