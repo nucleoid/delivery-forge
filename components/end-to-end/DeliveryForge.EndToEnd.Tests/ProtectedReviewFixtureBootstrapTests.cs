@@ -157,11 +157,14 @@ public sealed class ProtectedReviewFixtureBootstrapTests
         Assert.True(Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(120));
     }
 
-    private sealed record SetupResult(ProtectedReviewFixtureConfiguration Configuration, FrozenPlan Plan, ValidatedContract EvidencePolicy,
+    internal sealed record SetupResult(ProtectedReviewFixtureConfiguration Configuration, FrozenPlan Plan, ValidatedContract EvidencePolicy,
         string BaseCommit, string HeadCommit, string ProtectedPolicySha256, string WorkerPolicySha256);
-    private static async Task<SetupResult> Setup(OwnedScenarioRun run, CancellationToken token)
+    internal static async Task<SetupResult> Setup(OwnedScenarioRun run, CancellationToken token,
+        string initialCeiling = "pr", bool includeHostedPolicy = false)
     {
-        const string protectedJson = """
+        var protectedJson = includeHostedPolicy ? """
+            {"Fixture":false,"Advisory":false,"AllowedFamilies":[{"Author":"gpt","Reviewer":"claude"},{"Author":"gpt","Reviewer":"github-hosted"}],"AllowedScopes":["source","pull-request"],"AllowExactReuse":false,"Budget":{"MaximumRounds":4,"MaximumDuration":"00:00:30","MaximumTokens":8192,"MaximumCost":2.0},"ExemptionApprovers":[]}
+            """ : """
             {"Fixture":false,"Advisory":false,"AllowedFamilies":[{"Author":"gpt","Reviewer":"claude"}],"AllowedScopes":["source"],"AllowExactReuse":false,"Budget":{"MaximumRounds":2,"MaximumDuration":"00:00:30","MaximumTokens":4096,"MaximumCost":1.0},"ExemptionApprovers":[]}
             """;
         var protectedBytes = Encoding.UTF8.GetBytes(protectedJson);
@@ -179,7 +182,7 @@ public sealed class ProtectedReviewFixtureBootstrapTests
         var context = await run.Reader.ReadAsync(run.Checkout, "refs/heads/main", token);
         var now = DateTimeOffset.UtcNow;
         var request = new PlanningRequest("fixture/delivery-forge", "#11", "implement", "Protected review bootstrap fixture",
-            ["subject.txt", "policy/review.json"], ["excluded"], ["Same original Test issuer, actual protected policy"], "pr");
+            ["subject.txt", "policy/review.json"], ["excluded"], ["Same original Test issuer, actual protected policy"], initialCeiling);
         EvidenceItem[] evidence = [EvidenceItem.FromRepositoryFile(await run.Reader.ReadFileAsync(context, "subject.txt", token), now, [])];
         var plan = PlanFreezer.Freeze(new(request, context, evidence, [new("subject.txt", "fixture", "candidate")], [new("#11", [], "root")],
             [new("test", new("dotnet", [PlanCommandArgument.Literal("test")]), "PASS")],
@@ -187,7 +190,7 @@ public sealed class ProtectedReviewFixtureBootstrapTests
         var policyNode = new JsonObject
         {
             ["schemaVersion"] = "1.0.0", ["kind"] = "evidence-policy", ["policyId"] = "protected-review-bootstrap-fixture",
-            ["requiredGates"] = new JsonArray("test"), ["authorizedCeiling"] = "pr", ["requireIndependentReview"] = true,
+            ["requiredGates"] = new JsonArray("test"), ["authorizedCeiling"] = initialCeiling, ["requireIndependentReview"] = true,
             ["allowedNotApplicable"] = new JsonArray(), ["createdAt"] = now.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture)
         };
         policyNode["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(policyNode.ToJsonString()));
