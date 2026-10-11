@@ -191,17 +191,20 @@ public sealed partial class LocalSingleTests
         using var execution = new ExecutionCoordinator(store, worktrees, processes);
         var demand = Demand with { TimeLimit = TimeSpan.FromMinutes(5) };
         var closed = LocalSingleScheduler.Create(plan, Worker(repository, plan, "case-run"), demand, Budget(), store, execution, worktrees, repository.Reader);
-        using var cleanup = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        Exception? setupFailure = null;
         try
         {
             await closed.ReserveAsync(Cancellation);
-            Assert.True(await closed.StopAsync(cleanup.Token));
+            Assert.True(await closed.StopAsync(Cancellation));
         }
-        finally { Assert.True(await closed.StopAsync(cleanup.Token), closed.CleanupLimitation); }
+        catch (Exception exception) { setupFailure = exception; throw; }
+        finally { await SettleAndCloseFixtureAsync(closed, new DelayedFixtureControl(), setupFailure); }
         await store.AppendAsync("CASE-RUN-scheduler", "local-scheduler-checkpoint", new { profile = "local-single", phase = "prepared", runId = "CASE-RUN" }, Cancellation);
         var fresh = LocalSingleScheduler.Create(plan, Worker(repository, plan, "new-after-case"), demand, Budget(), store, execution, worktrees, repository.Reader);
+        Exception? caseFailure = null;
         try { await Assert.ThrowsAsync<SchedulingException>(() => fresh.ReserveAsync(Cancellation)); }
-        finally { Assert.True(await fresh.StopAsync(cleanup.Token), fresh.CleanupLimitation); }
+        catch (Exception exception) { caseFailure = exception; throw; }
+        finally { await SettleAndCloseFixtureAsync(fresh, new DelayedFixtureControl(), caseFailure); }
     }
 
     [Fact(Timeout = 600_000)]
