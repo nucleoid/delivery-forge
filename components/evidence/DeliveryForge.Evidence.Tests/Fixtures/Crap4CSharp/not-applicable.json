@@ -1,0 +1,110 @@
+{
+  "schemaVersion": "1.0",
+  "toolVersion": "0.1.0+1129c9d3280168b294f9fed1542f81ca716c6d53",
+  "complexityRulesetVersion": "callables-v1",
+  "evaluation": {
+    "invocationMode": "analyze",
+    "policy": {
+      "threshold": 8,
+      "allowMissingCoverage": false,
+      "comparisonOperator": "gt"
+    },
+    "scope": {
+      "logicalWorkspaceRoot": ".",
+      "sources": [
+        "Empty.cs"
+      ]
+    },
+    "contexts": [
+      {
+        "id": "0823f1a92585aa16cce683089f7a7ab9c14ccf7f4c86413e3de6bf4e3d233677",
+        "analysisMode": "syntaxOnly",
+        "project": null,
+        "targetFramework": "unknown",
+        "configuration": "unknown",
+        "sourceSetIdentity": null,
+        "externalRootIdentity": null
+      }
+    ],
+    "checks": [
+      {
+        "name": "testExecution",
+        "status": "notApplicable",
+        "reason": "tests.skippedSyntaxOnly",
+        "required": false
+      },
+      {
+        "name": "callableExemptions",
+        "status": "notApplicable",
+        "reason": "exemption.none",
+        "required": false
+      },
+      {
+        "name": "coverage",
+        "status": "pass",
+        "reason": "coverage.complete",
+        "required": true
+      },
+      {
+        "name": "crap",
+        "status": "notApplicable",
+        "reason": "crap.noKnownScores",
+        "required": true
+      }
+    ],
+    "metrics": [],
+    "findings": [],
+    "coverage": {
+      "methods": 0,
+      "known": 0,
+      "unknown": 0,
+      "reasons": {}
+    },
+    "artifacts": [
+      {
+        "kind": "source",
+        "path": "Empty.cs",
+        "contentIdentity": "0499d0d4187cdd838324ad658a303dd77c921254f7a5f2e6ab4a208180a920e7",
+        "identityStatus": "sha256"
+      }
+    ],
+    "decision": {
+      "completed": true,
+      "policyDecision": "notApplicable",
+      "reason": "crap.noKnownScores"
+    },
+    "provenance": {
+      "status": "unverified",
+      "basis": "none",
+      "postflightVerified": false,
+      "reusable": false,
+      "reasons": []
+    },
+    "coveragePathPolicy": {
+      "case": "auto",
+      "mappings": []
+    },
+    "coverageDiagnostics": [],
+    "callables": [],
+    "families": [],
+    "callableExemptions": [],
+    "exemptionErrors": []
+  },
+  "run": {
+    "invocationId": "00000000-0000-0000-0000-000000000001",
+    "startedAt": "2026-10-11T00:00:00Z",
+    "finishedAt": "2026-10-11T00:00:01Z",
+    "durationMilliseconds": 1000,
+    "commands": [],
+    "diagnosticLocations": [],
+    "artifacts": [],
+    "cancellation": {
+      "cancelled": false,
+      "timedOut": false,
+      "reason": null
+    },
+    "status": "completed",
+    "exitCode": 0,
+    "coverageEvidence": []
+  }
+}
