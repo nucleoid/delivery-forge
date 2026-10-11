@@ -113,9 +113,21 @@ internal static class ActualParentCrashOrchestrator
         }
         async Task PositiveExit(OwnedProcess owned, TimeSpan limit, CancellationToken current)
         {
+            var waitStarted = Stopwatch.GetTimestamp();
             await owned.Process.WaitForExitAsync(current).WaitAsync(limit, current);
-            var observed = artifacts.Processes.Observe(owned.Identity);
-            if (observed.Outcome != ProcessControlOutcome.AlreadyExited) throw new InvalidOperationException("Exact original driver exit remains unknown: " + observed.Reason);
+            while (true)
+            {
+                current.ThrowIfCancellationRequested();
+                if (Stopwatch.GetElapsedTime(waitStarted) >= limit) throw new TimeoutException("Original driver exit observation deadline exhausted.");
+                var observed = artifacts.Processes.Observe(owned.Identity);
+                if (Stopwatch.GetElapsedTime(waitStarted) >= limit) throw new TimeoutException("Original driver exit observation arrived after its deadline.");
+                if (observed.Outcome == ProcessControlOutcome.AlreadyExited) return;
+                if (observed.Outcome is not (ProcessControlOutcome.LiveOwned or ProcessControlOutcome.IdentityUnknown))
+                    throw new InvalidOperationException("Exact original driver exit remains unknown: " + observed.Reason);
+                var remaining = limit - Stopwatch.GetElapsedTime(waitStarted);
+                if (remaining <= TimeSpan.Zero) throw new TimeoutException("Original driver exit observation deadline exhausted.");
+                await Task.Delay(remaining < TimeSpan.FromMilliseconds(20) ? remaining : TimeSpan.FromMilliseconds(20), current);
+            }
         }
     }
 
