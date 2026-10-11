@@ -38,9 +38,15 @@ internal static class TestEvidence
                 invocationMode = "check",
                 policy = new { threshold = 30, allowMissingCoverage = false, comparisonOperator = "gt" },
                 scope = new { logicalWorkspaceRoot = ".", sources = new[] { "A.cs" } },
-                contexts = Array.Empty<object>(),
+                contexts = new[] { new { id = "fixture", analysisMode = "syntaxOnly", project = (string?)null,
+                    targetFramework = "unknown", configuration = "unknown", sourceSetIdentity = (string?)null,
+                    externalRootIdentity = (string?)null } },
                 checks = Array.Empty<object>(),
-                metrics = Array.Empty<object>(),
+                metrics = new[] { new { contextId = "fixture", path = "A.cs", methodIdentity = "fixture-method",
+                    signature = (string?)null, span = new { startLine = 1, endLine = 1 }, complexity = 1,
+                    coverage = unknown == 0 ? (double?)1 : null,
+                    crap = unknown == 0 ? (double?)(decision == "fail" ? 31 : 1) : null,
+                    coverageReason = unknown == 0 ? null : "coverage.unavailable" } },
                 findings = Array.Empty<object>(),
                 coverage = new { methods = 1, known = 1 - unknown, unknown, reasons = new { } },
                 artifacts = Array.Empty<object>(),
@@ -56,8 +62,8 @@ internal static class TestEvidence
                 diagnosticLocations = Array.Empty<object>(),
                 artifacts = Array.Empty<object>(),
                 cancellation = new { cancelled = false, timedOut = false, reason = (string?)null },
-                status = "completed",
-                exitCode = decision == "fail" ? 1 : 0
+                status = completed ? "completed" : "operationalError",
+                exitCode = decision switch { "fail" => 2, "unknown" => 1, _ => 0 }
             }
         });
 

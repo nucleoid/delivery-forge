@@ -1,0 +1,3 @@
+This fixture preserves the evaluation fields of a real installed Crap4CSharp syntax-only invocation built from source1129c9d3280168b294f9fed1542f81ca716c6d53. Invocation ID, timestamps and duration are replaced with synthetic values. The original raw bytes and package/executable/report hashes are retained privately by the handoff runner. The empty authored class has no callable methods; the tool reported completed/notApplicable/exit0 with zero methods.
+
+This is parser contract evidence. It does not prove compiled coverage mapping, project-aware provenance, real mutation, approved enforcement policy or production capability.

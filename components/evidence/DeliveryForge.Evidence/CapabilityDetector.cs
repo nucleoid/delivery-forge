@@ -57,7 +57,7 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
         if (versionResult.TimedOut || versionResult.Cancelled || versionResult.ExitCode != 0)
             return Unsupported(probe, "Version probe did not complete successfully.", versionInvocation, versionResult);
 
-        var version = ParseVersion(versionResult.StandardOutput, versionResult.StandardError);
+        var version = ParseVersion(probe, versionResult.StandardOutput, versionResult.StandardError);
         if (version is null || !VersionMatches(version, probe.RequiredVersionPrefix))
             return Unsupported(probe, "Observed executable version is missing or outside the protected policy range.", versionInvocation, versionResult);
 
@@ -153,8 +153,27 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
         return dotnet is null ? null : (dotnet.Value.Item1, new[] { "tool", "run", probe.Tool, "--" });
     }
 
-    private static string? ParseVersion(string stdout, string stderr)
+    private static string? ParseVersion(CapabilityProbe probe, string stdout, string stderr)
     {
+        // Crap4CSharp documents its informational version in JSON, not a --version flag.
+        // A configured syntax-only empty-input probe can use that endpoint without child commands.
+        if (probe.Tool == "crap4csharp" && stdout.TrimStart().StartsWith('{'))
+        {
+            try
+            {
+                using var report = JsonDocument.Parse(stdout);
+                var root = report.RootElement;
+                if (root.ValueKind != JsonValueKind.Object ||
+                    !root.TryGetProperty("schemaVersion", out var schema) || schema.ValueKind != JsonValueKind.String ||
+                    schema.GetString() != probe.DocumentedFormatVersion ||
+                    !root.TryGetProperty("toolVersion", out var reported) || reported.ValueKind != JsonValueKind.String)
+                    return null;
+                var value = reported.GetString()!;
+                var semanticVersion = VersionPattern().Match(value);
+                return semanticVersion.Success && semanticVersion.Groups[1].Value == value ? value : null;
+            }
+            catch (JsonException) { return null; }
+        }
         var match = VersionPattern().Match(stdout + "\n" + stderr);
         return match.Success ? match.Groups[1].Value : null;
     }
@@ -162,7 +181,8 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
     private static bool VersionMatches(string observed, string required) =>
         string.Equals(observed, required, StringComparison.Ordinal) ||
         observed.StartsWith(required + ".", StringComparison.Ordinal) ||
-        observed.StartsWith(required + "-", StringComparison.Ordinal);
+        observed.StartsWith(required + "-", StringComparison.Ordinal) ||
+        observed.StartsWith(required + "+", StringComparison.Ordinal);
 
     private static string HashExecutable(string executable) =>
         $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(executable)))}";
