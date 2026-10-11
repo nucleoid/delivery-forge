@@ -198,6 +198,7 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
                 if (!observation.IsClean) return false;
             }
             else if (registered.Contains(Worktree, comparison)) return false;
+            if (writerFence is not null && !await HasCurrentWriterNamespaceAsync(writerFence, cancellationToken)) return false;
             if (!await ArchiveAsync(cancellationToken, writerFence)) return false;
             if (!HasPlainOwnedArchiveRoot() || !HasSafeOwnedInventory(allowedEntries) ||
                 Processes.GetAllOwnedIdentities().Any(identity => Processes.Observe(identity).Outcome != ProcessControlOutcome.AlreadyExited)) return false;
@@ -213,15 +214,23 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
             if (currentRegistration.Length != registered.Length || currentRegistration.Any(path => !registered.Contains(path, comparison))) return false;
             if (Directory.Exists(Worktree) && (!(await Worktrees.ObserveAsync(Worktree, cancellationToken)).IsClean ||
                 writerFence is null || !IsPlainOwnedArchivePath(writerFence.DiagnosticLockPath))) return false;
+            if (writerFence is not null && !await HasCurrentWriterNamespaceAsync(writerFence, cancellationToken)) return false;
             if (Directory.Exists(Worktree)) await GitAsync(cancellationToken, "worktree", "remove", "--force", Worktree);
-            var finalRegistered = await GitAsync(cancellationToken, "worktree", "list", "--porcelain", "-z");
-            if (finalRegistered.Replace('\\', '/').Contains(Worktree.Replace('\\', '/'), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) return false;
+            var finalRegistered = (await GitAsync(cancellationToken, "worktree", "list", "--porcelain", "-z")).Split('\0')
+                .Where(item => item.StartsWith("worktree ", StringComparison.Ordinal)).Select(item => Path.GetFullPath(item[9..])).ToArray();
+            if (finalRegistered.Length != 1 || !comparison.Equals(finalRegistered[0], Repository)) return false;
             RequirePlainOutsideRepositories(Root);
             if (!File.ReadAllBytes(MarkerPath).SequenceEqual(_markerBytes)) return false;
             if (!HasSafeOwnedInventory(allowedEntries)) return false;
+            // Successful positively observed Git removal legitimately removes the writer
+            // pathname. Final admission needs that transition plus continued absence,
+            // rather than pretending an absent namespace can still produce Match.
+            if (Directory.Exists(Worktree) || File.Exists(Worktree) ||
+                (writerFence is not null && FormerWriterEntryExists(writerFence.DiagnosticLockPath))) return false;
             foreach (var file in Directory.EnumerateFiles(Root, "*", SearchOption.AllDirectories))
                 File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
             if (Processes.GetAllOwnedIdentities().Any(identity => Processes.Observe(identity).Outcome != ProcessControlOutcome.AlreadyExited)) return false;
+            if (writerFence is not null && FormerWriterEntryExists(writerFence.DiagnosticLockPath)) return false;
             Directory.Delete(Root, recursive: true);
             _removed = true;
             await _artifacts.WriteNewJsonAsync("runtime-cleanup.json", new { fixture = true, Root, RuntimeId, actualOwnedQuiescence = true, gitRegistrationRemoved = true, archivedBeforeDeletion = true }, cancellationToken);
@@ -297,6 +306,7 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
     {
         cancellationToken.ThrowIfCancellationRequested();
         if (FixtureArchiveEntryBarrier is { } barrier) await barrier(cancellationToken);
+        if (writerFence is not null && !await HasCurrentWriterNamespaceAsync(writerFence, cancellationToken)) return false;
         if (!HasPlainOwnedArchiveRoot())
         {
             _artifacts.RetainArtifacts("Archive refused: runtime root/ancestor/marker ownership cannot be established.");
@@ -328,6 +338,7 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
                 if (writerFence is not null && string.Equals(Path.GetFullPath(entry), writerFence.DiagnosticLockPath,
                     OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
                 {
+                    if (!await HasCurrentWriterNamespaceAsync(writerFence, cancellationToken)) return false;
                     await using var destination = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None);
                     await destination.WriteAsync(writerFence.GetDiagnosticBytes().ToArray(), cancellationToken);
                 }
@@ -337,6 +348,30 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
         await _artifacts.WriteNewJsonAsync("runtime-archive-index-" + Guid.NewGuid().ToString("N") + ".json",
             new { fixture = true, Root, archive, count, bytes }, cancellationToken);
         return true;
+    }
+
+    private async Task<bool> HasCurrentWriterNamespaceAsync(WriterLease writerFence, CancellationToken cancellationToken)
+    {
+        if (!HasPlainOwnedArchiveRoot() || !IsPlainOwnedArchivePath(writerFence.DiagnosticLockPath)) return false;
+        var observation = writerFence.ObserveCurrentNamespaceIdentity();
+        if (observation.Outcome == WriterNamespaceIdentityOutcome.Match) return true;
+        _artifacts.RetainArtifacts("Current writer namespace is unproved: " + observation.Reason);
+        await _artifacts.WriteNewJsonAsync("writer-namespace-refused-" + Guid.NewGuid().ToString("N") + ".json", new
+        {
+            fixture = true, productionCertified = false, observation, retained = true,
+            limitation = "Fresh live-handle observation is non-authorizing data; no fallback to path/token/bytes or filesystem atomicity claim."
+        }, cancellationToken);
+        return false;
+    }
+
+    private static bool FormerWriterEntryExists(string path)
+    {
+        var parent = Path.GetDirectoryName(path)!;
+        if (!Directory.Exists(parent)) return false; // Plain inventory/ancestor proof is required separately.
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        // Namespace enumeration includes dangling links, unlike File.Exists/Directory.Exists.
+        return Directory.EnumerateFileSystemEntries(parent).Any(entry =>
+            string.Equals(Path.GetFullPath(entry), Path.GetFullPath(path), comparison));
     }
 
     private bool HasPlainOwnedArchiveRoot()

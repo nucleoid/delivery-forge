@@ -432,6 +432,7 @@ public sealed class WriterLease : IDisposable
 {
     private readonly string _path;
     private readonly FileStream _stream;
+    private readonly object _lifetime = new();
     private bool _disposed;
 
     internal WriterLease(string path, FileStream stream, string runId, string writerToken)
@@ -445,30 +446,45 @@ public sealed class WriterLease : IDisposable
     public string RunId { get; }
     public string WriterToken { get; }
     public string DiagnosticLockPath => _path;
-    public WriterNamespaceIdentityObservation ObserveCurrentNamespaceIdentity() =>
-        throw new NotImplementedException("Live held-handle/current-namespace identity comparison requires compiled RED.");
+    public WriterNamespaceIdentityObservation ObserveCurrentNamespaceIdentity()
+    {
+        lock (_lifetime)
+        {
+            return _disposed ? new(WriterNamespaceIdentityOutcome.Unknown, "Owner lease is disposed; no native identity proof.")
+                : WriterNamespaceIdentityReader.Observe(_stream.SafeFileHandle, _path);
+        }
+    }
     public IReadOnlyList<byte> GetDiagnosticBytes()
     {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        if (_stream.Length > 8192) throw new WorktreeBoundaryException("Writer diagnostic bytes exceed the finite bound.");
-        var bytes = new byte[checked((int)_stream.Length)];
-        _stream.Position = 0;
-        _stream.ReadExactly(bytes);
-        _stream.Position = 0;
-        return Array.AsReadOnly(bytes); // The caller never receives the mutable owner-held array or stream.
+        lock (_lifetime)
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (_stream.Length > 8192) throw new WorktreeBoundaryException("Writer diagnostic bytes exceed the finite bound.");
+            var bytes = new byte[checked((int)_stream.Length)];
+            _stream.Position = 0;
+            _stream.ReadExactly(bytes);
+            _stream.Position = 0;
+            return Array.AsReadOnly(bytes); // The caller never receives the mutable owner-held array or stream.
+        }
     }
 
     internal void Abandon()
     {
-        Dispose();
-        File.Delete(_path);
+        lock (_lifetime)
+        {
+            Dispose();
+            File.Delete(_path);
+        }
     }
 
     public void Dispose()
     {
-        if (_disposed) return;
-        _disposed = true;
-        _stream.Dispose();
+        lock (_lifetime)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _stream.Dispose();
+        }
     }
 }
 
