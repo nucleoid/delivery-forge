@@ -105,15 +105,87 @@ public sealed class GitHubCliAdapterTests
         Assert.Equal(0, runner.Mutations);
     }
 
+    [Theory]
+    [InlineData("head")]
+    [InlineData("checks")]
+    [InlineData("protection")]
+    public async Task Exact_remote_drift_or_unknown_evidence_blocks_cli_send(string fault)
+    {
+        var runner = new CliFixtureRunner { Fault = fault };
+        var parent = Parent();
+        var result = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
+            .MergeNormalAsync(Mutation(), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Rejected, result.Outcome);
+        Assert.Equal(0, runner.Mutations);
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task Ignored_action_cancellation_returns_uncertain_and_cannot_start_another_action()
+    {
+        var runner = new CliFixtureRunner { BlockMutation = true };
+        var parent = Parent();
+        var configuration = Configuration() with { ActionTimeout = TimeSpan.FromMilliseconds(25) };
+        var adapter = new GitHubCliAdapter(configuration, runner, parent, parent.IssueGrant());
+        try
+        {
+            var result = await adapter.MergeNormalAsync(Mutation(), TestContext.Current.CancellationToken)
+                .WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+            Assert.Equal(GitHostMutationOutcome.Uncertain, result.Outcome);
+            var replay = await adapter.MergeNormalAsync(Mutation(), TestContext.Current.CancellationToken)
+                .WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+            Assert.Equal(GitHostMutationOutcome.Uncertain, replay.Outcome);
+            Assert.Equal(1, runner.Mutations);
+        }
+        finally { runner.ReleaseMutation.TrySetResult(); }
+    }
+
+    [Fact]
+    public async Task Cli_failure_after_possible_action_remains_uncertain_without_blind_retry()
+    {
+        var runner = new CliFixtureRunner { FailMutation = true };
+        var parent = Parent();
+        var adapter = new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant());
+        var first = await adapter.MergeNormalAsync(Mutation(), TestContext.Current.CancellationToken);
+        var replay = await adapter.MergeNormalAsync(Mutation(), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Uncertain, first.Outcome);
+        Assert.Equal(GitHostMutationOutcome.Uncertain, replay.Outcome);
+        Assert.Equal(1, runner.Mutations);
+    }
+
+    [Fact(Timeout = 10_000)]
+    public async Task Local_process_capture_is_complete_and_bounded_without_invoking_github()
+    {
+        var executable = OperatingSystem.IsWindows() ? Environment.GetEnvironmentVariable("ComSpec")! : "/bin/sh";
+        var configuration = Configuration() with
+        {
+            ExecutablePath = executable,
+            ExecutableIdentity = "sha256:" + Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(executable)))
+        };
+        var arguments = OperatingSystem.IsWindows() ? new[] { "/d", "/c", "echo fixture-output" } : new[] { "-c", "printf fixture-output" };
+        var result = await new ProcessGitHubCliExecutor(configuration).ExecuteAsync(arguments, TestContext.Current.CancellationToken);
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains("fixture-output", result.StandardOutput, StringComparison.Ordinal);
+        Assert.False(result.ResidualProcessUncertain);
+    }
+
     private sealed class CliFixtureRunner : IGitHubCliExecutor
     {
         public List<IReadOnlyList<string>> Calls { get; } = [];
         public bool PrExists { get; set; } = true;
         public bool MergeQueue { get; set; }
+        public string? Fault { get; set; }
+        public bool BlockMutation { get; set; }
+        public bool FailMutation { get; set; }
+        public TaskCompletionSource ReleaseMutation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int Mutations => Calls.Count(call => call.Count > 1 && call[0] == "pr" && call[1] is "merge" or "create" or "edit");
-        public Task<GitHubCliResult> ExecuteAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+        public async Task<GitHubCliResult> ExecuteAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
         {
             Calls.Add(arguments.ToArray());
+            if (arguments.Count > 1 && arguments[0] == "pr" && arguments[1] is "merge" or "create" or "edit")
+            {
+                if (BlockMutation) await ReleaseMutation.Task;
+                if (FailMutation) return new(1, "", "fixture lost result");
+            }
             var endpoint = arguments.Count > 1 ? arguments[1] : "";
             var body = arguments[0] == "--version" ? "gh version 2.80.0 (2025-10-01)" : arguments[0] == "auth" ? "Logged in" :
                 arguments[0] == "pr" ? "https://github.com/fixture/forge-disposable-10/pull/10" :
@@ -124,7 +196,12 @@ public sealed class GitHubCliAdapterTests
                 endpoint.Contains("/rules/branches/", StringComparison.Ordinal) ? MergeQueue ? "[{\"type\":\"merge_queue\"}]" : "[]" :
                 endpoint.Contains("/check-runs", StringComparison.Ordinal) ? "{\"total_count\":0,\"check_runs\":[]}" :
                 endpoint.EndsWith("/status", StringComparison.Ordinal) ? "{\"state\":\"success\",\"statuses\":[{\"context\":\"ci\",\"state\":\"success\"}]}" : "{}";
-            return Task.FromResult(new GitHubCliResult(0, body, ""));
+            if (Fault == "head" && endpoint.Contains("git/ref/heads/work", StringComparison.Ordinal))
+                body = "{\"object\":{\"sha\":\"" + PublicationFixture.Commit('9') + "\"}}";
+            if (Fault == "checks" && endpoint.EndsWith("/status", StringComparison.Ordinal))
+                body = "{\"state\":\"pending\",\"statuses\":[{\"context\":\"ci\",\"state\":\"pending\"}]}";
+            if (Fault == "protection" && endpoint.EndsWith("/protection", StringComparison.Ordinal)) body = "{}";
+            return new(0, body, "");
         }
         private string PrJson()
         {
