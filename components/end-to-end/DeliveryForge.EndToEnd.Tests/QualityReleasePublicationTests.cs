@@ -55,7 +55,8 @@ public sealed class QualityReleasePublicationTests
     private static async Task<OwnedQualityInterruptionRuntime> Runtime(OwnedScenarioRun artifacts, QualityInterruptionClock clock, CancellationToken token)
     {
         var seed = Path.Combine(artifacts.Root, "plain-source-only"); Directory.CreateDirectory(seed);
-        await artifacts.WriteNewJsonAsync("plain-source-only/seed.json", new { fixture = true }, token);
+        await OwnedQualityInterruptionRuntime.WriteNewAsync(Path.Combine(seed, "seed.json"),
+            DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new { fixture = true })), token);
         var runtime = new OwnedQualityInterruptionRuntime(artifacts, clock, token);
         runtime.BeginStage(clock.WorkBudget(30));
         await runtime.InitializeAsync(seed, token);
