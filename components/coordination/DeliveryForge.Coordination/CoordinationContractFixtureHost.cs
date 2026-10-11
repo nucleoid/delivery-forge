@@ -114,6 +114,12 @@ public sealed class CoordinationContractFixtureHost
             return ObserveRelease(result);
         }, cancellationToken);
 
+    // RED seam: exact pinned receiver/resources and the external fixture writer decide cleanup only.
+    // Persisted lifecycle IDs and takeover-reference data cannot construct dispatch authority.
+    public Task<CoordinationFixtureObservation<ReleaseResult>> RecoverForCleanupAsync(
+        string lifecycleId, string fixtureTakeoverReference, CancellationToken cancellationToken = default) =>
+        throw new NotImplementedException("Fixture cleanup recovery requires compiled public-boundary RED before delegation.");
+
     private CoordinationFixtureObservation<ReleaseResult> ObserveRelease(ReleaseResult result)
     {
         lock (_gate)

@@ -5,7 +5,7 @@ using DeliveryForge.Coordination;
 namespace DeliveryForge.EndToEnd.Tests;
 
 // Allowed external coordination fake. No network/service endpoint or production capability is supplied.
-internal sealed class CountingCoordinationFixtureTransport(bool marked = true, bool progressingRenewal = false, bool malformedAcquire = false) : ICoordinationTransport
+internal sealed class CountingCoordinationFixtureTransport(bool marked = true, bool progressingRenewal = false, bool malformedAcquire = false, bool inspectOwnedLease = false) : ICoordinationTransport
 {
     private readonly List<string> _calls = [];
     private LeaseOwner? _owner;
@@ -47,6 +47,11 @@ internal sealed class CountingCoordinationFixtureTransport(bool marked = true, b
     public Task<InspectTransportResult> InspectAsync(InspectRequest request, CancellationToken cancellationToken = default)
     {
         _calls.Add("inspect");
+        if (inspectOwnedLease && _lease is not null && request.Owner == _owner)
+        {
+            var server = DateTimeOffset.Parse("2030-01-01T00:00:00Z", System.Globalization.CultureInfo.InvariantCulture);
+            return Task.FromResult(InspectTransportResult.HeldByCaller(_lease, "1", server, server + TimeSpan.FromSeconds(300)));
+        }
         return Task.FromResult(_lease is null ? InspectTransportResult.Available() : InspectTransportResult.HeldByOther());
     }
 
