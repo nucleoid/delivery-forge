@@ -126,7 +126,8 @@ public sealed class GateRunner
         {
             var now = DateTimeOffset.UtcNow;
             execution = new CommandResult(
-                null, string.Empty, $"Command execution failed: {exception.Message}", false, false, now, now);
+                null, string.Empty, $"Command execution failed: {exception.Message}", false, false, now, now,
+                OwnedProcessQuiescent: false);
         }
         var artifactHashes = await WriteArtifactsAsync(gateDirectory, execution, CancellationToken.None).ConfigureAwait(false);
         string? artifactBindingError = null;

@@ -156,7 +156,7 @@ internal static class QualityInterruptionOrchestrator
                         if (new FileInfo(dirtyStatus).Length == 0) throw new IOException("Intended tracked source drift did not produce dirty Git status.");
                     }
                     if (phase is QualityInterruptionPhase.ColdControl or QualityInterruptionPhase.SourceDrift)
-                        await WriteNew(release, Encoding.UTF8.GetBytes(nonce), cancellationToken);
+                        await QualityReleasePublisher.PublishAsync(runtime, barrier, nonce, null, cancellationToken);
                     else if (phase == QualityInterruptionPhase.CallerCancellation)
                         caller.Cancel();
                     if (lateBarrier is not null)

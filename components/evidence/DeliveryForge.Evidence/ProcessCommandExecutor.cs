@@ -75,6 +75,10 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         var timedOut = false;
         var cancelled = false;
         var killSucceeded = true;
+        var killAttempted = false;
+        string? killExceptionType = null;
+        string? killExceptionDetail = null;
+        var killExceptionDetailTruncated = false;
         var exitWaitCompleted = true;
         try
         {
@@ -84,7 +88,8 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         {
             timedOut = timeoutSource.IsCancellationRequested && !cancellationToken.IsCancellationRequested;
             cancelled = !timedOut;
-            killSucceeded = TryKillTree(process);
+            killSucceeded = TryKillTree(process, out killAttempted, out killExceptionType,
+                out killExceptionDetail, out killExceptionDetailTruncated);
             try
             {
                 await process.WaitForExitAsync(CancellationToken.None)
@@ -121,23 +126,73 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             startedAt,
             DateTimeOffset.UtcNow,
             drainCompleted && processExited &&
-            (!timedOut && !cancelled || killSucceeded && exitWaitCompleted));
+            (!timedOut && !cancelled || killSucceeded && exitWaitCompleted))
+        {
+            LifecycleDiagnostics = new(killAttempted, killAttempted && killSucceeded, killExceptionType, killExceptionDetail,
+                killExceptionDetailTruncated, exitWaitCompleted, processExited, drainCompleted,
+                (int)Math.Clamp(_waitTimeout.TotalMilliseconds, 0, int.MaxValue),
+                ObserveStream(stdoutTask), ObserveStream(stderrTask))
+        };
     }
 
-    private bool TryKillTree(Process process)
+    private bool TryKillTree(Process process, out bool attempted, out string? exceptionType,
+        out string? exceptionDetail, out bool detailTruncated)
     {
+        attempted = false; exceptionType = null; exceptionDetail = null; detailTruncated = false;
         try
         {
             if (_hasExited(process))
                 return false;
 
+            attempted = true;
             _killTree(process);
             return true;
         }
         catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException)
         {
+            exceptionType = exception.GetType().FullName;
+            (exceptionDetail, detailTruncated) = BoundedExceptionDetail(exception);
             return false;
         }
+    }
+
+    private static CommandStreamObservation ObserveStream(Task<string> task)
+    {
+        var complete = task.IsCompletedSuccessfully;
+        var faulted = task.IsFaulted;
+        var cancelled = task.IsCanceled;
+        if (faulted) _ = task.Exception;
+        if (!task.IsCompleted)
+            _ = task.ContinueWith(static late => { _ = late.Exception; }, CancellationToken.None,
+                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        return new(complete, faulted, cancelled, complete ? task.Result : null);
+    }
+
+    private static (string Detail, bool Truncated) BoundedExceptionDetail(Exception exception)
+    {
+        const int limit = 2048;
+        var builder = new System.Text.StringBuilder();
+        var pending = new Stack<Exception>(); pending.Push(exception);
+        var count = 0; var truncated = false;
+        while (pending.TryPop(out var current))
+        {
+            if (++count > 8 || builder.Length >= limit) { truncated = true; break; }
+            var type = current.GetType().FullName ?? current.GetType().Name;
+            var message = current is AggregateException ? "aggregate kill failure" : current.Message;
+            var text = type + ": " + message +
+                (current is System.ComponentModel.Win32Exception native ? " (Win32=" + native.NativeErrorCode + ")" : "") + "\n";
+            var length = Math.Min(limit - builder.Length, text.Length);
+            builder.Append(text.AsSpan(0, length));
+            truncated |= length != text.Length;
+            if (current is AggregateException aggregate)
+            {
+                var take = Math.Min(8, aggregate.InnerExceptions.Count);
+                truncated |= take != aggregate.InnerExceptions.Count;
+                for (var index = take - 1; index >= 0; index--) pending.Push(aggregate.InnerExceptions[index]);
+            }
+            else if (current.InnerException is not null) pending.Push(current.InnerException);
+        }
+        return (builder.ToString(), truncated);
     }
 
     private bool ObserveHasExited(Process process)
