@@ -187,9 +187,30 @@ public sealed class WorktreeManager
         return exitCode;
     }
 
-    private async Task<(int ExitCode, string Stdout, string Stderr)> RunGitAsync(
-        string cwd, CancellationToken cancellationToken, params string[] arguments)
+    private Task<(int ExitCode, string Stdout, string Stderr)> RunGitAsync(
+        string cwd, CancellationToken cancellationToken, params string[] arguments) =>
+        RunGitCoreAsync(cwd, cancellationToken, disableFilters: true, arguments);
+
+    private async Task<(int ExitCode, string Stdout, string Stderr)> RunGitCoreAsync(
+        string cwd, CancellationToken cancellationToken, bool disableFilters, params string[] arguments)
     {
+        var filterNames = new HashSet<string>(StringComparer.Ordinal);
+        if (disableFilters)
+        {
+            var configuration = await RunGitCoreAsync(cwd, cancellationToken, false, "config", "--includes", "--name-only", "--get-regexp", "^filter\\.").ConfigureAwait(false);
+            if (configuration.ExitCode is not (0 or 1) || configuration.Stdout.Length > 65536)
+                throw new WorktreeBoundaryException("Effective Git filters could not be inspected within the finite boundary.");
+            foreach (var key in configuration.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(key => key.TrimEnd('\r')))
+            {
+                var separator = key.LastIndexOf('.');
+                if (!key.StartsWith("filter.", StringComparison.OrdinalIgnoreCase) || separator <= 7 || key.Any(char.IsControl))
+                    throw new WorktreeBoundaryException("Git filter configuration keys are ambiguous.");
+                var name = key[7..separator];
+                if (name.Length > 256 || name.Contains('=')) throw new WorktreeBoundaryException("Git filter name is unsupported.");
+                filterNames.Add(name);
+                if (filterNames.Count > 128) throw new WorktreeBoundaryException("Git filters exceed the finite configuration bound.");
+            }
+        }
         var start = new ProcessStartInfo(_gitExecutable)
         {
             WorkingDirectory = cwd,
@@ -206,6 +227,15 @@ public sealed class WorktreeManager
         start.Environment["GIT_TERMINAL_PROMPT"] = "0";
         start.ArgumentList.Add("-c"); start.ArgumentList.Add("core.hooksPath=" + disabledHooks);
         start.ArgumentList.Add("-c"); start.ArgumentList.Add("core.fsmonitor=false");
+        // Checkout/status use literal repository bytes, never external content-filter processes.
+        foreach (var filter in filterNames)
+        {
+            foreach (var setting in new[] { "process=", "smudge=", "clean=", "required=false" })
+            {
+                start.ArgumentList.Add("-c");
+                start.ArgumentList.Add("filter." + filter + "." + setting);
+            }
+        }
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new WorktreeBoundaryException("Could not start Git.");
         var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);

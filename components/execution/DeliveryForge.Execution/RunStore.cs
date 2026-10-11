@@ -61,6 +61,31 @@ public sealed class RunStore
         }
     }
 
+    public async Task<IReadOnlyList<string>> DiscoverRunIdsAsync(CancellationToken cancellationToken = default)
+    {
+        var runs = Path.Combine(_root, "runs");
+        if (!Directory.Exists(runs)) return [];
+        var directories = Directory.EnumerateDirectories(runs).Take(4097).ToArray();
+        if (directories.Length > 4096) throw new RunStoreCorruptionException("Run registry exceeds the finite discovery bound.");
+        var identities = new List<string>();
+        foreach (var directory in directories)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) throw new RunStoreCorruptionException("Run registry contains a reparse/symlink directory.");
+            var first = Directory.EnumerateFiles(directory, "*-sha256-*.json").Order(StringComparer.Ordinal).FirstOrDefault()
+                ?? throw new RunStoreCorruptionException("Run namespace has no identifiable immutable record; cleanup/reconciliation is required.");
+            if ((File.GetAttributes(first) & FileAttributes.ReparsePoint) != 0 || new FileInfo(first).Length > 16 * 1024 * 1024)
+                throw new RunStoreCorruptionException("Run identity record is a reparse entry or exceeds the finite discovery bound.");
+            using var document = JsonDocument.Parse(await File.ReadAllBytesAsync(first, cancellationToken).ConfigureAwait(false));
+            var runId = document.RootElement.GetProperty("runId").GetString() ?? throw new RunStoreCorruptionException("Run identity is missing.");
+            ValidateName(runId, nameof(runId));
+            if (!string.Equals(Path.GetFullPath(directory), GetRunDirectory(runId), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                throw new RunStoreCorruptionException("Run identity does not match its hashed storage namespace.");
+            await RecoverAsync(runId, cancellationToken).ConfigureAwait(false);
+            identities.Add(runId);
+        }
+        return identities.AsReadOnly();
+    }
     public async Task<RunRecovery> RecoverAsync(string runId, CancellationToken cancellationToken = default)
     {
         ValidateName(runId, nameof(runId));

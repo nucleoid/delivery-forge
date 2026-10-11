@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using System.Text.Json;
 using DeliveryForge.Execution;
 using DeliveryForge.Execution.Git;
@@ -16,6 +17,7 @@ public sealed class LocalDispatchReservation
 // One process-local parent lane, not distributed ownership. No native agent is launched here.
 public sealed class LocalSingleScheduler
 {
+    private static readonly ConcurrentDictionary<string, byte> ObservedClosedRuns = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private static readonly SemaphoreSlim LocalParentLane = new(1, 1);
     private readonly SemaphoreSlim _serial = new(1, 1);
     private readonly FrozenPlan _plan;
@@ -100,6 +102,7 @@ public sealed class LocalSingleScheduler
                 if ((await _store.RecoverAsync(_worker.RunId, deadline.Token).ConfigureAwait(false)).Records.Count != 0 ||
                     (await _store.RecoverAsync(JournalRunId, deadline.Token).ConfigureAwait(false)).Records.Count != 0)
                     throw new SchedulingException("Existing manifests/checkpoints are recovery data; they cannot create new live reservations.");
+                await RejectUnreconciledPriorRunsAsync(deadline.Token).ConfigureAwait(false);
                 await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
                 EnsureControls();
                 _resources = _budget.Allocate(_demand);
@@ -151,6 +154,37 @@ public sealed class LocalSingleScheduler
         finally { _serial.Release(); }
     }
 
+    public async Task<AgentRequest> ResumeAsync(LocalDispatchReservation reservation, CancellationToken cancellationToken = default)
+    {
+        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_uncertain || Volatile.Read(ref _stopped) != 0 || Volatile.Read(ref _paused) == 0 || !_prepared ||
+                !ReferenceEquals(reservation, _ticket) || !_laneHeld || _resources is null)
+                throw new SchedulingException("Resume requires this live parent's paused ticket; checkpoint data cannot recreate it.");
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            deadline.CancelAfter(Remaining());
+            await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
+            var resumed = await _execution.ResumeAsync(_worker.RunId, deadline.Token).WaitAsync(TimeSpan.FromSeconds(10), deadline.Token).ConfigureAwait(false);
+            if (resumed.Reconciliation.Action != ReconciliationAction.ResumeDispatch || resumed.Record is null)
+            {
+                _uncertain = true;
+                throw new SchedulingException("Execution live-fact reconciliation did not authorize resume; capacity remains reserved.");
+            }
+            var recovery = await _store.RecoverAsync(_worker.RunId, deadline.Token).ConfigureAwait(false);
+            var prepared = _store.ReadPayload<PreparedWorkerRecord>(recovery.Records.Single(record => record.Kind == "worker-prepared"));
+            if (prepared.Request.PlanIdentity != _worker.PlanIdentity || prepared.Request.AuthorizationCeiling != _worker.AuthorizationCeiling ||
+                prepared.Request.RequestIdentity != WorkerEnvelope.ComputeRequestIdentity(prepared.Request))
+                throw new SchedulingException("Recovered worker differs from the immutable parent plan or ceiling.");
+            if (Volatile.Read(ref _stopped) != 0) throw new SchedulingException("Stop arrived during resume reconciliation.");
+            Interlocked.Exchange(ref _paused, 0);
+            await PersistAsync("resumed", deadline.Token).ConfigureAwait(false);
+            return prepared.Request;
+        }
+        catch { _uncertain = true; throw; }
+        finally { _serial.Release(); }
+    }
+
     public async Task PauseAsync(CancellationToken cancellationToken = default)
     {
         Interlocked.Exchange(ref _paused, 1);
@@ -182,12 +216,24 @@ public sealed class LocalSingleScheduler
                 if (!result.Quiescent) { _uncertain = true; return false; }
             }
             await PersistAsync("stopped", cancellationToken).ConfigureAwait(false);
+            ObservedClosedRuns.TryAdd(Path.Combine(_store.RootPath, _worker.RunId), 0);
+            ObservedClosedRuns.TryAdd(Path.Combine(_store.RootPath, JournalRunId), 0);
             Release();
             return true;
         }
         finally { _serial.Release(); }
     }
 
+    private async Task RejectUnreconciledPriorRunsAsync(CancellationToken cancellationToken)
+    {
+        foreach (var runId in await _store.DiscoverRunIdsAsync(cancellationToken).ConfigureAwait(false))
+        {
+            if (ObservedClosedRuns.ContainsKey(Path.Combine(_store.RootPath, runId))) continue;
+            var recovery = await _store.RecoverAsync(runId, cancellationToken).ConfigureAwait(false);
+            if (recovery.Records.Any(record => record.Kind is "local-scheduler-checkpoint" or "worker-prepared"))
+                throw new SchedulingException("Prior local run requires fresh child/writer/host reconciliation; stored terminal or active claims cannot authorize another run.");
+        }
+    }
     private async Task CheckFreshBaseAsync(CancellationToken cancellationToken)
     {
         _nativeQuiescenceKnown = false;
