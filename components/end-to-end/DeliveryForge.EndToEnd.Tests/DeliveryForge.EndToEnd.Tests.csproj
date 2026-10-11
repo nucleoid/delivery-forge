@@ -13,6 +13,7 @@
     <ProjectReference Include="../../coordination/DeliveryForge.Coordination/DeliveryForge.Coordination.csproj" />
     <ProjectReference Include="../../evidence/DeliveryForge.Evidence/DeliveryForge.Evidence.csproj" />
     <ProjectReference Include="../../review/DeliveryForge.Review/DeliveryForge.Review.csproj" />
+    <ProjectReference Include="../../scheduling/DeliveryForge.Scheduling/DeliveryForge.Scheduling.csproj" />
   </ItemGroup>
   <ItemGroup>
     <None Include="../scenario-matrix.json" Link="scenario-matrix.json" CopyToOutputDirectory="PreserveNewest" />

@@ -93,6 +93,10 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
             limitations = [observedQuality.Reason, .. observedQuality.Limitations,
                 "Owned untrusted-input admission only; no actual quality producer, quality PASS or full-profile certificate."];
         }
+        else if (name is "scheduling.unknown-map-contention" or "scheduling.real-integrated-prerequisite" or "scheduling.stale-base-before-provision")
+        {
+            throw new NotImplementedException("Public scheduling safety orchestration requires compiled behavior RED on the actual integrated #9 base.");
+        }
         else
         {
             limitations = ["This scenario remains planned and has no executed behavior evidence: " + name,

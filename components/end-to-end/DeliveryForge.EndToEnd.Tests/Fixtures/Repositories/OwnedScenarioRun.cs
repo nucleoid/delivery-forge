@@ -8,7 +8,7 @@ namespace DeliveryForge.EndToEnd.Tests;
 // Real file/Git/process boundaries. This harness issues no worker, reviewer, lease or publication authority.
 public sealed class OwnedScenarioRun : IAsyncDisposable
 {
-    public const string InitialIntegratedBase = "0ec6c9d18c660d399c9b171aba4e6c09952f731a";
+    public const string InitialIntegratedBase = "8ad640d143869e56b5dfcd1cd359661735200f48";
     private readonly string _ownershipToken = Guid.NewGuid().ToString("N");
     private readonly string _git;
     private int _commandSequence;
