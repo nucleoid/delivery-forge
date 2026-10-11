@@ -56,8 +56,8 @@ internal static class TestEvidence
                 diagnosticLocations = Array.Empty<object>(),
                 artifacts = Array.Empty<object>(),
                 cancellation = new { cancelled = false, timedOut = false, reason = (string?)null },
-                status = "completed",
-                exitCode = decision == "fail" ? 1 : 0
+                status = completed ? "completed" : "operationalError",
+                exitCode = decision switch { "fail" => 2, "unknown" => 1, _ => 0 }
             }
         });
 
