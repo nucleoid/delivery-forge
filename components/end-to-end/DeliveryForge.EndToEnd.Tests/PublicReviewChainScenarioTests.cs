@@ -133,6 +133,9 @@ public sealed class PublicReviewChainScenarioTests
     private static async Task<PublicReviewSetup> Setup(OwnedScenarioRun artifacts, long started, CancellationToken token)
     {
         var baseCommit = await artifacts.GitAsync(token, "rev-parse", "HEAD");
+        // Preserve the protected main ref. The public reader distinguishes its Commit/Tree
+        // from the candidate working HEAD; PlanFreezer pins the former, review captures the latter.
+        await artifacts.GitAsync(token, "checkout", "-q", "-b", "review-candidate");
         await File.WriteAllTextAsync(Path.Combine(artifacts.Checkout, "subject.txt"), "actual candidate review patch\n", token);
         await artifacts.GitAsync(token, "add", "--", "subject.txt");
         await artifacts.GitAsync(token, "-c", "user.name=ReviewFixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "actual review candidate");
@@ -165,19 +168,19 @@ public sealed class PublicReviewChainScenarioTests
             throw new InvalidOperationException("Actual bounded owner Git preparation did not issue a positively settled context: " + preparation.Observation.Reason);
         using var controlled = preparation.Context;
         using var capture = CancellationTokenSource.CreateLinkedTokenSource(token); capture.CancelAfter(TimeSpan.FromSeconds(15));
-        var actualPatch = await GitPatchIdentity.ComputeAsync(controlled, baseCommit, context.Commit, plan.ContractIdentity,
+        var actualPatch = await GitPatchIdentity.ComputeAsync(controlled, baseCommit, context.HeadCommit, plan.ContractIdentity,
             new Dictionary<string, string> { ["plan-contract"] = Hash(plan.PlanContractBytes), ["fixture-evidence-policy-input"] = Hash(policyBytes) }, capture.Token);
         var rawIndex = Hash(await File.ReadAllBytesAsync(Path.Combine(artifacts.Checkout, ".git", "index"), token));
         await artifacts.WriteNewJsonAsync("public-review-real-git-setup.json", new
         {
             fixture = true, productionAccepted = false, firstFullRealRunCertified = false, seed = 11019,
             integratedBaseCommit = artifacts.IntegratedSource.Commit, implementationHead = artifacts.IntegratedSource.HeadCommit,
-            baseCommit, headCommit = context.Commit, headTree = context.Tree, actualPatch, rawIndexSha256 = rawIndex,
+            baseCommit, protectedBaseTree = context.Tree, headCommit = context.HeadCommit, headTree = context.HeadTree, actualPatch, rawIndexSha256 = rawIndex,
             wallSeconds = 120, ordinaryGitSeconds = 15, maximumCaptureBytes = 1024 * 1024, cpu = 2, memoryMiB = 4096,
             setupElapsedSeconds = Stopwatch.GetElapsedTime(started).TotalSeconds,
             limitation = "Pure fixture policy input only. Bounded owner preparation has its own proper RED/GREEN prerequisite before distinct chain RED. No synchronous unbounded fallback. Strong protected-policy composition remains required."
         }, token);
-        return new(artifacts, baseCommit, context.Commit, context.Tree, plan, policyDocument.Identity, git, actualPatch, rawIndex);
+        return new(artifacts, baseCommit, context.HeadCommit, context.HeadTree, plan, policyDocument.Identity, git, actualPatch, rawIndex);
     }
     private static string Hash(byte[] bytes) => "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes));
 }
