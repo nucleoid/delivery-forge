@@ -130,10 +130,10 @@ public sealed class GitHubCliAdapterTests
         {
             if (!PrExists) return "[]";
             var marker = "delivery-forge-publication:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("cli-key")));
-            return $$"""
+            return $$$"""
                 [{ "number":10, "html_url":"https://github.com/fixture/forge-disposable-10/pull/10",
-                   "head":{"sha":"{{PublicationFixture.Commit('b')}}","ref":"work","repo":{"full_name":"fixture/forge-disposable-10"}},
-                   "base":{"ref":"main","sha":"{{PublicationFixture.Commit('a')}}"},"body":"<!-- {{marker}} -->",
+                   "head":{"sha":"{{{PublicationFixture.Commit('b')}}}","ref":"work","repo":{"full_name":"fixture/forge-disposable-10"}},
+                   "base":{"ref":"main","sha":"{{{PublicationFixture.Commit('a')}}}"},"body":"<!-- {{{marker}}} -->",
                    "merged_at":null,"merge_commit_sha":null }]
                 """;
         }
