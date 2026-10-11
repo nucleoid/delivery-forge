@@ -266,6 +266,14 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
                         var name = s.GetProperty("context").GetString()!;
                         if (seenStatuses.Add(name) && s.GetProperty("state").GetString() == "success") passed.Add(name);
                     }
+                    var eligibleActions = new Dictionary<long, bool>();
+                    foreach (var check in checkRuns.EnumerateArray())
+                        if (allRequirements.Any(requirement => requirement.Key == check.GetProperty("name").GetString()) && IsActionsCheck(check))
+                        {
+                            var id = check.GetProperty("id").GetInt64();
+                            if (id <= 0 || eligibleActions.ContainsKey(id)) throw Unavailable();
+                            eligibleActions[id] = await ObserveActionsEligibility(repository, target, sourceHead, check, token).ConfigureAwait(false);
+                        }
                     bool Satisfies(KeyValuePair<string, int?> requirement)
                     {
                         var matchingRuns = checkRuns.EnumerateArray().Where(check => check.GetProperty("name").GetString() == requirement.Key).ToArray();
@@ -283,7 +291,8 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
                             check.GetProperty("app").GetProperty("id").GetInt32() == requirement.Value).ToArray();
                         return authorizedRuns.Length > 0 && authorizedRuns.All(check =>
                             check.GetProperty("head_sha").GetString() == sourceHead &&
-                            check.GetProperty("status").GetString() == "completed" && check.GetProperty("conclusion").GetString() == "success");
+                            check.GetProperty("status").GetString() == "completed" && check.GetProperty("conclusion").GetString() == "success" &&
+                            (!IsActionsCheck(check) || eligibleActions.GetValueOrDefault(check.GetProperty("id").GetInt64())));
                     }
                     checks = complete && allRequirements.All(Satisfies)
                         ? GitHostChecks.Passing : GitHostChecks.Pending;
@@ -296,6 +305,52 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
             body.Contains(Marker(key), StringComparison.Ordinal) ? key : null, resultId, mergedHead);
         token.ThrowIfCancellationRequested();
         return new(observation, number, body, state, mergeQueue || autoMerge);
+    }
+
+    private static bool IsActionsCheck(JsonElement check)
+    {
+        if (!check.TryGetProperty("app", out var app) || app.ValueKind != JsonValueKind.Object ||
+            !app.TryGetProperty("id", out var id) || !id.TryGetInt64(out var value) || value <= 0) throw Unavailable();
+        return value == 15368 ||
+            app.TryGetProperty("slug", out var slug) && slug.GetString() == "github-actions";
+    }
+
+    private async Task<bool> ObserveActionsEligibility(string repository, PublicationTarget target, string head,
+        JsonElement check, CancellationToken token)
+    {
+        // GitHub Actions' public App identity is distinct from external App checks.
+        var app = check.GetProperty("app");
+        if (app.GetProperty("id").GetInt64() != 15368 || app.GetProperty("slug").GetString() != "github-actions") return false;
+        var id = check.GetProperty("id").GetInt64();
+        var suite = check.GetProperty("check_suite").GetProperty("id").GetInt64();
+        if (suite <= 0 || id <= 0 || check.GetProperty("head_sha").GetString() != head) return false;
+        var checkUrl = "https://api.github.com/" + repository + "/check-runs/" + id.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (check.GetProperty("url").GetString() != checkUrl) return false;
+        using var runs = await Get(repository + "/actions/runs?check_suite_id=" + suite.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+            "&head_sha=" + head + "&per_page=100", token).ConfigureAwait(false);
+        var workflows = runs.RootElement.GetProperty("workflow_runs");
+        if (workflows.GetArrayLength() > 100 || runs.RootElement.GetProperty("total_count").GetInt32() != workflows.GetArrayLength() ||
+            workflows.GetArrayLength() != 1) return false;
+        var workflow = workflows[0];
+        var run = workflow.GetProperty("id").GetInt64();
+        var attempt = workflow.GetProperty("run_attempt").GetInt32();
+        var runPath = repository + "/actions/runs/" + run.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        var runUrl = "https://api.github.com/" + runPath;
+        if (run <= 0 || attempt <= 0 || workflow.GetProperty("check_suite_id").GetInt64() != suite ||
+            workflow.GetProperty("head_sha").GetString() != head || workflow.GetProperty("url").GetString() != runUrl ||
+            !string.Equals(workflow.GetProperty("repository").GetProperty("full_name").GetString(), target.Repository, StringComparison.OrdinalIgnoreCase) ||
+            workflow.GetProperty("status").GetString() != "completed" || workflow.GetProperty("conclusion").GetString() != "success" ||
+            workflow.GetProperty("event").GetString() is not ("push" or "pull_request" or "pull_request_review" or
+                "pull_request_target" or "deployment" or "deployment_status")) return false;
+        using var jobs = await Get(runPath + "/attempts/" + attempt.ToString(System.Globalization.CultureInfo.InvariantCulture) +
+            "/jobs?per_page=100", token).ConfigureAwait(false);
+        var observedJobs = jobs.RootElement.GetProperty("jobs");
+        if (observedJobs.GetArrayLength() > 100 || jobs.RootElement.GetProperty("total_count").GetInt32() != observedJobs.GetArrayLength()) return false;
+        var associated = observedJobs.EnumerateArray().Where(job => job.GetProperty("check_run_url").GetString() == checkUrl).ToArray();
+        return associated.Length == 1 && associated[0].GetProperty("id").GetInt64() > 0 &&
+            associated[0].GetProperty("run_id").GetInt64() == run && associated[0].GetProperty("run_url").GetString() == runUrl &&
+            associated[0].GetProperty("head_sha").GetString() == head && associated[0].GetProperty("name").GetString() == check.GetProperty("name").GetString() &&
+            associated[0].GetProperty("status").GetString() == "completed" && associated[0].GetProperty("conclusion").GetString() == "success";
     }
 
     private async Task<JsonElement[]> ReadApplicableRules(string repository, PublicationTarget target, CancellationToken token)
