@@ -14,6 +14,7 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
     private int _commandSequence;
     private bool _commandsQuiescent = true;
     private bool _assertionsPassed;
+    private string? _retentionReason;
 
     private OwnedScenarioRun(string sourceRoot, string git)
     {
@@ -110,6 +111,7 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
     }
 
     public void MarkAssertionsPassed() => _assertionsPassed = true;
+    public void RetainArtifacts(string reason) => _retentionReason = string.IsNullOrWhiteSpace(reason) ? "Non-pass evidence retained." : reason;
 
     public async Task WriteNewJsonAsync<T>(string name, T value, CancellationToken cancellationToken)
     {
@@ -136,17 +138,18 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
         try { await Processes.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(8), CancellationToken.None); }
         catch (Exception) { quiescent = false; }
 
-        if (_assertionsPassed && quiescent && OwnsPlainLeaf())
+        var owned = OwnsPlainLeaf();
+        if (_assertionsPassed && quiescent && owned && _retentionReason is null)
         {
             foreach (var file in Directory.EnumerateFiles(Root, "*", SearchOption.AllDirectories))
                 File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
             Directory.Delete(Root, recursive: true);
             return;
         }
-        if (Directory.Exists(Root) && OwnsPlainLeaf())
+        if (Directory.Exists(Root) && owned)
             await WriteNewJsonAsync("retained-" + Guid.NewGuid().ToString("N") + ".json",
-                new { assertionsPassed = _assertionsPassed, quiescent, fixture = true, reason = "Failure, timeout or ambiguous cleanup retains owned artifacts." }, CancellationToken.None);
-        if (_assertionsPassed)
+                new { assertionsPassed = _assertionsPassed, quiescent, fixture = true, reason = _retentionReason ?? "Failure, timeout or ambiguous cleanup retains owned artifacts." }, CancellationToken.None);
+        if (_assertionsPassed && (!quiescent || !owned))
             throw new InvalidOperationException("Cleanup was not positively owned and quiescent; retained run: " + Root);
     }
 

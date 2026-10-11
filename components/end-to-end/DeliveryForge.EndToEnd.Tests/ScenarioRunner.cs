@@ -1,4 +1,7 @@
+using System.Collections.ObjectModel;
+using DeliveryForge.Coordination;
 using DeliveryForge.Evidence;
+using DeliveryForge.Execution;
 
 namespace DeliveryForge.EndToEnd.Tests;
 
@@ -13,16 +16,85 @@ public sealed record ScenarioResult(GateOutcome Outcome, ScenarioProfile Profile
     string IntegratedBaseCommit, string ImplementationHead, int Seed, ScenarioBudget Budget,
     IReadOnlyDictionary<string, bool> Invariants, IReadOnlyList<string> ReceiptIds, IReadOnlyList<string> Limitations);
 
-// Initial public-interface RED seam. No scenario behavior is implemented before the parent's compiled RED receipt.
-// The integrated publication owner's review-authority bridge is deliberately not duplicated here.
+// Narrow contract scenarios only. No worker, reviewer or publication authority is minted by this component.
+// Remaining scenario behavior is added only after separate compiled RED slices and actual owner integration.
 public sealed class ScenarioRunner(OwnedScenarioRun run)
 {
-    public Task<ScenarioResult> RunAsync(string name, ScenarioOptions options, CancellationToken cancellationToken = default)
+    public async Task<ScenarioResult> RunAsync(string name, ScenarioOptions options, CancellationToken cancellationToken = default)
     {
-        _ = run;
-        _ = name;
-        _ = options;
-        _ = cancellationToken;
-        throw new NotImplementedException("Issue 11 initial scenario specification awaits compiled RED before behavior implementation.");
+        ArgumentNullException.ThrowIfNull(run);
+        ArgumentNullException.ThrowIfNull(options);
+        if (string.IsNullOrWhiteSpace(name) || name.Length > 256) throw new ArgumentException("An explicit bounded scenario name is required.", nameof(name));
+        if (!Enum.IsDefined(options.Profile)) throw new ArgumentOutOfRangeException(nameof(options.Profile));
+        if (options.Budget is null || options.Budget.WallTime <= TimeSpan.Zero || options.Budget.WallTime > TimeSpan.FromSeconds(120) ||
+            options.Budget.CpuCores is < 1 or > 2 || options.Budget.MemoryMiB is < 1 or > 4096 ||
+            options.Budget.Tokens is < 1 or > 1000 || options.Budget.Cost != 0m)
+            throw new ArgumentOutOfRangeException(nameof(options.Budget), "This development slice permits only finite approved no-cost fixture budgets.");
+        if (options.Capabilities is null || options.Capabilities.Count > 16 || options.Capabilities.Any(claim => claim is null ||
+            string.IsNullOrWhiteSpace(claim.Name) || claim.Name.Length > 128 || claim.EvidenceReference is null || claim.EvidenceReference.Length > 4096))
+            throw new ArgumentException("Capability claims must be bounded diagnostic data.", nameof(options));
+        cancellationToken.ThrowIfCancellationRequested();
+        var captured = options with { Capabilities = Array.AsReadOnly(options.Capabilities.ToArray()) };
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(captured.Budget.WallTime);
+        var invariants = new Dictionary<string, bool>(StringComparer.Ordinal) { ["no-publication-writes"] = true };
+        var receiptIds = new List<string>();
+        var outcome = GateOutcome.Incomplete;
+        IReadOnlyList<string> limitations;
+        if (captured.Profile == ScenarioProfile.ProductionCoordinated)
+        {
+            var unavailable = ProductionCoordinationProfile.CurrentUnavailable();
+            limitations = [.. unavailable.Limitations, "This scenario harness supplies no deployed transport or production authority."];
+        }
+        else if (captured.Profile == ScenarioProfile.LocalReal)
+        {
+            limitations = ["Actual configured host worker, independent reviewer and installed .NET producer receipts are absent.",
+                "Caller available/fixture flags are diagnostic claims, not owner-issued capability or acceptance receipts."];
+        }
+        else if (name == "recovery.torn-run-pointer")
+        {
+            var recovered = await RecoverTornPointerAsync(receiptIds, deadline.Token);
+            invariants["durable-pointer-recovered"] = recovered;
+            outcome = recovered ? GateOutcome.Pass : GateOutcome.Incomplete;
+            limitations = ["Real durable-file contract scenario only; no worker/reviewer/tool/full-profile certification.",
+                "Scheduler/publication golden path awaits actual integrated owner interfaces."];
+        }
+        else
+        {
+            limitations = ["This scenario remains planned and has no executed behavior evidence: " + name,
+                "No local-contract fallback can certify the complete profile or unavailable real adapters."];
+        }
+        if (outcome != GateOutcome.Pass) run.RetainArtifacts("Scenario remains non-pass: " + outcome);
+        var observed = new ReadOnlyDictionary<string, bool>(invariants);
+        var recorded = await run.Store.AppendAsync(run.RunId, "scenario-result", new
+        {
+            schemaVersion = "1.0.0", scenario = name, profile = captured.Profile.ToString(), fixture = true,
+            fullRealProfileCertified = false, integratedBaseCommit = run.IntegratedSource.Commit,
+            implementationHead = run.IntegratedSource.HeadCommit, seed = captured.Seed, budget = captured.Budget,
+            capabilityClaims = captured.Capabilities, outcome = outcome.ToString().ToUpperInvariant(), invariants = observed,
+            receiptIds = receiptIds.ToArray(), limitations
+        }, deadline.Token);
+        receiptIds.Add(recorded.Sha256);
+        var result = new ScenarioResult(outcome, captured.Profile, true, false, run.IntegratedSource.Commit,
+            run.IntegratedSource.HeadCommit, captured.Seed, captured.Budget, observed, receiptIds.AsReadOnly(), limitations);
+        await run.WriteNewJsonAsync("scenario-" + Guid.NewGuid().ToString("N") + ".json", result, deadline.Token);
+        return result;
+    }
+
+    private async Task<bool> RecoverTornPointerAsync(List<string> receiptIds, CancellationToken cancellationToken)
+    {
+        if ((await run.Store.RecoverAsync(run.RunId, cancellationToken)).Records.Count != 0)
+            throw new InvalidOperationException("This fresh scenario cannot overwrite an existing run history.");
+        var before = await run.Store.AppendAsync(run.RunId, "fixture-checkpoint",
+            new { fixture = true, phase = "before", integratedBaseCommit = run.IntegratedSource.Commit }, cancellationToken);
+        var after = await run.Store.AppendAsync(run.RunId, "fixture-checkpoint",
+            new { fixture = true, phase = "after", integratedBaseCommit = run.IntegratedSource.Commit }, cancellationToken);
+        receiptIds.Add(before.Sha256);
+        receiptIds.Add(after.Sha256);
+        var pointer = Path.Combine(Path.GetDirectoryName(after.Path)!, "current.json");
+        await File.WriteAllTextAsync(pointer, "{interrupted-pointer-write", cancellationToken);
+        var recovery = await new RunStore(Path.Combine(run.Root, "receipts")).RecoverAsync(run.RunId, cancellationToken);
+        return recovery.PointerWasRecovered && recovery.Latest?.Sha256 == after.Sha256 &&
+            recovery.Records.Select(record => record.Sha256).SequenceEqual([before.Sha256, after.Sha256]);
     }
 }
