@@ -153,7 +153,8 @@ public sealed class GitRepositoryContextReader
             throw new PlanningException("Repository context commit/tree identity does not match the exact Git objects.");
         }
         var path = NormalizeRepositoryPath(repositoryRelativePath);
-        var treeEntry = await TryReadTreeEntryAsync(context, path, cancellationToken)
+        var treeListings = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        var treeEntry = await TryReadTreeEntryAsync(context, path, cancellationToken, treeListings: treeListings)
             ?? throw new PlanningException($"Path '{path}' does not exist at exact commit {context.Commit}.");
         if (treeEntry.Type != "blob")
         {
@@ -163,7 +164,7 @@ public sealed class GitRepositoryContextReader
         var bytes = await ReadBlobAsync(context, treeEntry.ObjectId, cancellationToken);
         var isSymlink = treeEntry.Mode == "120000";
         var resolution = isSymlink
-            ? await ResolveSymlinkAsync(context, path, Encoding.UTF8.GetString(bytes), cancellationToken)
+            ? await ResolveSymlinkAsync(context, path, Encoding.UTF8.GetString(bytes), treeListings, cancellationToken)
             : SymlinkResolution.NotSymlink;
         var generated = path.Contains("/obj/", StringComparison.OrdinalIgnoreCase) ||
                         path.StartsWith("obj/", StringComparison.OrdinalIgnoreCase) ||
@@ -243,12 +244,12 @@ public sealed class GitRepositoryContextReader
         RepositoryContext context,
         string symlinkPath,
         string target,
+        Dictionary<string, byte[]> treeListings,
         CancellationToken cancellationToken)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         deadline.CancelAfter(SymlinkResolutionTimeout);
         var budget = new ResolutionBudget();
-        var treeListings = new Dictionary<string, byte[]>(StringComparer.Ordinal);
         try
         {
             var posix = await ResolveTargetAsync(

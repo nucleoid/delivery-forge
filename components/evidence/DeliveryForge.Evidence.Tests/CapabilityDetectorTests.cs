@@ -3,6 +3,29 @@ namespace DeliveryForge.Evidence.Tests;
 public sealed class CapabilityDetectorTests
 {
     [Fact]
+    public async Task Documented_json_version_probe_retains_exact_build_metadata()
+    {
+        using var temp = new TempDirectory();
+        var executable = Path.Combine(temp.Path, OperatingSystem.IsWindows() ? "tool.exe" : "tool");
+        await File.WriteAllTextAsync(executable, "fixture", TestContext.Current.CancellationToken);
+        var report = await File.ReadAllTextAsync(Path.Combine(AppContext.BaseDirectory,
+            "Fixtures", "Crap4CSharp", "not-applicable.json"), TestContext.Current.CancellationToken);
+        var detector = new ToolCapabilityDetector(new QueueCommandExecutor(
+            new CommandResult(0, report, "", false, false, TestEvidence.Time(0), TestEvidence.Time(1)),
+            new CommandResult(0, "--format json --syntax-only", "", false, false, TestEvidence.Time(1), TestEvidence.Time(2))));
+
+        var result = await detector.DetectAsync(new CapabilityProbe(
+            "crap4csharp", ExecutableSource.TrustedExplicit, executable, temp.Path, null,
+            ["analyze", "--syntax-only", "--format", "json", "Empty.cs"], ["--help"],
+            "0.1.0", "1.0", true), TestContext.Current.CancellationToken);
+
+        Assert.True(result.Capability.Supported);
+        Assert.Equal("0.1.0+1129c9d3280168b294f9fed1542f81ca716c6d53", result.Capability.Version);
+        Assert.True(result.Capability.Fixture);
+        Assert.StartsWith("sha256:", result.Capability.ExecutableIdentity);
+    }
+
+    [Fact]
     public async Task Trusted_explicit_probe_binds_version_help_and_executable_hash()
     {
         using var temp = new TempDirectory();

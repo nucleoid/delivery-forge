@@ -5,5 +5,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../contracts/DeliveryForge.Contracts/DeliveryForge.Contracts.csproj" />
+    <EmbeddedResource Include="Vendor/Crap4CSharp/result-schema-v1.json" LogicalName="DeliveryForge.Evidence.Crap4CSharp.result-schema-v1.json" />
   </ItemGroup>
 </Project>

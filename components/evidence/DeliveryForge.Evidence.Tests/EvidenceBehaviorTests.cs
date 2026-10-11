@@ -167,7 +167,7 @@ public sealed class EvidenceBehaviorTests
     }
 
     [Theory]
-    [InlineData(false, "pass", 0, GateOutcome.Incomplete)]
+    [InlineData(false, "unknown", 0, GateOutcome.Incomplete)]
     [InlineData(true, "pass", 1, GateOutcome.Incomplete)]
     [InlineData(true, "fail", 0, GateOutcome.Fail)]
     [InlineData(true, "pass", 0, GateOutcome.Pass)]
