@@ -38,7 +38,17 @@ internal sealed class WindowsCommandLifetime : IDisposable
         try
         {
             owner = new();
-            owner.Start(invocation);
+            owner.Start(invocation, started, timeout, caller);
+        }
+        catch (StartupStoppedException stopped)
+        {
+            var settled = false; string? cleanupFailure = null;
+            try { settled = owner is not null && await owner.CleanupFailedStartAsync().ConfigureAwait(false); }
+            catch (Exception cleanup) when (cleanup is Win32Exception or IOException or InvalidOperationException)
+            { cleanupFailure = "; cleanup observation failed: " + Bounded(cleanup); }
+            finally { owner?.Dispose(); }
+            return new(null, "", "Owned Windows startup stopped at " + (owner?._stage ?? "creation") + ": " + stopped.Message + cleanupFailure,
+                stopped.TimedOut, stopped.Cancelled, startedAt, DateTimeOffset.UtcNow, settled);
         }
         catch (Exception failure) when (failure is Win32Exception or IOException or ArgumentException or InvalidOperationException)
         {
@@ -125,7 +135,7 @@ internal sealed class WindowsCommandLifetime : IDisposable
         }
     }
 
-    private void Start(CommandInvocation invocation)
+    private void Start(CommandInvocation invocation, long originalStarted, TimeSpan originalTimeout, CancellationToken caller)
     {
         _stage = "configure-job";
         var limits = new ExtendedLimits { BasicLimitInformation = new() { LimitFlags = 0x2000 } };
@@ -157,6 +167,7 @@ internal sealed class WindowsCommandLifetime : IDisposable
                 AttributeList = attributes.Pointer
             };
             _stage = "create-suspended";
+            CheckStartupBudget(originalStarted, originalTimeout, caller);
             if (!CreateProcessW(executable, commandLine, IntPtr.Zero, IntPtr.Zero, true,
                 0x00000004 | 0x08000000 | 0x00000400 | 0x00080000, environment, directory, ref startup, out var processInfo)) throw Native(_stage);
             _process = new(processInfo.Process); _thread = new(processInfo.Thread);
@@ -170,8 +181,22 @@ internal sealed class WindowsCommandLifetime : IDisposable
         _stdout = new(new FileStream(_outRead, FileAccess.Read, 4096, false), Console.OutputEncoding, true);
         _stderr = new(new FileStream(_errRead, FileAccess.Read, 4096, false), Console.OutputEncoding, true);
         _stage = "resume-owned-root";
+        CheckStartupBudget(originalStarted, originalTimeout, caller);
         if (ResumeThread(_thread) == uint.MaxValue) throw Native(_stage);
         _resumed = true; _thread.Dispose(); _thread = null;
+    }
+
+    private static void CheckStartupBudget(long originalStarted, TimeSpan originalTimeout, CancellationToken caller)
+    {
+        var cancelled = caller.IsCancellationRequested;
+        if (cancelled || Stopwatch.GetElapsedTime(originalStarted) >= originalTimeout)
+            throw new StartupStoppedException(cancelled);
+    }
+    private sealed class StartupStoppedException(bool cancelled)
+        : Exception(cancelled ? "Caller cancelled before command execution." : "Original command deadline expired before command execution.")
+    {
+        public bool Cancelled => cancelled;
+        public bool TimedOut => !cancelled;
     }
 
     private bool Observe(out bool rootExited, out uint active, out string? failure)
