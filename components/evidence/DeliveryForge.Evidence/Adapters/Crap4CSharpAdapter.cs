@@ -49,6 +49,30 @@ public sealed class Crap4CSharpAdapter
                 (long)knownCount + unknownCount > methodCount ||
                 evaluation.GetProperty("metrics").GetArrayLength() != methodCount)
                 return NormalizedEvidence.Error("Crap4CSharp coverage summary is malformed.", capability.Fixture);
+            var metrics = evaluation.GetProperty("metrics").EnumerateArray().ToArray();
+            var observedKnown = metrics.Count(metric => metric.GetProperty("coverage").ValueKind == JsonValueKind.Number);
+            if (observedKnown != knownCount || unknownCount > methodCount - observedKnown)
+                return NormalizedEvidence.Error("Crap4CSharp coverage counts contradict the metric inventory.", capability.Fixture);
+            var contexts = evaluation.GetProperty("contexts").EnumerateArray()
+                .Select(context => context.GetProperty("id").GetString()!).ToHashSet(StringComparer.Ordinal);
+            if (metrics.Any(metric => !contexts.Contains(metric.GetProperty("contextId").GetString()!)))
+                return NormalizedEvidence.Incomplete("Crap4CSharp metric context is unbound.", capability.Fixture);
+            var notApplicable = new HashSet<string>(StringComparer.Ordinal);
+            if (root.GetProperty("complexityRulesetVersion").GetString() == "callables-v1" &&
+                evaluation.TryGetProperty("callables", out var callables))
+            {
+                foreach (var callable in callables.EnumerateArray())
+                    if (TryString(callable, "callableId", out var id) &&
+                        TryString(callable, "applicability", out var applicability) && applicability == "not-applicable" &&
+                        TryString(callable, "coverageStatus", out var coverageStatus) && coverageStatus == "not-applicable")
+                        notApplicable.Add(id);
+            }
+            var unscoredNotApplicable = metrics.Count(metric =>
+                metric.GetProperty("coverage").ValueKind == JsonValueKind.Null &&
+                metric.GetProperty("crap").ValueKind == JsonValueKind.Null &&
+                notApplicable.Contains(metric.GetProperty("methodIdentity").GetString()!));
+            if (methodCount - knownCount - unknownCount > unscoredNotApplicable)
+                return NormalizedEvidence.Incomplete("Crap4CSharp omitted coverage is not accounted for by reported applicability.", capability.Fixture);
             if (!TryInt(run, "exitCode", out var exitCode))
                 return NormalizedEvidence.Error("Crap4CSharp run exit is missing.", capability.Fixture);
 
@@ -86,6 +110,11 @@ public sealed class Crap4CSharpAdapter
             }
             if (policyDecision == "unknown")
                 return NormalizedEvidence.Incomplete("Crap4CSharp returned valid inconclusive evidence.", true);
+            if (policyDecision == "pass" && metrics.Any(metric =>
+                metric.GetProperty("crap").ValueKind == JsonValueKind.Null &&
+                !(metric.GetProperty("coverage").ValueKind == JsonValueKind.Null &&
+                    notApplicable.Contains(metric.GetProperty("methodIdentity").GetString()!))))
+                return NormalizedEvidence.Incomplete("Crap4CSharp applicable metric has no known score.", capability.Fixture);
             if (unknownCount > 0 && policyDecision != "fail" || methodCount == 0 && policyDecision == "pass")
                 return NormalizedEvidence.Incomplete("Crap4CSharp coverage is missing, empty, or contains unmapped callables.", capability.Fixture);
 
