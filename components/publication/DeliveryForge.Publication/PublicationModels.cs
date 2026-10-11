@@ -78,4 +78,15 @@ public sealed record PublicationResult(
     ValidatedContract? Receipt = null);
 
 public sealed record PublicationPreflightResult(bool Allowed, PublicationDenial Denial, string Reason);
+public sealed record PublicationLimits(TimeSpan ReadTimeout, TimeSpan ActionTimeout, TimeSpan JournalTimeout, TimeSpan LockTimeout)
+{
+    public static PublicationLimits FixtureDefault { get; } = new(
+        TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(30));
+    internal void Validate()
+    {
+        if (new[] { ReadTimeout, ActionTimeout, JournalTimeout, LockTimeout }
+            .Any(value => value <= TimeSpan.Zero || value > TimeSpan.FromMinutes(5)))
+            throw new ArgumentOutOfRangeException(nameof(ReadTimeout), "Publication operation budgets must be positive and finite.");
+    }
+}
 public sealed class PublicationUnavailableException(string message) : Exception(message);

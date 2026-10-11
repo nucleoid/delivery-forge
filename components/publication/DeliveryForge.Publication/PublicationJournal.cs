@@ -14,7 +14,8 @@ public sealed record PublicationIntent(
     string TreeId,
     PublicationIntentState State,
     string? ResultId = null,
-    string? ReceiptIdentity = null);
+    string? ReceiptIdentity = null,
+    DateTimeOffset CreatedAt = default);
 
 /// <summary>Local append-only evidence; durable records do not reconstruct parent authority.</summary>
 public interface IPublicationJournal

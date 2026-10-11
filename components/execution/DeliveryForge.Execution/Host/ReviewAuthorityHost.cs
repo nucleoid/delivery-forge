@@ -294,13 +294,27 @@ public sealed class ReviewAuthorityHost
             hostedContext is null ? null : CreateConsumerContext(hostedContext));
     }
 
-    // Explicit fixture-only bridge. Its RED stub must not alter production acceptance.
+    // Explicit fixture-only bridge; production acceptance is never lowered to Test.
     public void EnsureContractFixtureTransition(
         DeliveryForge.Contracts.Models.WorkflowState from,
         DeliveryForge.Contracts.Models.WorkflowState to,
         TransitionEvidence evidence,
-        ReviewTransitionReceiver receiver) =>
-        throw new InvalidOperationException("Fixture transition bridge is not implemented at this RED checkpoint.");
+        ReviewTransitionReceiver receiver)
+    {
+        if (_realm != ReviewAuthorityRealm.Test || !ReferenceEquals(receiver.Authority, Authority))
+            throw new InvalidOperationException("Fixture transition requires this exact isolated test issuer's pinned receiver.");
+        WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, evidence, receiver);
+    }
+
+    public void EnsureContractFixtureRootBinding(
+        string runIdentity, string planIdentity, string evidencePolicyIdentity, ReviewTransitionReceiver receiver)
+    {
+        if (_realm != ReviewAuthorityRealm.Test || _rootContext is null ||
+            !ReferenceEquals(receiver.Authority, Authority) ||
+            runIdentity != _rootContext.RunIdentity || planIdentity != _rootContext.PlanIdentity ||
+            evidencePolicyIdentity != _rootContext.EvidencePolicyIdentity)
+            throw new InvalidOperationException("Publication fixture binding does not match the immutable review issuer root.");
+    }
 
     // Fixture setup support, not a live policy resolver or production authority path.
     public ReviewPolicy CreateContractFixturePolicy(

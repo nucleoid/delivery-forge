@@ -54,7 +54,7 @@ public sealed class PublicationFixture
     public PublicationTarget Target { get; } = new("fixture/disposable", "refs/heads/issue-10", "refs/heads/main");
 
     public PublicationRunDefinition Definition(AuthorizationCeiling ceiling = AuthorizationCeiling.Merge) => new(
-        Root.RunIdentity, "revision-1", null, ceiling, Target, Patch, Policy, Gates, Ci, Review, HostedReview, Receiver);
+        Root.RunIdentity, "revision-" + Guid.NewGuid().ToString("N"), null, ceiling, Target, Patch, Policy, Gates, Ci, Review, HostedReview, Receiver);
 
     public TransitionEvidence Transition => new(AuthorizationCeiling.Merge, Patch.BaseCommit, Patch.HeadCommit,
         Patch.HeadTree, Policy: Policy, GateReceipts: Gates, CiReceipt: Ci,
