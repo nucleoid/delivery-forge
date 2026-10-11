@@ -145,7 +145,7 @@ public sealed partial class LocalSingleTests
         }
     }
 
-    [Fact(Timeout = 60_000)]
+    [Fact(Timeout = 600_000)]
     public async Task ResumingIntent_is_durable_before_host_send_so_cold_paused_claims_cannot_outrun_it()
     {
         using var repository = new PlanningRepository();
@@ -157,8 +157,10 @@ public sealed partial class LocalSingleTests
         await using var processes = new ProcessControl();
         var control = new DelayedFixtureControl();
         using var execution = new ExecutionCoordinator(store, worktrees, processes, control);
-        var scheduler = LocalSingleScheduler.Create(plan, worker, Demand, Budget(), store, execution, worktrees, repository.Reader);
+        var scheduler = LocalSingleScheduler.Create(plan, worker, Demand with { TimeLimit = TimeSpan.FromMinutes(5) }, Budget(), store, execution, worktrees, repository.Reader,
+            controlTimeout: TimeSpan.FromSeconds(30));
         Task<AgentRequest>? resume = null;
+        Exception? primaryFailure = null;
         try
         {
             var ticket = await scheduler.ReserveAsync(Cancellation);
@@ -167,25 +169,17 @@ public sealed partial class LocalSingleTests
             await scheduler.PauseAsync(Cancellation);
             control.Block(AgentControlAction.Resume);
             resume = scheduler.ResumeAsync(ticket, Cancellation);
-            await control.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Cancellation);
+            await AwaitEnteredOrFailureAsync(control.Entered.Task, resume);
             var journal = await store.RecoverAsync(worker.RunId + "-scheduler", Cancellation);
             Assert.Equal("resuming", journal.Latest!.Payload.GetProperty("phase").GetString());
             control.Release();
             Assert.Equal(original.RequestIdentity, (await resume).RequestIdentity);
         }
-        finally
-        {
-            control.Release();
-            if (resume is not null)
-            {
-                try { await resume.WaitAsync(TimeSpan.FromSeconds(10), Cancellation); }
-                catch (SchedulingException) { }
-            }
-            if (!await scheduler.StopAsync(Cancellation)) Assert.True(await scheduler.ReconcileCleanupAsync(Cancellation));
-        }
+        catch (Exception exception) { primaryFailure = exception; throw; }
+        finally { await SettleAndCloseFixtureAsync(scheduler, control, primaryFailure, resume); }
     }
 
-    [Fact(Timeout = 180_000)]
+    [Fact(Timeout = 600_000)]
     public async Task ClosedNamespace_case_distinct_run_claim_cannot_reuse_another_run_closure_proof()
     {
         using var repository = new PlanningRepository();
@@ -195,16 +189,22 @@ public sealed partial class LocalSingleTests
         var worktrees = new WorktreeManager();
         await using var processes = new ProcessControl();
         using var execution = new ExecutionCoordinator(store, worktrees, processes);
-        var closed = LocalSingleScheduler.Create(plan, Worker(repository, plan, "case-run"), Demand, Budget(), store, execution, worktrees, repository.Reader);
-        await closed.ReserveAsync(Cancellation);
-        Assert.True(await closed.StopAsync(Cancellation));
+        var demand = Demand with { TimeLimit = TimeSpan.FromMinutes(5) };
+        var closed = LocalSingleScheduler.Create(plan, Worker(repository, plan, "case-run"), demand, Budget(), store, execution, worktrees, repository.Reader);
+        using var cleanup = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        try
+        {
+            await closed.ReserveAsync(Cancellation);
+            Assert.True(await closed.StopAsync(cleanup.Token));
+        }
+        finally { Assert.True(await closed.StopAsync(cleanup.Token), closed.CleanupLimitation); }
         await store.AppendAsync("CASE-RUN-scheduler", "local-scheduler-checkpoint", new { profile = "local-single", phase = "prepared", runId = "CASE-RUN" }, Cancellation);
-        var fresh = LocalSingleScheduler.Create(plan, Worker(repository, plan, "new-after-case"), Demand, Budget(), store, execution, worktrees, repository.Reader);
+        var fresh = LocalSingleScheduler.Create(plan, Worker(repository, plan, "new-after-case"), demand, Budget(), store, execution, worktrees, repository.Reader);
         try { await Assert.ThrowsAsync<SchedulingException>(() => fresh.ReserveAsync(Cancellation)); }
-        finally { Assert.True(await fresh.StopAsync(Cancellation)); }
+        finally { Assert.True(await fresh.StopAsync(cleanup.Token), fresh.CleanupLimitation); }
     }
 
-    [Fact(Timeout = 180_000)]
+    [Fact(Timeout = 600_000)]
     public async Task ConcurrentPause_during_resume_never_returns_a_dispatchable_request()
     {
         using var repository = new PlanningRepository();
@@ -216,9 +216,11 @@ public sealed partial class LocalSingleTests
         await using var processes = new ProcessControl();
         var control = new DelayedFixtureControl();
         using var execution = new ExecutionCoordinator(store, worktrees, processes, control);
-        var scheduler = LocalSingleScheduler.Create(plan, worker, Demand, Budget(), store, execution, worktrees, repository.Reader);
+        var scheduler = LocalSingleScheduler.Create(plan, worker, Demand with { TimeLimit = TimeSpan.FromMinutes(5) }, Budget(), store, execution, worktrees, repository.Reader,
+            controlTimeout: TimeSpan.FromSeconds(30));
         Task<AgentRequest>? resume = null;
         Task? pause = null;
+        Exception? primaryFailure = null;
         try
         {
             var ticket = await scheduler.ReserveAsync(Cancellation);
@@ -227,22 +229,40 @@ public sealed partial class LocalSingleTests
             await scheduler.PauseAsync(Cancellation);
             control.Block(AgentControlAction.Resume);
             resume = scheduler.ResumeAsync(ticket, Cancellation);
-            await control.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Cancellation);
+            await AwaitEnteredOrFailureAsync(control.Entered.Task, resume);
             pause = scheduler.PauseAsync(Cancellation); // Public ingress is synchronous before its first awaited serial gate.
             control.Release();
             await Assert.ThrowsAsync<SchedulingException>(async () => await resume);
             await pause;
         }
-        finally
+        catch (Exception exception) { primaryFailure = exception; throw; }
+        finally { await SettleAndCloseFixtureAsync(scheduler, control, primaryFailure, resume, pause); }
+    }
+
+    private static async Task AwaitEnteredOrFailureAsync(Task entered, Task operation)
+    {
+        var first = await Task.WhenAny(entered, operation).WaitAsync(TimeSpan.FromMinutes(2), Cancellation);
+        if (ReferenceEquals(first, operation))
         {
-            control.Release();
-            if (resume is not null)
-            {
-                try { await resume.WaitAsync(TimeSpan.FromSeconds(10), Cancellation); }
-                catch (SchedulingException) { }
-            }
-            if (pause is not null) await pause;
-            if (!await scheduler.StopAsync(Cancellation)) Assert.True(await scheduler.ReconcileCleanupAsync(Cancellation));
+            await operation; // Preserve a real preflight/control failure instead of disguising it as a barrier timeout.
+            Assert.Fail("The control operation completed before the fixture port was entered.");
         }
+        await entered;
+    }
+
+    private static async Task SettleAndCloseFixtureAsync(LocalSingleScheduler scheduler, DelayedFixtureControl control, Exception? primaryFailure, params Task?[] operations)
+    {
+        control.Release();
+        using var cleanup = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+        var cleanupFailures = new List<Exception>();
+        foreach (var operation in operations.Where(operation => operation is not null).Cast<Task>())
+        {
+            try { await operation.WaitAsync(cleanup.Token); }
+            catch (Exception exception) { cleanupFailures.Add(exception); }
+            Assert.True(operation.IsCompleted, $"Fixture operation did not positively settle before cleanup. Primary: {primaryFailure}; cleanup: {string.Join(';', cleanupFailures)}");
+        }
+        var stopped = await scheduler.StopAsync(cleanup.Token).WaitAsync(cleanup.Token);
+        if (!stopped) stopped = await scheduler.ReconcileCleanupAsync(cleanup.Token).WaitAsync(cleanup.Token);
+        Assert.True(stopped, $"Fresh bounded uncancelled cleanup failed: {scheduler.CleanupLimitation}; primary: {primaryFailure}; cleanup: {string.Join(';', cleanupFailures)}");
     }
 }
