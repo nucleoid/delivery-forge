@@ -294,6 +294,59 @@ public sealed class ReviewAuthorityHost
             hostedContext is null ? null : CreateConsumerContext(hostedContext));
     }
 
+    // Explicit fixture-only bridge; production acceptance is never lowered to Test.
+    public void EnsureContractFixtureTransition(
+        DeliveryForge.Contracts.Models.WorkflowState from,
+        DeliveryForge.Contracts.Models.WorkflowState to,
+        TransitionEvidence evidence,
+        ReviewTransitionReceiver receiver)
+    {
+        if (_realm != ReviewAuthorityRealm.Test || !ReferenceEquals(receiver.Authority, Authority))
+            throw new InvalidOperationException("Fixture transition requires this exact isolated test issuer's pinned receiver.");
+        WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, evidence, receiver);
+    }
+
+    public void EnsureContractFixtureRootBinding(
+        string runIdentity, string planIdentity, string evidencePolicyIdentity, ReviewTransitionReceiver receiver)
+    {
+        if (_realm != ReviewAuthorityRealm.Test || _rootContext is null ||
+            !ReferenceEquals(receiver.Authority, Authority) ||
+            runIdentity != _rootContext.RunIdentity || planIdentity != _rootContext.PlanIdentity ||
+            evidencePolicyIdentity != _rootContext.EvidencePolicyIdentity)
+            throw new InvalidOperationException("Publication fixture binding does not match the immutable review issuer root.");
+    }
+
+    public void EnsureContractFixturePredecessorScope(ReviewAuthorityHost predecessor)
+    {
+        if (predecessor is null || ReferenceEquals(predecessor, this) ||
+            _realm != ReviewAuthorityRealm.Test || predecessor._realm != ReviewAuthorityRealm.Test ||
+            _rootContext is null || predecessor._rootContext is null ||
+            string.IsNullOrWhiteSpace(_rootContext.SourceAuthorityIdentity) ||
+            string.IsNullOrWhiteSpace(predecessor._rootContext.SourceAuthorityIdentity) ||
+            !Path.IsPathFullyQualified(_rootContext.SourceRoot) || !Path.IsPathFullyQualified(predecessor._rootContext.SourceRoot) ||
+            !SamePath(_rootContext.SourceRoot, predecessor._rootContext.SourceRoot) ||
+            _rootContext.SourceAuthorityIdentity != predecessor._rootContext.SourceAuthorityIdentity)
+            throw new InvalidOperationException("New fixture root requires the predecessor's same owned source boundary and Test realm.");
+    }
+
+    // Fixture setup support, not a live policy resolver or production authority path.
+    public ReviewPolicy CreateContractFixturePolicy(
+        IReadOnlyList<FamilyPair> families,
+        IReadOnlyList<string> scopes,
+        bool allowExactReuse,
+        ReviewBudget budget)
+    {
+        if (_realm != ReviewAuthorityRealm.Test || _rootContext is null)
+            throw new InvalidOperationException("Contract fixture policy requires an isolated root-configured test host.");
+        var policy = ReviewPolicy.TrustedFixture(
+            _rootContext.ReviewPolicyContentIdentity, families, scopes, allowExactReuse, budget);
+        if (policy.ContentIdentity != _rootContext.ReviewPolicyContentIdentity ||
+            policy.SourceRevision != _rootContext.ReviewPolicySourceRevision ||
+            policy.AuthorityKind != _rootContext.ReviewPolicyAuthorityKind)
+            throw new InvalidOperationException("Root policy provenance does not match the pure contract fixture policy.");
+        return policy;
+    }
+
     public void IssueAcceptance(
         ValidatedContract receipt,
         NormalizedReview review,
