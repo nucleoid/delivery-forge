@@ -21,6 +21,13 @@ public sealed record AgentControlResult(
 
 public interface IAgentControlPort
 {
+    // Separate fresh lookup for a request with no accepted runtime binding. Ordinary accepted-run
+    // control support is not proof that this adapter can exclude an in-flight unstarted dispatch.
+    Task<AgentControlResult> ObserveUnstartedAsync(
+        AgentRunBinding binding, TimeSpan deadline, CancellationToken cancellationToken = default) =>
+        Task.FromResult(new AgentControlResult(binding, AgentControlAction.Stop, AgentActivityState.Unknown, false, "",
+            "INCOMPLETE: adapter has no explicit fresh unstarted-request observation capability."));
+
     Task<AgentControlResult> ControlAsync(
         AgentRunBinding binding,
         AgentControlAction action,

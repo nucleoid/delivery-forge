@@ -13,5 +13,7 @@
     <Project Path="components/review/DeliveryForge.Review/DeliveryForge.Review.csproj" />
     <Project Path="components/review/DeliveryForge.Review.Tests/DeliveryForge.Review.Tests.csproj" />
     <Project Path="components/end-to-end/DeliveryForge.EndToEnd.Tests/DeliveryForge.EndToEnd.Tests.csproj" />
+    <Project Path="components/scheduling/DeliveryForge.Scheduling/DeliveryForge.Scheduling.csproj" />
+    <Project Path="components/scheduling/DeliveryForge.Scheduling.Tests/DeliveryForge.Scheduling.Tests.csproj" />
   </Folder>
 </Solution>

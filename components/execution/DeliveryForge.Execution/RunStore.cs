@@ -15,21 +15,28 @@ public sealed class RunStore
     private readonly JsonSerializerOptions _json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     public RunStore(string root) => _root = Path.GetFullPath(root);
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string RootPath => _root;
 
     public async Task<StoredRunRecord> AppendAsync<T>(string runId, string kind, T payload, CancellationToken cancellationToken = default)
     {
         ValidateName(runId, nameof(runId));
         ValidateName(kind, nameof(kind));
         var runDirectory = GetRunDirectory(runId);
+        RejectReparseAncestors(runDirectory);
         var appendLock = AppendLocks.GetOrAdd(runDirectory, _ => new SemaphoreSlim(1, 1));
         await appendLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             Directory.CreateDirectory(runDirectory);
+            RejectReparseAncestors(runDirectory);
             var recovery = await RecoverAsync(runId, cancellationToken).ConfigureAwait(false);
             var sequence = (recovery.Latest?.Sequence ?? 0) + 1;
             var document = JsonSerializer.SerializeToUtf8Bytes(
                 new PersistedRecord<T>(runId, sequence, kind, DateTimeOffset.UtcNow, payload), _json);
+            if (document.Length > 16 * 1024 * 1024 || recovery.Records.Count >= 4096 ||
+                recovery.Records.Sum(record => new FileInfo(record.Path).Length) + document.Length > 64 * 1024 * 1024)
+                throw new RunStoreCorruptionException("Appending would exceed the finite recoverable run history bounds.");
             var hash = Convert.ToHexStringLower(SHA256.HashData(document));
             var fileName = $"{sequence:D12}-sha256-{hash}.json";
             var target = Path.Combine(runDirectory, fileName);
@@ -59,14 +66,49 @@ public sealed class RunStore
         }
     }
 
+    public async Task<IReadOnlyList<string>> DiscoverRunIdsAsync(CancellationToken cancellationToken = default)
+    {
+        var runs = Path.Combine(_root, "runs");
+        RejectReparseAncestors(runs);
+        if (!Directory.Exists(runs)) return [];
+        var directories = Directory.EnumerateDirectories(runs).Take(4097).ToArray();
+        if (directories.Length > 4096) throw new RunStoreCorruptionException("Run registry exceeds the finite discovery bound.");
+        var identities = new List<string>();
+        foreach (var directory in directories)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if ((File.GetAttributes(directory) & FileAttributes.ReparsePoint) != 0) throw new RunStoreCorruptionException("Run registry contains a reparse/symlink directory.");
+            var first = Directory.EnumerateFiles(directory, "*-sha256-*.json").Order(StringComparer.Ordinal).FirstOrDefault()
+                ?? throw new RunStoreCorruptionException("Run namespace has no identifiable immutable record; cleanup/reconciliation is required.");
+            if ((File.GetAttributes(first) & FileAttributes.ReparsePoint) != 0 || new FileInfo(first).Length > 16 * 1024 * 1024)
+                throw new RunStoreCorruptionException("Run identity record is a reparse entry or exceeds the finite discovery bound.");
+            using var document = JsonDocument.Parse(await File.ReadAllBytesAsync(first, cancellationToken).ConfigureAwait(false));
+            var runId = document.RootElement.GetProperty("runId").GetString() ?? throw new RunStoreCorruptionException("Run identity is missing.");
+            ValidateName(runId, nameof(runId));
+            if (!string.Equals(Path.GetFullPath(directory), GetRunDirectory(runId), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                throw new RunStoreCorruptionException("Run identity does not match its hashed storage namespace.");
+            await RecoverAsync(runId, cancellationToken).ConfigureAwait(false);
+            identities.Add(runId);
+        }
+        return identities.AsReadOnly();
+    }
     public async Task<RunRecovery> RecoverAsync(string runId, CancellationToken cancellationToken = default)
     {
         ValidateName(runId, nameof(runId));
         var runDirectory = GetRunDirectory(runId);
+        RejectReparseAncestors(runDirectory);
         if (!Directory.Exists(runDirectory)) return new RunRecovery([], null, false);
         var records = new List<StoredRunRecord>();
-        foreach (var path in Directory.EnumerateFiles(runDirectory, "*-sha256-*.json").Order(StringComparer.Ordinal))
+        var paths = Directory.EnumerateFiles(runDirectory, "*-sha256-*.json").Take(4097).ToArray();
+        if (paths.Length > 4096) throw new RunStoreCorruptionException("Immutable run history exceeds the finite record bound.");
+        long totalBytes = 0;
+        foreach (var path in paths.Order(StringComparer.Ordinal))
         {
+            RejectReparseFile(path);
+            var length = new FileInfo(path).Length;
+            totalBytes = checked(totalBytes + length);
+            if (length > 16 * 1024 * 1024 || totalBytes > 64 * 1024 * 1024)
+                throw new RunStoreCorruptionException("Immutable run history exceeds the finite recovery byte bound.");
             var (fileSequence, expectedHash) = ParseFileIdentity(path);
             var bytes = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
             var actualHash = Convert.ToHexStringLower(SHA256.HashData(bytes));
@@ -97,6 +139,7 @@ public sealed class RunStore
 
         var latest = records.LastOrDefault();
         var pointerPath = Path.Combine(runDirectory, "current.json");
+        if (File.Exists(pointerPath)) RejectReparseFile(pointerPath);
         if (latest is null && File.Exists(pointerPath))
             throw new RunStoreCorruptionException("Run pointer references an immutable history that is missing.");
         var pointerRecovered = !await PointerMatchesAsync(runDirectory, latest, cancellationToken).ConfigureAwait(false);
@@ -112,9 +155,26 @@ public sealed class RunStore
     }
 
     private string GetRunDirectory(string runId)
+        => Path.Combine(_root, "runs", GetRunNamespaceIdentity(runId));
+
+    // Namespace identity is data, not proof of an active/closed run or permission to dispatch.
+    public string GetRunNamespaceIdentity(string runId)
     {
-        var digest = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(runId)));
-        return Path.Combine(_root, "runs", digest);
+        ValidateName(runId, nameof(runId));
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(runId)));
+    }
+
+    private static void RejectReparseAncestors(string path)
+    {
+        for (var directory = new DirectoryInfo(Path.GetFullPath(path)); directory is not null; directory = directory.Parent)
+            if (directory.Exists && (directory.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new RunStoreCorruptionException("Run storage cannot traverse a reparse/symlink ancestor.");
+    }
+
+    private static void RejectReparseFile(string path)
+    {
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            throw new RunStoreCorruptionException("Immutable run storage cannot read a reparse/symlink file.");
     }
 
     private static async Task<bool> PointerMatchesAsync(string runDirectory, StoredRunRecord? latest, CancellationToken cancellationToken)
