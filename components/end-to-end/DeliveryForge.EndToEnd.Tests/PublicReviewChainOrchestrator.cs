@@ -115,6 +115,7 @@ internal static class PublicReviewChainOrchestrator
         var resultObservation = Common();
         resultObservation["fullRegistrationIssuerExecutionChain"] = true; resultObservation["externalReviewerExplicitlyFixture"] = true;
         resultObservation["normalizerOutcome"] = original.Normalized.Outcome.ToString(); resultObservation["authorFamily"] = original.Normalized.AuthorFamily;
+        resultObservation["normalizerReason"] = original.Normalized.Reason;
         resultObservation["reviewerFamily"] = original.Normalized.ReviewerFamily; resultObservation["rawArtifactSha256"] = original.Raw.RawSha256;
         resultObservation["authorityAccepted"] = original.Normalized.AuthorityAccepted; resultObservation["acceptanceIssued"] = original.AcceptanceIssued;
         resultObservation["transitionAllowed"] = original.Allowed; resultObservation["originalPinnedReceiverAllowedBeforeNegative"] = original.Allowed;
@@ -174,7 +175,11 @@ internal static class PublicReviewChainOrchestrator
             var raw = await port.ExecuteAsync(registration, Path.Combine(artifacts.Root, "review-" + name + "-raw.json"), token);
             var execution = issuer.RecordExecution(registration, capability, "fixture-execution-" + Guid.NewGuid().ToString("N"),
                 true, true, raw.RawSha256, raw.Verdict, raw.CompletedAt);
-            var normalized = ReviewNormalizer.Normalize(request, ReviewResult.Complete(patch, family, raw.Verdict, [], raw.RawSha256, raw.CompletedAt), policy, capability, execution);
+            // The external raw vocabulary remains verbatim in its artifact/execution. The public
+            // normalizer expects a mapped result verdict and independently checks this correspondence.
+            var mappedVerdict = raw.Verdict.Trim().ToLowerInvariant() switch
+            { "ship" => "PASS", "needs-attention" or "do-not-ship" => "FAIL", _ => "ERROR" };
+            var normalized = ReviewNormalizer.Normalize(request, ReviewResult.Complete(patch, family, mappedVerdict, [], raw.RawSha256, raw.CompletedAt), policy, capability, execution);
             if (!normalized.Fixture || normalized.ProductionAccepted) throw new InvalidOperationException("External fixture review promoted to production.");
             var receiptBytes = ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(normalized));
             var receipt = ContractValidator.ParseAndValidate(receiptBytes);
