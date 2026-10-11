@@ -6,6 +6,7 @@ using Xunit;
 namespace DeliveryForge.EndToEnd.Tests;
 
 // Real public boundaries. These regressions do not provide worker or production evidence.
+[Collection(LocalSingleFixtureCollection.Name)]
 public sealed class NativeCleanupRegressionTests
 {
     [Theory(Timeout = 120_000)]

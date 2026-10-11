@@ -5,6 +5,7 @@ using Xunit;
 
 namespace DeliveryForge.EndToEnd.Tests;
 
+[Collection(LocalSingleFixtureCollection.Name)]
 public sealed class NativeExecutionScenarioTests
 {
     private static ScenarioOptions Options => new(ScenarioProfile.LocalContract, [],

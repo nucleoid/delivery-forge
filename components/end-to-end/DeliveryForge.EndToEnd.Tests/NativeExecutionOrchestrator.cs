@@ -34,30 +34,31 @@ internal static class NativeExecutionOrchestrator
         var binding = new AgentRunBinding(preparedData.AdapterId, preparedData.AdapterVersion, preparedData.RunId,
             preparedData.RequestIdentity, "fixture-runtime:" + runtime.RuntimeId, "fixture-task:" + runtime.RuntimeId);
         var host = new NativeFixtureControl(runtime, binding, scenario == "execution.unknown-host");
-        using var execution = new ExecutionCoordinator(runtime.Store, runtime.Worktrees, runtime.Processes, host);
+        var execution = new ExecutionCoordinator(runtime.Store, runtime.Worktrees, runtime.Processes, host);
         var scheduler = LocalSingleScheduler.Create(plan, worker, SchedulingScenarioFixture.Demand, SchedulingScenarioFixture.Budget(),
             runtime.Store, execution, runtime.Worktrees, runtime.Reader);
-        var ticket = await scheduler.ReserveAsync(cancellationToken);
-        if (fixtureAfterReserve is not null) await fixtureAfterReserve(scheduler, cancellationToken);
-        var prepared = await scheduler.ProvisionAndPrepareAsync(ticket, cancellationToken);
-        var observation = await runtime.Worktrees.ObserveAsync(runtime.Worktree, cancellationToken);
-        var accepted = new AgentAcceptedReceipt(WorkerEnvelope.SchemaVersion, prepared.RunId, prepared.RequestIdentity,
-            prepared.PlanIdentity, prepared.BaseCommit, prepared.Worktree, prepared.AdapterId, prepared.AdapterVersion,
-            binding.RuntimeRunIdentity, binding.RuntimeTaskIdentity, DateTimeOffset.UtcNow,
-            new[] { AgentCapability.Launch, AgentCapability.CompletionEvidence, AgentCapability.Pause, AgentCapability.Stop, AgentCapability.Resume }
-                .Select(capability => new AgentCapabilityEvidence(capability, AgentCapabilityStatus.Supported,
-                    "FIXTURE native-task contract", "fixture-native-session:" + runtime.RuntimeId)).ToArray());
-        await execution.AcceptAsync(accepted, cancellationToken);
-        runtime.BindSession(execution, host, binding, prepared);
-        var writerExclusive = false;
-        try { using var foreign = runtime.Worktrees.AcquireWriter(runtime.Worktree, "foreign", "foreign"); }
-        catch (DeliveryForge.Execution.Git.WorktreeBoundaryException) { writerExclusive = true; }
-        var childInitiallyLive = false; var childFinallyQuiet = true; var paused = false;
-        var lateDenied = false; var resumeDenied = false; var startDenied = false;
-        var closedBeforeFresh = false; var closedAfterFresh = false; var localQuietUnknown = false;
-        var beforeCount = 0; var afterCount = 0;
+        runtime.TrackScheduler(scheduler, execution, host);
         try
         {
+            var ticket = await scheduler.ReserveAsync(cancellationToken);
+            if (fixtureAfterReserve is not null) await fixtureAfterReserve(scheduler, cancellationToken);
+            var prepared = await scheduler.ProvisionAndPrepareAsync(ticket, cancellationToken);
+            var observation = await runtime.Worktrees.ObserveAsync(runtime.Worktree, cancellationToken);
+            var accepted = new AgentAcceptedReceipt(WorkerEnvelope.SchemaVersion, prepared.RunId, prepared.RequestIdentity,
+                prepared.PlanIdentity, prepared.BaseCommit, prepared.Worktree, prepared.AdapterId, prepared.AdapterVersion,
+                binding.RuntimeRunIdentity, binding.RuntimeTaskIdentity, DateTimeOffset.UtcNow,
+                new[] { AgentCapability.Launch, AgentCapability.CompletionEvidence, AgentCapability.Pause, AgentCapability.Stop, AgentCapability.Resume }
+                    .Select(capability => new AgentCapabilityEvidence(capability, AgentCapabilityStatus.Supported,
+                        "FIXTURE native-task contract", "fixture-native-session:" + runtime.RuntimeId)).ToArray());
+            await execution.AcceptAsync(accepted, cancellationToken);
+            runtime.BindSession(execution, host, binding, prepared);
+            var writerExclusive = false;
+            try { using var foreign = runtime.Worktrees.AcquireWriter(runtime.Worktree, "foreign", "foreign"); }
+            catch (DeliveryForge.Execution.Git.WorktreeBoundaryException) { writerExclusive = true; }
+            var childInitiallyLive = false; var childFinallyQuiet = true; var paused = false;
+            var lateDenied = false; var resumeDenied = false; var startDenied = false;
+            var closedBeforeFresh = false; var closedAfterFresh = false; var localQuietUnknown = false;
+            var beforeCount = 0; var afterCount = 0;
             if (scenario != "execution.real-provision")
             {
                 var executable = OperatingSystem.IsWindows() ? FindPowerShell() : FindExecutable("sleep");
@@ -101,40 +102,44 @@ internal static class NativeExecutionOrchestrator
                 afterCount = (await runtime.Store.RecoverAsync(worker.RunId, cancellationToken)).Records.Count(item => item.Kind == "process-registered");
             }
             else if (!await scheduler.StopAsync(cancellationToken)) throw new InvalidOperationException(scheduler.CleanupLimitation);
+            invariants["real-owned-worktree-provisioned"] = observation.IsClean && observation.HeadCommit == plan.BaseCommit;
+            invariants["exact-prepared-request-bound"] = prepared.RequestIdentity == WorkerEnvelope.PrepareWorker(worker).RequestIdentity;
+            invariants["writer-exclusive-observed"] = writerExclusive;
+            invariants["actual-native-child-paused"] = childInitiallyLive && childFinallyQuiet && paused;
+            invariants["paused-blocks-new-dispatch"] = lateDenied;
+            invariants["fresh-bound-fixture-host-observed"] = host.Observations > 0;
+            invariants["terminal-stop-recorded"] = (await runtime.Store.RecoverAsync(worker.RunId, cancellationToken)).Records.Any(item => item.Kind == "stopped");
+            invariants["stopped-run-cannot-resume"] = resumeDenied;
+            invariants["stopped-run-cannot-start-child"] = startDenied && beforeCount == afterCount;
+            var registered = await runtime.GitAsync(cancellationToken, "worktree", "list", "--porcelain");
+            var history = await runtime.Store.RecoverAsync(worker.RunId, cancellationToken);
+            var record = await artifacts.Store.AppendAsync(artifacts.RunId, "scenario-execution-observation", new
+            {
+                fixture = true, productionCertified = false, firstFullRealRunCertified = false,
+                integratedBaseCommit = artifacts.IntegratedSource.Commit, implementationHead = artifacts.IntegratedSource.HeadCommit,
+                frozenBaseCommit = plan.BaseCommit, preparedHeadCommit = observation.HeadCommit, prepared.RequestIdentity,
+                fixtureNativeTaskOnly = true, worktreeRegistered = registered.Replace('\\', '/').Contains(runtime.Worktree.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase),
+                childInitiallyLive, childFinallyQuiescent = childFinallyQuiet, pauseRecorded = paused,
+                processRegistrationsBefore = beforeCount, processRegistrationsAfter = afterCount,
+                localChildQuiescentWhileHostUnknown = localQuietUnknown, closedBeforeFreshHostObservation = closedBeforeFresh,
+                closedAfterFreshBoundHostObservation = closedAfterFresh, journalHashes = history.Records.Select(item => item.Sha256).ToArray(),
+                limitation = "Exact public contract fixture/native task only; no host-invoked model worker, quality PASS or full-profile certification."
+            }, cancellationToken);
+            receipts.Add(record.Sha256);
+            execution.Dispose(); // Actual exclusive writer handle must settle before filesystem cleanup.
+            if (!await runtime.TryCleanupAsync(cancellationToken)) throw new InvalidOperationException("Closed native runtime was not safely cleanable.");
         }
         finally
         {
             using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             host.EnableFreshOwnedFixtureObservations();
             if (!await scheduler.StopAsync(cleanup.Token) && !await scheduler.ReconcileCleanupAsync(cleanup.Token))
+            {
+                artifacts.RetainArtifacts("Owning scheduler retained by live runtime; closure uncertain: " + scheduler.CleanupLimitation);
                 throw new InvalidOperationException("Native fixture closure remains uncertain: " + scheduler.CleanupLimitation);
+            }
+            execution.Dispose(); // Keep the live owner on uncertainty; release only after positive closure.
         }
-        invariants["real-owned-worktree-provisioned"] = observation.IsClean && observation.HeadCommit == plan.BaseCommit;
-        invariants["exact-prepared-request-bound"] = prepared.RequestIdentity == WorkerEnvelope.PrepareWorker(worker).RequestIdentity;
-        invariants["writer-exclusive-observed"] = writerExclusive;
-        invariants["actual-native-child-paused"] = childInitiallyLive && childFinallyQuiet && paused;
-        invariants["paused-blocks-new-dispatch"] = lateDenied;
-        invariants["fresh-bound-fixture-host-observed"] = host.Observations > 0;
-        invariants["terminal-stop-recorded"] = (await runtime.Store.RecoverAsync(worker.RunId, cancellationToken)).Records.Any(item => item.Kind == "stopped");
-        invariants["stopped-run-cannot-resume"] = resumeDenied;
-        invariants["stopped-run-cannot-start-child"] = startDenied && beforeCount == afterCount;
-        var registered = await runtime.GitAsync(cancellationToken, "worktree", "list", "--porcelain");
-        var history = await runtime.Store.RecoverAsync(worker.RunId, cancellationToken);
-        var record = await artifacts.Store.AppendAsync(artifacts.RunId, "scenario-execution-observation", new
-        {
-            fixture = true, productionCertified = false, firstFullRealRunCertified = false,
-            integratedBaseCommit = artifacts.IntegratedSource.Commit, implementationHead = artifacts.IntegratedSource.HeadCommit,
-            frozenBaseCommit = plan.BaseCommit, preparedHeadCommit = observation.HeadCommit, prepared.RequestIdentity,
-            fixtureNativeTaskOnly = true, worktreeRegistered = registered.Replace('\\', '/').Contains(runtime.Worktree.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase),
-            childInitiallyLive, childFinallyQuiescent = childFinallyQuiet, pauseRecorded = paused,
-            processRegistrationsBefore = beforeCount, processRegistrationsAfter = afterCount,
-            localChildQuiescentWhileHostUnknown = localQuietUnknown, closedBeforeFreshHostObservation = closedBeforeFresh,
-            closedAfterFreshBoundHostObservation = closedAfterFresh, journalHashes = history.Records.Select(item => item.Sha256).ToArray(),
-            limitation = "Exact public contract fixture/native task only; no host-invoked model worker, quality PASS or full-profile certification."
-        }, cancellationToken);
-        receipts.Add(record.Sha256);
-        execution.Dispose(); // Actual exclusive writer handle must settle before filesystem cleanup.
-        if (!await runtime.TryCleanupAsync(cancellationToken)) throw new InvalidOperationException("Closed native runtime was not safely cleanable.");
     }
 
     private static async Task CleanupNegativeAsync(OwnedScenarioRun artifacts, OwnedEphemeralRuntime runtime, string scenario,

@@ -53,6 +53,10 @@ public sealed class ProcessControl : IAsyncDisposable
         _owned.Values.Where(owned => owned.RunId == runId)
             .Select(owned => owned.Identity).ToArray();
 
+    // Observation only: the snapshot cannot register/adopt a process or mint control authority.
+    public IReadOnlyList<ProcessIdentity> GetAllOwnedIdentities() =>
+        _owned.Values.Select(owned => owned.Identity).ToArray();
+
     public ProcessControlResult Observe(ProcessIdentity expected)
     {
         if (!_owned.TryGetValue(expected.ProcessId, out var owned) || owned.Identity != expected)

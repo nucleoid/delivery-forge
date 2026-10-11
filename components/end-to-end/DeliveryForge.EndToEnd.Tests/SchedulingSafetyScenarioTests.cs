@@ -6,6 +6,7 @@ using Xunit;
 
 namespace DeliveryForge.EndToEnd.Tests;
 
+[Collection(LocalSingleFixtureCollection.Name)]
 public sealed class SchedulingSafetyScenarioTests
 {
     private static ScenarioOptions Options => new(ScenarioProfile.LocalContract, [],
