@@ -210,6 +210,38 @@ public sealed class ExecutionCoordinator : IDisposable
             return await QuiesceAndRecordAsync(runId, WorkflowState.Stopped, "stopped", deadline, cancellationToken, reconcileTerminal: true).ConfigureAwait(false);
         }, cancellationToken);
 
+    // Observation only: no prepared/accepted record, writer, reservation or dispatch is created.
+    public Task<bool> ReconcileUnstartedStopAsync(AgentRequest request, string parentCheckout, TimeSpan deadline, CancellationToken cancellationToken = default) =>
+        RunExclusiveAsync(request.RunId, async () =>
+        {
+            ThrowIfDisposed();
+            if (request.SchemaVersion != WorkerEnvelope.SchemaVersion || request.RequestIdentity != WorkerEnvelope.ComputeRequestIdentity(request))
+                throw new WorkerEnvelopeException("Unstarted observation requires the original exact request data.");
+            if (deadline <= TimeSpan.Zero || deadline > TimeSpan.FromDays(1))
+                throw new WorkerEnvelopeException("Unstarted observation requires a finite positive deadline.");
+            if ((await _store.RecoverAsync(request.RunId, cancellationToken).ConfigureAwait(false)).Records.Count != 0 ||
+                HasPendingControlOperations(request.RunId) || _processes.GetOwnedIdentities(request.RunId).Count != 0 || _writers.ContainsKey(request.RunId))
+                return false;
+            await _worktrees.ValidateUnprovisionedPathsAsync(parentCheckout, request.Worktree, request.ResultDirectory, cancellationToken).ConfigureAwait(false);
+            var binding = new AgentRunBinding(request.AdapterId, request.AdapterVersion, request.RunId, request.RequestIdentity, "", "");
+            var task = _agentControl.ObserveUnstartedAsync(binding, deadline, cancellationToken)
+                ?? throw new WorkerEnvelopeException("Unstarted host observation returned no task.");
+            _pendingControls.TryAdd(task, request.RunId);
+            _ = task.ContinueWith(completed =>
+            {
+                _ = completed.Exception;
+                _pendingControls.TryRemove(completed, out _);
+            }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            var observed = await task.WaitAsync(deadline, cancellationToken).ConfigureAwait(false);
+            if (observed.Binding != binding || observed.Action != AgentControlAction.Stop || !observed.CapabilitySupported ||
+                observed.Activity != AgentActivityState.Quiescent || string.IsNullOrWhiteSpace(observed.EvidenceReference))
+                return false;
+            // Observe both sides of the host call; missing manifests/files never replace the host proof.
+            await _worktrees.ValidateUnprovisionedPathsAsync(parentCheckout, request.Worktree, request.ResultDirectory, cancellationToken).ConfigureAwait(false);
+            return (await _store.RecoverAsync(request.RunId, cancellationToken).ConfigureAwait(false)).Records.Count == 0 &&
+                !HasPendingControlOperations(request.RunId) && _processes.GetOwnedIdentities(request.RunId).Count == 0 && !_writers.ContainsKey(request.RunId);
+        }, cancellationToken);
+
     public Task<QuiescenceResult> ReconcilePausedAsync(string runId, TimeSpan deadline, CancellationToken cancellationToken = default) =>
         RunExclusiveAsync(runId, async () =>
         {

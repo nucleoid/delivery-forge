@@ -199,17 +199,20 @@ public sealed class LocalSingleScheduler
                 saved.StartedAtUtc == default || saved.ExpiresAtUtc - saved.StartedAtUtc != _demand.TimeLimit)
                 throw new SchedulingException("Cold cleanup journal/namespace/request/plan/resource identity is unknown or differs.");
             var execution = await _store.RecoverAsync(_worker.RunId, deadline.Token).ConfigureAwait(false);
-            var preparedRecord = execution.Records.SingleOrDefault(item => item.Kind == "worker-prepared")
-                ?? throw new SchedulingException("Cold terminal cleanup requires the original immutable prepared worker.");
-            var prepared = _store.ReadPayload<PreparedWorkerRecord>(preparedRecord);
-            if (prepared.Request.RunId != _worker.RunId || prepared.Request.RequestIdentity != saved.RequestIdentity ||
-                prepared.Request.RequestIdentity != WorkerEnvelope.ComputeRequestIdentity(prepared.Request))
+            var preparedRecord = execution.Records.SingleOrDefault(item => item.Kind == "worker-prepared");
+            var prepared = preparedRecord is null ? null : _store.ReadPayload<PreparedWorkerRecord>(preparedRecord);
+            if (prepared is not null && (prepared.Request.RunId != _worker.RunId || prepared.Request.RequestIdentity != saved.RequestIdentity ||
+                prepared.Request.RequestIdentity != WorkerEnvelope.ComputeRequestIdentity(prepared.Request)))
                 throw new SchedulingException("Cold cleanup worker differs from the exact original local request.");
+            if (prepared is null && (execution.Records.Count != 0 || saved.Phase != "stopped" || !saved.Stopped))
+                throw new SchedulingException("Missing preparation is not proof of an unstarted stopped reservation; ambiguous history is refused.");
             await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
             if (!await _execution.AwaitPendingControlSettlementAsync(_worker.RunId, _controlTimeout, deadline.Token).ConfigureAwait(false))
                 throw new SchedulingException("Pending host controls cannot be outrun by cold terminal cleanup.");
-            var observed = await _execution.ReconcileTerminalStopAsync(_worker.RunId, _controlTimeout, deadline.Token).ConfigureAwait(false);
-            if (!observed.Quiescent || _execution.HasPendingControlOperations(_worker.RunId))
+            var quiescent = prepared is null
+                ? await _execution.ReconcileUnstartedStopAsync(WorkerEnvelope.PrepareWorker(_worker), _worker.ParentCheckout, _controlTimeout, deadline.Token).ConfigureAwait(false)
+                : (await _execution.ReconcileTerminalStopAsync(_worker.RunId, _controlTimeout, deadline.Token).ConfigureAwait(false)).Quiescent;
+            if (!quiescent || _execution.HasPendingControlOperations(_worker.RunId))
                 throw new SchedulingException("Fresh child/writer/bound host observations did not prove terminal closure.");
             _startedAtUtc = saved.StartedAtUtc;
             _expiresAtUtc = saved.ExpiresAtUtc;

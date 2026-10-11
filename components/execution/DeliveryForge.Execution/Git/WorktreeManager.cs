@@ -55,6 +55,21 @@ public sealed class WorktreeManager
             throw new WorktreeBoundaryException("Assigned path is not the exact Git worktree root.");
     }
 
+    public async Task ValidateUnprovisionedPathsAsync(string parentCheckout, string worktree, string resultDirectory, CancellationToken cancellationToken = default)
+    {
+        ValidateDestination(parentCheckout, worktree);
+        RejectSymlinkAncestors(resultDirectory);
+        RejectRepositoryAncestors(resultDirectory);
+        RejectParentOrNested(CanonicalPath(parentCheckout), CanonicalPath(resultDirectory));
+        if (Directory.Exists(worktree) || File.Exists(worktree) || Directory.Exists(resultDirectory) || File.Exists(resultDirectory))
+            throw new WorktreeBoundaryException("Unstarted cleanup refuses existing or ambiguous worktree/result paths; their absence alone is not closure proof.");
+        var registered = await GitAsync(parentCheckout, cancellationToken, "worktree", "list", "--porcelain", "-z").ConfigureAwait(false);
+        var paths = registered.Split('\0').Where(item => item.StartsWith("worktree ", StringComparison.Ordinal)).Select(item => item[9..]).ToArray();
+        if (paths.Length == 0 || paths.Any(path => !Path.IsPathFullyQualified(path)) ||
+            paths.Any(path => string.Equals(CanonicalPath(path), CanonicalPath(worktree), PathComparison())))
+            throw new WorktreeBoundaryException("Git worktree registration is missing/ambiguous or still names the supposedly unstarted destination.");
+    }
+
     public async Task PrepareAsync(string parentCheckout, string destination, string baseCommit, CancellationToken cancellationToken = default)
     {
         ValidateDestination(parentCheckout, destination);

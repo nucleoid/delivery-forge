@@ -180,6 +180,8 @@ public sealed partial class LocalSingleTests
     private sealed class ColdObservationControl(string observation) : IAgentControlPort
     {
         public int StopObservations { get; private set; }
+        public Task<AgentControlResult> ObserveUnstartedAsync(AgentRunBinding binding, TimeSpan deadline, CancellationToken cancellationToken = default) =>
+            ControlAsync(binding, AgentControlAction.Stop, deadline, cancellationToken);
         public Task<AgentControlResult> ControlAsync(AgentRunBinding binding, AgentControlAction action, TimeSpan deadline, CancellationToken cancellationToken = default)
         {
             if (action == AgentControlAction.Stop) StopObservations++;
