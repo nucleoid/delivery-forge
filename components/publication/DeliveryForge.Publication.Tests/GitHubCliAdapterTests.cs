@@ -15,10 +15,11 @@ public sealed class GitHubCliAdapterTests
         return new(executable, "sha256:" + Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(executable))),
             AppContext.BaseDirectory, "2.80.0", TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
     }
-    private static ParentDisposableGitHubAuthority Parent() => ParentDisposableGitHubAuthority.CreateForExplicitUserAuthorization(
-        "fixture-only-user-grant", Target, "forge-disposable-", AuthorizationCeiling.Merge, DateTimeOffset.UtcNow.AddMinutes(5));
-    private static GitHostMutation Mutation(PublicationAction action = PublicationAction.MergeNormal) => new(
-        new("cli-key", "fixture-run", "fixture-revision", action, Target, PublicationFixture.Commit('a'),
+    private static ParentDisposableGitHubAuthority Parent(PublicationTarget? target = null) => ParentDisposableGitHubAuthority.CreateForExplicitUserAuthorization(
+        "fixture-only-user-grant", target ?? Target, "forge-disposable-", AuthorizationCeiling.Merge, DateTimeOffset.UtcNow.AddMinutes(5));
+    private static GitHostMutation Mutation(PublicationAction action = PublicationAction.MergeNormal,
+        string key = "cli-key", PublicationTarget? target = null) => new(
+        new(key, "fixture-run", "fixture-revision", action, target ?? Target, PublicationFixture.Commit('a'),
             PublicationFixture.Commit('b'), PublicationFixture.Commit('c'), PublicationIntentState.Sent, CreatedAt: DateTimeOffset.UtcNow),
         PublicationFixture.Commit('a'));
 
@@ -174,6 +175,75 @@ public sealed class GitHubCliAdapterTests
         Assert.False(result.ResidualProcessUncertain);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Completed_residual_process_result_fences_ref_across_new_key_and_parent(bool newParent)
+    {
+        var target = Target with { Repository = "fixture/forge-disposable-residual-" + Guid.NewGuid().ToString("N") };
+        var runner = new CliFixtureRunner { RepositoryTarget = target, ResidualMutation = true };
+        var parent = Parent(target);
+        var first = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
+            .MergeNormalAsync(Mutation(target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Uncertain, first.Outcome);
+        Assert.Equal(1, runner.Mutations);
+        var nextParent = newParent ? Parent(target) : parent;
+        var second = await new GitHubCliAdapter(Configuration(), runner, nextParent, nextParent.IssueGrant())
+            .MergeNormalAsync(Mutation(key: "another-key", target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Uncertain, second.Outcome);
+        Assert.Equal(1, runner.Mutations);
+    }
+
+    [Fact]
+    public async Task Fully_quiescent_uncertain_result_does_not_invent_a_physical_residual_barrier()
+    {
+        var target = Target with { Repository = "fixture/forge-disposable-quiescent-" + Guid.NewGuid().ToString("N") };
+        var runner = new CliFixtureRunner { RepositoryTarget = target, FailMutation = true };
+        var parent = Parent(target);
+        var first = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
+            .MergeNormalAsync(Mutation(target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Uncertain, first.Outcome);
+        runner.FailMutation = false;
+        runner.PublicationKey = "next-quiescent-key";
+        var nextParent = Parent(target);
+        var second = await new GitHubCliAdapter(Configuration(), runner, nextParent, nextParent.IssueGrant())
+            .MergeNormalAsync(Mutation(key: runner.PublicationKey, target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Confirmed, second.Outcome);
+        Assert.Equal(2, runner.Mutations);
+    }
+
+    [Theory]
+    [InlineData("wrong-app")]
+    [InlineData("absent-required-app")]
+    [InlineData("required-failing-wrong-passing")]
+    [InlineData("missing-observed-app")]
+    [InlineData("missing-required-app")]
+    public async Task App_specific_required_check_cannot_be_satisfied_by_name_only(string shape)
+    {
+        var target = Target with { Repository = "fixture/forge-disposable-app-" + Guid.NewGuid().ToString("N") };
+        var runner = new CliFixtureRunner { RepositoryTarget = target, AppShape = shape };
+        var parent = Parent(target);
+        var result = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
+            .MergeNormalAsync(Mutation(target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Rejected, result.Outcome);
+        Assert.Equal(0, runner.Mutations);
+    }
+
+    [Theory]
+    [InlineData("correct-app")]
+    [InlineData("explicit-any-app")]
+    [InlineData("legacy")]
+    public async Task Correct_or_explicitly_unrestricted_required_check_is_a_positive_control(string shape)
+    {
+        var target = Target with { Repository = "fixture/forge-disposable-app-control-" + Guid.NewGuid().ToString("N") };
+        var runner = new CliFixtureRunner { RepositoryTarget = target, AppShape = shape };
+        var parent = Parent(target);
+        var result = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
+            .MergeNormalAsync(Mutation(target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Confirmed, result.Outcome);
+        Assert.Equal(1, runner.Mutations);
+    }
+
     private sealed class CliFixtureRunner : IGitHubCliExecutor
     {
         public List<IReadOnlyList<string>> Calls { get; } = [];
@@ -182,6 +252,10 @@ public sealed class GitHubCliAdapterTests
         public string? Fault { get; set; }
         public bool BlockMutation { get; set; }
         public bool FailMutation { get; set; }
+        public bool ResidualMutation { get; set; }
+        public PublicationTarget RepositoryTarget { get; set; } = Target;
+        public string PublicationKey { get; set; } = "cli-key";
+        public string? AppShape { get; set; }
         public TaskCompletionSource ReleaseMutation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task<GitHubCliResult>? MutationTask { get; private set; }
         private bool merged;
@@ -199,12 +273,13 @@ public sealed class GitHubCliAdapterTests
             {
                 if (BlockMutation) await ReleaseMutation.Task;
                 if (FailMutation) return new(1, "", "fixture lost result");
+                if (ResidualMutation) return new(null, "", "fixture incomplete physical cleanup", ResidualProcessUncertain: true);
                 if (arguments[1] == "merge") merged = true;
                 if (arguments[1] == "create") PrExists = true;
             }
             var endpoint = arguments.Count > 1 ? arguments[1] : "";
             var body = arguments[0] == "--version" ? "gh version 2.80.0 (2025-10-01)" : arguments[0] == "auth" ? "Logged in" :
-                arguments[0] == "pr" ? "https://github.com/fixture/forge-disposable-10/pull/10" :
+                arguments[0] == "pr" ? "https://github.com/" + RepositoryTarget.Repository + "/pull/10" :
                 endpoint.Contains("git/ref/heads/work", StringComparison.Ordinal) ? "{\"object\":{\"sha\":\"" + PublicationFixture.Commit('b') + "\"}}" :
                 endpoint.Contains("git/ref/heads/main", StringComparison.Ordinal) ? "{\"object\":{\"sha\":\"" + PublicationFixture.Commit(merged ? 'd' : 'a') + "\"}}" :
                 endpoint.Contains("/pulls/", StringComparison.Ordinal) ? PrDocument().ToJsonString() :
@@ -218,7 +293,46 @@ public sealed class GitHubCliAdapterTests
             if (Fault == "checks" && endpoint.EndsWith("/status", StringComparison.Ordinal))
                 body = "{\"state\":\"pending\",\"statuses\":[{\"context\":\"ci\",\"state\":\"pending\"}]}";
             if (Fault == "protection" && endpoint.EndsWith("/protection", StringComparison.Ordinal)) body = "{}";
+            if (AppShape is not null)
+            {
+                if (endpoint.EndsWith("/protection", StringComparison.Ordinal)) body = AppProtection();
+                if (endpoint.Contains("/check-runs", StringComparison.Ordinal)) body = AppRuns();
+                if (endpoint.EndsWith("/status", StringComparison.Ordinal))
+                {
+                    var context = AppShape is "absent-required-app" or "legacy" ? "ci" : "unrelated";
+                    body = new JsonObject { ["state"] = "success", ["statuses"] = new JsonArray(new JsonObject
+                        { ["context"] = context, ["state"] = "success" }) }.ToJsonString();
+                }
+            }
             return new(0, body, "");
+        }
+        private string AppProtection()
+        {
+            var required = new JsonObject { ["contexts"] = new JsonArray("ci") };
+            if (AppShape != "legacy")
+            {
+                var check = new JsonObject { ["context"] = "ci" };
+                if (AppShape != "missing-required-app") check["app_id"] = AppShape == "explicit-any-app" ? -1 : 123;
+                required["checks"] = new JsonArray(check);
+            }
+            return new JsonObject { ["required_status_checks"] = required, ["required_pull_request_reviews"] = new JsonObject() }.ToJsonString();
+        }
+        private string AppRuns()
+        {
+            JsonObject Run(int? app, string conclusion)
+            {
+                var run = new JsonObject { ["id"] = app ?? 1, ["name"] = "ci", ["head_sha"] = PublicationFixture.Commit('b'),
+                    ["status"] = "completed", ["conclusion"] = conclusion };
+                if (app is not null) run["app"] = new JsonObject { ["id"] = app.Value };
+                return run;
+            }
+            var runs = new JsonArray();
+            if (AppShape is not ("absent-required-app" or "legacy"))
+            {
+                if (AppShape == "required-failing-wrong-passing") runs.Add(Run(123, "failure"));
+                runs.Add(Run(AppShape == "correct-app" ? 123 : AppShape == "missing-observed-app" ? null : 999, "success"));
+            }
+            return new JsonObject { ["total_count"] = runs.Count, ["check_runs"] = runs }.ToJsonString();
         }
         private string PrJson()
         {
@@ -227,14 +341,14 @@ public sealed class GitHubCliAdapterTests
         }
         private JsonObject PrDocument()
         {
-            var marker = "delivery-forge-publication:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("cli-key")));
+            var marker = "delivery-forge-publication:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(PublicationKey)));
             return new JsonObject
             {
-                ["number"] = 10, ["html_url"] = "https://github.com/fixture/forge-disposable-10/pull/10",
+                ["number"] = 10, ["html_url"] = "https://github.com/" + RepositoryTarget.Repository + "/pull/10",
                 ["head"] = new JsonObject { ["sha"] = PublicationFixture.Commit('b'), ["ref"] = "work",
-                    ["repo"] = new JsonObject { ["full_name"] = "fixture/forge-disposable-10" } },
+                    ["repo"] = new JsonObject { ["full_name"] = RepositoryTarget.Repository } },
                 ["base"] = new JsonObject { ["sha"] = PublicationFixture.Commit('a'), ["ref"] = "main",
-                    ["repo"] = new JsonObject { ["full_name"] = "fixture/forge-disposable-10" } },
+                    ["repo"] = new JsonObject { ["full_name"] = RepositoryTarget.Repository } },
                 ["body"] = "<!-- " + marker + " -->", ["state"] = merged ? "closed" : "open", ["auto_merge"] = null,
                 ["merged_at"] = merged ? "2026-10-11T00:00:01Z" : null,
                 ["merge_commit_sha"] = merged ? PublicationFixture.Commit('d') : null
