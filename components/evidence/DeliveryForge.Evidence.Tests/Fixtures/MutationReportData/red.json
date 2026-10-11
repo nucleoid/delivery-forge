@@ -1,0 +1,79 @@
+{
+  "schemaVersion": "2",
+  "runId": "format-only-red",
+  "generatedAtUtc": "2026-01-01T00:00:00Z",
+  "mode": "check",
+  "selection": {
+    "inputs": [
+      "src/Example/Flag.cs"
+    ],
+    "kind": "inputs",
+    "baseRevision": null
+  },
+  "scopePlan": {
+    "files": [],
+    "projectUnits": [],
+    "selectionKind": "inputs",
+    "exclusions": [],
+    "baseCommit": null,
+    "schemaVersion": "1",
+    "root": "format-only-repository",
+    "isComplete": true,
+    "reasons": []
+  },
+  "policy": {
+    "allowNotApplicable": false,
+    "mutationCap": 4,
+    "stabilityRepetitions": 1,
+    "overallDeadlineSeconds": 240,
+    "mutantTimeoutSeconds": 30,
+    "maxWorkers": 1,
+    "baselineTimeoutSeconds": 60
+  },
+  "baseline": "RED",
+  "suites": [
+    {
+      "suiteId": "suite:v1:59cff946e0beaffe2aeb6e3783b39be7fca4be2b31d6cf2862fc3385da3d1b0f",
+      "baseline": "RED",
+      "evidence": [
+        {
+          "summary": "Explicit format-only suite data; nothing was executed.",
+          "diagnostics": null,
+          "kind": "SUITE_BASELINE"
+        }
+      ]
+    }
+  ],
+  "units": [],
+  "counts": {
+    "compileInvalid": 0,
+    "enumerated": null,
+    "survived": 0,
+    "killed": 0,
+    "executed": 0,
+    "selected": 0,
+    "errors": 0,
+    "omitted": 0,
+    "freshUncovered": 0
+  },
+  "incompleteConditions": [],
+  "reasons": [
+    {
+      "code": "BASELINE_RED",
+      "message": "The baseline status is RED."
+    },
+    {
+      "code": "ENUMERATION_INCOMPLETE",
+      "message": "The mutation-site total is unknown."
+    }
+  ],
+  "evidence": [
+    {
+      "summary": "Explicit format-only data, not execution proof.",
+      "diagnostics": null,
+      "kind": "FORMAT_ONLY"
+    }
+  ],
+  "outcome": "INCOMPLETE",
+  "exitCode": 2
+}
