@@ -454,9 +454,12 @@ public sealed class LocalSingleScheduler
     }
     private async Task PersistAsync(string phase, CancellationToken cancellationToken)
     {
-        try { await _store.AppendAsync(JournalRunId, "local-scheduler-checkpoint", new LocalCheckpoint(2, "local-single", phase, _plan.Identity, _plan.ContractIdentity,
-            _worker.RunId, _worker.BaseCommit, WorkerEnvelope.PrepareWorker(_worker).RequestIdentity, _budget.PolicyIdentity, _worker.AuthorizationCeiling, _demand,
-            _startedAtUtc, _expiresAtUtc, Volatile.Read(ref _paused) != 0, Volatile.Read(ref _stopped) != 0), cancellationToken).ConfigureAwait(false); }
+        try
+        {
+            await _store.AppendAsync(JournalRunId, "local-scheduler-checkpoint", new LocalCheckpoint(2, "local-single", phase, _plan.Identity, _plan.ContractIdentity,
+                _worker.RunId, _worker.BaseCommit, WorkerEnvelope.PrepareWorker(_worker).RequestIdentity, _budget.PolicyIdentity, _worker.AuthorizationCeiling, _demand,
+                _startedAtUtc, _expiresAtUtc, Volatile.Read(ref _paused) != 0, Volatile.Read(ref _stopped) != 0), cancellationToken).ConfigureAwait(false);
+        }
         catch { _uncertain = true; throw; }
     }
     private void MarkObservedClosed()
