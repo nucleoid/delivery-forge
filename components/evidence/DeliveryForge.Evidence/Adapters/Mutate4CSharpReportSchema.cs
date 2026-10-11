@@ -80,7 +80,16 @@ internal static class Mutate4CSharpReportSchema
             if (schema.TryGetProperty("minItems", out var minimumItems)) Require(length >= minimumItems.GetInt32(), path, "array too short");
             if (schema.TryGetProperty("maxItems", out var maximumItems)) Require(length <= maximumItems.GetInt32(), path, "array too long");
             if (schema.TryGetProperty("uniqueItems", out var unique) && unique.GetBoolean())
-                Require(value.EnumerateArray().Select(item => item.GetRawText()).Distinct(StringComparer.Ordinal).Count() == length, path, "duplicate array values");
+            {
+                // The pinned schema declares uniqueItems only for the two bounded member
+                // arrays of strings. JSON escape spelling is not part of decoded identity.
+                Require(length <= 256 && schema.TryGetProperty("items", out var uniqueItems) &&
+                    uniqueItems.TryGetProperty("type", out var itemType) && itemType.GetString() == "string",
+                    path, "unsupported uniqueness grammar");
+                var seen = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var item in value.EnumerateArray())
+                    Require(item.ValueKind == JsonValueKind.String && seen.Add(item.GetString()!), path, "duplicate or non-string member");
+            }
             if (schema.TryGetProperty("contains", out var contains))
                 Require(value.EnumerateArray().Count(item => Accepts(item, contains, path, root)) >=
                     (schema.TryGetProperty("minContains", out var minimumContains) ? minimumContains.GetInt32() : 1), path, "required array member absent");
