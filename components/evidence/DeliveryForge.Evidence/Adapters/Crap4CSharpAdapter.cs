@@ -50,6 +50,22 @@ public sealed class Crap4CSharpAdapter
                 evaluation.GetProperty("metrics").GetArrayLength() != methodCount)
                 return NormalizedEvidence.Error("Crap4CSharp coverage summary is malformed.", capability.Fixture);
             var metrics = evaluation.GetProperty("metrics").EnumerateArray().ToArray();
+            var metricIdentities = new HashSet<string>(StringComparer.Ordinal);
+            var callableRuleset = root.GetProperty("complexityRulesetVersion").GetString() == "callables-v1";
+            foreach (var metric in metrics)
+            {
+                var identity = JsonSerializer.Serialize(new
+                {
+                    context = metric.GetProperty("contextId").GetString(),
+                    path = metric.GetProperty("path").GetString(),
+                    method = metric.GetProperty("methodIdentity").GetString(),
+                    signature = callableRuleset ? null : metric.GetProperty("signature").GetString(),
+                    start = callableRuleset ? 0 : metric.GetProperty("span").GetProperty("startLine").GetDouble(),
+                    end = callableRuleset ? 0 : metric.GetProperty("span").GetProperty("endLine").GetDouble()
+                });
+                if (!metricIdentities.Add(identity))
+                    return NormalizedEvidence.Error("Crap4CSharp metric inventory contains duplicate identities.", capability.Fixture);
+            }
             var observedKnown = metrics.Count(metric => metric.GetProperty("coverage").ValueKind == JsonValueKind.Number);
             if (observedKnown != knownCount || unknownCount > methodCount - observedKnown)
                 return NormalizedEvidence.Error("Crap4CSharp coverage counts contradict the metric inventory.", capability.Fixture);
@@ -90,6 +106,14 @@ public sealed class Crap4CSharpAdapter
                 status is not ("completed" or "operationalError" or "cancelled"))
                 return NormalizedEvidence.Error("Crap4CSharp run status is malformed.", capability.Fixture);
             var completed = completedElement.ValueKind == JsonValueKind.True;
+            var requiredChecks = evaluation.GetProperty("checks").EnumerateArray()
+                .Where(check => check.GetProperty("required").GetBoolean()).ToArray();
+            var requiredIncomplete = requiredChecks.Any(check =>
+                check.GetProperty("status").GetString() is "operationalError" or "cancelled" or "skipped");
+            var requiredFailed = requiredChecks.Any(check => check.GetProperty("status").GetString() == "fail");
+            if (requiredIncomplete && (completed || policyDecision != "unknown" || status == "completed") ||
+                requiredFailed && policyDecision is "pass" or "notApplicable")
+                return NormalizedEvidence.Error("Crap4CSharp required checks contradict its decision.", capability.Fixture);
             if (status != "completed" && (completed || policyDecision != "unknown") ||
                 !completed && policyDecision != "unknown")
                 return NormalizedEvidence.Error("Crap4CSharp decision and run completion disagree.", capability.Fixture);

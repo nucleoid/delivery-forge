@@ -107,9 +107,35 @@ internal static class Crap4CSharpResultSchema
         "boolean" => value.ValueKind is JsonValueKind.True or JsonValueKind.False,
         "null" => value.ValueKind == JsonValueKind.Null,
         "number" => value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number) && double.IsFinite(number),
-        "integer" => value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var integer) && double.IsFinite(integer) && Math.Truncate(integer) == integer,
+        "integer" => value.ValueKind == JsonValueKind.Number && IsInteger(value.GetRawText()),
         _ => throw new InvalidOperationException("Unsupported vendor schema type.")
     };
+
+    private static bool IsInteger(string token)
+    {
+        var text = token.AsSpan();
+        var exponentIndex = text.IndexOfAny('e', 'E');
+        var mantissa = exponentIndex < 0 ? text : text[..exponentIndex];
+        var nonzero = false;
+        foreach (var character in mantissa)
+            if (character is >= '1' and <= '9') nonzero = true;
+        if (!nonzero) return true;
+        var exponent = 0;
+        if (exponentIndex >= 0 && !int.TryParse(text[(exponentIndex + 1)..],
+            NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out exponent)) return false;
+        var dot = mantissa.IndexOf('.');
+        var fractionDigits = dot < 0 ? 0 : mantissa.Length - dot - 1;
+        var neededZeros = (long)fractionDigits - exponent;
+        if (neededZeros <= 0) return true;
+        long trailingZeros = 0;
+        for (var index = mantissa.Length - 1; index >= 0; index--)
+        {
+            if (mantissa[index] == '.') continue;
+            if (mantissa[index] != '0') break;
+            trailingZeros++;
+        }
+        return trailingZeros >= neededZeros;
+    }
 
     private static bool Accepts(JsonElement value, JsonElement schema, string path, JsonElement root)
     {
