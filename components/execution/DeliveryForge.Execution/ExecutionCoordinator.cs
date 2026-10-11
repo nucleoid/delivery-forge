@@ -28,6 +28,7 @@ public sealed class ExecutionCoordinator : IDisposable
     private readonly IAgentControlPort _agentControl;
     private readonly IExecutionFactSource _factSource;
     private readonly ConcurrentDictionary<string, WriterLease> _writers = new(StringComparer.Ordinal);
+    private readonly ConcurrentDictionary<Task, string> _pendingControls = new();
     private bool _disposed;
 
     public ExecutionCoordinator(
@@ -178,15 +179,53 @@ public sealed class ExecutionCoordinator : IDisposable
             () => QuiesceAndRecordAsync(runId, WorkflowState.Stopped, "stopped", deadline, cancellationToken), cancellationToken);
 
     public Task<ResumeResult> ResumeAsync(string runId, CancellationToken cancellationToken = default) =>
-        RunExclusiveAsync(runId, () => ResumeCoreAsync(runId, cancellationToken), cancellationToken);
+        ResumeAsync(runId, TimeSpan.FromSeconds(30), cancellationToken);
 
-    private async Task<ResumeResult> ResumeCoreAsync(string runId, CancellationToken cancellationToken)
+    public Task<ResumeResult> ResumeAsync(string runId, TimeSpan controlDeadline, CancellationToken cancellationToken = default) =>
+        RunExclusiveAsync(runId, () => ResumeCoreAsync(runId, controlDeadline, cancellationToken), cancellationToken);
+
+    public bool HasPendingControlOperations(string runId) => _pendingControls.Any(pair => pair.Value == runId && !pair.Key.IsCompleted);
+
+    public async Task<bool> AwaitPendingControlSettlementAsync(string runId, TimeSpan deadline, CancellationToken cancellationToken = default)
+    {
+        if (deadline <= TimeSpan.Zero || deadline > TimeSpan.FromDays(1)) throw new WorkerEnvelopeException("Control settlement requires a finite positive deadline.");
+        var pending = _pendingControls.Where(pair => pair.Value == runId).Select(pair => pair.Key).ToArray();
+        if (pending.Length == 0) return true;
+        try { await Task.WhenAll(pending).WaitAsync(deadline, cancellationToken).ConfigureAwait(false); }
+        catch (Exception) { }
+        return !HasPendingControlOperations(runId);
+    }
+
+    public Task<QuiescenceResult> ReconcileStopAsync(string runId, TimeSpan deadline, CancellationToken cancellationToken = default) =>
+        RunExclusiveAsync(runId, () => QuiesceAndRecordAsync(runId, WorkflowState.Stopped, "stopped", deadline, cancellationToken, reconcileTerminal: true), cancellationToken);
+
+    public Task<QuiescenceResult> ReconcilePausedAsync(string runId, TimeSpan deadline, CancellationToken cancellationToken = default) =>
+        RunExclusiveAsync(runId, async () =>
+        {
+            ThrowIfDisposed();
+            var recovered = await _store.RecoverAsync(runId, cancellationToken).ConfigureAwait(false);
+            EnsureState(recovered, WorkflowState.Paused, "reconcile paused ownership");
+            var prepared = GetPrepared(recovered);
+            var durable = _store.ReadPayload<QuiescenceRecord>(recovered.Records.Last(record => record.Kind is "paused" or "paused-reconciled")).Checkpoint
+                ?? throw new RunStoreCorruptionException("Paused recovery requires the original durable checkpoint.");
+            var actual = await _worktrees.ObserveAsync(prepared.Request.Worktree, cancellationToken).ConfigureAwait(false);
+            await _worktrees.EnsureDescendsFromAsync(prepared.Request.Worktree, prepared.Request.BaseCommit, actual.HeadCommit, cancellationToken).ConfigureAwait(false);
+            var facts = await ObserveOwnedFactsAsync(prepared.Request, actual, false, cancellationToken).ConfigureAwait(false);
+            var reconciliation = Reconciler.ReconcileResume(new(durable, actual,
+                _worktrees.IsSameDirectory(actual.RootPath, prepared.Request.Worktree), TryEnsureWriterOwnership(prepared.Request),
+                facts.RequiredArtifactPaths.All(File.Exists), OwnedFactsEqual(facts, durable.OwnedFacts), ObserveRegisteredProcesses(runId, recovered)));
+            if (reconciliation.Action != ReconciliationAction.ResumeDispatch)
+                throw new WorkerEnvelopeException("Fresh paused ownership is not recoverable: " + string.Join("; ", reconciliation.Reasons));
+            return await QuiesceAndRecordAsync(runId, WorkflowState.Paused, "paused-reconciled", deadline, cancellationToken, reconcilePaused: true).ConfigureAwait(false);
+        }, cancellationToken);
+
+    private async Task<ResumeResult> ResumeCoreAsync(string runId, TimeSpan controlDeadline, CancellationToken cancellationToken)
     {
         ThrowIfDisposed();
         var recovery = await _store.RecoverAsync(runId, cancellationToken).ConfigureAwait(false);
         EnsureState(recovery, WorkflowState.Paused, "resume");
         var prepared = GetPrepared(recovery);
-        var pause = recovery.Records.Last(record => record.Kind == "paused");
+        var pause = recovery.Records.Last(record => record.Kind is "paused" or "paused-reconciled");
         var durable = _store.ReadPayload<QuiescenceRecord>(pause).Checkpoint
             ?? throw new RunStoreCorruptionException("Paused record has no durable checkpoint.");
         var actual = await _worktrees.ObserveAsync(prepared.Request.Worktree, cancellationToken).ConfigureAwait(false);
@@ -214,8 +253,7 @@ public sealed class ExecutionCoordinator : IDisposable
         AgentControlResult adapterObservation;
         try
         {
-            adapterObservation = await _agentControl.ControlAsync(
-                ToBinding(accepted), AgentControlAction.Resume, TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+            adapterObservation = await InvokeControlAsync(ToBinding(accepted), AgentControlAction.Resume, controlDeadline, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
@@ -251,15 +289,16 @@ public sealed class ExecutionCoordinator : IDisposable
 
     private async Task<QuiescenceResult> QuiesceAndRecordAsync(
         string runId, WorkflowState requestedState, string requestedKind,
-        TimeSpan deadline, CancellationToken cancellationToken)
+        TimeSpan deadline, CancellationToken cancellationToken, bool reconcileTerminal = false, bool reconcilePaused = false)
     {
         ThrowIfDisposed();
         var recovery = await _store.RecoverAsync(runId, cancellationToken).ConfigureAwait(false);
         if (recovery.Records.Count == 0) throw new WorkerEnvelopeException("No durable prepared request exists for this run.");
         var current = GetState(recovery);
+        if (HasPendingControlOperations(runId)) throw new WorkerEnvelopeException("An earlier host control is still unsettled; fresh cleanup cannot outrun its possible side effects.");
         if (requestedState == WorkflowState.Paused)
-            EnsureState(recovery, WorkflowState.Executing, "pause");
-        else if (current is WorkflowState.Stopped or WorkflowState.Blocked or WorkflowState.Failed or WorkflowState.LocalComplete)
+            EnsureState(recovery, reconcilePaused ? WorkflowState.Paused : WorkflowState.Executing, "pause");
+        else if (!reconcileTerminal && current is WorkflowState.Stopped or WorkflowState.Blocked or WorkflowState.Failed or WorkflowState.LocalComplete)
             throw new WorkerEnvelopeException($"Cannot stop a run in terminal state {current}.");
 
         var prepared = GetPrepared(recovery);
@@ -304,8 +343,7 @@ public sealed class ExecutionCoordinator : IDisposable
             {
                 try
                 {
-                    adapterControl = await _agentControl.ControlAsync(
-                        ToBinding(accepted), action, deadline, cancellationToken).ConfigureAwait(false);
+                    adapterControl = await InvokeControlAsync(ToBinding(accepted), action, deadline, cancellationToken).ConfigureAwait(false);
                     adapterQuiescent = TryValidateControlResult(
                         accepted, action, AgentActivityState.Quiescent, adapterControl, out var controlLimitation);
                     if (!adapterQuiescent) limitations.Add(controlLimitation);
@@ -346,13 +384,29 @@ public sealed class ExecutionCoordinator : IDisposable
             limitations.Add($"Post-control checkpoint observation failed: {exception.Message}");
         }
 
+        var terminalReconciliation = reconcileTerminal && current is WorkflowState.Stopped or WorkflowState.Blocked or WorkflowState.Failed or WorkflowState.LocalComplete;
         var target = quiescent ? requestedState : WorkflowState.Blocked;
-        WorkflowTransition.EnsureAllowed(current, target, new TransitionEvidence(GetAuthorization(prepared.Request)));
+        if (!terminalReconciliation && !(reconcilePaused && quiescent))
+            WorkflowTransition.EnsureAllowed(current, target, new TransitionEvidence(GetAuthorization(prepared.Request)));
 
-        var kind = quiescent ? requestedKind : "blocked-quiescence";
+        var kind = terminalReconciliation ? "cleanup-reconciled" : quiescent ? requestedKind : "blocked-quiescence";
         var payload = new QuiescenceRecord(requestedKind, quiescent, results, adapterControl, checkpoint, limitations);
         var record = await _store.AppendAsync(runId, kind, payload, CancellationToken.None).ConfigureAwait(false);
         return new QuiescenceResult(quiescent, results, record);
+    }
+
+    private async Task<AgentControlResult> InvokeControlAsync(AgentRunBinding binding, AgentControlAction action, TimeSpan deadline, CancellationToken cancellationToken)
+    {
+        if (deadline <= TimeSpan.Zero || deadline > TimeSpan.FromDays(1)) throw new WorkerEnvelopeException("Host control requires an explicit finite positive deadline.");
+        var task = _agentControl.ControlAsync(binding, action, deadline, cancellationToken)
+            ?? throw new WorkerEnvelopeException("Host control returned no task.");
+        _pendingControls.TryAdd(task, binding.RunId);
+        _ = task.ContinueWith(completed =>
+        {
+            _ = completed.Exception;
+            _pendingControls.TryRemove(completed, out _);
+        }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        return await task.WaitAsync(deadline, cancellationToken).ConfigureAwait(false);
     }
 
     private ObservedProcessState ObserveRegisteredProcesses(string runId, RunRecovery recovery)
@@ -425,6 +479,8 @@ public sealed class ExecutionCoordinator : IDisposable
                 "worker-accepted" when state == WorkflowState.Ready => WorkflowState.Executing,
                 "paused" when state == WorkflowState.Executing => WorkflowState.Paused,
                 "resumed" when state == WorkflowState.Paused => WorkflowState.Executing,
+                "paused-reconciled" when state == WorkflowState.Paused => state,
+                "cleanup-reconciled" when state is WorkflowState.Stopped or WorkflowState.Blocked or WorkflowState.Failed or WorkflowState.LocalComplete => state,
                 "worker-completed" when state == WorkflowState.Executing => WorkflowState.LocalComplete,
                 "stopped" => WorkflowState.Stopped,
                 "blocked-quiescence" => WorkflowState.Blocked,

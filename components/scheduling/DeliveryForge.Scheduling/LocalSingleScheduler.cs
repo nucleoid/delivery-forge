@@ -29,6 +29,7 @@ public sealed class LocalSingleScheduler
     private readonly WorktreeManager _worktrees;
     private readonly GitRepositoryContextReader _reader;
     private readonly IReadOnlyList<string> _prerequisiteCommits;
+    private readonly TimeSpan _controlTimeout;
     private ResourceReservation? _resources;
     private LocalDispatchReservation? _ticket;
     private bool _laneHeld;
@@ -36,14 +37,18 @@ public sealed class LocalSingleScheduler
     private bool _uncertain;
     private bool _nativeQuiescenceKnown = true;
     private long _allocatedAt;
+    private DateTimeOffset _startedAtUtc;
+    private DateTimeOffset _expiresAtUtc;
+    private bool _relinquished;
     private int _paused;
     private int _stopped;
 
     private LocalSingleScheduler(FrozenPlan plan, FrozenWorkerPlan worker, RunDemand demand, ResourceBudget budget, RunStore store,
-        ExecutionCoordinator execution, WorktreeManager worktrees, GitRepositoryContextReader reader, IReadOnlyList<string> prerequisites)
+        ExecutionCoordinator execution, WorktreeManager worktrees, GitRepositoryContextReader reader, IReadOnlyList<string> prerequisites, TimeSpan controlTimeout)
     {
         _plan = plan; _worker = worker; _demand = demand; _budget = budget; _store = store;
         _execution = execution; _worktrees = worktrees; _reader = reader; _prerequisiteCommits = prerequisites;
+        _controlTimeout = controlTimeout;
     }
 
     public static LocalSingleScheduler Create(FrozenPlan plan, FrozenWorkerPlan worker, RunDemand demand, ResourceBudget budget,
@@ -83,17 +88,102 @@ public sealed class LocalSingleScheduler
         var captured = worker with { AllowedPaths = Array.AsReadOnly(paths), Exclusions = Array.AsReadOnly(excluded), RequiredCapabilities = Array.AsReadOnly(worker.RequiredCapabilities.ToArray()) };
         WorkerEnvelope.PrepareWorker(captured);
         if (!budget.CanAllocate(demand)) throw new SchedulingException("Approved finite local resource/time/token/cost capacity is unavailable.");
-        return new(plan, captured, demand with { ExclusiveResources = Array.AsReadOnly(demand.ExclusiveResources.ToArray()) }, budget, store, execution, worktrees, reader, prerequisites.AsReadOnly());
+        var timeout = controlTimeout ?? TimeSpan.FromSeconds(5);
+        if (timeout <= TimeSpan.Zero || timeout > TimeSpan.FromMinutes(1)) throw new SchedulingException("Host control requires a finite positive bound no greater than one minute.");
+        return new(plan, captured, demand with { ExclusiveResources = Array.AsReadOnly(demand.ExclusiveResources.ToArray()) }, budget, store, execution, worktrees, reader, prerequisites.AsReadOnly(), timeout);
     }
 
-    public Task RelinquishPausedAsync(CancellationToken cancellationToken = default) =>
-        Task.FromException(new NotImplementedException("Paused parent transfer requires immutable recovery and fresh ownership reconciliation."));
+    public async Task RelinquishPausedAsync(CancellationToken cancellationToken = default)
+    {
+        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (_uncertain || !_nativeQuiescenceKnown || !_prepared || !_laneHeld || Volatile.Read(ref _paused) == 0 ||
+                Volatile.Read(ref _stopped) != 0 || _execution.HasPendingControlOperations(_worker.RunId))
+                throw new SchedulingException("Only this positively quiesced paused parent can relinquish its live ticket.");
+            await PersistAsync("paused-transfer", cancellationToken).ConfigureAwait(false);
+            _relinquished = true;
+            Release();
+        }
+        finally { _serial.Release(); }
+    }
 
-    public Task<LocalDispatchReservation> RecoverPausedAsync(CancellationToken cancellationToken = default) =>
-        Task.FromException<LocalDispatchReservation>(new NotImplementedException("Cold recovery must re-observe child, writer, plan and host facts."));
+    public async Task<LocalDispatchReservation> RecoverPausedAsync(CancellationToken cancellationToken = default)
+    {
+        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            EnsureControls();
+            if (_ticket is not null || _laneHeld || !await LocalParentLane.WaitAsync(0, cancellationToken).ConfigureAwait(false))
+                throw new SchedulingException("Cold reconciliation requires the sole available local parent lane.");
+            _laneHeld = true;
+            try
+            {
+                var journal = await _store.RecoverAsync(JournalRunId, cancellationToken).ConfigureAwait(false);
+                var record = journal.Records.LastOrDefault(item => item.Kind == "local-scheduler-checkpoint")
+                    ?? throw new SchedulingException("Missing local journal cannot recreate a reservation.");
+                var saved = _store.ReadPayload<LocalCheckpoint>(record);
+                var now = DateTimeOffset.UtcNow;
+                if (saved.Version != 2 || saved.Profile != "local-single" || saved.Phase is not ("paused" or "paused-transfer" or "recovered-paused") ||
+                    !saved.Paused || saved.Stopped || saved.RunId != _worker.RunId || saved.PlanIdentity != _plan.Identity ||
+                    saved.RequestPlanIdentity != _plan.ContractIdentity || saved.BaseCommit != _worker.BaseCommit ||
+                    saved.RequestIdentity != WorkerEnvelope.PrepareWorker(_worker).RequestIdentity || saved.Ceiling != _worker.AuthorizationCeiling ||
+                    saved.BudgetPolicyIdentity != _budget.PolicyIdentity || !SameDemand(saved.Demand, _demand) ||
+                    saved.ExpiresAtUtc - saved.StartedAtUtc != _demand.TimeLimit || now < saved.StartedAtUtc || now >= saved.ExpiresAtUtc)
+                    throw new SchedulingException("Immutable paused journal/plan/budget/clock differs or its original finite lifetime expired.");
+                var execution = await _store.RecoverAsync(_worker.RunId, cancellationToken).ConfigureAwait(false);
+                var preparedRecord = execution.Records.SingleOrDefault(item => item.Kind == "worker-prepared")
+                    ?? throw new SchedulingException("Cold recovery requires the original immutable prepared worker.");
+                var prepared = _store.ReadPayload<PreparedWorkerRecord>(preparedRecord);
+                if (prepared.Request.RequestIdentity != saved.RequestIdentity || prepared.Request.RequestIdentity != WorkerEnvelope.ComputeRequestIdentity(prepared.Request))
+                    throw new SchedulingException("Immutable worker request differs from the parent recovery journal.");
+                _prepared = true;
+                await RejectUnreconciledPriorRunsAsync(cancellationToken, recoveringSameRun: true).ConfigureAwait(false);
+                _resources = _budget.Allocate(_demand);
+                _allocatedAt = Stopwatch.GetTimestamp();
+                _startedAtUtc = saved.StartedAtUtc;
+                _expiresAtUtc = saved.ExpiresAtUtc;
+                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                deadline.CancelAfter(Remaining());
+                await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
+                var observed = await _execution.ReconcilePausedAsync(_worker.RunId, _controlTimeout, deadline.Token).ConfigureAwait(false);
+                if (!observed.Quiescent) throw new SchedulingException("Fresh host/child/writer observations did not prove paused quiescence.");
+                Interlocked.Exchange(ref _paused, 1);
+                await PersistAsync("recovered-paused", deadline.Token).ConfigureAwait(false);
+                _ticket = new LocalDispatchReservation(_worker.RunId);
+                return _ticket;
+            }
+            catch (Exception exception)
+            {
+                // Existing child records make failed adoption cleanup-only; never release by stored claims.
+                _uncertain = true;
+                if (!_prepared) Release();
+                throw new SchedulingException("Cold paused reconciliation failed: " + exception.Message, exception);
+            }
+        }
+        finally { _serial.Release(); }
+    }
 
-    public Task<bool> ReconcileCleanupAsync(CancellationToken cancellationToken = default) =>
-        Task.FromException<bool>(new NotImplementedException("Fresh cleanup cannot be inferred from a late control result."));
+    public async Task<bool> ReconcileCleanupAsync(CancellationToken cancellationToken = default)
+    {
+        Interlocked.Exchange(ref _stopped, 1);
+        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!_laneHeld) return true;
+            if (!_nativeQuiescenceKnown || !await _execution.AwaitPendingControlSettlementAsync(_worker.RunId, _controlTimeout, cancellationToken).ConfigureAwait(false)) return false;
+            if (!_prepared) return false;
+            var result = await _execution.ReconcileStopAsync(_worker.RunId, _controlTimeout, cancellationToken).ConfigureAwait(false);
+            if (!result.Quiescent || _execution.HasPendingControlOperations(_worker.RunId)) return false;
+            await PersistAsync("stopped", cancellationToken).ConfigureAwait(false);
+            MarkObservedClosed();
+            _uncertain = false;
+            Release();
+            return true;
+        }
+        catch (Exception) { _uncertain = true; return false; }
+        finally { _serial.Release(); }
+    }
 
     public async Task<LocalDispatchReservation> ReserveAsync(CancellationToken cancellationToken = default)
     {
@@ -116,6 +206,8 @@ public sealed class LocalSingleScheduler
                 EnsureControls();
                 _resources = _budget.Allocate(_demand);
                 _allocatedAt = Stopwatch.GetTimestamp();
+                _startedAtUtc = DateTimeOffset.UtcNow;
+                _expiresAtUtc = _startedAtUtc + _demand.TimeLimit;
                 await PersistAsync("reserved", deadline.Token).ConfigureAwait(false);
                 _ticket = new LocalDispatchReservation(_worker.RunId);
                 return _ticket;
@@ -133,10 +225,12 @@ public sealed class LocalSingleScheduler
     public async Task<AgentRequest> ProvisionAndPrepareAsync(LocalDispatchReservation reservation, CancellationToken cancellationToken = default)
     {
         await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var transitionStarted = false;
         try
         {
             EnsureControls();
             if (!ReferenceEquals(reservation, _ticket) || !_laneHeld || _resources is null || _prepared) throw new SchedulingException("Provisioning requires this live parent's unused reservation.");
+            transitionStarted = true;
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             deadline.CancelAfter(Remaining());
             await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
@@ -157,7 +251,7 @@ public sealed class LocalSingleScheduler
         }
         catch
         {
-            if (!_nativeQuiescenceKnown || _prepared) _uncertain = true;
+            if (transitionStarted && (!_nativeQuiescenceKnown || _prepared)) _uncertain = true;
             throw;
         }
         finally { _serial.Release(); }
@@ -168,13 +262,13 @@ public sealed class LocalSingleScheduler
         await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (_uncertain || Volatile.Read(ref _stopped) != 0 || Volatile.Read(ref _paused) == 0 || !_prepared ||
+            if (_relinquished || _uncertain || Volatile.Read(ref _stopped) != 0 || Volatile.Read(ref _paused) == 0 || !_prepared ||
                 !ReferenceEquals(reservation, _ticket) || !_laneHeld || _resources is null)
                 throw new SchedulingException("Resume requires this live parent's paused ticket; checkpoint data cannot recreate it.");
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             deadline.CancelAfter(Remaining());
             await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
-            var resumed = await _execution.ResumeAsync(_worker.RunId, deadline.Token).WaitAsync(TimeSpan.FromSeconds(10), deadline.Token).ConfigureAwait(false);
+            var resumed = await _execution.ResumeAsync(_worker.RunId, _controlTimeout, deadline.Token).ConfigureAwait(false);
             if (resumed.Reconciliation.Action != ReconciliationAction.ResumeDispatch || resumed.Record is null)
             {
                 _uncertain = true;
@@ -202,12 +296,13 @@ public sealed class LocalSingleScheduler
         {
             if (_prepared)
             {
-                var result = await _execution.PauseAsync(_worker.RunId, TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+                var result = await _execution.PauseAsync(_worker.RunId, _controlTimeout, cancellationToken).ConfigureAwait(false);
                 if (!result.Quiescent) { _uncertain = true; throw new SchedulingException("Pause could not prove child quiescence; local capacity remains reserved."); }
             }
             else _ticket = null;
             await PersistAsync("paused", cancellationToken).ConfigureAwait(false);
         }
+        catch { _uncertain = true; throw; }
         finally { _serial.Release(); }
     }
 
@@ -221,22 +316,23 @@ public sealed class LocalSingleScheduler
             if (_uncertain || !_nativeQuiescenceKnown) return false;
             if (_prepared)
             {
-                var result = await _execution.StopAsync(_worker.RunId, TimeSpan.FromSeconds(5), cancellationToken).ConfigureAwait(false);
+                var result = await _execution.StopAsync(_worker.RunId, _controlTimeout, cancellationToken).ConfigureAwait(false);
                 if (!result.Quiescent) { _uncertain = true; return false; }
             }
             await PersistAsync("stopped", cancellationToken).ConfigureAwait(false);
-            ObservedClosedRuns.TryAdd(Path.Combine(_store.RootPath, _worker.RunId), 0);
-            ObservedClosedRuns.TryAdd(Path.Combine(_store.RootPath, JournalRunId), 0);
+            MarkObservedClosed();
             Release();
             return true;
         }
+        catch { _uncertain = true; return false; }
         finally { _serial.Release(); }
     }
 
-    private async Task RejectUnreconciledPriorRunsAsync(CancellationToken cancellationToken)
+    private async Task RejectUnreconciledPriorRunsAsync(CancellationToken cancellationToken, bool recoveringSameRun = false)
     {
         foreach (var runId in await _store.DiscoverRunIdsAsync(cancellationToken).ConfigureAwait(false))
         {
+            if (recoveringSameRun && (runId == _worker.RunId || runId == JournalRunId)) continue;
             if (ObservedClosedRuns.ContainsKey(Path.Combine(_store.RootPath, runId))) continue;
             var recovery = await _store.RecoverAsync(runId, cancellationToken).ConfigureAwait(false);
             if (recovery.Records.Any(record => record.Kind is "local-scheduler-checkpoint" or "worker-prepared"))
@@ -261,22 +357,37 @@ public sealed class LocalSingleScheduler
 
     private TimeSpan Remaining()
     {
-        var remaining = _demand.TimeLimit - Stopwatch.GetElapsedTime(_allocatedAt);
+        var now = DateTimeOffset.UtcNow;
+        if (now < _startedAtUtc) throw new SchedulingException("Local budget clock moved backwards; fresh reconciliation is required.");
+        var monotonic = _demand.TimeLimit - Stopwatch.GetElapsedTime(_allocatedAt);
+        var wall = _expiresAtUtc - now;
+        var remaining = monotonic < wall ? monotonic : wall;
         if (remaining <= TimeSpan.Zero) throw new SchedulingException("The immutable finite local run time budget is exhausted.");
         return remaining;
     }
     private string JournalRunId => _worker.RunId + "-scheduler";
     private void EnsureControls()
     {
-        if (_uncertain || Volatile.Read(ref _paused) != 0 || Volatile.Read(ref _stopped) != 0) throw new SchedulingException("Paused/stopped/uncertain parent cannot grant new dispatch.");
+        if (_relinquished || _uncertain || Volatile.Read(ref _paused) != 0 || Volatile.Read(ref _stopped) != 0) throw new SchedulingException("Paused/stopped/uncertain/relinquished parent cannot grant new dispatch.");
     }
     private async Task PersistAsync(string phase, CancellationToken cancellationToken)
     {
-        try { await _store.AppendAsync(JournalRunId, "local-scheduler-checkpoint", new { profile = "local-single", phase, planIdentity = _plan.Identity, requestPlanIdentity = _plan.ContractIdentity,
-            _worker.RunId, _worker.BaseCommit, budgetPolicyIdentity = _budget.PolicyIdentity, ceiling = _worker.AuthorizationCeiling, demand = _demand,
-            paused = Volatile.Read(ref _paused) != 0, stopped = Volatile.Read(ref _stopped) != 0, dispatchAuthority = "in-memory parent reservation only; checkpoints are data" }, cancellationToken).ConfigureAwait(false); }
+        try { await _store.AppendAsync(JournalRunId, "local-scheduler-checkpoint", new LocalCheckpoint(2, "local-single", phase, _plan.Identity, _plan.ContractIdentity,
+            _worker.RunId, _worker.BaseCommit, WorkerEnvelope.PrepareWorker(_worker).RequestIdentity, _budget.PolicyIdentity, _worker.AuthorizationCeiling, _demand,
+            _startedAtUtc, _expiresAtUtc, Volatile.Read(ref _paused) != 0, Volatile.Read(ref _stopped) != 0), cancellationToken).ConfigureAwait(false); }
         catch { _uncertain = true; throw; }
     }
+    private void MarkObservedClosed()
+    {
+        ObservedClosedRuns.TryAdd(Path.Combine(_store.RootPath, _worker.RunId), 0);
+        ObservedClosedRuns.TryAdd(Path.Combine(_store.RootPath, JournalRunId), 0);
+    }
+    private static bool SameDemand(RunDemand saved, RunDemand actual) => saved is not null && saved.Slots == actual.Slots &&
+        saved.TimeLimit == actual.TimeLimit && saved.TokenLimit == actual.TokenLimit && saved.CostLimit == actual.CostLimit &&
+        saved.ExclusiveResources is not null && saved.ExclusiveResources.SequenceEqual(actual.ExclusiveResources, StringComparer.Ordinal);
+    private sealed record LocalCheckpoint(int Version, string Profile, string Phase, string PlanIdentity, string RequestPlanIdentity,
+        string RunId, string BaseCommit, string RequestIdentity, string BudgetPolicyIdentity, string Ceiling, RunDemand Demand,
+        DateTimeOffset StartedAtUtc, DateTimeOffset ExpiresAtUtc, bool Paused, bool Stopped);
     private void Release()
     {
         _ticket = null; _resources?.Dispose(); _resources = null;

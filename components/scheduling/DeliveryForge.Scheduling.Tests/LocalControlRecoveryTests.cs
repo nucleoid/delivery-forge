@@ -82,6 +82,7 @@ public sealed partial class LocalSingleTests
         using var execution = new ExecutionCoordinator(store, worktrees, processes, new FixtureControl());
         var scheduler = LocalSingleScheduler.Create(plan, worker, Demand, Budget(), store, execution, worktrees, repository.Reader);
         LocalSingleScheduler? receiver = null;
+        ExecutionCoordinator? coldExecution = null;
         var relinquished = false;
         try
         {
@@ -93,7 +94,7 @@ public sealed partial class LocalSingleTests
             relinquished = true;
             if (!writerStillHeld) execution.Dispose();
             if (changedBase) await repository.CommitAsync("changed after checkpoint");
-            using var coldExecution = new ExecutionCoordinator(store, worktrees, processes, new FixtureControl());
+            coldExecution = new ExecutionCoordinator(store, worktrees, processes, new FixtureControl());
             receiver = LocalSingleScheduler.Create(plan, worker, Demand, Budget(), store, coldExecution, worktrees, repository.Reader);
             if (changedBase || writerStillHeld)
             {
@@ -116,8 +117,10 @@ public sealed partial class LocalSingleTests
         finally
         {
             if (!relinquished) Assert.True(await scheduler.StopAsync(Cancellation));
+            execution.Dispose(); // Settle the former writer before fresh cleanup of a failed adoption.
             if (receiver is not null && !await receiver.StopAsync(Cancellation))
                 Assert.True(await receiver.ReconcileCleanupAsync(Cancellation));
+            coldExecution?.Dispose();
         }
     }
 

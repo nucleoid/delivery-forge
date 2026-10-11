@@ -77,4 +77,4 @@ public sealed class DependencyGraph
     private static bool ValidId(string? id) => !string.IsNullOrWhiteSpace(id) && id.Length <= 256 && id == id.Trim() && !id.Any(char.IsControl);
 }
 
-public sealed class SchedulingException(string message) : Exception(message);
+public sealed class SchedulingException(string message, Exception? inner = null) : Exception(message, inner);
