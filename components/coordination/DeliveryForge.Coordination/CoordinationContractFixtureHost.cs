@@ -82,9 +82,19 @@ public sealed class CoordinationContractFixtureHost
         }
     }
 
-    // RED checkpoint: owner renewal must preserve reference lineage and never expose the adapter.
     public Task<CoordinationFixtureObservation<RenewalResult>> RenewAsync(DispatchAuthority authority, CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException("Contract-fixture renewal requires compiled behavior RED before delegation.");
+        SerialAsync(async () =>
+        {
+            lock (_gate)
+                if (authority is null || !_authorities.Contains(authority)) throw new CoordinationUncertainException("Fixture authority belongs to another receiver host.");
+            var result = await _adapter.RenewAllAsync(authority, cancellationToken).ConfigureAwait(false);
+            lock (_gate)
+            {
+                if (result.Authority is not null) _authorities.Add(result.Authority);
+                if (result.ReleaseContinuation is not null) _continuations.Add(result.ReleaseContinuation);
+            }
+            return new CoordinationFixtureObservation<RenewalResult>(result);
+        }, cancellationToken);
 
     public Task<CoordinationFixtureObservation<ReleaseResult>> ReleaseAsync(DispatchAuthority authority, CancellationToken cancellationToken = default) =>
         SerialAsync(async () =>

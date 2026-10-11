@@ -6,7 +6,7 @@
   "fixture": true,
   "productionCertified": false,
   "firstFullRealRunCertified": false,
-  "stage": "parent GREEN20/20 confirmed; renewal RED stubs and lease/native/file controls prepared; final profile pending integrated #9/#10",
+  "stage": "parent GREEN20/20 confirmed; focused renewal RED4FAIL1PASS includes3 proper stub failures and1 native identity setup failure; renewal delegation GREEN25 candidate pending; final profile awaits integrated #9/#10",
   "seed": 11017,
   "budget": { "maximumScenarioSeconds": 120, "maximumCommandSeconds": 15, "maximumOwnedChildSeconds": 30, "cpuCores": 2, "memoryMiB": 4096, "tokens": 1000, "cost": 0 },
   "runtimeArtifacts": "components/end-to-end/artifacts/test-runs/<unique-owned-runId>",

@@ -141,17 +141,25 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
     public async ValueTask DisposeAsync()
     {
         var quiescent = _commandsQuiescent;
+        var cleanupObservations = new List<object>();
         foreach (var identity in Processes.GetOwnedIdentities(RunId))
         {
             try
             {
                 var observation = Processes.Observe(identity);
+                ProcessControlResult? controlled = null;
                 if (observation.Outcome == ProcessControlOutcome.LiveOwned)
-                    await Processes.QuiesceAsync(identity, TimeSpan.FromSeconds(2), CancellationToken.None)
+                    controlled = await Processes.QuiesceAsync(identity, TimeSpan.FromSeconds(2), CancellationToken.None)
                         .WaitAsync(TimeSpan.FromSeconds(8), CancellationToken.None);
-                quiescent &= Processes.Observe(identity).Outcome == ProcessControlOutcome.AlreadyExited;
+                var settled = Processes.Observe(identity);
+                cleanupObservations.Add(new { identity, initial = observation, controlled, settled });
+                quiescent &= settled.Outcome == ProcessControlOutcome.AlreadyExited;
             }
-            catch (Exception) { quiescent = false; }
+            catch (Exception exception)
+            {
+                cleanupObservations.Add(new { identity, failureType = exception.GetType().FullName, exception.Message });
+                quiescent = false;
+            }
         }
         try { await Processes.DisposeAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(8), CancellationToken.None); }
         catch (Exception) { quiescent = false; }
@@ -166,7 +174,7 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
         }
         if (Directory.Exists(Root) && owned)
             await WriteNewJsonAsync("retained-" + Guid.NewGuid().ToString("N") + ".json",
-                new { assertionsPassed = _assertionsPassed, quiescent, fixture = true, reason = _retentionReason ?? "Failure, timeout or ambiguous cleanup retains owned artifacts." }, CancellationToken.None);
+                new { assertionsPassed = _assertionsPassed, quiescent, fixture = true, cleanupObservations, reason = _retentionReason ?? "Failure, timeout or ambiguous cleanup retains owned artifacts." }, CancellationToken.None);
         if (_assertionsPassed && (!quiescent || !owned))
             throw new InvalidOperationException("Cleanup was not positively owned and quiescent; retained run: " + Root);
     }

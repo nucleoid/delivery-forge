@@ -117,7 +117,11 @@ public sealed class CoordinationLeaseScenarioTests
         var acquired = (await host.AcquireAsync(TestContext.Current.CancellationToken)).Value;
         Assert.NotNull(acquired.Authority);
         var child = run.StartBoundedChild();
-        Assert.Equal(ProcessControlOutcome.LiveOwned, run.Processes.Observe(child.Identity).Outcome);
+        var live = run.Processes.Observe(child.Identity);
+        await run.WriteNewJsonAsync("expiry-child-initial-observation.json",
+            new { fixture = true, child.Identity, child.RunId, observation = live }, TestContext.Current.CancellationToken);
+        Assert.True(live.Outcome == ProcessControlOutcome.LiveOwned,
+            $"Expected LiveOwned; actual {live.Outcome}: {live.Reason}; owned PID {child.Identity.ProcessId}, start {child.Identity.PlatformStartIdentity}, executable {child.Identity.ExecutablePath}, argv digest {child.Identity.ArgumentDigest}; retained run {run.Root}");
         clock.Advance(TimeSpan.FromSeconds(301));
         Assert.False(host.MayDispatchFixture(acquired.Authority));
         var retained = (await host.ReleaseAsync(acquired.Authority, TestContext.Current.CancellationToken)).Value;
@@ -125,6 +129,8 @@ public sealed class CoordinationLeaseScenarioTests
         Assert.NotNull(retained.Continuation);
         Assert.Equal(0, transport.ReleaseCalls);
         var stopped = await run.Processes.QuiesceAsync(child.Identity, TimeSpan.FromSeconds(1), TestContext.Current.CancellationToken);
+        await run.WriteNewJsonAsync("expiry-child-quiescence-observation.json",
+            new { fixture = true, child.Identity, observation = stopped }, TestContext.Current.CancellationToken);
         Assert.True(stopped.Outcome is ProcessControlOutcome.Quiesced or ProcessControlOutcome.AlreadyExited, stopped.Reason);
         Assert.Equal(ProcessControlOutcome.AlreadyExited, run.Processes.Observe(child.Identity).Outcome);
         var closed = (await host.ReleaseAsync(retained.Continuation, TestContext.Current.CancellationToken)).Value;
