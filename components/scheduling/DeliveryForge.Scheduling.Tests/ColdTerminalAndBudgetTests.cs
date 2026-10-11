@@ -238,8 +238,8 @@ public sealed partial class LocalSingleTests
                 await File.WriteAllTextAsync(nativeInput, JsonSerializer.Serialize(new ColdFixtureInput(repository.Root, frozenAt, plan.Identity, worker, HoldFile: holdFile)), Cancellation);
                 var start = ColdFixtureStartInfo(nativeInput);
                 pending = Process.Start(start) ?? throw new InvalidOperationException("Pending native fixture did not start.");
-                nativeOutput = pending.StandardOutput.ReadToEndAsync();
-                nativeError = pending.StandardError.ReadToEndAsync();
+                nativeOutput = pending.StandardOutput.ReadToEndAsync(Cancellation);
+                nativeError = pending.StandardError.ReadToEndAsync(Cancellation);
                 using var entered = CancellationTokenSource.CreateLinkedTokenSource(Cancellation);
                 entered.CancelAfter(TimeSpan.FromSeconds(30));
                 while (!File.Exists(holdFile + ".entered"))
@@ -278,8 +278,9 @@ public sealed partial class LocalSingleTests
             writer?.Dispose();
             if (pending is not null)
             {
-                await File.WriteAllTextAsync(holdFile + ".release", "release");
                 using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                // Fresh uncancelled teardown token: cancelling the test must not strand its owned helper.
+                await File.WriteAllTextAsync(holdFile + ".release", "release", cleanup.Token);
                 try
                 {
                     await pending.WaitForExitAsync(cleanup.Token);
