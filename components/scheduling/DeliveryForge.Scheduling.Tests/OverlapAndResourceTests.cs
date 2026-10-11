@@ -23,6 +23,14 @@ public sealed class OverlapTests
     [InlineData("")]
     public void Unsafe_or_unresolved_maps_serialize(string path) => Assert.True(OverlapDetector.Conflicts(Map(path), Map("other.cs")));
 
+    [Theory]
+    [InlineData("migrations/001.cs", "migrations/002.cs")]
+    [InlineData("schemas/one.json", "schemas/two.json")]
+    [InlineData("quality/coverage-baseline.json", "quality/mutation-baseline.json")]
+    [InlineData("src/a.g.cs", "src/b.generated.cs")]
+    public void Shared_sensitive_classes_without_explicit_owners_serialize(string left, string right) =>
+        Assert.True(OverlapDetector.Conflicts(Map(left), Map(right)));
+
     [Fact]
     public void Unknown_and_shared_owners_serialize()
     {
@@ -68,6 +76,43 @@ public sealed class ResourceTests
         Assert.Throws<SchedulingException>(() => ResourceBudget.Measure(Slots with { Cpu = 0 }, Policy));
         Assert.Throws<SchedulingException>(() => ResourceBudget.Measure(Slots with { MemoryMiB = -1 }, Policy));
         Assert.Throws<SchedulingException>(() => ResourceBudget.Measure(Slots, Policy with { Identity = "" }));
+    }
+
+    [Fact]
+    public async Task Concurrent_parent_allocations_cannot_overcommit_one_slot()
+    {
+        var budget = ResourceBudget.Measure(Slots, Policy);
+        var held = new System.Collections.Concurrent.ConcurrentBag<ResourceReservation>();
+        await Task.WhenAll(Enumerable.Range(0, 16).Select(_ => Task.Run(() =>
+        {
+            try { held.Add(budget.Allocate(Demand)); }
+            catch (SchedulingException) { }
+        }))).WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        Assert.Single(held);
+        foreach (var reservation in held) reservation.Dispose();
+        Assert.True(budget.CanAllocate(Demand));
+    }
+
+    [Fact]
+    public void Approved_caps_can_lower_measured_capacity_and_inputs_are_copied()
+    {
+        var budget = ResourceBudget.Measure(Slots, Policy with { Caps = Slots with { Cpu = 1 } });
+        Assert.False(budget.CanAllocate(Demand with { Slots = new(1, 2, 1, 0, 0, 0) }));
+        var names = new[] { "schema:v1" };
+        using var reservation = budget.Allocate(Demand with { ExclusiveResources = names });
+        names[0] = "other";
+        Assert.False(budget.CanAllocate(Demand with { Slots = new(1, 1, 1, 0, 0, 0) }));
+    }
+
+    [Fact]
+    public void Cumulative_token_and_cost_budget_is_not_refunded_by_resource_release()
+    {
+        var budget = ResourceBudget.Measure(Slots, Policy);
+        var demand = Demand with { TokenLimit = 6000, CostLimit = 0.75m };
+        using (budget.Allocate(demand)) { }
+        Assert.False(budget.CanAllocate(demand));
+        Assert.False(budget.CanAllocate(Demand with { TokenLimit = 1, CostLimit = 0.5m }));
+        Assert.True(budget.CanAllocate(Demand with { TokenLimit = 4000, CostLimit = 0.25m }));
     }
 
     [Fact]
