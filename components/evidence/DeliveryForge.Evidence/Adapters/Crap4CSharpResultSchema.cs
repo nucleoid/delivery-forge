@@ -94,8 +94,10 @@ internal static class Crap4CSharpResultSchema
         if (value.ValueKind == JsonValueKind.Number)
         {
             Require(value.TryGetDouble(out var number) && double.IsFinite(number), path, "nonfinite number");
-            if (schema.TryGetProperty("minimum", out var minimum)) Require(number >= minimum.GetDouble(), path, "below minimum");
-            if (schema.TryGetProperty("maximum", out var maximum)) Require(number <= maximum.GetDouble(), path, "above maximum");
+            if (schema.TryGetProperty("minimum", out var minimum))
+                Require(CompareNumbers(value.GetRawText(), minimum.GetRawText()) >= 0, path, "below minimum");
+            if (schema.TryGetProperty("maximum", out var maximum))
+                Require(CompareNumbers(value.GetRawText(), maximum.GetRawText()) <= 0, path, "above maximum");
         }
     }
 
@@ -135,6 +137,50 @@ internal static class Crap4CSharpResultSchema
             trailingZeros++;
         }
         return trailingZeros >= neededZeros;
+    }
+
+    private static int CompareNumbers(string leftToken, string rightToken)
+    {
+        var left = NormalizeNumber(leftToken);
+        var right = NormalizeNumber(rightToken);
+        if (left.Sign != right.Sign) return left.Sign.CompareTo(right.Sign);
+        if (left.Sign == 0) return 0;
+        var magnitude = left.Position.CompareTo(right.Position);
+        if (magnitude == 0)
+        {
+            for (var index = 0; index < Math.Max(left.Digits.Length, right.Digits.Length); index++)
+            {
+                var leftDigit = index < left.Digits.Length ? left.Digits[index] : '0';
+                var rightDigit = index < right.Digits.Length ? right.Digits[index] : '0';
+                magnitude = leftDigit.CompareTo(rightDigit);
+                if (magnitude != 0) break;
+            }
+        }
+        return left.Sign * Math.Sign(magnitude);
+    }
+
+    private static (int Sign, string Digits, long Position) NormalizeNumber(string token)
+    {
+        var text = token.AsSpan();
+        var sign = text[0] == '-' ? -1 : 1;
+        if (sign < 0) text = text[1..];
+        var exponentIndex = text.IndexOfAny('e', 'E');
+        var mantissa = exponentIndex < 0 ? text : text[..exponentIndex];
+        var dot = mantissa.IndexOf('.');
+        var fractionDigits = dot < 0 ? 0 : mantissa.Length - dot - 1;
+        var digits = mantissa.ToString().Replace(".", "", StringComparison.Ordinal).TrimStart('0');
+        if (digits.Length == 0) return (0, "", 0);
+        long exponent = 0;
+        if (exponentIndex >= 0)
+        {
+            var exponentText = text[(exponentIndex + 1)..];
+            if (!long.TryParse(exponentText, NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out exponent))
+                exponent = exponentText[0] == '-' ? long.MinValue : long.MaxValue;
+        }
+        long position;
+        try { position = checked(exponent + digits.Length - fractionDigits); }
+        catch (OverflowException) { position = exponent < 0 ? long.MinValue : long.MaxValue; }
+        return (sign, digits, position);
     }
 
     private static bool Accepts(JsonElement value, JsonElement schema, string path, JsonElement root)
