@@ -113,6 +113,23 @@ public sealed class Crap4CSharpSchemaTests
     }
 
     [Theory]
+    [InlineData("-1e-400", GateOutcome.Error)]
+    [InlineData("1.00000000000000000001", GateOutcome.Error)]
+    [InlineData("1.0", GateOutcome.Pass)]
+    [InlineData("1e0", GateOutcome.Pass)]
+    [InlineData("0.5", GateOutcome.Pass)]
+    [InlineData("1e-400", GateOutcome.Pass)]
+    public void Coverage_bounds_use_exact_numeric_tokens(string token, GateOutcome expected)
+    {
+        var json = Positive().ToJsonString();
+        Assert.Contains("\"coverage\":1", json, StringComparison.Ordinal);
+        json = json.Replace("\"coverage\":1", "\"coverage\":" + token, StringComparison.Ordinal);
+        var result = new Crap4CSharpAdapter().Normalize(Encoding.UTF8.GetBytes(json),
+            new ToolCapability("crap4csharp", "0.1.0+1129c9d3280168b294f9fed1542f81ca716c6d53", "1.0", true, true));
+        Assert.Equal(expected, result.Outcome);
+    }
+
+    [Theory]
     [InlineData(false, GateOutcome.Pass)]
     [InlineData(true, GateOutcome.Error)]
     public void Diagnostic_span_must_match_one_declared_schema_alternative(bool invalid, GateOutcome expected)
