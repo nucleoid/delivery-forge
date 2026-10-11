@@ -40,9 +40,20 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         CommandInvocation invocation,
         TimeSpan entireBudget,
         int maximumBytesPerStream,
-        CancellationToken cancellationToken) =>
-        Task.FromException<BoundedCommandCaptureResult>(new NotImplementedException(
-            "Creation-owned bounded byte capture is RED; ordinary unbounded execution is not a fallback."));
+        CancellationToken cancellationToken)
+    {
+        if (!_creationOwnedWindows)
+            throw new InvalidOperationException("Injected executor delegates cannot establish creation-owned byte capture.");
+        if (entireBudget <= TimeSpan.Zero || entireBudget > TimeSpan.FromMinutes(15))
+            throw new ArgumentOutOfRangeException(nameof(entireBudget));
+        if (maximumBytesPerStream <= 0 || maximumBytesPerStream > 16 * 1024 * 1024)
+            throw new ArgumentOutOfRangeException(nameof(maximumBytesPerStream));
+        if (OperatingSystem.IsWindows())
+            return WindowsCommandLifetime.ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken);
+        if (OperatingSystem.IsLinux())
+            return BoundedProcessCapture.ExecuteAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken);
+        throw new PlatformNotSupportedException("Creation-owned bounded capture supports Windows and Linux only.");
+    }
 
     public async Task<CommandResult> ExecuteAsync(
         CommandInvocation invocation,

@@ -135,6 +135,88 @@ internal sealed class WindowsCommandLifetime : IDisposable
         }
     }
 
+    internal static async Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+        CommandInvocation invocation, TimeSpan entireBudget, int maximumBytesPerStream, CancellationToken caller)
+    {
+        var began = DateTimeOffset.UtcNow; var started = Stopwatch.GetTimestamp();
+        var workBudget = BoundedCaptureStream.WorkBudget(entireBudget);
+        var stdout = new BoundedCaptureStream(maximumBytesPerStream); var stderr = new BoundedCaptureStream(maximumBytesPerStream);
+        WindowsCommandLifetime? owner = null; Task? output = null, error = null;
+        var timedOut = false; var cancelled = false; var known = true; var rootExited = false;
+        uint active = uint.MaxValue;
+        var killAttempted = false; var killSucceeded = false;
+        string? failure = null, killType = null;
+        try
+        {
+            owner = new();
+            owner.Start(invocation, started, workBudget, caller);
+            output = BoundedCaptureStream.Observe(stdout.DrainAsync(owner._stdout!.BaseStream));
+            error = BoundedCaptureStream.Observe(stderr.DrainAsync(owner._stderr!.BaseStream));
+            while (true)
+            {
+                if (caller.IsCancellationRequested) { cancelled = true; break; }
+                if (stdout.Exceeded || stderr.Exceeded) break;
+                if (!BoundedCaptureStream.Within(started, workBudget)) { timedOut = true; break; }
+                if (!owner.Observe(out rootExited, out active, out failure)) { known = false; break; }
+                if (output.IsFaulted || error.IsFaulted) { known = false; failure = "Owned byte drain failed."; break; }
+                if (rootExited && active == 0 && BoundedCaptureStream.Eof(output) && BoundedCaptureStream.Eof(error)) break;
+                await Task.Delay(5).ConfigureAwait(false);
+            }
+        }
+        catch (StartupStoppedException stopped) { cancelled = stopped.Cancelled; timedOut = stopped.TimedOut; }
+        catch (Exception exception) when (exception is Win32Exception or IOException or ArgumentException or InvalidOperationException)
+        { known = false; failure = Bounded(exception); }
+        try
+        {
+            if (owner?._process is not null)
+            {
+                if (!rootExited || active != 0 || !known)
+                {
+                    killAttempted = true;
+                    killSucceeded = owner._assigned ? TerminateJobObject(owner._job, unchecked((uint)-1)) : TerminateProcess(owner._process, unchecked((uint)-1));
+                    if (!killSucceeded) { var native = Native("terminate-owned-byte-capture"); killType = native.GetType().FullName; failure ??= Bounded(native); }
+                }
+                // Cleanup consumes the original remaining allowance. No appended five-second tail.
+                while (BoundedCaptureStream.Within(started, entireBudget))
+                {
+                    if (!owner.Observe(out rootExited, out active, out var observationFailure))
+                    { known = false; failure ??= observationFailure; break; }
+                    if (rootExited && active == 0 &&
+                        (output is null || BoundedCaptureStream.Eof(output)) && (error is null || BoundedCaptureStream.Eof(error))) break;
+                    await Task.Delay(5).ConfigureAwait(false);
+                }
+                var finalKnown = owner.Observe(out rootExited, out active, out var finalFailure);
+                known &= finalKnown; failure ??= finalFailure;
+            }
+            int? exit = null;
+            if (rootExited && owner?._process is not null)
+            {
+                if (GetExitCodeProcess(owner._process, out var code)) exit = unchecked((int)code);
+                else { known = false; failure ??= "Original exit-code observation failed: " + Marshal.GetLastWin32Error(); }
+            }
+            var outputStatus = output?.Status; var errorStatus = error?.Status;
+            var outEof = outputStatus == TaskStatus.RanToCompletion; var errEof = errorStatus == TaskStatus.RanToCompletion;
+            var settled = known && rootExited && active == 0;
+            var quiescent = settled && outEof && errEof && (!killAttempted || killSucceeded) &&
+                BoundedCaptureStream.Within(started, entireBudget);
+            var outBytes = stdout.Snapshot(); var errBytes = stderr.Snapshot();
+            var command = new CommandResult(exit, Encoding.UTF8.GetString(outBytes), Encoding.UTF8.GetString(errBytes), timedOut,
+                cancelled, began, DateTimeOffset.UtcNow, quiescent)
+            {
+                LifecycleDiagnostics = new(killAttempted, killSucceeded, killType, failure, false,
+                    settled, rootExited, outEof && errEof, 0,
+                    new(outEof, outputStatus == TaskStatus.Faulted, outputStatus == TaskStatus.Canceled, outEof ? Encoding.UTF8.GetString(outBytes) : null),
+                    new(errEof, errorStatus == TaskStatus.Faulted, errorStatus == TaskStatus.Canceled, errEof ? Encoding.UTF8.GetString(errBytes) : null))
+                {
+                    OwnedTree = new(owner is { _assigned: true, _resumed: true }, settled, active > int.MaxValue ? -1 : (int)active),
+                    NativeFailure = failure
+                }
+            };
+            return new(command, outBytes, errBytes, stdout.Exceeded || stderr.Exceeded, rootExited, outEof, errEof);
+        }
+        finally { owner?.Dispose(); }
+    }
+
     private void Start(CommandInvocation invocation, long originalStarted, TimeSpan originalTimeout, CancellationToken caller)
     {
         _stage = "configure-job";

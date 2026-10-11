@@ -2,6 +2,8 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text;
+using DeliveryForge.Evidence;
 using DeliveryForge.Contracts.State;
 using DeliveryForge.Contracts.Validation;
 using DeliveryForge.Review;
@@ -68,10 +70,154 @@ public sealed class ReviewAuthorityHost
     public ReviewAcceptanceAuthority Authority { get; }
 
     // Bounded Test-only preparation; observations are data and cannot issue/rebind opaque ownership.
-    public Task<ReviewGitPreparationResult> PrepareIsolatedTestGitEvidenceAsync(
+    public async Task<ReviewGitPreparationResult> PrepareIsolatedTestGitEvidenceAsync(
         string sourceRoot, string workerGitDirectory, string trustedGitExecutable, long maximumEvidenceBytes,
-        TimeSpan deadline, CancellationToken cancellationToken = default, Action? beforeFinalRecheck = null) =>
-        Task.FromException<ReviewGitPreparationResult>(new NotImplementedException("Entire-deadline bounded Git preparation is RED; synchronous preparation is not a cancellation/pipe-settlement fallback."));
+        TimeSpan deadline, CancellationToken cancellationToken = default, Action? beforeFinalRecheck = null)
+    {
+        if (_realm != ReviewAuthorityRealm.Test)
+            throw new InvalidOperationException("Only an isolated test authority may prepare fixture Git metadata.");
+        if (deadline <= TimeSpan.Zero || deadline > TimeSpan.FromSeconds(15) || maximumEvidenceBytes <= 0 || maximumEvidenceBytes > 16 * 1024 * 1024 ||
+            !Path.IsPathFullyQualified(sourceRoot) || !Path.IsPathFullyQualified(workerGitDirectory) || !Path.IsPathFullyQualified(trustedGitExecutable))
+            throw new ArgumentException("Fixture preparation requires absolute paths, a finite entire deadline up to15 seconds and bounded bytes.");
+        var started = Stopwatch.GetTimestamp();
+        BoundedCommandCaptureResult? last = null;
+        TimeSpan Remaining()
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var remaining = deadline - Stopwatch.GetElapsedTime(started);
+            if (remaining <= TimeSpan.Zero) throw new TimeoutException("Original entire Git preparation deadline expired.");
+            return remaining;
+        }
+        ReviewGitPreparationResult Refusal(ReviewGitPreparationOutcome outcome, string reason) => new(null, new(outcome,
+            last?.Command.OwnedProcessQuiescent == true, last?.RootExitObserved == true,
+            last?.StandardOutputDrainCompleted == true, last?.StandardErrorDrainCompleted == true,
+            last?.Command.StandardOutput ?? "", last?.Command.StandardError ?? "", reason.Length > 1024 ? reason[..1024] : reason));
+        try
+        {
+            _ = Remaining();
+            RequirePlainPreparationPath(sourceRoot); RequirePlainPreparationPath(workerGitDirectory); RequirePlainPreparationPath(trustedGitExecutable);
+            if (!Directory.Exists(sourceRoot) || !Directory.Exists(workerGitDirectory) || !File.Exists(trustedGitExecutable) ||
+                !SamePath(Path.Combine(sourceRoot, ".git"), workerGitDirectory))
+                throw new ReviewPreflightException("Only this plain standalone fixture repository is supported.");
+            var workerObjects = Path.Combine(workerGitDirectory, "objects");
+            RequirePlainPreparationPath(workerObjects);
+            var config = Path.Combine(workerGitDirectory, "config");
+            RequirePlainPreparationPath(config);
+            if (!Directory.Exists(workerObjects) || File.Exists(Path.Combine(workerObjects, "info", "alternates")) ||
+                File.Exists(Path.Combine(workerGitDirectory, "info", "grafts")) || Directory.Exists(Path.Combine(workerGitDirectory, "refs", "replace")))
+                throw new ReviewPreflightException("Fixture object authority is external or incomplete.");
+            var configBytes = await ReadPreparationBytesAsync(config, 1024 * 1024, Remaining, cancellationToken).ConfigureAwait(false);
+            var configText = new UTF8Encoding(false, true).GetString(configBytes);
+            if (new[] { "include", "promisor", "partialclone", "alternates", "worktree" }.Any(value => configText.Contains(value, StringComparison.OrdinalIgnoreCase)))
+                throw new ReviewPreflightException("Fixture Git configuration contains unsupported external authority.");
+            var executor = new ProcessCommandExecutor();
+            var environment = new Dictionary<string, string>
+            {
+                ["GIT_DIR"] = workerGitDirectory, ["GIT_WORK_TREE"] = sourceRoot, ["GIT_COMMON_DIR"] = workerGitDirectory,
+                ["GIT_OBJECT_DIRECTORY"] = workerObjects, ["GIT_INDEX_FILE"] = Path.Combine(workerGitDirectory, "index"),
+                ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "", ["GIT_CONFIG_COUNT"] = "0", ["GIT_CONFIG_PARAMETERS"] = "",
+                ["GIT_CONFIG"] = config, ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
+                ["GIT_CONFIG_SYSTEM"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null", ["GIT_NO_REPLACE_OBJECTS"] = "1",
+                ["GIT_NO_LAZY_FETCH"] = "1", ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_GRAFT_FILE"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null"
+            };
+            async Task<string?> Git(IReadOnlyList<string> args)
+            {
+                last = await executor.ExecuteBoundedCaptureAsync(new(trustedGitExecutable, args, sourceRoot, environment),
+                    Remaining(), (int)maximumEvidenceBytes, cancellationToken).ConfigureAwait(false);
+                if (last.Command.Cancelled || last.Command.TimedOut || last.CaptureBoundExceeded || last.Command.ExitCode != 0 ||
+                    !last.Command.OwnedProcessQuiescent || !last.RootExitObserved || !last.StandardOutputDrainCompleted || !last.StandardErrorDrainCompleted)
+                    return null;
+                _ = Remaining();
+                return new UTF8Encoding(false, true).GetString(last.StandardOutputBytes).Trim();
+            }
+            var version = await Git(["--version"]).ConfigureAwait(false);
+            if (version is null) return Refusal(CaptureOutcome(last!), "Version command did not establish complete owned capture.");
+            if (!version.StartsWith("git version ", StringComparison.Ordinal)) throw new ReviewPreflightException("Trusted executable did not return a Git version.");
+            var head = await Git(["--no-replace-objects", $"--git-dir={workerGitDirectory}", "rev-parse", "--verify", "HEAD^{commit}"]).ConfigureAwait(false);
+            if (head is null) return Refusal(CaptureOutcome(last!), "Head command did not establish complete owned capture.");
+            if (head.Length is not (40 or 64) || head.Any(character => !char.IsAsciiHexDigit(character)))
+                throw new ReviewPreflightException("Actual Git head is not a complete object identity.");
+            var index = await ReadPreparationBytesAsync(Path.Combine(workerGitDirectory, "index"), 16 * 1024 * 1024, Remaining, cancellationToken).ConfigureAwait(false);
+            var controlled = Path.Combine(Path.GetTempPath(), "delivery-forge-controlled-git", Guid.NewGuid().ToString("N"));
+            RequirePlainPreparationPath(controlled);
+            if (Directory.Exists(controlled) || File.Exists(controlled)) throw new ReviewPreflightException("Controlled fixture leaf already exists.");
+            Directory.CreateDirectory(Path.Combine(controlled, "objects")); Directory.CreateDirectory(Path.Combine(controlled, "refs"));
+            await WritePreparationBytesAsync(Path.Combine(controlled, "HEAD"), Encoding.UTF8.GetBytes("ref: refs/heads/controlled\n"), Remaining, cancellationToken).ConfigureAwait(false);
+            await WritePreparationBytesAsync(Path.Combine(controlled, "config"), Encoding.UTF8.GetBytes("[core]\n\trepositoryformatversion = 0\n\tbare = true\n\tfilemode = true\n"), Remaining, cancellationToken).ConfigureAwait(false);
+            var count = 0; long copied = 0;
+            async Task Copy(string source, string target)
+            {
+                _ = Remaining(); RequirePlainPreparationPath(source); RequirePlainPreparationPath(target);
+                foreach (var entry in Directory.EnumerateFileSystemEntries(source))
+                {
+                    _ = Remaining(); if (++count > 4096) throw new ReviewPreflightException("Fixture object inventory exceeds4096 entries.");
+                    RequirePlainPreparationPath(entry);
+                    var destination = Path.Combine(target, Path.GetFileName(entry));
+                    if (Directory.Exists(entry)) { Directory.CreateDirectory(destination); await Copy(entry, destination).ConfigureAwait(false); }
+                    else
+                    {
+                        var bytes = await ReadPreparationBytesAsync(entry, 16 * 1024 * 1024, Remaining, cancellationToken).ConfigureAwait(false);
+                        copied += bytes.Length; if (copied > 128 * 1024 * 1024) throw new ReviewPreflightException("Fixture object bytes exceed128MiB.");
+                        await WritePreparationBytesAsync(destination, bytes, Remaining, cancellationToken).ConfigureAwait(false);
+                    }
+                }
+            }
+            await Copy(workerObjects, Path.Combine(controlled, "objects")).ConfigureAwait(false);
+            _ = Remaining();
+            var freshIndex = await ReadPreparationBytesAsync(Path.Combine(workerGitDirectory, "index"), 16 * 1024 * 1024, Remaining, cancellationToken).ConfigureAwait(false);
+            if (!index.AsSpan().SequenceEqual(freshIndex)) throw new ReviewPreflightException("Raw fixture index changed during preparation.");
+            var freshHead = await Git(["--no-replace-objects", $"--git-dir={workerGitDirectory}", "rev-parse", "--verify", "HEAD^{commit}"]).ConfigureAwait(false);
+            if (freshHead is null) return Refusal(CaptureOutcome(last!), "Final head observation failed.");
+            if (!string.Equals(head, freshHead, StringComparison.Ordinal)) throw new ReviewPreflightException("Fixture HEAD changed during preparation.");
+            _ = Remaining();
+            var context = new ControlledGitEvidenceContext(sourceRoot, workerGitDirectory, controlled, trustedGitExecutable, version,
+                maximumEvidenceBytes, _rootIdentity, head, $"test-object-view:{Guid.NewGuid():N}", _realm, SHA256.HashData(index), _issuer,
+                () => FixtureDirectoryCleanup.Delete(controlled), beforeFinalRecheck);
+            return new(context, new(ReviewGitPreparationOutcome.Prepared, true, true, true, true,
+                last!.Command.StandardOutput, last.Command.StandardError, "Bounded fixture preparation; no production authority."));
+        }
+        catch (OperationCanceledException)
+        { return Refusal(cancellationToken.IsCancellationRequested ? ReviewGitPreparationOutcome.Cancelled : ReviewGitPreparationOutcome.TimedOut, "Original preparation cancellation/deadline observed; partial fixture files retained."); }
+        catch (TimeoutException exception) { return Refusal(ReviewGitPreparationOutcome.TimedOut, exception.Message); }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException or InvalidOperationException or ReviewPreflightException or NotSupportedException)
+        { return Refusal(ReviewGitPreparationOutcome.Error, exception.GetType().Name + ": " + exception.Message); }
+    }
+
+    private static ReviewGitPreparationOutcome CaptureOutcome(BoundedCommandCaptureResult capture) =>
+        capture.Command.Cancelled ? ReviewGitPreparationOutcome.Cancelled : capture.Command.TimedOut ? ReviewGitPreparationOutcome.TimedOut :
+        capture.CaptureBoundExceeded ? ReviewGitPreparationOutcome.CaptureBoundExceeded : ReviewGitPreparationOutcome.Error;
+
+    private static void RequirePlainPreparationPath(string path)
+    {
+        for (FileSystemInfo? current = Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path); current is not null;
+            current = current is DirectoryInfo directory ? directory.Parent : ((FileInfo)current).Directory)
+            if (current.LinkTarget is not null || (current.Exists && (current.Attributes & FileAttributes.ReparsePoint) != 0))
+                throw new ReviewPreflightException("Fixture preparation path is redirected.");
+    }
+    private static async Task<byte[]> ReadPreparationBytesAsync(string path, int maximum, Func<TimeSpan> remaining, CancellationToken caller)
+    {
+        RequirePlainPreparationPath(path);
+        using var bound = CancellationTokenSource.CreateLinkedTokenSource(caller); bound.CancelAfter(remaining());
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous);
+        if (stream.Length > maximum) throw new ReviewPreflightException("Fixture file exceeds bounded bytes.");
+        using var bytes = new MemoryStream(); var buffer = new byte[4096];
+        while (true)
+        {
+            _ = remaining(); var count = await stream.ReadAsync(buffer.AsMemory(), bound.Token).ConfigureAwait(false);
+            if (count == 0) break;
+            if (bytes.Length + count > maximum) throw new ReviewPreflightException("Fixture file grew past bounded bytes.");
+            bytes.Write(buffer, 0, count);
+        }
+        _ = remaining(); RequirePlainPreparationPath(path); return bytes.ToArray();
+    }
+    private static async Task WritePreparationBytesAsync(string path, byte[] bytes, Func<TimeSpan> remaining, CancellationToken caller)
+    {
+        RequirePlainPreparationPath(path);
+        using var bound = CancellationTokenSource.CreateLinkedTokenSource(caller); bound.CancelAfter(remaining());
+        await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous);
+        await stream.WriteAsync(bytes, bound.Token).ConfigureAwait(false); await stream.FlushAsync(bound.Token).ConfigureAwait(false);
+        _ = remaining(); RequirePlainPreparationPath(path);
+    }
 
     public static ReviewAuthorityHost CreateIsolatedTest(DateTimeOffset? now = null) =>
         new(ReviewAuthorityRealm.Test, $"test-root:{Guid.NewGuid():N}", now, null, null);

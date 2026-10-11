@@ -49,5 +49,14 @@ jobs:
           if (-not (Test-Path -LiteralPath $hostCommand.Source) -or -not (Test-Path -LiteralPath $helperDll)) { throw 'Actual SDK/helper binding is missing' }
           "DELIVERY_FORGE_DOTNET_HOST=$($hostCommand.Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "DELIVERY_FORGE_LIFECYCLE_HELPER_DLL=$helperDll" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Build actual bounded review preparation helper
+        shell: pwsh
+        run: |
+          $reviewHelperOutput = Join-Path $env:RUNNER_TEMP ('delivery-forge-review-helper-' + [guid]::NewGuid().ToString('N'))
+          dotnet build components/execution/DeliveryForge.Execution.Tests/Fixtures/BoundedGitPreparationHelper/BoundedGitPreparationHelper.csproj --configuration Release --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false -o $reviewHelperOutput
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $reviewAppHost = Join-Path $reviewHelperOutput $(if ($IsWindows) { 'BoundedGitPreparationHelper.exe' } else { 'BoundedGitPreparationHelper' })
+          if (-not (Test-Path -LiteralPath $reviewAppHost -PathType Leaf)) { throw 'Actual review helper apphost is missing' }
+          "DELIVERY_FORGE_REVIEW_GIT_NEGATIVE_HELPER=$reviewAppHost" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - run: dotnet test DeliveryForge.slnx --no-restore --configuration Release
       - run: dotnet format DeliveryForge.slnx --no-restore --verify-no-changes
