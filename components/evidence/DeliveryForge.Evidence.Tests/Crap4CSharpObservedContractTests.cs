@@ -89,8 +89,12 @@ public sealed class Crap4CSharpObservedContractTests
         {
             metrics.Add(JsonSerializer.SerializeToNode(new
             {
-                contextId = "fixture-context", path = "Fixture.cs", methodIdentity = $"fixture-{index}",
-                signature = (string?)null, span = new { startLine = 1, endLine = 1 }, complexity = 1,
+                contextId = "fixture-context",
+                path = "Fixture.cs",
+                methodIdentity = $"fixture-{index}",
+                signature = (string?)null,
+                span = new { startLine = 1, endLine = 1 },
+                complexity = 1,
                 coverage = index < known ? (double?)1 : null,
                 crap = index < known ? (double?)(decision == "fail" ? 10 : 1) : null,
                 coverageReason = index < known ? null : "coverage.unavailable"
