@@ -12,5 +12,6 @@
     <Project Path="components/planning/DeliveryForge.Planning.Tests/DeliveryForge.Planning.Tests.csproj" />
     <Project Path="components/review/DeliveryForge.Review/DeliveryForge.Review.csproj" />
     <Project Path="components/review/DeliveryForge.Review.Tests/DeliveryForge.Review.Tests.csproj" />
+    <Project Path="components/end-to-end/DeliveryForge.EndToEnd.Tests/DeliveryForge.EndToEnd.Tests.csproj" />
   </Folder>
 </Solution>

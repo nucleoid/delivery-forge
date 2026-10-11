@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <ProjectReference Include="../../contracts/DeliveryForge.Contracts/DeliveryForge.Contracts.csproj" />
+    <ProjectReference Include="../../planning/DeliveryForge.Planning/DeliveryForge.Planning.csproj" />
+    <ProjectReference Include="../../execution/DeliveryForge.Execution/DeliveryForge.Execution.csproj" />
+    <ProjectReference Include="../../coordination/DeliveryForge.Coordination/DeliveryForge.Coordination.csproj" />
+    <ProjectReference Include="../../evidence/DeliveryForge.Evidence/DeliveryForge.Evidence.csproj" />
+    <ProjectReference Include="../../review/DeliveryForge.Review/DeliveryForge.Review.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="../scenario-matrix.json" Link="scenario-matrix.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

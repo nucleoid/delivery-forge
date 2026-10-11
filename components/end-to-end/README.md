@@ -1,0 +1,7 @@
+# Cross-slice development scenarios
+
+This component consumes the integrated public contracts and adapters. Its initial scenario runner is deliberately unimplemented until a parent-owned compiled RED run. Three harness controls use actual Git objects, durable files and an identity-bound native child. They do not invoke a model worker, reviewer, installed quality profile or remote repository.
+
+`scenario-matrix.json` records the explicit acceptance queue, seed, finite budgets and profile limits. Entries marked planned or awaiting integration have no passing claim. The initial base contains slices 3–8 only. Scheduler and publication tests wait for actual integrated owner changes; no owner source is copied from unmerged branches. The future public review-authority bridge belongs to publication, not this component.
+
+Runtime outputs stay in this component's gitignored `artifacts/test-runs/<unique-runId>/` leaves. Tests delete only a positively owned plain leaf after assertions pass and all harness-observed children/commands are quiescent. Failure, timeout or ambiguous cleanup retains the leaf. Receipts bind the real integrated source commit, implementation HEAD, seed, budget and fixture status. `local-contract` is narrow contract evidence. `local-real` is incomplete without configured actual host worker, independent reviewer and quality producers; caller capability claims cannot grant that authority. Production remains incomplete without deployed coordination. No first full real success or production certification is claimed.
