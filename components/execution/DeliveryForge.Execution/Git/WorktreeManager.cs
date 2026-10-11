@@ -424,6 +424,10 @@ public sealed class WorktreeManager
     private static StringComparison PathComparison() => OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 }
 
+// Observation data only. No operation accepts this result as ownership or deletion authority.
+public enum WriterNamespaceIdentityOutcome { Match, Changed, Unknown, Unsupported }
+public sealed record WriterNamespaceIdentityObservation(WriterNamespaceIdentityOutcome Outcome, string Reason);
+
 public sealed class WriterLease : IDisposable
 {
     private readonly string _path;
@@ -441,6 +445,8 @@ public sealed class WriterLease : IDisposable
     public string RunId { get; }
     public string WriterToken { get; }
     public string DiagnosticLockPath => _path;
+    public WriterNamespaceIdentityObservation ObserveCurrentNamespaceIdentity() =>
+        throw new NotImplementedException("Live held-handle/current-namespace identity comparison requires compiled RED.");
     public IReadOnlyList<byte> GetDiagnosticBytes()
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
