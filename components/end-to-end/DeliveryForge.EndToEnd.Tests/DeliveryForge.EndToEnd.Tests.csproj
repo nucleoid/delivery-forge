@@ -20,5 +20,8 @@
     <Compile Remove="Fixtures/RealDotNet/**/*.cs" />
     <None Remove="Fixtures/RealDotNet/**/*" />
     <None Include="Fixtures/RealDotNet/**/*" Exclude="Fixtures/RealDotNet/**/bin/**/*;Fixtures/RealDotNet/**/obj/**/*" CopyToOutputDirectory="PreserveNewest" />
+    <Compile Remove="Fixtures/QualityInterruption/**/*.cs" />
+    <None Remove="Fixtures/QualityInterruption/**/*" />
+    <None Include="Fixtures/QualityInterruption/**/*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
