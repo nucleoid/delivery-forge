@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using DeliveryForge.Execution;
 
 namespace DeliveryForge.Scheduling;
@@ -102,6 +103,7 @@ public sealed class Scheduler
                 if (_nodes.Any(active => active.Phase is Phase.Reserved or Phase.Running or Phase.Cleaning && OverlapDetector.Conflicts(active.Item.Changes, node.Item.Changes)) ||
                     !_budget.CanAllocate(node.Item.Demand)) continue;
                 node.Reservation = _budget.Allocate(node.Item.Demand);
+                node.AllocatedAt = Stopwatch.GetTimestamp();
                 node.Phase = Phase.Reserved;
                 var ticket = new SchedulingTicket(node.Item.Id);
                 _tickets.Add(ticket, node);
@@ -123,6 +125,17 @@ public sealed class Scheduler
         if (Volatile.Read(ref _paused) != 0 || Volatile.Read(ref _stopped) != 0) throw new SchedulingException("Pause/stop prevents new fixture dispatch.");
         var node = Owned(ticket);
         if (node.Phase != Phase.Reserved) throw new SchedulingException("Ticket is not a current unstarted reservation.");
+        if (Expired(node))
+        {
+            // No fixture child was started, so only this unstarted reservation can be released implicitly.
+            node.Phase = Phase.Incomplete;
+            node.Outcome = ScheduledOutcome.Incomplete;
+            node.Reservation!.Dispose();
+            node.Reservation = null;
+            _tickets.Remove(ticket);
+            await PersistAsync(cancellationToken).ConfigureAwait(false);
+            throw new SchedulingException("The fixture reservation's finite lifetime expired before start.");
+        }
         node.Phase = Phase.Running;
         await PersistAsync(cancellationToken).ConfigureAwait(false);
         if (Volatile.Read(ref _paused) != 0 || Volatile.Read(ref _stopped) != 0) throw new SchedulingException("Pause/stop arrived during allocation; no new fixture start is authorized.");
@@ -133,6 +146,8 @@ public sealed class Scheduler
         if (!Enum.IsDefined(outcome)) throw new SchedulingException("Undefined scheduling outcome.");
         var node = Owned(ticket);
         if (node.Phase is not (Phase.Running or Phase.Cleaning)) throw new SchedulingException("Outcome requires an owned started fixture ticket.");
+        if (Expired(node) && outcome != ScheduledOutcome.Incomplete)
+            throw new SchedulingException("Expired fixture work is incomplete; elapsed time cannot certify success or child quiescence.");
         if (node.Outcome is not null && node.Outcome != outcome) throw new SchedulingException("A retained outcome cannot be rewritten during cleanup.");
         node.Outcome = outcome;
         if (!quiescent) node.Phase = Phase.Cleaning;
@@ -196,6 +211,7 @@ public sealed class Scheduler
     private void EnsureJournal() { if (_journalUncertain) throw new SchedulingException("Queue journal write is uncertain; dispatch remains disabled."); }
     private static bool Clear(SchedulingRecoveryFacts facts) => !facts.LiveChild && !facts.WriterPresent && !facts.LeasePresent && !facts.Uncertain;
     private static bool Active(Phase phase) => phase is Phase.Reserved or Phase.Running or Phase.Cleaning;
+    private static bool Expired(Node node) => Stopwatch.GetElapsedTime(node.AllocatedAt) >= node.Item.Demand.TimeLimit;
 
     private void CancelUnstarted(bool stop)
     {
@@ -232,6 +248,7 @@ public sealed class Scheduler
         public int Bypasses { get; set; }
         public ScheduledOutcome? Outcome { get; set; }
         public ResourceReservation? Reservation { get; set; }
+        public long AllocatedAt { get; set; }
     }
     private sealed record NodeCheckpoint(string Id, Phase Phase, int Sequence, int Bypasses, ScheduledOutcome? Outcome);
     private sealed record FixtureCheckpoint(int Version, bool Fixture, string RunId, string BudgetPolicyIdentity, string FairnessPolicyIdentity,

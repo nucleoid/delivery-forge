@@ -60,7 +60,7 @@ public sealed partial class LocalSingleTests
         }
     }
 
-    [Fact(Timeout = 60_000)]
+    [Fact(Timeout = 180_000)]
     public async Task ElapsedBudget_cannot_provision_and_keeps_slots_until_explicit_stop()
     {
         using var repository = new PlanningRepository();
@@ -73,12 +73,14 @@ public sealed partial class LocalSingleTests
         using var execution = new ExecutionCoordinator(store, worktrees, processes);
         var slots = new ResourceSlots(1, 1, 1024, 0, 0, 0);
         var budget = ResourceBudget.Measure(slots, new("fixture-expiry", true, slots, TimeSpan.FromMinutes(20), 10000, 0));
-        var demand = Demand with { TimeLimit = TimeSpan.FromSeconds(5) };
+        // The finite preflight must have realistic Git startup room; expiry is still tested after reservation.
+        var demand = Demand with { TimeLimit = TimeSpan.FromSeconds(30) };
         var scheduler = LocalSingleScheduler.Create(plan, worker, demand, budget, store, execution, worktrees, repository.Reader);
+        Exception? priorFailure = null;
         try
         {
             var ticket = await scheduler.ReserveAsync(Cancellation);
-            await Task.Delay(TimeSpan.FromSeconds(5.1), Cancellation);
+            await Task.Delay(TimeSpan.FromSeconds(30.1), Cancellation);
             await Assert.ThrowsAsync<SchedulingException>(() => scheduler.ProvisionAndPrepareAsync(ticket, Cancellation));
             Assert.False(Directory.Exists(worker.Worktree));
             Assert.Empty((await store.RecoverAsync(worker.RunId, Cancellation)).Records);
@@ -86,6 +88,7 @@ public sealed partial class LocalSingleTests
             Assert.True(await scheduler.StopAsync(Cancellation));
             Assert.True(budget.CanAllocate(demand));
         }
-        finally { Assert.True(await scheduler.StopAsync(Cancellation)); }
+        catch (Exception exception) { priorFailure = exception; throw; }
+        finally { Assert.True(await scheduler.StopAsync(Cancellation), $"Explicit cleanup failed; original failure before cleanup: {priorFailure}"); }
     }
 }

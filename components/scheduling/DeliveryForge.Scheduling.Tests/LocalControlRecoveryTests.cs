@@ -144,4 +144,44 @@ public sealed partial class LocalSingleTests
                 true, "fixture-fresh-control", "Marked external fixture; no production host proof.");
         }
     }
+
+    [Fact(Timeout = 60_000)]
+    public async Task ResumingIntent_is_durable_before_host_send_so_cold_paused_claims_cannot_outrun_it()
+    {
+        using var repository = new PlanningRepository();
+        await repository.InitializeAsync();
+        var plan = await repository.FreezeAsync();
+        var worker = Worker(repository, plan, "resume-intent");
+        var store = new RunStore(Path.Combine(repository.Root, "results"));
+        var worktrees = new WorktreeManager();
+        await using var processes = new ProcessControl();
+        var control = new DelayedFixtureControl();
+        using var execution = new ExecutionCoordinator(store, worktrees, processes, control);
+        var scheduler = LocalSingleScheduler.Create(plan, worker, Demand, Budget(), store, execution, worktrees, repository.Reader);
+        Task<AgentRequest>? resume = null;
+        try
+        {
+            var ticket = await scheduler.ReserveAsync(Cancellation);
+            var original = await scheduler.ProvisionAndPrepareAsync(ticket, Cancellation);
+            await execution.AcceptAsync(Accepted(original), Cancellation);
+            await scheduler.PauseAsync(Cancellation);
+            control.Block(AgentControlAction.Resume);
+            resume = scheduler.ResumeAsync(ticket, Cancellation);
+            await control.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Cancellation);
+            var journal = await store.RecoverAsync(worker.RunId + "-scheduler", Cancellation);
+            Assert.Equal("resuming", journal.Latest!.Payload.GetProperty("phase").GetString());
+            control.Release();
+            Assert.Equal(original.RequestIdentity, (await resume).RequestIdentity);
+        }
+        finally
+        {
+            control.Release();
+            if (resume is not null)
+            {
+                try { await resume.WaitAsync(TimeSpan.FromSeconds(10), Cancellation); }
+                catch (SchedulingException) { }
+            }
+            if (!await scheduler.StopAsync(Cancellation)) Assert.True(await scheduler.ReconcileCleanupAsync(Cancellation));
+        }
+    }
 }
