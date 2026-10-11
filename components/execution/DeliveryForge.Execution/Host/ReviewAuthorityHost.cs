@@ -67,6 +67,12 @@ public sealed class ReviewAuthorityHost
 
     public ReviewAcceptanceAuthority Authority { get; }
 
+    // Bounded Test-only preparation; observations are data and cannot issue/rebind opaque ownership.
+    public Task<ReviewGitPreparationResult> PrepareIsolatedTestGitEvidenceAsync(
+        string sourceRoot, string workerGitDirectory, string trustedGitExecutable, long maximumEvidenceBytes,
+        TimeSpan deadline, CancellationToken cancellationToken = default, Action? beforeFinalRecheck = null) =>
+        Task.FromException<ReviewGitPreparationResult>(new NotImplementedException("Entire-deadline bounded Git preparation is RED; synchronous preparation is not a cancellation/pipe-settlement fallback."));
+
     public static ReviewAuthorityHost CreateIsolatedTest(DateTimeOffset? now = null) =>
         new(ReviewAuthorityRealm.Test, $"test-root:{Guid.NewGuid():N}", now, null, null);
 
