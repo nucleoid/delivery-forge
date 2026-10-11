@@ -6,7 +6,7 @@
   "fixture": true,
   "productionCertified": false,
   "firstFullRealRunCertified": false,
-  "stage": "parent GREEN25/25 confirmed; prior native IdentityUnknown cause remains unknown with raw failure retained; cleanup-only file-journal restart RED stub prepared; final profile awaits integrated #9/#10",
+  "stage": "parent GREEN25/25 and cleanup-only restart RED7FAIL1PASS confirmed; minimal cleanup delegation GREEN33 candidate pending; prior native IdentityUnknown cause remains unknown and raw failure retained; final profile awaits integrated #9/#10",
   "seed": 11017,
   "budget": { "maximumScenarioSeconds": 120, "maximumCommandSeconds": 15, "maximumOwnedChildSeconds": 30, "cpuCores": 2, "memoryMiB": 4096, "tokens": 1000, "cost": 0 },
   "runtimeArtifacts": "components/end-to-end/artifacts/test-runs/<unique-owned-runId>",
