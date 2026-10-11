@@ -9,6 +9,7 @@ on:
       - "components/evidence/**"
       - "components/planning/**"
       - "components/review/**"
+      - "components/publication/**"
       - "components/scheduling/**"
       - "DeliveryForge.slnx"
       - "Directory.*.props"
