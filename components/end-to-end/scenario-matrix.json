@@ -70,6 +70,12 @@
     { "id": "publication.timeout-after-publish", "stage": "integrated-owner-scenario-planned", "minimumSlices": [10], "invariants": ["uncertain result reconciled before retry", "no duplicate operation"] },
     { "id": "cleanup.ambiguous-ownership", "stage": "incremental-planned", "minimumSlices": [5], "invariants": ["preserve foreign or reparse target", "retain on unknown/live child"] },
     { "id": "profile.unsupported-os-tool", "stage": "incremental-planned", "minimumSlices": [5, 7], "invariants": ["unsupported platform/tool stays INCOMPLETE", "no guessed fallback"] },
-    { "id": "profile.fixture-leakage", "stage": "incremental-planned", "minimumSlices": [3, 6, 7, 8], "invariants": ["fixture external edge cannot authorize production", "all real/fake limits visible"] }
-  ]
+    { "id": "profile.fixture-leakage", "stage": "incremental-planned", "minimumSlices": [3, 6, 7, 8], "invariants": ["fixture external edge cannot authorize production", "all real/fake limits visible"] },
+    { "id": "review.public-chain-marked-positive", "stage": "red-staged-after-bounded-preparation-prerequisite", "parameters": ["marked-positive"], "invariants": ["actual isolated Git identity", "full public issuer/receipt/lookup/pinned receiver", "ProductionAcceptedfalse", "zero publication/model calls"], "limits": ["pure fixture policy only", "strong protected-policy composition required"] },
+    { "id": "review.public-chain-strict-same-family", "stage": "red-staged", "parameters": ["strict-same-family"], "ownerOutcome": "INCOMPLETE", "invariants": ["development exception cannot waive product family rule", "no accepted receipt or transition"] },
+    { "id": "review.public-chain-real-preflight-drift", "stage": "red-staged", "parameters": ["tracked-drift", "head-drift", "raw-index-drift"], "invariants": ["actual source/HEAD/index mutation", "zero reviewer calls", "raw refusal retained"] },
+    { "id": "review.public-chain-revocation", "stage": "red-staged", "parameters": ["revoked-capability"], "invariants": ["same stored receipt denied by current lookup", "immutable raw/receipt bytes"] },
+    { "id": "review.public-chain-receiver-membership", "stage": "red-staged", "parameters": ["foreign-host", "distinct-request"], "invariants": ["intact secondary own positive/original negative", "original still valid", "public facts do not mint opaque membership"] }
+  ],
+  "publicReviewIncrement": { "cases": 8, "compiledReceipt": "pending", "boundedPreparationPrerequisite": "owner four-case RED first", "production": false, "strongProtectedPolicyComposition": "required feasible followup" }
 }
