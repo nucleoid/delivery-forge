@@ -69,6 +69,13 @@ public sealed class ReviewAuthorityHost
 
     public ReviewAcceptanceAuthority Authority { get; }
 
+    // Test-only same-issuer bootstrap. No caller root/source/view opaque identities and no live members
+    // escape until real protected policy provenance and the immutable root have been joined.
+    public static Task<ProtectedReviewFixtureBootstrap> CreateProtectedGitContractFixtureAsync(
+        ProtectedReviewFixtureConfiguration configuration, CancellationToken cancellationToken = default) =>
+        Task.FromException<ProtectedReviewFixtureBootstrap>(new NotImplementedException(
+            "Single-issuer protected Git policy/view/root fixture bootstrap is RED."));
+
     // Bounded Test-only preparation; observations are data and cannot issue/rebind opaque ownership.
     public async Task<ReviewGitPreparationResult> PrepareIsolatedTestGitEvidenceAsync(
         string sourceRoot, string workerGitDirectory, string trustedGitExecutable, long maximumEvidenceBytes,
