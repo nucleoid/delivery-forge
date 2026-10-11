@@ -29,6 +29,8 @@ public sealed class ResourceBudget
             Math.Min(measured.MemoryMiB, caps.MemoryMiB), Math.Min(measured.Build, caps.Build), Math.Min(measured.Test, caps.Test), Math.Min(measured.Mutation, caps.Mutation)), policy);
     }
 
+    public string PolicyIdentity => _policy.Identity;
+
     public bool CanAllocate(RunDemand demand)
     {
         if (!TryCapture(demand, out var captured)) return false;

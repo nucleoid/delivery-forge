@@ -15,6 +15,8 @@ public sealed class RunStore
     private readonly JsonSerializerOptions _json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     public RunStore(string root) => _root = Path.GetFullPath(root);
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string RootPath => _root;
 
     public async Task<StoredRunRecord> AppendAsync<T>(string runId, string kind, T payload, CancellationToken cancellationToken = default)
     {

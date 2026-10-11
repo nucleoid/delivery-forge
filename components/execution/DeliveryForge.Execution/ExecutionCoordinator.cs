@@ -44,6 +44,9 @@ public sealed class ExecutionCoordinator : IDisposable
         _factSource = factSource ?? new RequestExecutionFactSource();
     }
 
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string StoreRootPath => _store.RootPath;
+
     public Task<(AgentRequest Request, StoredRunRecord Record)> PrepareWorkerAsync(
         FrozenWorkerPlan plan, CancellationToken cancellationToken = default) =>
         RunExclusiveAsync(plan.RunId, () => PrepareWorkerCoreAsync(plan, cancellationToken), cancellationToken);

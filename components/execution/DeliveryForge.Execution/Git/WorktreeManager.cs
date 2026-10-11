@@ -15,6 +15,20 @@ public sealed record WorktreeObservation(
 
 public sealed class WorktreeManager
 {
+    private readonly string _gitExecutable;
+    public WorktreeManager(string? gitExecutablePath = null)
+    {
+        if (gitExecutablePath is not null)
+        {
+            if (!Path.IsPathFullyQualified(gitExecutablePath) || !File.Exists(gitExecutablePath)) throw new WorktreeBoundaryException("Configured Git executable must be an existing absolute trusted path.");
+            _gitExecutable = Path.GetFullPath(gitExecutablePath);
+            return;
+        }
+        var name = OperatingSystem.IsWindows() ? "git.exe" : "git";
+        _gitExecutable = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
+            .Where(Path.IsPathFullyQualified).Select(path => Path.Combine(path, name)).FirstOrDefault(File.Exists)
+            ?? throw new WorktreeBoundaryException("No absolute Git executable was discovered on the trusted parent PATH.");
+    }
     internal bool IsSameDirectory(string left, string right) =>
         string.Equals(CanonicalPath(left), CanonicalPath(right), PathComparison());
 
@@ -160,31 +174,38 @@ public sealed class WorktreeManager
             throw new WorktreeBoundaryException($"Out-of-scope writes detected: {string.Join(", ", outside)}.");
     }
 
-    private static async Task<string> GitAsync(string cwd, CancellationToken cancellationToken, params string[] arguments)
+    private async Task<string> GitAsync(string cwd, CancellationToken cancellationToken, params string[] arguments)
     {
         var (exitCode, stdout, stderr) = await RunGitAsync(cwd, cancellationToken, arguments).ConfigureAwait(false);
         if (exitCode != 0) throw new WorktreeBoundaryException($"Git failed: {stderr}");
         return stdout;
     }
 
-    private static async Task<int> GitExitCodeAsync(string cwd, CancellationToken cancellationToken, params string[] arguments)
+    private async Task<int> GitExitCodeAsync(string cwd, CancellationToken cancellationToken, params string[] arguments)
     {
         var (exitCode, _, _) = await RunGitAsync(cwd, cancellationToken, arguments).ConfigureAwait(false);
         return exitCode;
     }
 
-    private static async Task<(int ExitCode, string Stdout, string Stderr)> RunGitAsync(
+    private async Task<(int ExitCode, string Stdout, string Stderr)> RunGitAsync(
         string cwd, CancellationToken cancellationToken, params string[] arguments)
     {
-        var start = new ProcessStartInfo("git")
+        var start = new ProcessStartInfo(_gitExecutable)
         {
             WorkingDirectory = cwd,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false
         };
-        start.Environment.Remove("GIT_DIR");
-        start.Environment.Remove("GIT_WORK_TREE");
+        foreach (var name in new[] { "GIT_DIR", "GIT_WORK_TREE", "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_INDEX_FILE", "GIT_COMMON_DIR", "GIT_CONFIG", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM", "GIT_CONFIG_PARAMETERS", "GIT_CONFIG_COUNT" }) start.Environment.Remove(name);
+        foreach (var name in start.Environment.Keys.Where(name => name.StartsWith("GIT_CONFIG_KEY_", StringComparison.Ordinal) || name.StartsWith("GIT_CONFIG_VALUE_", StringComparison.Ordinal)).ToArray()) start.Environment.Remove(name);
+        var disabledHooks = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+        start.Environment["GIT_NO_REPLACE_OBJECTS"] = "1";
+        start.Environment["GIT_GRAFT_FILE"] = disabledHooks;
+        start.Environment["GIT_NO_LAZY_FETCH"] = "1";
+        start.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        start.ArgumentList.Add("-c"); start.ArgumentList.Add("core.hooksPath=" + disabledHooks);
+        start.ArgumentList.Add("-c"); start.ArgumentList.Add("core.fsmonitor=false");
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         using var process = Process.Start(start) ?? throw new WorktreeBoundaryException("Could not start Git.");
         var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
