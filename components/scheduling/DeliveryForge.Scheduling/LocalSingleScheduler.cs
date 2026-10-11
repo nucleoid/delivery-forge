@@ -47,7 +47,7 @@ public sealed class LocalSingleScheduler
     }
 
     public static LocalSingleScheduler Create(FrozenPlan plan, FrozenWorkerPlan worker, RunDemand demand, ResourceBudget budget,
-        RunStore store, ExecutionCoordinator execution, WorktreeManager worktrees, GitRepositoryContextReader reader)
+        RunStore store, ExecutionCoordinator execution, WorktreeManager worktrees, GitRepositoryContextReader reader, TimeSpan? controlTimeout = null)
     {
         ArgumentNullException.ThrowIfNull(plan); ArgumentNullException.ThrowIfNull(worker); ArgumentNullException.ThrowIfNull(demand);
         ArgumentNullException.ThrowIfNull(budget); ArgumentNullException.ThrowIfNull(store); ArgumentNullException.ThrowIfNull(execution);
@@ -85,6 +85,15 @@ public sealed class LocalSingleScheduler
         if (!budget.CanAllocate(demand)) throw new SchedulingException("Approved finite local resource/time/token/cost capacity is unavailable.");
         return new(plan, captured, demand with { ExclusiveResources = Array.AsReadOnly(demand.ExclusiveResources.ToArray()) }, budget, store, execution, worktrees, reader, prerequisites.AsReadOnly());
     }
+
+    public Task RelinquishPausedAsync(CancellationToken cancellationToken = default) =>
+        Task.FromException(new NotImplementedException("Paused parent transfer requires immutable recovery and fresh ownership reconciliation."));
+
+    public Task<LocalDispatchReservation> RecoverPausedAsync(CancellationToken cancellationToken = default) =>
+        Task.FromException<LocalDispatchReservation>(new NotImplementedException("Cold recovery must re-observe child, writer, plan and host facts."));
+
+    public Task<bool> ReconcileCleanupAsync(CancellationToken cancellationToken = default) =>
+        Task.FromException<bool>(new NotImplementedException("Fresh cleanup cannot be inferred from a late control result."));
 
     public async Task<LocalDispatchReservation> ReserveAsync(CancellationToken cancellationToken = default)
     {

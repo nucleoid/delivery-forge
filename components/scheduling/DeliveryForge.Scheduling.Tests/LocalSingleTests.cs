@@ -6,7 +6,7 @@ using Xunit;
 
 namespace DeliveryForge.Scheduling.Tests;
 
-public sealed class LocalSingleTests
+public sealed partial class LocalSingleTests
 {
     private static CancellationToken Cancellation => TestContext.Current.CancellationToken;
     private static RunDemand Demand => new(new(1, 1, 1024, 0, 0, 0), [], TimeSpan.FromMinutes(1), 1000, 0);
