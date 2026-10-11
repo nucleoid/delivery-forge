@@ -9,7 +9,8 @@ namespace DeliveryForge.EndToEnd.Tests;
 internal static class NativeExecutionOrchestrator
 {
     public static async Task ObserveAsync(OwnedScenarioRun artifacts, OwnedEphemeralRuntime runtime, string scenario,
-        List<string> receipts, Dictionary<string, bool> invariants, CancellationToken cancellationToken)
+        List<string> receipts, Dictionary<string, bool> invariants, CancellationToken cancellationToken,
+        Func<LocalSingleScheduler, CancellationToken, Task>? fixtureAfterReserve = null)
     {
         if (scenario.StartsWith("cleanup.", StringComparison.Ordinal))
         {
@@ -37,6 +38,7 @@ internal static class NativeExecutionOrchestrator
         var scheduler = LocalSingleScheduler.Create(plan, worker, SchedulingScenarioFixture.Demand, SchedulingScenarioFixture.Budget(),
             runtime.Store, execution, runtime.Worktrees, runtime.Reader);
         var ticket = await scheduler.ReserveAsync(cancellationToken);
+        if (fixtureAfterReserve is not null) await fixtureAfterReserve(scheduler, cancellationToken);
         var prepared = await scheduler.ProvisionAndPrepareAsync(ticket, cancellationToken);
         var observation = await runtime.Worktrees.ObserveAsync(runtime.Worktree, cancellationToken);
         var accepted = new AgentAcceptedReceipt(WorkerEnvelope.SchemaVersion, prepared.RunId, prepared.RequestIdentity,

@@ -25,6 +25,7 @@ public sealed record ScenarioResult(GateOutcome Outcome, ScenarioProfile Profile
 public sealed class ScenarioRunner(OwnedScenarioRun run)
 {
     private readonly OwnedEphemeralRuntime? _runtime;
+    public Func<DeliveryForge.Scheduling.LocalSingleScheduler, CancellationToken, Task>? FixtureAfterReserve { get; set; }
     public ScenarioRunner(OwnedScenarioRun run, OwnedEphemeralRuntime runtime) : this(run)
     {
         if (!runtime.BelongsTo(run)) throw new ArgumentException("Runtime belongs to another live fixture owner.", nameof(runtime));
@@ -110,7 +111,7 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
             "execution.unknown-host" or "cleanup.changed-owner-marker" or "cleanup.foreign-reparse-entry")
         {
             if (_runtime is null) throw new InvalidOperationException("Native fixture scenarios require their live owned runtime reference.");
-            await NativeExecutionOrchestrator.ObserveAsync(run, _runtime, name, receiptIds, invariants, deadline.Token);
+            await NativeExecutionOrchestrator.ObserveAsync(run, _runtime, name, receiptIds, invariants, deadline.Token, FixtureAfterReserve);
             outcome = GateOutcome.Incomplete;
             limitations = ["Public native-task/control and ownership contract fixture only; no actual model worker, quality PASS or full-real certificate."];
         }

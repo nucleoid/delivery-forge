@@ -49,6 +49,8 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
     public string ExpectedMarkerSha256 => Convert.ToHexStringLower(SHA256.HashData(_markerBytes));
     public RunStore Store { get; }
     public ProcessControl Processes { get; } = new();
+    // Explicit live fixture instrumentation; never imported from stored observations.
+    public Func<CancellationToken, Task>? FixtureArchiveEntryBarrier { get; set; }
     public GitRepositoryContextReader Reader => new(_git);
     public WorktreeManager Worktrees => new(_git);
     internal bool BelongsTo(OwnedScenarioRun artifacts) => ReferenceEquals(_artifacts, artifacts);
@@ -251,6 +253,7 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
     private async Task ArchiveAsync(CancellationToken cancellationToken)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (FixtureArchiveEntryBarrier is { } barrier) await barrier(cancellationToken);
         var archive = Path.Combine(_artifacts.Root, "runtime-archive-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(archive);
         var stack = new Stack<string>(); stack.Push(Root);
