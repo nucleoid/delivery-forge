@@ -95,7 +95,10 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
         }
         else if (name is "scheduling.unknown-map-contention" or "scheduling.real-integrated-prerequisite" or "scheduling.stale-base-before-provision")
         {
-            throw new NotImplementedException("Public scheduling safety orchestration requires compiled behavior RED on the actual integrated #9 base.");
+            await SchedulingSafetyOrchestrator.ObserveAsync(run, name, receiptIds, invariants, deadline.Token);
+            outcome = GateOutcome.Incomplete;
+            limitations = ["Actual Git/file/owned native sleep safety observations with public fixture/local scheduling APIs.",
+                "Reservation-only local admission and fixture bookkeeping; no native worker, model, quality PASS, distributed ownership or full-profile certificate."];
         }
         else
         {
