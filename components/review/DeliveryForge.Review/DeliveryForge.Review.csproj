@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>DeliveryForge.Review</AssemblyName>
+    <RootNamespace>DeliveryForge.Review</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../contracts/DeliveryForge.Contracts/DeliveryForge.Contracts.csproj" />
+    <ProjectReference Include="../../evidence/DeliveryForge.Evidence/DeliveryForge.Evidence.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="DeliveryForge.Review.Tests" />
+    <InternalsVisibleTo Include="DeliveryForge.Execution" />
+  </ItemGroup>
+</Project>

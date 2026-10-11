@@ -13,6 +13,8 @@
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="../DeliveryForge.Contracts/DeliveryForge.Contracts.csproj" />
+    <ProjectReference Include="../../execution/DeliveryForge.Execution/DeliveryForge.Execution.csproj" />
+    <ProjectReference Include="../../review/DeliveryForge.Review/DeliveryForge.Review.csproj" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Fixtures/**/*.json" CopyToOutputDirectory="PreserveNewest" />

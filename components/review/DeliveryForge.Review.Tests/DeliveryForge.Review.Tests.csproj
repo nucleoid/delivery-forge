@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" />
+    <PackageReference Include="xunit.v3" />
+    <PackageReference Include="xunit.runner.visualstudio" />
+    <ProjectReference Include="../DeliveryForge.Review/DeliveryForge.Review.csproj" />
+    <ProjectReference Include="../../execution/DeliveryForge.Execution/DeliveryForge.Execution.csproj" />
+  </ItemGroup>
+</Project>
