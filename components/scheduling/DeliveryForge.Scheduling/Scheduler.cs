@@ -146,8 +146,8 @@ public sealed class Scheduler
         if (!Enum.IsDefined(outcome)) throw new SchedulingException("Undefined scheduling outcome.");
         var node = Owned(ticket);
         if (node.Phase is not (Phase.Running or Phase.Cleaning)) throw new SchedulingException("Outcome requires an owned started fixture ticket.");
-        if (Expired(node) && outcome != ScheduledOutcome.Incomplete)
-            throw new SchedulingException("Expired fixture work is incomplete; elapsed time cannot certify success or child quiescence.");
+        if (Expired(node) && outcome == ScheduledOutcome.Pass)
+            throw new SchedulingException("Expired fixture work cannot certify success; cleanup still requires actual quiescence.");
         if (node.Outcome is not null && node.Outcome != outcome) throw new SchedulingException("A retained outcome cannot be rewritten during cleanup.");
         node.Outcome = outcome;
         if (!quiescent) node.Phase = Phase.Cleaning;
