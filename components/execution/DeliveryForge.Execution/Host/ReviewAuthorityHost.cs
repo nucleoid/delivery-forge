@@ -316,8 +316,18 @@ public sealed class ReviewAuthorityHost
             throw new InvalidOperationException("Publication fixture binding does not match the immutable review issuer root.");
     }
 
-    public void EnsureContractFixturePredecessorScope(ReviewAuthorityHost predecessor) =>
-        throw new InvalidOperationException("New-root fixture scope reconciliation is not implemented at this RED checkpoint.");
+    public void EnsureContractFixturePredecessorScope(ReviewAuthorityHost predecessor)
+    {
+        if (predecessor is null || ReferenceEquals(predecessor, this) ||
+            _realm != ReviewAuthorityRealm.Test || predecessor._realm != ReviewAuthorityRealm.Test ||
+            _rootContext is null || predecessor._rootContext is null ||
+            string.IsNullOrWhiteSpace(_rootContext.SourceAuthorityIdentity) ||
+            string.IsNullOrWhiteSpace(predecessor._rootContext.SourceAuthorityIdentity) ||
+            !Path.IsPathFullyQualified(_rootContext.SourceRoot) || !Path.IsPathFullyQualified(predecessor._rootContext.SourceRoot) ||
+            !SamePath(_rootContext.SourceRoot, predecessor._rootContext.SourceRoot) ||
+            _rootContext.SourceAuthorityIdentity != predecessor._rootContext.SourceAuthorityIdentity)
+            throw new InvalidOperationException("New fixture root requires the predecessor's same owned source boundary and Test realm.");
+    }
 
     // Fixture setup support, not a live policy resolver or production authority path.
     public ReviewPolicy CreateContractFixturePolicy(
