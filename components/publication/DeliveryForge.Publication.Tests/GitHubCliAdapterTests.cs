@@ -389,21 +389,21 @@ public sealed class GitHubCliAdapterTests
                 endpoint.EndsWith("/protection", StringComparison.Ordinal) ? "{\"required_status_checks\":{\"contexts\":[\"ci\"]},\"required_pull_request_reviews\":{}}" :
                 endpoint.Contains("/rules/branches/", StringComparison.Ordinal) ? MergeQueue ? "[{\"type\":\"merge_queue\"}]" : "[]" :
                 endpoint.Contains("/check-runs", StringComparison.Ordinal) ? "{\"total_count\":0,\"check_runs\":[]}" :
-                endpoint.EndsWith("/status", StringComparison.Ordinal) ? "{\"state\":\"success\",\"statuses\":[{\"context\":\"ci\",\"state\":\"success\"}]}" : "{}";
+                endpoint.Contains("/status", StringComparison.Ordinal) ? "{\"state\":\"success\",\"total_count\":1,\"statuses\":[{\"context\":\"ci\",\"state\":\"success\"}]}" : "{}";
             if (Fault == "head" && endpoint.Contains("git/ref/heads/work", StringComparison.Ordinal))
                 body = "{\"object\":{\"sha\":\"" + PublicationFixture.Commit('9') + "\"}}";
-            if (Fault == "checks" && endpoint.EndsWith("/status", StringComparison.Ordinal))
-                body = "{\"state\":\"pending\",\"statuses\":[{\"context\":\"ci\",\"state\":\"pending\"}]}";
+            if (Fault == "checks" && endpoint.Contains("/status", StringComparison.Ordinal))
+                body = "{\"state\":\"pending\",\"total_count\":1,\"statuses\":[{\"context\":\"ci\",\"state\":\"pending\"}]}";
             if (Fault == "protection" && endpoint.EndsWith("/protection", StringComparison.Ordinal)) body = "{}";
             if (AppShape is not null)
             {
                 if (endpoint.EndsWith("/protection", StringComparison.Ordinal)) body = AppProtection();
                 if (endpoint.Contains("/check-runs", StringComparison.Ordinal)) body = AppRuns();
-                if (endpoint.EndsWith("/status", StringComparison.Ordinal))
+                if (endpoint.Contains("/status", StringComparison.Ordinal))
                 {
                     var context = AppShape is "absent-required-app" or "legacy" ||
                         AppShape.StartsWith("legacy-", StringComparison.Ordinal) && AppShape != "legacy-check-only" ? "ci" : "unrelated";
-                    body = new JsonObject { ["state"] = "success", ["statuses"] = new JsonArray(new JsonObject
+                    body = new JsonObject { ["state"] = "success", ["total_count"] = 1, ["statuses"] = new JsonArray(new JsonObject
                         { ["context"] = context, ["state"] = "success" }) }.ToJsonString();
                 }
             }
@@ -416,9 +416,9 @@ public sealed class GitHubCliAdapterTests
                 }
                 if (endpoint.Contains("/check-runs", StringComparison.Ordinal)) body = RuleRuns();
             }
-            if ((EmptyStatuses || AppShape == "legacy-check-only") && endpoint.EndsWith("/status", StringComparison.Ordinal))
+            if ((EmptyStatuses || AppShape == "legacy-check-only") && endpoint.Contains("/status", StringComparison.Ordinal))
                 body = "{\"state\":\"pending\",\"total_count\":0,\"statuses\":[]}";
-            if (SameNameStatusState is not null && endpoint.EndsWith("/status", StringComparison.Ordinal))
+            if (SameNameStatusState is not null && endpoint.Contains("/status", StringComparison.Ordinal))
                 body = new JsonObject { ["state"] = SameNameStatusState, ["total_count"] = 1,
                     ["statuses"] = new JsonArray(new JsonObject { ["context"] = "ci", ["state"] = SameNameStatusState }) }.ToJsonString();
             return new(0, body, "");

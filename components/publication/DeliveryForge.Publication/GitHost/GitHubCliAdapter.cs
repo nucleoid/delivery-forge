@@ -205,9 +205,33 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
         var mergeQueue = false;
         try
         {
-            using var rules = await Get(repository + "/rules/branches/" + Uri.EscapeDataString(Branch(target.TargetRef)), token).ConfigureAwait(false);
-            if (rules.RootElement.ValueKind != JsonValueKind.Array) throw Unavailable();
-            mergeQueue = rules.RootElement.EnumerateArray().Any(rule => rule.GetProperty("type").GetString() is "merge_queue" or "required_linear_history");
+            var rules = await ReadApplicableRules(repository, target, token).ConfigureAwait(false);
+            var ruleRequirements = new List<KeyValuePair<string, int?>>();
+            foreach (var rule in rules)
+            {
+                switch (rule.GetProperty("type").GetString())
+                {
+                    case "merge_queue":
+                    case "required_linear_history":
+                        mergeQueue = true;
+                        break;
+                    case "required_status_checks":
+                        var parameters = rule.GetProperty("parameters");
+                        _ = parameters.GetProperty("strict_required_status_checks_policy").GetBoolean();
+                        foreach (var check in parameters.GetProperty("required_status_checks").EnumerateArray())
+                        {
+                            var name = check.GetProperty("context").GetString();
+                            var integration = check.GetProperty("integration_id");
+                            int? app = integration.ValueKind == JsonValueKind.Null ? null : integration.GetInt32();
+                            if (string.IsNullOrWhiteSpace(name) || app is <= 0) throw Unavailable();
+                            ruleRequirements.Add(new(name, app));
+                        }
+                        break;
+                    default:
+                        // Opaque applicable protection cannot be silently treated as satisfied.
+                        throw Unavailable();
+                }
+            }
             using var protectedBranch = await Get(repository + "/branches/" + Uri.EscapeDataString(Branch(target.TargetRef)) + "/protection", token).ConfigureAwait(false);
             var r = protectedBranch.RootElement;
             if (r.TryGetProperty("required_status_checks", out var required) && required.ValueKind == JsonValueKind.Object &&
@@ -225,16 +249,19 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
                         requirements[name] = app;
                         contexts.Add(name);
                     }
-                if (contexts.Count > 0 && contexts.All(x => !string.IsNullOrWhiteSpace(x)))
+                var allRequirements = requirements.Concat(ruleRequirements).ToArray();
+                if (allRequirements.Length > 0 && allRequirements.All(x => !string.IsNullOrWhiteSpace(x.Key)))
                 {
                     protection = GitHostProtection.RequiredAndObserved;
-                    using var status = await Get(repository + "/commits/" + sourceHead + "/status", token).ConfigureAwait(false);
+                    using var status = await Get(repository + "/commits/" + sourceHead + "/status?per_page=100", token).ConfigureAwait(false);
                     using var runs = await Get(repository + "/commits/" + sourceHead + "/check-runs?filter=latest&per_page=100", token).ConfigureAwait(false);
                     var checkRuns = runs.RootElement.GetProperty("check_runs");
-                    var complete = runs.RootElement.GetProperty("total_count").GetInt32() == checkRuns.GetArrayLength();
+                    var statuses = status.RootElement.GetProperty("statuses");
+                    var complete = runs.RootElement.GetProperty("total_count").GetInt32() == checkRuns.GetArrayLength() &&
+                        status.RootElement.GetProperty("total_count").GetInt32() == statuses.GetArrayLength();
                     var passed = new HashSet<string>(StringComparer.Ordinal);
                     var seenStatuses = new HashSet<string>(StringComparer.Ordinal);
-                    foreach (var s in status.RootElement.GetProperty("statuses").EnumerateArray())
+                    foreach (var s in statuses.EnumerateArray())
                     {
                         var name = s.GetProperty("context").GetString()!;
                         if (seenStatuses.Add(name) && s.GetProperty("state").GetString() == "success") passed.Add(name);
@@ -242,10 +269,10 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
                     bool Satisfies(KeyValuePair<string, int?> requirement)
                     {
                         var matchingRuns = checkRuns.EnumerateArray().Where(check => check.GetProperty("name").GetString() == requirement.Key).ToArray();
+                        if (seenStatuses.Contains(requirement.Key) && !passed.Contains(requirement.Key)) return false;
                         if (requirement.Value is null)
                         {
                             // GitHub requires both when a commit status and check share a required name.
-                            if (seenStatuses.Contains(requirement.Key) && !passed.Contains(requirement.Key)) return false;
                             if (matchingRuns.Length == 0) return passed.Contains(requirement.Key);
                         }
                         else if (matchingRuns.Length == 0) return false;
@@ -258,7 +285,7 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
                             check.GetProperty("head_sha").GetString() == sourceHead &&
                             check.GetProperty("status").GetString() == "completed" && check.GetProperty("conclusion").GetString() == "success");
                     }
-                    checks = complete && requirements.All(Satisfies) && status.RootElement.GetProperty("state").GetString() == "success"
+                    checks = complete && allRequirements.All(Satisfies)
                         ? GitHostChecks.Passing : GitHostChecks.Pending;
                 }
                 else protection = GitHostProtection.Missing;
@@ -269,6 +296,24 @@ public sealed class GitHubCliAdapter : IGitHostAdapter
             body.Contains(Marker(key), StringComparison.Ordinal) ? key : null, resultId, mergedHead);
         token.ThrowIfCancellationRequested();
         return new(observation, number, body, state, mergeQueue || autoMerge);
+    }
+
+    private async Task<JsonElement[]> ReadApplicableRules(string repository, PublicationTarget target, CancellationToken token)
+    {
+        const int pageSize = 100;
+        const int maximumPages = 10;
+        var collected = new List<JsonElement>();
+        for (var page = 1; page <= maximumPages; page++)
+        {
+            using var result = await Get(repository + "/rules/branches/" + Uri.EscapeDataString(Branch(target.TargetRef)) +
+                "?per_page=100&page=" + page.ToString(System.Globalization.CultureInfo.InvariantCulture), token).ConfigureAwait(false);
+            var entries = result.RootElement;
+            if (entries.ValueKind != JsonValueKind.Array || entries.GetArrayLength() > pageSize) throw Unavailable();
+            collected.AddRange(entries.EnumerateArray().Select(item => item.Clone()));
+            if (entries.GetArrayLength() < pageSize) return collected.ToArray();
+        }
+        // A full final page leaves an unobserved tail; the fixed bound is a refusal, never a truncation.
+        throw Unavailable();
     }
 
     private async Task<JsonDocument> Get(string endpoint, CancellationToken cancellationToken)
