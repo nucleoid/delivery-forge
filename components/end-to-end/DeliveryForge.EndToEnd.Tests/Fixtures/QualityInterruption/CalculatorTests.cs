@@ -22,17 +22,17 @@ public sealed class CalculatorTests
                     throw new IOException("Fixture barrier path is redirected.");
             var entered = Path.Combine(directory, "entered-" + nonce);
             await using (var stream = new FileStream(entered, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-                await stream.WriteAsync(Encoding.UTF8.GetBytes(nonce));
+                await stream.WriteAsync(Encoding.UTF8.GetBytes(nonce), TestContext.Current.CancellationToken);
             var release = Path.Combine(directory, "release-" + nonce);
             var started = Stopwatch.GetTimestamp();
             while (!File.Exists(release))
             {
                 if (Stopwatch.GetElapsedTime(started) >= TimeSpan.FromSeconds(180))
                     throw new TimeoutException("Real compiled fixture workload exceeded its180-second self limit.");
-                await Task.Delay(20);
+                await Task.Delay(20, TestContext.Current.CancellationToken);
             }
             if ((File.GetAttributes(release) & FileAttributes.ReparsePoint) != 0 ||
-                await File.ReadAllTextAsync(release) != nonce)
+                await File.ReadAllTextAsync(release, TestContext.Current.CancellationToken) != nonce)
                 throw new IOException("Fixture release does not match this compiled test's nonce.");
         }
         Assert.Equal(4, Calculator.Add(1, 3));
