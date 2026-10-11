@@ -8,6 +8,7 @@ on:
       - "components/execution/**"
       - "components/evidence/**"
       - "components/planning/**"
+      - "components/review/**"
       - "DeliveryForge.slnx"
       - "Directory.*.props"
       - "global.json"

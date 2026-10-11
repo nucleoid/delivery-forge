@@ -14,7 +14,10 @@ public sealed record TransitionEvidence(
     ValidatedContract? CiReceipt = null,
     ValidatedContract? ReviewReceipt = null,
     ValidatedContract? PublicationReceipt = null,
-    ValidatedContract? HostReviewReceipt = null);
+    ValidatedContract? HostReviewReceipt = null,
+    ReviewAcceptanceAuthority? ReviewAuthority = null,
+    ReviewConsumerContext? ReviewContext = null,
+    ReviewConsumerContext? HostReviewContext = null);
 
 public static class WorkflowTransition
 {
@@ -40,7 +43,46 @@ public static class WorkflowTransition
     private static readonly IReadOnlySet<WorkflowState> TerminalStates =
         new HashSet<WorkflowState> { WorkflowState.Merged, WorkflowState.Blocked, WorkflowState.Failed, WorkflowState.Stopped };
 
-    public static void EnsureAllowed(WorkflowState from, WorkflowState to, TransitionEvidence evidence)
+    public static void EnsureAllowed(WorkflowState from, WorkflowState to, TransitionEvidence evidence) =>
+        EnsureAllowedCore(from, to, evidence, ReviewAuthorityRealm.Production, receiver: null);
+
+    public static void EnsureAllowed(
+        WorkflowState from,
+        WorkflowState to,
+        TransitionEvidence evidence,
+        ReviewTransitionReceiver receiver) =>
+        EnsureAllowedCore(from, to, evidence, ReviewAuthorityRealm.Production, receiver);
+
+    internal static void EnsureAllowedForIsolatedTest(
+        WorkflowState from,
+        WorkflowState to,
+        TransitionEvidence evidence)
+    {
+        // Compatibility for pre-existing isolated contract tests only. The public legacy
+        // entry point above never derives a receiver from per-call evidence.
+        var receiver = evidence.ReviewAuthority is not null && evidence.ReviewContext is not null
+            ? new ReviewTransitionReceiver(
+                evidence.ReviewAuthority,
+                ReviewAuthorityRealm.Test,
+                evidence.ReviewContext,
+                evidence.HostReviewContext)
+            : null;
+        EnsureAllowedCore(from, to, evidence, ReviewAuthorityRealm.Test, receiver);
+    }
+
+    internal static void EnsureAllowedForIsolatedTest(
+        WorkflowState from,
+        WorkflowState to,
+        TransitionEvidence evidence,
+        ReviewTransitionReceiver receiver) =>
+        EnsureAllowedCore(from, to, evidence, ReviewAuthorityRealm.Test, receiver);
+
+    private static void EnsureAllowedCore(
+        WorkflowState from,
+        WorkflowState to,
+        TransitionEvidence evidence,
+        ReviewAuthorityRealm requiredReviewRealm,
+        ReviewTransitionReceiver? receiver)
     {
         ArgumentNullException.ThrowIfNull(evidence);
         if (!Enum.IsDefined(from) || !Enum.IsDefined(to) || !Enum.IsDefined(evidence.Ceiling))
@@ -68,13 +110,13 @@ public static class WorkflowTransition
         if (to == WorkflowState.PrAuthorized)
         {
             RequirePolicyCeiling(evidence, AuthorizationCeiling.Pr, "PR authorization");
-            RequireIndependentReview(evidence);
+            RequireIndependentReview(evidence, requiredReviewRealm, receiver);
         }
 
         if (to == WorkflowState.PrPublished)
         {
             RequirePolicyCeiling(evidence, AuthorizationCeiling.Pr, "PR publication");
-            RequireIndependentReview(evidence);
+            RequireIndependentReview(evidence, requiredReviewRealm, receiver);
             RequireReceipt(evidence.PublicationReceipt, "publication-receipt", outcome: null, "PR_PUBLISHED", evidence);
         }
 
@@ -87,19 +129,19 @@ public static class WorkflowTransition
         if (to == WorkflowState.HostReviewComplete)
         {
             RequirePolicyCeiling(evidence, AuthorizationCeiling.Pr, "Hosted review completion");
-            RequireDistinctHostReview(evidence);
+            RequireDistinctHostReview(evidence, requiredReviewRealm, receiver);
         }
 
         if (to == WorkflowState.MergeAuthorized)
         {
             RequirePolicyCeiling(evidence, AuthorizationCeiling.Merge, "Merge authorization");
-            RequireDistinctHostReview(evidence);
+            RequireDistinctHostReview(evidence, requiredReviewRealm, receiver);
         }
 
         if (to == WorkflowState.Merged)
         {
             RequirePolicyCeiling(evidence, AuthorizationCeiling.Merge, "Merge");
-            RequireDistinctHostReview(evidence);
+            RequireDistinctHostReview(evidence, requiredReviewRealm, receiver);
             RequireReceipt(evidence.PublicationReceipt, "publication-receipt", outcome: null, "MERGED", evidence);
         }
     }
@@ -132,9 +174,12 @@ public static class WorkflowTransition
         }
     }
 
-    private static void RequireDistinctHostReview(TransitionEvidence evidence)
+    private static void RequireDistinctHostReview(
+        TransitionEvidence evidence,
+        ReviewAuthorityRealm requiredReviewRealm,
+        ReviewTransitionReceiver? receiver)
     {
-        RequireIndependentReview(evidence);
+        RequireIndependentReview(evidence, requiredReviewRealm, receiver);
         RequireReceipt(evidence.HostReviewReceipt, "review-receipt", "PASS", action: null, evidence);
         if (evidence.HostReviewReceipt is not null &&
             string.Equals(evidence.ReviewReceipt!.Identity, evidence.HostReviewReceipt.Identity, StringComparison.Ordinal))
@@ -147,15 +192,50 @@ public static class WorkflowTransition
         {
             throw new InvalidWorkflowTransitionException("Hosted review requires reviewerFamily 'github-hosted'.");
         }
+        RequireReviewAcceptance(
+            evidence, evidence.HostReviewReceipt!, ReviewEvidenceRole.Hosted, requiredReviewRealm, receiver);
     }
 
-    private static void RequireIndependentReview(TransitionEvidence evidence)
+    private static void RequireIndependentReview(
+        TransitionEvidence evidence,
+        ReviewAuthorityRealm requiredReviewRealm,
+        ReviewTransitionReceiver? receiver)
     {
         RequireReceipt(evidence.ReviewReceipt, "review-receipt", "PASS", action: null, evidence);
         using var review = JsonDocument.Parse(evidence.ReviewReceipt!.CanonicalBytes);
         if (review.RootElement.GetProperty("reviewerFamily").GetString() == "github-hosted")
         {
             throw new InvalidWorkflowTransitionException("The independent review cannot use reviewerFamily 'github-hosted'.");
+        }
+        RequireReviewAcceptance(
+            evidence, evidence.ReviewReceipt!, ReviewEvidenceRole.Independent, requiredReviewRealm, receiver);
+    }
+
+    private static void RequireReviewAcceptance(
+        TransitionEvidence evidence,
+        ValidatedContract receipt,
+        ReviewEvidenceRole role,
+        ReviewAuthorityRealm requiredReviewRealm,
+        ReviewTransitionReceiver? receiver)
+    {
+        var consumerContext = role == ReviewEvidenceRole.Hosted
+            ? receiver?.HostedContext
+            : receiver?.IndependentContext;
+        var requirement = new ReviewAcceptanceRequirement(
+            receipt.Identity,
+            role,
+            requiredReviewRealm,
+            evidence.BaseCommit!,
+            evidence.HeadCommit!,
+            evidence.TreeId!,
+            RequirePolicy(evidence).Identity,
+            consumerContext!,
+            role == ReviewEvidenceRole.Hosted ? evidence.ReviewReceipt?.Identity : null);
+        if (receiver is null || receiver.Realm != requiredReviewRealm || consumerContext is null ||
+            !receiver.Authority.Accepts(requirement))
+        {
+            throw new InvalidWorkflowTransitionException(
+                "Transition requires root-issued review acceptance for the exact receipt and authority realm.");
         }
     }
 

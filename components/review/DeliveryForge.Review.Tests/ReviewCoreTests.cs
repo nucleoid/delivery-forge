@@ -1,0 +1,1374 @@
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json.Nodes;
+using DeliveryForge.Contracts.Models;
+using DeliveryForge.Contracts.Serialization;
+using DeliveryForge.Contracts.State;
+using DeliveryForge.Contracts.Validation;
+using DeliveryForge.Execution.Host;
+
+namespace DeliveryForge.Review.Tests;
+
+public sealed class ReviewCoreTests
+{
+    [Fact]
+    public void Fixture_cleanup_removes_owned_readonly_objects_and_preserves_outside_targets()
+    {
+        var container = Path.Combine(Path.GetTempPath(), "delivery-forge-cleanup-proof", Guid.NewGuid().ToString("N"));
+        var owned = Path.Combine(container, "owned");
+        var outside = Path.Combine(container, "outside");
+        Directory.CreateDirectory(Path.Combine(owned, "objects"));
+        Directory.CreateDirectory(outside);
+        var objectFile = Path.Combine(owned, "objects", "object");
+        var outsideFile = Path.Combine(outside, "preserve");
+        File.WriteAllText(objectFile, "owned object");
+        File.WriteAllText(outsideFile, "outside object");
+        File.SetAttributes(objectFile, File.GetAttributes(objectFile) | FileAttributes.ReadOnly);
+        File.SetAttributes(outsideFile, File.GetAttributes(outsideFile) | FileAttributes.ReadOnly);
+        var outsideAttributes = File.GetAttributes(outsideFile);
+        try
+        {
+            try { Directory.CreateSymbolicLink(Path.Combine(owned, "outside-link"), outside); }
+            catch (Exception error) when (error is UnauthorizedAccessException or IOException or PlatformNotSupportedException)
+            {
+                TestContext.Current.SendDiagnosticMessage("Cleanup symlink conformance is unproved on this host: {0}", error.GetType().Name);
+            }
+            FixtureDirectoryCleanup.Delete(owned);
+            Assert.False(Directory.Exists(owned));
+            Assert.Equal("outside object", File.ReadAllText(outsideFile));
+            Assert.Equal(outsideAttributes, File.GetAttributes(outsideFile));
+        }
+        finally { FixtureDirectoryCleanup.Delete(container); }
+    }
+
+    [Fact]
+    public async Task Patch_identity_binds_exact_binary_full_index_bytes_and_clean_committed_head()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]>
+        {
+            ["delete.txt"] = "delete me\n"u8.ToArray(),
+            ["mode.sh"] = "#!/bin/sh\necho old\n"u8.ToArray(),
+            ["rename old.txt"] = "rename payload\n"u8.ToArray(),
+            ["unicode-æ.txt"] = "før\n"u8.ToArray(),
+            ["binary.bin"] = [0, 1, 2, 0, 255]
+        });
+        repository.Move("rename old.txt", "rename new.txt");
+        repository.Delete("delete.txt");
+        repository.Write("mode.sh", "#!/bin/sh\necho new\n"u8.ToArray());
+        repository.MakeExecutable("mode.sh");
+        repository.Write("unicode-æ.txt", "efter\n"u8.ToArray());
+        repository.Write("binary.bin", [0, 9, 2, 0, 255]);
+        var headCommit = repository.CommitAll();
+
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
+        var identity = await GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'),
+            new Dictionary<string, string> { ["tests"] = Identity('a') },
+            TestContext.Current.CancellationToken);
+        var nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+        var bytes = repository.GitBytes(
+            "-c", "core.quotepath=false",
+            "-c", "core.fsmonitor=false",
+            "-c", $"core.hooksPath={nullDevice}",
+            "-c", "diff.noprefix=false",
+            "-c", "diff.mnemonicPrefix=false",
+            "-c", "diff.relative=false",
+            "-c", "diff.renames=true",
+            "-c", "diff.algorithm=myers",
+            "-c", $"diff.orderFile={nullDevice}",
+            "diff", "--binary", "--full-index", "--no-color", "--no-ext-diff", "--no-textconv",
+            "--ignore-submodules=none", baseCommit, headCommit, "--");
+
+        Assert.Equal(Hash(bytes), identity.PatchSha256);
+        Assert.Equal(repository.Git("rev-parse", $"{headCommit}^{{tree}}"), identity.HeadTree);
+        Assert.Equal(TrustedGitPath(), identity.Command[0]);
+        Assert.Contains("--no-replace-objects", identity.Command);
+        Assert.Contains("--no-textconv", identity.Command);
+        Assert.Contains("--ignore-submodules=none", identity.Command);
+        Assert.Contains("git version", identity.GitVersion, StringComparison.Ordinal);
+        Assert.Equal(Identity('e'), identity.PlanIdentity);
+        Assert.Equal(Identity('a'), identity.ArtifactIdentities["tests"]);
+
+        repository.Write("dirty.txt", "dirty"u8.ToArray());
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Patch_identity_rejects_staged_mismatched_missing_and_non_head_inputs()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "a"u8.ToArray() });
+        repository.Write("a.txt", "b"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
+
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, new string('f', 40), Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, headCommit, baseCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+        repository.Write("staged.txt", "staged"u8.ToArray());
+        repository.Git("add", "staged.txt");
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public void Controlled_git_rejects_worker_helpers_replacements_and_path_authority()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]>
+        {
+            [".gitattributes"] = "*.txt diff=evil filter=evil\n"u8.ToArray(),
+            ["a.txt"] = "before\n"u8.ToArray()
+        });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        var sentinel = Path.Combine(repository.Path, ".git", "helper-ran");
+        var helper = Path.Combine(repository.Path, ".git", OperatingSystem.IsWindows() ? "evil.cmd" : "evil.sh");
+        if (OperatingSystem.IsWindows())
+        {
+            File.WriteAllText(helper, $"@echo ran>\"{sentinel}\"\r\n");
+        }
+        else
+        {
+            File.WriteAllText(helper, $"#!/bin/sh\nprintf ran > '{sentinel}'\n");
+            File.SetUnixFileMode(helper, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+        repository.Git("config", "core.fsmonitor", helper);
+        repository.Git("config", "diff.evil.textconv", helper);
+        repository.Git("config", "filter.evil.clean", helper);
+        repository.Git("config", "filter.evil.smudge", helper);
+        Directory.CreateDirectory(Path.Combine(repository.Path, ".git", "refs", "replace"));
+        File.WriteAllText(Path.Combine(repository.Path, ".git", "refs", "replace", baseCommit), headCommit + "\n");
+        Assert.Throws<ReviewPreflightException>(() =>
+            ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+                repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024));
+
+        Assert.False(File.Exists(sentinel));
+    }
+
+    [Fact]
+    public async Task Controlled_git_raw_source_check_exposes_ignored_and_skip_worktree_entries()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]>
+        {
+            [".gitignore"] = "ignored.txt\n"u8.ToArray(),
+            ["a.txt"] = "before\n"u8.ToArray()
+        });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
+
+        repository.Git("update-index", "--skip-worktree", "a.txt");
+        repository.Write("a.txt", "hidden\n"u8.ToArray());
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+        repository.Git("update-index", "--no-skip-worktree", "a.txt");
+        repository.Write("a.txt", "after\n"u8.ToArray());
+
+        repository.Write("ignored.txt", "ignored\n"u8.ToArray());
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+        repository.Delete("ignored.txt");
+    }
+
+    [Fact]
+    public async Task Controlled_git_symlink_conformance_exercises_the_actual_producer_or_reports_unproved()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "before\n"u8.ToArray() });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
+
+        var ownedLinkTarget = Path.Combine(Path.GetTempPath(), $"delivery-forge-link-{Guid.NewGuid():N}");
+        var link = Path.Combine(repository.Path, "outside-link");
+        File.WriteAllText(ownedLinkTarget, "owned target");
+        try
+        {
+            File.CreateSymbolicLink(link, ownedLinkTarget);
+        }
+        catch (Exception error) when (error is PlatformNotSupportedException or UnauthorizedAccessException)
+        {
+            File.Delete(ownedLinkTarget);
+            Assert.Skip($"Symlink producer conformance is unproved on this platform: {error.GetType().Name}.");
+        }
+        try
+        {
+            await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+                controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+                TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            if (File.Exists(link)) File.Delete(link);
+            if (File.Exists(ownedLinkTarget)) File.Delete(ownedLinkTarget);
+        }
+    }
+
+    [Fact]
+    public async Task Controlled_git_rejects_alternates_independently_of_symlink_support()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "before\n"u8.ToArray() });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
+
+        Directory.CreateDirectory(Path.Combine(controlled.ControlledGitDirectory, "objects", "info"));
+        File.WriteAllText(
+            Path.Combine(controlled.ControlledGitDirectory, "objects", "info", "alternates"),
+            Path.Combine(repository.Path, "untrusted-objects") + Environment.NewLine);
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Controlled_git_rejects_submodule_worktrees_and_shallow_metadata()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "a\n"u8.ToArray() });
+        repository.Git("update-index", "--add", "--cacheinfo", $"160000,{baseCommit},submodule");
+        var headCommit = repository.CommitIndex();
+        repository.Write("submodule/work.txt", "nested\n"u8.ToArray());
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
+
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+
+        File.WriteAllText(Path.Combine(controlled.ControlledGitDirectory, "shallow"), baseCommit + "\n");
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Controlled_git_output_bound_and_cancellation_fail_typed()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "before\n"u8.ToArray() });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var bounded = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 8);
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            bounded, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+
+        using var cancelled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            cancelled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(), cancellation.Token));
+    }
+
+    [Fact]
+    public async Task Controlled_git_rechecks_root_owned_quiescence_before_accepting_evidence()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "before\n"u8.ToArray() });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path,
+            Path.Combine(repository.Path, ".git"),
+            TrustedGitPath(),
+            1024 * 1024,
+            () => repository.Write("a.txt", "mutated during capture\n"u8.ToArray()));
+
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Controlled_git_recheck_rejects_staged_only_change_with_restored_working_bytes()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "before\n"u8.ToArray() });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path,
+            Path.Combine(repository.Path, ".git"),
+            TrustedGitPath(),
+            1024 * 1024,
+            () =>
+            {
+                repository.Write("a.txt", "staged-only\n"u8.ToArray());
+                repository.Git("add", "a.txt");
+                repository.Write("a.txt", "after\n"u8.ToArray());
+            });
+
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public async Task Controlled_git_recheck_rejects_same_tree_head_drift()
+    {
+        using var repository = new TinyGitRepository();
+        var baseCommit = repository.Commit(new Dictionary<string, byte[]> { ["a.txt"] = "before\n"u8.ToArray() });
+        repository.Write("a.txt", "after\n"u8.ToArray());
+        var headCommit = repository.CommitAll();
+        using var controlled = ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidence(
+            repository.Path,
+            Path.Combine(repository.Path, ".git"),
+            TrustedGitPath(),
+            1024 * 1024,
+            () => repository.Git("commit", "--quiet", "--allow-empty", "-m", "same-tree drift"));
+
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
+            controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
+            TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public void Isolated_root_issuer_drives_the_exact_safe_receipt_and_consumer_path()
+    {
+        var policy = Policy();
+        var request = Request(policy);
+        var evidencePolicy = EvidencePolicy();
+        var host = ReviewAuthorityHost.CreateIsolatedTest(
+            RootContext("run-1", request, policy, evidencePolicy.Identity), Time(1));
+        var acceptance = new ReviewAcceptanceContext(
+            "run-1", "review-request-1", request.Identity.PlanIdentity, evidencePolicy.Identity,
+            policy.ContentIdentity, policy.SourceRevision, policy.AuthorityKind,
+            "source-authority-1", TrustedSourceRoot(), request.Identity.BaseCommit, "object-view-1");
+        var receiver = host.CreateTransitionReceiver(acceptance);
+        var registration = host.RegisterRequest("review-request-1", request, acceptance);
+        var capability = host.IssueCapability(
+            request.Capability,
+            "capability-proof-1",
+            Time(0),
+            Time(2));
+        var execution = host.RecordExecution(
+            registration,
+            capability,
+            "review-execution-1",
+            accepted: true,
+            completed: true,
+            rawArtifactHash: Identity('f'),
+            rawVerdict: "ship",
+            completedAt: Time(1));
+
+        var normalized = ReviewNormalizer.Normalize(request, Result(), policy, capability, execution);
+        Assert.True(normalized.AuthorityAccepted);
+        Assert.False(normalized.ProductionAccepted);
+
+        var receipt = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(normalized)));
+        Assert.Equal("PASS", JsonNode.Parse(receipt.CanonicalBytes.Span)!["outcome"]!.GetValue<string>());
+
+        host.IssueAcceptance(
+            receipt,
+            normalized,
+            acceptance,
+            ReviewEvidenceRole.Independent);
+
+        var transition = new TransitionEvidence(
+            AuthorizationCeiling.Pr,
+            request.Identity.BaseCommit,
+            request.Identity.HeadCommit,
+            request.Identity.HeadTree,
+            Policy: evidencePolicy,
+            ReviewReceipt: receipt,
+            ReviewAuthority: host.Authority,
+            ReviewContext: host.CreateConsumerContext(acceptance));
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.IndependentReview,
+            WorkflowState.PrAuthorized,
+            transition,
+            receiver);
+
+        var replacementPolicy = EvidencePolicy("merge");
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.IndependentReview,
+            WorkflowState.PrAuthorized,
+            transition with { Policy = replacementPolicy },
+            receiver));
+
+        host.RevokeCapability(capability.ProofIdentity);
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized, transition, receiver));
+        var restarted = ReviewAuthorityHost.CreateIsolatedTest(
+            RootContext("run-1", request, policy, evidencePolicy.Identity), Time(1));
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.IndependentReview,
+            WorkflowState.PrAuthorized,
+            transition with { ReviewAuthority = restarted.Authority }, receiver));
+    }
+
+    [Fact]
+    public void Root_issuer_rejects_every_mutated_acceptance_binding()
+    {
+        var policy = Policy();
+        var request = Request(policy);
+        var evidencePolicy = EvidencePolicy();
+        var root = RootContext("binding-run", request, policy, evidencePolicy.Identity) with
+        {
+            SourceAuthorityIdentity = "binding-source"
+        };
+        var host = ReviewAuthorityHost.CreateIsolatedTest(root, Time(1));
+        var valid = new ReviewAcceptanceContext(
+            root.RunIdentity, "binding-request", root.PlanIdentity, root.EvidencePolicyIdentity,
+            root.ReviewPolicyContentIdentity, root.ReviewPolicySourceRevision,
+            root.ReviewPolicyAuthorityKind, root.SourceAuthorityIdentity, root.SourceRoot,
+            root.ProtectedBaseCommit, root.ProtectedObjectViewIdentity);
+        var registration = host.RegisterRequest("binding-request", request, valid);
+        var capability = host.IssueCapability(request.Capability, "binding-capability", Time(0), Time(2));
+        var execution = host.RecordExecution(
+            registration, capability, "binding-execution", true, true, Identity('f'), "ship", Time(1));
+        var review = ReviewNormalizer.Normalize(request, Result(), policy, capability, execution);
+        var receipt = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(review)));
+        var mutations = new[]
+        {
+            valid with { RunIdentity = "wrong" },
+            valid with { RequestIdentity = "wrong" },
+            valid with { PlanIdentity = Identity('9') },
+            valid with { EvidencePolicyIdentity = Identity('9') },
+            valid with { ReviewPolicyContentIdentity = Identity('9') },
+            valid with { ReviewPolicySourceRevision = Commit('9') },
+            valid with { ReviewPolicyAuthorityKind = ReviewPolicyAuthorityKind.WorkerBranch },
+            valid with { SourceAuthorityIdentity = "wrong" },
+            valid with { SourceRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), "wrong-source")) },
+            valid with { ProtectedBaseCommit = Commit('9') }
+            ,valid with { ProtectedObjectViewIdentity = "wrong-view" }
+        };
+
+        Assert.All(mutations, mutated => Assert.Throws<InvalidOperationException>(() =>
+            host.IssueAcceptance(receipt, review, mutated, ReviewEvidenceRole.Independent)));
+        host.IssueAcceptance(receipt, review, valid, ReviewEvidenceRole.Independent);
+        Assert.False(host.Authority.Equals(null));
+    }
+
+    [Fact]
+    public void Registered_request_execution_and_normalized_provenance_cannot_be_rebound_or_adopted()
+    {
+        var policy = Policy();
+        var request = Request(policy);
+        var evidencePolicy = EvidencePolicy();
+        var root = RootContext("provenance-run", request, policy, evidencePolicy.Identity);
+        var context = new ReviewAcceptanceContext(
+            root.RunIdentity, "request-a", root.PlanIdentity, root.EvidencePolicyIdentity,
+            root.ReviewPolicyContentIdentity, root.ReviewPolicySourceRevision,
+            root.ReviewPolicyAuthorityKind, root.SourceAuthorityIdentity, root.SourceRoot,
+            root.ProtectedBaseCommit, root.ProtectedObjectViewIdentity);
+        var hostA = ReviewAuthorityHost.CreateIsolatedTest(root, Time(1));
+        var registration = hostA.RegisterRequest("request-a", request, context);
+        Assert.Throws<InvalidOperationException>(() => hostA.RegisterRequest(
+            "request-a", request with { Scope = "docs" }, context));
+        var capability = hostA.IssueCapability(request.Capability, "provenance-capability", Time(0), Time(2));
+        var execution = hostA.RecordExecution(
+            registration, capability, "execution-a", true, true, Identity('f'), "ship", Time(1));
+        var changedIdentity = request.Identity with { PatchSha256 = Identity('9') };
+        var rebound = ReviewNormalizer.Normalize(
+            request with { Identity = changedIdentity },
+            Result() with { Identity = changedIdentity },
+            policy, capability, execution);
+        Assert.False(rebound.AuthorityAccepted);
+
+        var normalized = ReviewNormalizer.Normalize(request, Result(), policy, capability, execution);
+        var receipt = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(normalized)));
+        var hostB = ReviewAuthorityHost.CreateIsolatedTest(root, Time(1));
+        Assert.Throws<InvalidOperationException>(() => hostB.IssueAcceptance(
+            receipt, normalized, context, ReviewEvidenceRole.Independent));
+        Assert.Throws<InvalidOperationException>(() => hostA.IssueAcceptance(
+            receipt, normalized, context, ReviewEvidenceRole.Hosted));
+    }
+
+    [Fact]
+    public void Isolated_issuer_requires_two_distinct_executions_at_actual_pr_hosted_and_merge_consumers()
+    {
+        var policy = ReviewPolicy.TrustedFixture(
+            Identity('7'),
+            [new FamilyPair("gpt", "claude"), new FamilyPair("gpt", "github-hosted")],
+            ["source"], false, new ReviewBudget(2, TimeSpan.FromMinutes(5), 20_000, 2m));
+        var independent = Request(policy);
+        var hosted = independent with
+        {
+            Capability = independent.Capability with { Family = "github-hosted" }
+        };
+        var evidencePolicy = EvidencePolicy("merge");
+        var root = RootContext("dual-run", independent, policy, evidencePolicy.Identity);
+        var host = ReviewAuthorityHost.CreateIsolatedTest(root, Time(1));
+        var independentContext = Acceptance(root, "independent-request");
+        var hostedContext = Acceptance(root, "hosted-request");
+        var receiver = host.CreateTransitionReceiver(independentContext, hostedContext);
+
+        var independentCapability = host.IssueCapability(
+            independent.Capability, "independent-capability", Time(0), Time(2));
+        var hostedCapability = host.IssueCapability(
+            hosted.Capability, "hosted-capability", Time(0), Time(2));
+        var independentExecution = host.RecordExecution(
+            host.RegisterRequest("independent-request", independent, independentContext),
+            independentCapability, "independent-execution", true, true, Identity('f'), "ship", Time(1));
+        var hostedExecution = host.RecordExecution(
+            host.RegisterRequest("hosted-request", hosted, hostedContext),
+            hostedCapability, "hosted-execution", true, true, Identity('6'), "ship", Time(1));
+        var independentReview = ReviewNormalizer.Normalize(
+            independent, Result(), policy, independentCapability, independentExecution);
+        var hostedResult = Result() with
+        {
+            ReviewerFamily = "github-hosted",
+            ArtifactHash = Identity('6')
+        };
+        var hostedReview = ReviewNormalizer.Normalize(
+            hosted, hostedResult, policy, hostedCapability, hostedExecution);
+        var independentReceipt = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(independentReview)));
+        var hostedReceipt = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(hostedReview)));
+        host.IssueAcceptance(
+            independentReceipt, independentReview, independentContext, ReviewEvidenceRole.Independent);
+        host.IssueAcceptance(hostedReceipt, hostedReview, hostedContext, ReviewEvidenceRole.Hosted);
+
+        var evidence = new TransitionEvidence(
+            AuthorizationCeiling.Merge,
+            independent.Identity.BaseCommit,
+            independent.Identity.HeadCommit,
+            independent.Identity.HeadTree,
+            Policy: evidencePolicy,
+            ReviewReceipt: independentReceipt,
+            HostReviewReceipt: hostedReceipt,
+            PublicationReceipt: PublicationReceipt(independent.Identity, "PR_PUBLISHED"),
+            ReviewAuthority: host.Authority,
+            ReviewContext: host.CreateConsumerContext(independentContext),
+            HostReviewContext: host.CreateConsumerContext(hostedContext));
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized, evidence, receiver);
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.PrAuthorized, WorkflowState.PrPublished, evidence, receiver);
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.CiComplete, WorkflowState.HostReviewComplete, evidence, receiver);
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.HostReviewComplete, WorkflowState.MergeAuthorized, evidence, receiver);
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.MergeAuthorized,
+            WorkflowState.Merged,
+            evidence with { PublicationReceipt = PublicationReceipt(independent.Identity, "MERGED") },
+            receiver);
+
+        var edges = new[]
+        {
+            (WorkflowState.IndependentReview, WorkflowState.PrAuthorized),
+            (WorkflowState.PrAuthorized, WorkflowState.PrPublished),
+            (WorkflowState.CiComplete, WorkflowState.HostReviewComplete),
+            (WorkflowState.HostReviewComplete, WorkflowState.MergeAuthorized),
+            (WorkflowState.MergeAuthorized, WorkflowState.Merged)
+        };
+        TransitionEvidence ForEdge(TransitionEvidence supplied, WorkflowState target) => target == WorkflowState.Merged
+            ? supplied with { PublicationReceipt = PublicationReceipt(independent.Identity, "MERGED") }
+            : supplied;
+
+        (TransitionEvidence Evidence, ReviewTransitionReceiver Receiver, string IndependentProof) IssueChain(
+            ReviewAuthorityHost issuer, ReviewAuthorityRootContext issuerRoot, string prefix)
+        {
+            var independentBinding = Acceptance(issuerRoot, prefix + "-independent-request");
+            var hostedBinding = Acceptance(issuerRoot, prefix + "-hosted-request");
+            var independentArtifact = Identity(prefix == "foreign" ? '1' : '3');
+            var hostedArtifact = Identity(prefix == "foreign" ? '2' : '4');
+            var pinned = issuer.CreateTransitionReceiver(independentBinding, hostedBinding);
+            var independentProof = issuer.IssueCapability(
+                independent.Capability, prefix + "-independent-capability", Time(0), Time(2));
+            var hostedProof = issuer.IssueCapability(
+                hosted.Capability, prefix + "-hosted-capability", Time(0), Time(2));
+            var independentRun = issuer.RecordExecution(
+                issuer.RegisterRequest(independentBinding.RequestIdentity, independent, independentBinding),
+                independentProof, prefix + "-independent-execution", true, true, independentArtifact, "ship", Time(1));
+            var hostedRun = issuer.RecordExecution(
+                issuer.RegisterRequest(hostedBinding.RequestIdentity, hosted, hostedBinding),
+                hostedProof, prefix + "-hosted-execution", true, true, hostedArtifact, "ship", Time(1));
+            var independentNormalized = ReviewNormalizer.Normalize(
+                independent, Result() with { ArtifactHash = independentArtifact }, policy, independentProof, independentRun);
+            var hostedNormalized = ReviewNormalizer.Normalize(
+                hosted, hostedResult with { ArtifactHash = hostedArtifact }, policy, hostedProof, hostedRun);
+            Assert.True(independentNormalized.AuthorityAccepted);
+            Assert.True(hostedNormalized.AuthorityAccepted);
+            var independentDocument = ContractValidator.ParseAndValidate(
+                ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(independentNormalized)));
+            var hostedDocument = ContractValidator.ParseAndValidate(
+                ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(hostedNormalized)));
+            issuer.IssueAcceptance(independentDocument, independentNormalized, independentBinding,
+                ReviewEvidenceRole.Independent);
+            issuer.IssueAcceptance(hostedDocument, hostedNormalized, hostedBinding, ReviewEvidenceRole.Hosted);
+            return (evidence with
+            {
+                ReviewReceipt = independentDocument,
+                HostReviewReceipt = hostedDocument,
+                ReviewAuthority = issuer.Authority,
+                ReviewContext = issuer.CreateConsumerContext(independentBinding),
+                HostReviewContext = issuer.CreateConsumerContext(hostedBinding)
+            }, pinned, independentProof.ProofIdentity);
+        }
+
+        var foreignRoot = root with { RunIdentity = "foreign-dual-run" };
+        var foreignIssuer = ReviewAuthorityHost.CreateIsolatedTest(foreignRoot, Time(1));
+        var foreign = IssueChain(foreignIssuer, foreignRoot, "foreign");
+        var otherRequest = IssueChain(host, root, "other-request");
+        foreach (var (from, to) in edges)
+        {
+            // Each foreign envelope is intact and authorizes its independently pinned receiver.
+            WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, ForEdge(foreign.Evidence, to), foreign.Receiver);
+            WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, ForEdge(otherRequest.Evidence, to), otherRequest.Receiver);
+            Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+                from, to, ForEdge(foreign.Evidence, to), receiver));
+            Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+                from, to, ForEdge(otherRequest.Evidence, to), receiver));
+        }
+
+        // Hosted proof remains current, so every failure below isolates independent revocation.
+        host.RevokeCapability(otherRequest.IndependentProof);
+        foreach (var (from, to) in edges)
+            Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+                from, to, ForEdge(otherRequest.Evidence, to), otherRequest.Receiver));
+
+        host.RevokeCapability(hostedCapability.ProofIdentity);
+        foreach (var (from, to) in edges)
+        {
+            if (to is WorkflowState.PrAuthorized or WorkflowState.PrPublished)
+                WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, ForEdge(evidence, to), receiver);
+            else
+                Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+                    from, to, ForEdge(evidence, to), receiver));
+        }
+        host.RevokeCapability(independentCapability.ProofIdentity);
+        foreach (var (from, to) in edges)
+            Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowedForIsolatedTest(
+                from, to, ForEdge(evidence, to), receiver));
+    }
+
+    [Theory]
+    [InlineData("ship", ReviewOutcome.Pass, 0)]
+    [InlineData("needs-attention", ReviewOutcome.Fail, 1)]
+    [InlineData("do-not-ship", ReviewOutcome.Fail, 1)]
+    [InlineData("anything-else", ReviewOutcome.Error, 1)]
+    public void Supported_live_producer_maps_real_verdict_grammar_and_preserves_findings(
+        string rawVerdict,
+        ReviewOutcome expected,
+        int findingCount)
+    {
+        var policy = Policy();
+        var request = Request(policy);
+        var evidencePolicy = EvidencePolicy();
+        var host = ReviewAuthorityHost.CreateIsolatedTest(
+            RootContext("live-run", request, policy, evidencePolicy.Identity), Time(1));
+        var context = new ReviewAcceptanceContext(
+            "live-run", "live-request", request.Identity.PlanIdentity, evidencePolicy.Identity,
+            policy.ContentIdentity, policy.SourceRevision, policy.AuthorityKind,
+            "source-authority-1", TrustedSourceRoot(), request.Identity.BaseCommit, "object-view-1");
+        var registration = host.RegisterRequest("live-request", request, context);
+        var findings = Enumerable.Range(0, findingCount)
+            .Select(index => new ReviewFinding($"R{index}", "material", "finding", "A.cs:1"))
+            .ToArray();
+        var observation = new LiveReviewerObservation(
+            true, true, true, true, true,
+            "fixture", "1", "source", "live-capability", Time(0), Time(2),
+            "live-request", "live-execution", "VERDICT output"u8.ToArray(), rawVerdict,
+            findings, Time(1), true);
+
+        var normalized = SupportedLiveReviewProducer.Produce(host, registration, request, policy, observation);
+
+        Assert.Equal(expected, normalized.Outcome);
+        Assert.Equal(findings, normalized.Findings);
+        Assert.Equal(expected == ReviewOutcome.Pass, normalized.AuthorityAccepted);
+    }
+
+    [Fact]
+    public void Missing_live_configuration_remains_incomplete()
+    {
+        var policy = Policy();
+        var observation = new LiveReviewerObservation(
+            false, false, false, false, false,
+            "fixture", "1", "source", "missing", Time(0), Time(2),
+            "request", "execution", [], "ship", [], Time(1), true);
+
+        var normalized = SupportedLiveReviewProducer.Produce(
+            ReviewAuthorityHost.CreateIsolatedTest(Time(1)), Request(policy), policy, observation);
+
+        Assert.Equal(ReviewOutcome.Incomplete, normalized.Outcome);
+        Assert.False(normalized.AuthorityAccepted);
+    }
+
+    [Fact]
+    public void Trusted_fixture_policy_accepts_explicit_different_family_but_not_production()
+    {
+        var policy = Policy();
+        var normalized = ReviewNormalizer.Normalize(Request(policy), Result(), policy);
+        Assert.Equal(ReviewOutcome.Pass, normalized.Outcome);
+        Assert.False(normalized.ProductionAccepted);
+        Assert.False(normalized.AuthorityAccepted);
+        Assert.True(normalized.Fixture);
+    }
+
+    [Theory]
+    [InlineData("gpt", "gpt")]
+    [InlineData("gpt", "unknown")]
+    [InlineData("unknown", "claude")]
+    public void Same_unknown_or_self_family_never_passes(string author, string reviewer)
+    {
+        var policy = Policy();
+        var request = Request(policy) with
+        {
+            AuthorFamily = author,
+            Capability = Capability() with { Family = reviewer }
+        };
+        Assert.NotEqual(ReviewOutcome.Pass,
+            ReviewNormalizer.Normalize(request, Result() with { ReviewerFamily = reviewer }, policy).Outcome);
+    }
+
+    [Fact]
+    public void Forged_authority_advisory_downgrade_and_untrusted_scope_are_non_pass()
+    {
+        var candidate = new ReviewPolicyCandidate(Identity('7'), Identity('8'), Commit('a'), false, false,
+            [new FamilyPair("gpt", "claude")], ["source"], true,
+            new ReviewBudget(1, TimeSpan.FromMinutes(1), 100, 1m), []);
+        foreach (var authority in new[]
+                 {
+                     new ReviewPolicyAuthority(ReviewPolicyAuthorityKind.Caller, Commit('a'), Identity('8')),
+                     new ReviewPolicyAuthority(ReviewPolicyAuthorityKind.ParentAdmin, Commit('a'), Identity('8'))
+                 })
+        {
+            var policy = ReviewPolicy.Resolve(candidate, authority);
+            Assert.NotEqual(ReviewOutcome.Pass, ReviewNormalizer.Normalize(Request(policy), Result(), policy).Outcome);
+        }
+
+        var trusted = Policy();
+        Assert.NotEqual(ReviewOutcome.Pass, ReviewNormalizer.Normalize(
+            Request(trusted) with { Capability = Capability() with { Fixture = false, Advisory = true } },
+            Result(), trusted).Outcome);
+        Assert.NotEqual(ReviewOutcome.Pass, ReviewNormalizer.Normalize(
+            Request(trusted) with { Scope = "docs" }, Result(), trusted).Outcome);
+        Assert.NotEqual(ReviewOutcome.Pass, ReviewNormalizer.Normalize(
+            Request(trusted) with { PolicyIdentity = Identity('9') }, Result(), trusted).Outcome);
+    }
+
+    [Fact]
+    public void Policy_is_frozen_against_caller_collection_mutation()
+    {
+        var families = new List<FamilyPair> { new("gpt", "claude") };
+        var scopes = new List<string> { "source" };
+        var policy = ReviewPolicy.TrustedFixture(Identity('7'), families, scopes, false,
+            new ReviewBudget(1, TimeSpan.FromMinutes(1), 100, 1m));
+        families.Clear();
+        scopes.Add("docs");
+        Assert.Equal(ReviewOutcome.Pass, ReviewNormalizer.Normalize(Request(policy), Result(), policy).Outcome);
+        Assert.DoesNotContain("docs", policy.AllowedScopes);
+    }
+
+    [Fact]
+    public void Timeout_truncation_missing_findings_and_binding_mismatches_are_non_pass()
+    {
+        var policy = Policy();
+        var identity = Patch();
+        var cases = new[]
+        {
+            Result() with { TimedOut = true },
+            Result() with { Truncated = true },
+            Result() with { Findings = null },
+            Result() with { Verdict = null! },
+            Result() with { Identity = identity with { HeadCommit = Commit('d') } },
+            Result() with { Identity = identity with { PatchSha256 = Identity('9') } },
+            Result() with { ReviewerFamily = "pi" }
+        };
+        Assert.All(cases, value => Assert.NotEqual(
+            ReviewOutcome.Pass, ReviewNormalizer.Normalize(Request(policy), value, policy).Outcome));
+        Assert.NotEqual(
+            ReviewOutcome.Pass,
+            ReviewNormalizer.Normalize(
+                Request(policy) with { Capability = Capability() with { Scopes = null! } },
+                Result(),
+                policy).Outcome);
+    }
+
+    [Theory]
+    [InlineData(MaterialChange.Edit)]
+    [InlineData(MaterialChange.Amend)]
+    [InlineData(MaterialChange.Rebase)]
+    [InlineData(MaterialChange.ConflictResolution)]
+    [InlineData(MaterialChange.Generation)]
+    [InlineData(MaterialChange.DependencyIntegration)]
+    [InlineData(MaterialChange.Plan)]
+    [InlineData(MaterialChange.Policy)]
+    [InlineData(MaterialChange.Artifact)]
+    public void Material_changes_invalidate_review(MaterialChange change)
+    {
+        var policy = Policy(true);
+        var receipt = ReviewNormalizer.Normalize(Request(policy), Result(), policy);
+        var decision = ReviewInvalidation.Assess(receipt, Patch(), policy, change);
+        Assert.True(decision.Invalidated);
+        Assert.False(decision.Reusable);
+    }
+
+    [Fact]
+    public void Unchanged_reuse_requires_trusted_policy_exact_identity_and_original_provenance()
+    {
+        var policy = Policy(true);
+        var request = Request(policy);
+        var evidencePolicy = EvidencePolicy();
+        var host = ReviewAuthorityHost.CreateIsolatedTest(
+            RootContext("reuse-run", request, policy, evidencePolicy.Identity), Time(1));
+        var acceptance = new ReviewAcceptanceContext(
+            "reuse-run", "reuse-request", request.Identity.PlanIdentity, evidencePolicy.Identity,
+            policy.ContentIdentity, policy.SourceRevision, policy.AuthorityKind,
+            "reuse-source-authority", TrustedSourceRoot(), request.Identity.BaseCommit, "object-view-1");
+        var registration = host.RegisterRequest("reuse-request", request, acceptance);
+        var capability = host.IssueCapability(request.Capability, "reuse-capability", Time(0), Time(2));
+        var execution = host.RecordExecution(
+            registration, capability, "reuse-execution", true, true, Identity('f'), "ship", Time(1));
+        var receipt = ReviewNormalizer.Normalize(request, Result(), policy, capability, execution);
+        var contract = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(receipt)));
+        host.IssueAcceptance(
+            contract,
+            receipt,
+            acceptance,
+            ReviewEvidenceRole.Independent);
+        var reuse = host.CreateReuseContext(contract, ReviewEvidenceRole.Independent, request, capability);
+        Assert.True(ReviewInvalidation.Assess(
+            receipt, Patch(), policy, MaterialChange.None, reuse).Reusable);
+        Assert.False(ReviewInvalidation.Assess(
+            receipt, Patch() with { HeadTree = Commit('d') }, policy, MaterialChange.None, reuse).Reusable);
+
+        var changedRequests = new[]
+        {
+            request with { Capability = request.Capability with { AdapterId = "other" } },
+            request with { Capability = request.Capability with { AdapterVersion = "2" } },
+            request with { Capability = request.Capability with { Family = "pi" } },
+            request with { Capability = request.Capability with { Fixture = false } },
+            request with { Capability = request.Capability with { Scopes = ["docs"] } },
+            request with { Scope = "docs" }
+        };
+        foreach (var changed in changedRequests)
+        {
+            var changedContext = host.CreateReuseContext(
+                contract, ReviewEvidenceRole.Independent, changed, capability);
+            var decision = ReviewInvalidation.Assess(
+                receipt, Patch(), Policy(false), MaterialChange.None, changedContext);
+            Assert.True(decision.Invalidated);
+            Assert.False(decision.Reusable);
+        }
+
+        Assert.False(ReviewInvalidation.Assess(
+            WithoutOriginalExecution(receipt), Patch(), policy, MaterialChange.None, reuse).Reusable);
+        host.RevokeCapability(capability.ProofIdentity);
+        Assert.True(ReviewInvalidation.Assess(
+            receipt, Patch(), policy, MaterialChange.None, reuse).Invalidated);
+        Assert.False(ReviewInvalidation.Assess(
+            receipt, Patch(), Policy(false), MaterialChange.None, reuse).Reusable);
+    }
+
+    [Fact]
+    public void Explicit_budget_exhaustion_pauses_and_preserves_findings()
+    {
+        var ledger = ReviewBudgetLedger.FromTrustedPolicy(Policy());
+        Assert.True(ledger.TryReserve(
+            new ReviewCost(TimeSpan.FromMinutes(4), 18_000, 1.5m),
+            out var reservation,
+            out _));
+        var finding = new ReviewFinding("R1", "material", "fix this", "A.cs:1");
+        ledger.RecordFindings([finding]);
+        var settled = ledger.Settle(
+            reservation!,
+            new ReviewCost(TimeSpan.FromMinutes(6), 21_000, 2.5m));
+        Assert.Equal(ReviewOutcome.Incomplete, settled.Outcome);
+        Assert.Contains("exhausted", settled.Reason, StringComparison.Ordinal);
+        Assert.Equal([finding], settled.Findings);
+        Assert.Equal(1, ledger.ConsumedRounds);
+        Assert.False(ledger.TryReserve(
+            new ReviewCost(TimeSpan.FromSeconds(1), 1, .01m),
+            out _,
+            out var exhausted));
+        Assert.Equal([finding], exhausted.Findings);
+    }
+
+    [Fact]
+    public void Budget_reservation_is_atomic_under_concurrency_and_every_success_settles()
+    {
+        var ledger = ReviewBudgetLedger.FromTrustedPolicy(Policy());
+        var reservations = new System.Collections.Concurrent.ConcurrentBag<ReviewBudgetReservation>();
+        Parallel.For(0, 12, iteration =>
+        {
+            if (ledger.TryReserve(
+                    new ReviewCost(TimeSpan.FromSeconds(1), 10, .01m),
+                    out var reservation,
+                    out _))
+                reservations.Add(reservation!);
+        });
+
+        Assert.Equal(2, reservations.Count);
+        foreach (var reservation in reservations)
+            ledger.Settle(reservation, new ReviewCost(TimeSpan.FromSeconds(1), 10, .01m));
+        Assert.Equal(2, ledger.ConsumedRounds);
+    }
+
+    [Fact]
+    public void Raw_capability_and_mutable_caller_collections_cannot_gain_or_change_authority()
+    {
+        var capability = new ReviewerCapability("caller", "1", "claude", true, false, false, ["source"]);
+
+        var artifacts = new Dictionary<string, string> { ["tests"] = Identity('1') };
+        var findings = new List<ReviewFinding> { new("R1", "material", "before", "A.cs:1") };
+        var identity = Patch() with { ArtifactIdentities = artifacts };
+        var policy = Policy();
+        var request = Request(policy) with { Identity = identity };
+        var result = ReviewResult.Complete(identity, "claude", "PASS", findings, Identity('f'), Time(1));
+        var receipt = ReviewNormalizer.Normalize(request, result, policy);
+
+        artifacts["tests"] = Identity('2');
+        findings[0] = new ReviewFinding("R2", "material", "after", "B.cs:2");
+        Assert.Equal(Identity('1'), receipt.Identity.ArtifactIdentities["tests"]);
+        Assert.Equal("R1", receipt.Findings[0].Code);
+        Assert.False(receipt.ProductionAccepted);
+    }
+
+    [Fact]
+    public void Issued_and_normalized_returned_collections_are_not_mutable_backing_objects()
+    {
+        var policy = Policy();
+        var request = Request(policy);
+        var evidencePolicy = EvidencePolicy();
+        var root = RootContext("immutable-run", request, policy, evidencePolicy.Identity);
+        var host = ReviewAuthorityHost.CreateIsolatedTest(root, Time(1));
+        var context = Acceptance(root, "immutable-request");
+        var registration = host.RegisterRequest("immutable-request", request, context);
+        var capability = host.IssueCapability(request.Capability, "immutable-capability", Time(0), Time(2));
+        var execution = host.RecordExecution(
+            registration, capability, "immutable-execution", true, true, Identity('f'),
+            "needs-attention", Time(1));
+        var finding = new ReviewFinding("R1", "material", "before", "A.cs:1");
+        var normalized = ReviewNormalizer.Normalize(
+            request,
+            Result() with { Verdict = "FAIL", Findings = [finding] },
+            policy,
+            capability,
+            execution);
+
+        Assert.Throws<NotSupportedException>(() =>
+            ((IDictionary<string, string>)registration.Request.Identity.ArtifactIdentities)["tests"] = Identity('9'));
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<string>)registration.Request.Identity.Command)[0] = "evil");
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<string>)capability.Capability.Scopes)[0] = "docs");
+        Assert.Throws<NotSupportedException>(() =>
+            ((IDictionary<string, string>)normalized.Identity.ArtifactIdentities)["tests"] = Identity('9'));
+        Assert.Throws<NotSupportedException>(() =>
+            ((IList<ReviewFinding>)normalized.Findings)[0] = finding with { Code = "R2" });
+    }
+
+    [Fact]
+    public async Task Protected_policy_resolver_freezes_exact_base_and_ignores_worker_branch_edits()
+    {
+        using var repository = new TinyGitRepository();
+        var protectedJson = """
+            {
+              "Fixture": false,
+              "Advisory": false,
+              "AllowedFamilies": [{ "Author": "gpt", "Reviewer": "claude" }],
+              "AllowedScopes": ["source"],
+              "AllowExactReuse": true,
+              "Budget": {
+                "MaximumRounds": 2,
+                "MaximumDuration": "00:05:00",
+                "MaximumTokens": 20000,
+                "MaximumCost": 2.0
+              },
+              "ExemptionApprovers": []
+            }
+            """;
+        var protectedBase = repository.Commit(new Dictionary<string, byte[]>
+        {
+            ["policy/review.json"] = Encoding.UTF8.GetBytes(protectedJson)
+        });
+        repository.Write("policy/review.json", Encoding.UTF8.GetBytes("{}"));
+        repository.CommitAll();
+
+        var host = ReviewAuthorityHost.CreateIsolatedTest();
+        using var objectView = host.PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
+        var source = host.FreezeProtectedSource(objectView, protectedBase, "test-source-authority");
+        var policy = await new ProtectedReviewPolicyResolver(source)
+            .ResolveAsync("policy/review.json", TestContext.Current.CancellationToken);
+
+        Assert.True(policy.Trusted);
+        Assert.False(policy.Fixture);
+        Assert.Equal(protectedBase, policy.SourceRevision);
+        Assert.Equal(policy.ContentIdentity, policy.PolicyIdentity);
+        Assert.NotEqual(Identity('7'), policy.PolicyIdentity);
+        Assert.Contains(new FamilyPair("gpt", "claude"), policy.AllowedFamilies);
+
+        var productionCapability = Capability() with { Fixture = false };
+        var productionRequest = Request(policy) with { Capability = productionCapability };
+        var productionRoot = new ReviewAuthorityRootContext(
+            "production-run", productionRequest.Identity.PlanIdentity, Identity('0'),
+            policy.ContentIdentity, policy.SourceRevision, policy.AuthorityKind,
+            "production-source", repository.Path, productionRequest.Identity.BaseCommit,
+            "production-object-view");
+        var productionHost = ReviewAuthorityHost.CreateProduction(
+            new ProductionReviewAuthorityConfiguration("production-root", productionRoot));
+        var productionContext = Acceptance(productionRoot, "production-request");
+        var productionRegistration = productionHost.RegisterRequest(
+            "production-request", productionRequest, productionContext);
+        var issuedCapability = productionHost.IssueCapability(
+            productionCapability, "production-capability", Time(0), Time(2));
+        var productionExecution = productionHost.RecordExecution(
+            productionRegistration, issuedCapability, "production-execution", true, true,
+            Identity('f'), "ship", Time(1));
+        var productionResult = new ReviewResult(
+            productionRequest.Identity, "claude", "PASS", [], Identity('f'), Time(1),
+            TimedOut: false, Truncated: false, Fixture: false, Advisory: false);
+        var crossRealm = ReviewNormalizer.Normalize(
+            productionRequest, productionResult, policy, issuedCapability, productionExecution);
+
+        Assert.False(crossRealm.AuthorityAccepted);
+        Assert.False(crossRealm.ProductionAccepted);
+    }
+
+    [Fact]
+    public async Task Protected_policy_missing_required_fields_fails_typed_and_closed()
+    {
+        using var repository = new TinyGitRepository();
+        var protectedBase = repository.Commit(new Dictionary<string, byte[]>
+        {
+            ["policy/review.json"] = "{}"u8.ToArray()
+        });
+
+        var host = ReviewAuthorityHost.CreateIsolatedTest();
+        using var objectView = host.PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
+        var error = await Assert.ThrowsAsync<ReviewPolicyException>(() =>
+            new ProtectedReviewPolicyResolver(host.FreezeProtectedSource(
+                    objectView, protectedBase, "test-source-authority"))
+                .ResolveAsync("policy/review.json", TestContext.Current.CancellationToken));
+
+        Assert.Contains("malformed", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("duplicate")]
+    [InlineData("null-family")]
+    public async Task Protected_policy_duplicate_and_null_inputs_fail_typed(string malformed)
+    {
+        using var repository = new TinyGitRepository();
+        var families = malformed == "null-family"
+            ? "[null]"
+            : "[{ \"Author\": \"gpt\", \"Reviewer\": \"claude\" }]";
+        var duplicate = malformed == "duplicate" ? ", \"Fixture\": true" : string.Empty;
+        var json = $$"""
+            {
+              "Fixture": false{{duplicate}},
+              "Advisory": false,
+              "AllowedFamilies": {{families}},
+              "AllowedScopes": ["source"],
+              "AllowExactReuse": false,
+              "Budget": {
+                "MaximumRounds": 1,
+                "MaximumDuration": "00:01:00",
+                "MaximumTokens": 100,
+                "MaximumCost": 1.0
+              },
+              "ExemptionApprovers": []
+            }
+            """;
+        var protectedBase = repository.Commit(new Dictionary<string, byte[]>
+        {
+            ["policy/review.json"] = Encoding.UTF8.GetBytes(json)
+        });
+        var host = ReviewAuthorityHost.CreateIsolatedTest();
+        using var objectView = host.PrepareIsolatedTestGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), TrustedGitPath(), 1024 * 1024);
+        var source = host.FreezeProtectedSource(objectView, protectedBase, "test-source-authority");
+
+        await Assert.ThrowsAsync<ReviewPolicyException>(() =>
+            new ProtectedReviewPolicyResolver(source)
+                .ResolveAsync("policy/review.json", TestContext.Current.CancellationToken));
+    }
+
+    [Fact]
+    public void Production_source_context_rejects_worker_selected_ancestor_or_branch_base()
+    {
+        using var repository = new TinyGitRepository();
+        var protectedBase = repository.Commit(new Dictionary<string, byte[]> { ["policy/review.json"] = "{}"u8.ToArray() });
+        repository.Write("worker.txt", "worker"u8.ToArray());
+        repository.CommitAll();
+        var host = ReviewAuthorityHost.CreateProduction(new ProductionReviewAuthorityConfiguration(
+            "production-root",
+            new ReviewAuthorityRootContext(
+                "run", Identity('e'), Identity('0'), Identity('7'), Commit('f'),
+                ReviewPolicyAuthorityKind.ProtectedGitBase,
+                "parent-source", repository.Path, protectedBase, "production-object-view")));
+
+        Assert.Throws<ReviewPreflightException>(() => host.UseControlledGitEvidence(
+            repository.Path, Path.Combine(repository.Path, ".git"), Path.Combine(repository.Path, ".git"),
+            TrustedGitPath(), "git version 0", 1024, "parent-source"));
+    }
+
+    [Fact]
+    public void Fixture_pass_receipt_cannot_authorize_pr_transition()
+    {
+        var policy = Policy();
+        var normalized = ReviewNormalizer.Normalize(Request(policy), Result(), policy);
+        var receipt = ContractValidator.ParseAndValidate(
+            ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(normalized)));
+        var identity = normalized.Identity;
+        var evidence = new TransitionEvidence(
+            AuthorizationCeiling.Pr,
+            identity.BaseCommit,
+            identity.HeadCommit,
+            identity.HeadTree,
+            Policy: EvidencePolicy(),
+            ReviewReceipt: receipt);
+
+        Assert.Throws<InvalidWorkflowTransitionException>(() => WorkflowTransition.EnsureAllowed(
+            WorkflowState.IndependentReview, WorkflowState.PrAuthorized, evidence));
+    }
+
+    [Fact]
+    public void Identity_policy_and_findings_mismatches_are_behavioral_non_pass()
+    {
+        var noReuse = Policy(false);
+        var receipt = ReviewNormalizer.Normalize(Request(noReuse), Result(), noReuse);
+        Assert.True(ReviewInvalidation.Assess(
+            receipt,
+            Patch() with { HeadTree = Commit('d') },
+            noReuse,
+            MaterialChange.None).Invalidated);
+
+        var versionMismatch = Result() with
+        {
+            Identity = Patch() with { GitVersion = "git version 9.9.9" }
+        };
+        Assert.NotEqual(ReviewOutcome.Pass,
+            ReviewNormalizer.Normalize(Request(noReuse), versionMismatch, noReuse).Outcome);
+
+        var materialFinding = new ReviewFinding("R1", "material", "must fix", "A.cs:1");
+        Assert.NotEqual(ReviewOutcome.Pass,
+            ReviewNormalizer.Normalize(
+                Request(noReuse),
+                Result() with { Findings = [materialFinding] },
+                noReuse).Outcome);
+    }
+
+    [Fact]
+    public void Normalized_result_emits_the_existing_versioned_review_receipt_contract()
+    {
+        var policy = Policy();
+        var normalized = ReviewNormalizer.Normalize(Request(policy), Result(), policy);
+
+        var receipt = ReviewReceiptSerializer.Create(normalized);
+        var bytes = ReviewReceiptSerializer.Serialize(receipt);
+        var validated = DeliveryForge.Contracts.Validation.ContractValidator.ParseAndValidate(bytes);
+
+        Assert.Equal("review-receipt", validated.SchemaName);
+        Assert.Equal(normalized.Identity.BaseCommit, receipt.BaseCommit);
+        Assert.Equal(normalized.Identity.HeadCommit, receipt.HeadCommit);
+        Assert.Equal(normalized.Identity.HeadTree, receipt.TreeId);
+        Assert.Equal(normalized.Identity.PatchSha256, receipt.PatchSha256);
+        Assert.Equal(normalized.ReviewerFamily, receipt.ReviewerFamily);
+        Assert.Equal("INCOMPLETE", receipt.Outcome);
+        Assert.Equal(normalized.Findings.Count, receipt.FindingCount);
+        Assert.Equal(normalized.ArtifactHash, receipt.ArtifactHash);
+        Assert.Equal(validated.Identity, receipt.Identity);
+    }
+
+    [Fact]
+    public void Missing_policy_and_fixture_or_advisory_evidence_cannot_satisfy_production()
+    {
+        var fixture = ReviewNormalizer.Normalize(Request(Policy()), Result(), Policy());
+        Assert.False(fixture.ProductionAccepted);
+        Assert.NotEqual(ReviewOutcome.Pass,
+            ReviewNormalizer.Normalize(Request(ReviewPolicy.Missing), Result(), ReviewPolicy.Missing).Outcome);
+    }
+
+    private static ReviewAuthorityRootContext RootContext(
+        string runIdentity,
+        ReviewRequest request,
+        ReviewPolicy policy,
+        string evidencePolicyIdentity) => new(
+        runIdentity,
+        request.Identity.PlanIdentity,
+        evidencePolicyIdentity,
+        policy.ContentIdentity,
+        policy.SourceRevision,
+        policy.AuthorityKind,
+        runIdentity == "reuse-run" ? "reuse-source-authority" : "source-authority-1",
+        TrustedSourceRoot(),
+        request.Identity.BaseCommit,
+        "object-view-1");
+
+    private static ReviewAcceptanceContext Acceptance(
+        ReviewAuthorityRootContext root,
+        string requestIdentity) => new(
+        root.RunIdentity, requestIdentity, root.PlanIdentity, root.EvidencePolicyIdentity,
+        root.ReviewPolicyContentIdentity, root.ReviewPolicySourceRevision,
+        root.ReviewPolicyAuthorityKind, root.SourceAuthorityIdentity, root.SourceRoot,
+        root.ProtectedBaseCommit, root.ProtectedObjectViewIdentity);
+
+    private static ReviewPolicy Policy(bool allowReuse = false) => ReviewPolicy.TrustedFixture(
+        Identity('7'), [new FamilyPair("gpt", "claude")], ["source"], allowReuse,
+        new ReviewBudget(2, TimeSpan.FromMinutes(5), 20_000, 2m));
+    private static ReviewerCapability Capability() =>
+        new("fixture", "1", "claude", true, true, false, ["source"]);
+    private static ReviewRequest Request(ReviewPolicy policy) =>
+        new(Patch(), "gpt", Capability(), "source", policy.PolicyIdentity);
+    private static ReviewResult Result() =>
+        ReviewResult.Complete(Patch(), "claude", "PASS", [], Identity('f'), Time(1));
+    private static PatchIdentity Patch() => new(
+        Commit('a'), Commit('b'), Commit('c'), Identity('d'), Identity('e'),
+        new Dictionary<string, string> { ["tests"] = Identity('1') }, "git version 2.51.0",
+        ["git", "diff"]);
+    private static string Identity(char value) => $"sha256:{new string(value, 64)}";
+    private static string Commit(char value) => new(value, 40);
+    private static string TrustedSourceRoot() =>
+        Path.GetFullPath(Path.Combine(Path.GetTempPath(), "delivery-forge-trusted-source"));
+    private static string TrustedGitPath()
+    {
+        var names = OperatingSystem.IsWindows() ? new[] { "git.exe" } : new[] { "git" };
+        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                     .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+            foreach (var name in names)
+            {
+                var candidate = Path.GetFullPath(Path.Combine(directory, name));
+                if (File.Exists(candidate)) return candidate;
+            }
+        throw new ReviewPreflightException("Installed absolute Git executable is unavailable; fixture is INCOMPLETE.");
+    }
+    private static string Hash(byte[] bytes) => $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
+    private static DateTimeOffset Time(int seconds) =>
+        DateTimeOffset.Parse("2026-10-09T00:00:00Z").AddSeconds(seconds);
+
+    private static NormalizedReview WithoutOriginalExecution(NormalizedReview source) => new(
+        source.Outcome,
+        source.Reason,
+        source.Identity,
+        source.PolicyIdentity,
+        source.PolicyContentIdentity,
+        source.PolicySourceRevision,
+        source.PolicyAuthorityKind,
+        source.AuthorFamily,
+        source.ReviewerFamily,
+        source.Findings,
+        source.ArtifactHash,
+        source.CompletedAt,
+        source.Fixture,
+        source.Advisory,
+        source.ProductionAccepted,
+        originalExecution: false);
+
+    private static ValidatedContract EvidencePolicy(string ceiling = "pr")
+    {
+        var node = JsonNode.Parse($$"""
+            {
+              "schemaVersion": "1.0.0",
+              "kind": "evidence-policy",
+              "identity": "{{Identity('0')}}",
+              "policyId": "review-tests",
+              "requiredGates": ["review"],
+              "authorizedCeiling": "{{ceiling}}",
+              "requireIndependentReview": true,
+              "allowedNotApplicable": [],
+              "createdAt": "2026-10-09T00:00:00Z"
+            }
+            """)!.AsObject();
+        node["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(node.ToJsonString()));
+        return ContractValidator.ParseAndValidate(Encoding.UTF8.GetBytes(node.ToJsonString()));
+    }
+
+    private static ValidatedContract PublicationReceipt(PatchIdentity identity, string action)
+    {
+        var node = JsonNode.Parse($$"""
+            {
+              "schemaVersion": "1.0.0",
+              "kind": "publication-receipt",
+              "identity": "{{Identity('0')}}",
+              "baseCommit": "{{identity.BaseCommit}}",
+              "headCommit": "{{identity.HeadCommit}}",
+              "treeId": "{{identity.HeadTree}}",
+              "action": "{{action}}",
+              "remoteRef": "refs/pull/8/head",
+              "resultId": "https://example.invalid/pr/8",
+              "createdAt": "2026-10-09T00:00:01Z"
+            }
+            """)!.AsObject();
+        node["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(node.ToJsonString()));
+        return ContractValidator.ParseAndValidate(Encoding.UTF8.GetBytes(node.ToJsonString()));
+    }
+}
+
+internal sealed class TinyGitRepository : IDisposable
+{
+    public TinyGitRepository()
+    {
+        Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "delivery-forge-review", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path);
+        Git("init", "--quiet");
+        Git("config", "user.name", "Delivery Forge Tests");
+        Git("config", "user.email", "tests@example.invalid");
+    }
+
+    public string Path { get; }
+    public string Commit(IReadOnlyDictionary<string, byte[]> files)
+    {
+        foreach (var (path, bytes) in files) Write(path, bytes);
+        return CommitAll();
+    }
+    public string CommitAll()
+    {
+        Git("add", "-A");
+        return CommitIndex();
+    }
+    public string CommitIndex()
+    {
+        Git("commit", "--quiet", "-m", "fixture");
+        return Git("rev-parse", "HEAD");
+    }
+    public void Write(string relative, byte[] bytes)
+    {
+        var full = System.IO.Path.Combine(Path, relative);
+        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(full)!);
+        File.WriteAllBytes(full, bytes);
+    }
+    public void Move(string from, string to) => Git("mv", from, to);
+    public void Delete(string relative) => File.Delete(System.IO.Path.Combine(Path, relative));
+    public void MakeExecutable(string relative) => Git("update-index", "--chmod=+x", relative);
+    public string Git(params string[] args) => Encoding.UTF8.GetString(GitBytes(args)).Trim();
+    public byte[] GitBytes(params string[] args)
+    {
+        using var process = Process.Start(new ProcessStartInfo("git", args)
+        {
+            WorkingDirectory = Path,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        })!;
+        using var output = new MemoryStream();
+        process.StandardOutput.BaseStream.CopyTo(output);
+        var error = process.StandardError.ReadToEnd();
+        process.WaitForExit();
+        if (process.ExitCode != 0) throw new InvalidOperationException(error);
+        return output.ToArray();
+    }
+    public void Dispose() => FixtureDirectoryCleanup.Delete(Path);
+}
