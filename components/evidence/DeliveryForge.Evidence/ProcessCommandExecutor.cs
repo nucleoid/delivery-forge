@@ -34,6 +34,16 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         _waitTimeout = waitTimeout ?? DefaultWaitTimeout;
     }
 
+    /// <summary>Captures a finite byte prefix per stream within one entire owner lifetime budget.
+    /// Observations are data only; injected execution delegates cannot establish this owner proof.</summary>
+    public Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+        CommandInvocation invocation,
+        TimeSpan entireBudget,
+        int maximumBytesPerStream,
+        CancellationToken cancellationToken) =>
+        Task.FromException<BoundedCommandCaptureResult>(new NotImplementedException(
+            "Creation-owned bounded byte capture is RED; ordinary unbounded execution is not a fallback."));
+
     public async Task<CommandResult> ExecuteAsync(
         CommandInvocation invocation,
         TimeSpan timeout,

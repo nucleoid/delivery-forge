@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using DeliveryForge.Contracts.State;
 using DeliveryForge.Evidence;
@@ -10,6 +11,53 @@ namespace DeliveryForge.Execution.Tests;
 
 public sealed class ReviewGitPreparationBoundaryTests
 {
+    [Fact(Timeout = 120_000)]
+    public async Task Bounded_capture_healthy_helper_preserves_exact_multibyte_UTF8_bytes()
+    {
+        using var bound = Bound();
+        var fixture = await Fixture.CreateAsync("echo", bound.Token);
+        var started = Stopwatch.GetTimestamp();
+        var result = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
+            new CommandInvocation(fixture.Helper!, [], fixture.Root), TimeSpan.FromSeconds(5), 1024, bound.Token);
+        await fixture.SaveCaptureAsync(result, bound.Token);
+        Assert.Equal(0, result.Command.ExitCode);
+        Assert.False(result.Command.TimedOut);
+        Assert.False(result.Command.Cancelled);
+        Assert.False(result.CaptureBoundExceeded);
+        Assert.True(result.Command.OwnedProcessQuiescent);
+        Assert.True(result.RootExitObserved);
+        Assert.True(result.StandardOutputDrainCompleted);
+        Assert.True(result.StandardErrorDrainCompleted);
+        Assert.Equal(Encoding.UTF8.GetBytes("stdout:λ🙂:" + fixture.Nonce + "\n"), result.StandardOutputBytes);
+        Assert.Equal(Encoding.UTF8.GetBytes("stderr:漢字:" + fixture.Nonce + "\n"), result.StandardErrorBytes);
+        Assert.Equal(fixture.Nonce, await File.ReadAllTextAsync(fixture.EnteredPath, bound.Token));
+        Assert.True(Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact(Timeout = 120_000)]
+    public async Task Bounded_capture_real_both_stream_pressure_exceeds_byte_quota_and_physically_settles()
+    {
+        using var bound = Bound();
+        var fixture = await Fixture.CreateAsync("pressure", bound.Token);
+        var started = Stopwatch.GetTimestamp();
+        var result = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
+            new CommandInvocation(fixture.Helper!, [], fixture.Root), TimeSpan.FromSeconds(5), 1024, bound.Token);
+        await fixture.SaveCaptureAsync(result, bound.Token);
+        Assert.True(result.CaptureBoundExceeded);
+        Assert.False(result.Command.TimedOut);
+        Assert.False(result.Command.Cancelled);
+        Assert.True(result.Command.OwnedProcessQuiescent);
+        Assert.True(result.RootExitObserved);
+        Assert.True(result.StandardOutputDrainCompleted);
+        Assert.True(result.StandardErrorDrainCompleted);
+        Assert.InRange(result.StandardOutputBytes.Length, 1, 1024);
+        Assert.InRange(result.StandardErrorBytes.Length, 1, 1024);
+        Assert.StartsWith("negative-fixture-stdout\n", Encoding.UTF8.GetString(result.StandardOutputBytes), StringComparison.Ordinal);
+        Assert.StartsWith("negative-fixture-stderr\n", Encoding.UTF8.GetString(result.StandardErrorBytes), StringComparison.Ordinal);
+        Assert.Equal(fixture.Nonce, await File.ReadAllTextAsync(fixture.EnteredPath, bound.Token));
+        Assert.True(Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(5));
+    }
+
     [Fact(Timeout = 120_000)]
     public async Task Real_healthy_Git_preparation_returns_opaque_context_with_actual_version_head_and_index()
     {
@@ -142,6 +190,14 @@ public sealed class ReviewGitPreparationBoundaryTests
             { token.ThrowIfCancellationRequested(); if (Stopwatch.GetElapsedTime(started) >= TimeSpan.FromSeconds(5)) throw new TimeoutException("Actual negative helper never entered."); await Task.Delay(10, token); }
         }
         public Task SaveAsync(ReviewGitPreparationResult result, CancellationToken token) => WriteNew(Path.Combine(GitDirectory, "actual-preparation-result.json"), JsonSerializer.SerializeToUtf8Bytes(new { fixture = true, result.Observation, contextIssued = result.Context is not null, retained = true }), token);
+        public Task SaveCaptureAsync(BoundedCommandCaptureResult result, CancellationToken token) => WriteNew(
+            Path.Combine(GitDirectory, "actual-bounded-capture-result.json"), JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                fixture = true, nonce = Nonce, result.Command, result.CaptureBoundExceeded,
+                result.RootExitObserved, result.StandardOutputDrainCompleted, result.StandardErrorDrainCompleted,
+                stdoutBytes = result.StandardOutputBytes, stderrBytes = result.StandardErrorBytes,
+                stdoutSha256 = Hash(result.StandardOutputBytes), stderrSha256 = Hash(result.StandardErrorBytes), retained = true
+            }), token);
         public static string Hash(byte[] bytes) => "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes));
         private static async Task WriteNew(string path, byte[] bytes, CancellationToken token)
         { await using var writer = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None); await writer.WriteAsync(bytes, token); }
