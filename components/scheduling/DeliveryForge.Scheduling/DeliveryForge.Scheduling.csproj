@@ -1,0 +1,7 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <ItemGroup>
+    <ProjectReference Include="../../planning/DeliveryForge.Planning/DeliveryForge.Planning.csproj" />
+    <ProjectReference Include="../../execution/DeliveryForge.Execution/DeliveryForge.Execution.csproj" />
+    <ProjectReference Include="../../coordination/DeliveryForge.Coordination/DeliveryForge.Coordination.csproj" />
+  </ItemGroup>
+</Project>
