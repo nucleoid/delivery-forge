@@ -89,6 +89,6 @@ public sealed partial class LocalSingleTests
             Assert.True(budget.CanAllocate(demand));
         }
         catch (Exception exception) { priorFailure = exception; throw; }
-        finally { Assert.True(await scheduler.StopAsync(Cancellation), $"Explicit cleanup failed; original failure before cleanup: {priorFailure}"); }
+        finally { Assert.True(await scheduler.StopAsync(Cancellation), $"Explicit cleanup failed: {scheduler.CleanupLimitation}; original failure before cleanup: {priorFailure}"); }
     }
 }

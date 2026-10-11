@@ -42,6 +42,8 @@ public sealed class LocalSingleScheduler
     private bool _relinquished;
     private int _paused;
     private int _stopped;
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string CleanupLimitation { get; private set; } = "";
 
     private LocalSingleScheduler(FrozenPlan plan, FrozenWorkerPlan worker, RunDemand demand, ResourceBudget budget, RunStore store,
         ExecutionCoordinator execution, WorktreeManager worktrees, GitRepositoryContextReader reader, IReadOnlyList<string> prerequisites, TimeSpan controlTimeout)
@@ -212,8 +214,9 @@ public sealed class LocalSingleScheduler
                 _ticket = new LocalDispatchReservation(_worker.RunId);
                 return _ticket;
             }
-            catch
+            catch (Exception exception)
             {
+                CleanupLimitation = "Reservation failed: " + exception.GetType().Name + ": " + exception.Message;
                 Interlocked.Exchange(ref _stopped, 1);
                 if (_nativeQuiescenceKnown) Release(); else _uncertain = true;
                 throw;
@@ -313,7 +316,11 @@ public sealed class LocalSingleScheduler
         try
         {
             if (!_laneHeld) return true;
-            if (_uncertain || !_nativeQuiescenceKnown) return false;
+            if (_uncertain || !_nativeQuiescenceKnown)
+            {
+                CleanupLimitation = _uncertain ? "Parent uncertainty retains local capacity." : "Native operation quiescence is not yet proved.";
+                return false;
+            }
             if (_prepared)
             {
                 var result = await _execution.StopAsync(_worker.RunId, _controlTimeout, cancellationToken).ConfigureAwait(false);
@@ -324,7 +331,7 @@ public sealed class LocalSingleScheduler
             Release();
             return true;
         }
-        catch { _uncertain = true; return false; }
+        catch (Exception exception) { CleanupLimitation = exception.GetType().Name + ": " + exception.Message; _uncertain = true; return false; }
         finally { _serial.Release(); }
     }
 
