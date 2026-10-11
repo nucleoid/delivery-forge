@@ -82,7 +82,7 @@ public sealed class Crap4CSharpAdapter
             }
             if (policyDecision == "unknown")
                 return NormalizedEvidence.Incomplete("Crap4CSharp returned valid inconclusive evidence.", true);
-            if (unknownCount > 0 || methodCount == 0 && policyDecision == "pass")
+            if (unknownCount > 0 && policyDecision != "fail" || methodCount == 0 && policyDecision == "pass")
                 return NormalizedEvidence.Incomplete("Crap4CSharp coverage is missing, empty, or contains unmapped callables.", capability.Fixture);
 
             return policyDecision switch
@@ -92,7 +92,8 @@ public sealed class Crap4CSharpAdapter
                     true, false, [.. capability.Limitations ?? [], "Installed one-command certification is absent."]),
                 "fail" => new NormalizedEvidence(
                     GateOutcome.Fail, "Crap4CSharp completed with policy findings.",
-                    true, false, [.. capability.Limitations ?? [], "Installed one-command certification is absent."]),
+                    true, false, [.. capability.Limitations ?? [], "Installed one-command certification is absent.",
+                        .. unknownCount > 0 ? new[] { "Some callable coverage remains unknown; known policy findings still fail." } : Array.Empty<string>()]),
                 "unknown" => NormalizedEvidence.Incomplete("Crap4CSharp returned valid inconclusive evidence.", true),
                 "notApplicable" when TryString(decision, "reason", out var reason) && !string.IsNullOrWhiteSpace(reason) =>
                     new NormalizedEvidence(
