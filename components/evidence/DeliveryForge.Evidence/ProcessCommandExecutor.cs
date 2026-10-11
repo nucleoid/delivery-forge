@@ -158,13 +158,12 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
 
     private static CommandStreamObservation ObserveStream(Task<string> task)
     {
-        var complete = task.IsCompletedSuccessfully;
-        var faulted = task.IsFaulted;
-        var cancelled = task.IsCanceled;
-        if (faulted) _ = task.Exception;
-        if (!task.IsCompleted)
-            _ = task.ContinueWith(static late => { _ = late.Exception; }, CancellationToken.None,
-                TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        _ = task.ContinueWith(static late => { _ = late.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        var status = task.Status;
+        var complete = status == TaskStatus.RanToCompletion;
+        var faulted = status == TaskStatus.Faulted;
+        var cancelled = status == TaskStatus.Canceled;
         return new(complete, faulted, cancelled, complete ? task.Result : null);
     }
 
