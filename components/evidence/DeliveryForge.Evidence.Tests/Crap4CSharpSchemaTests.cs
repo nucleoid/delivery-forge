@@ -44,6 +44,41 @@ public sealed class Crap4CSharpSchemaTests
         Assert.Equal(GateOutcome.Error, Normalize(root).Outcome);
     }
 
+    [Fact]
+    public void Known_summary_cannot_hide_null_metric_coverage()
+    {
+        var root = Positive();
+        root["evaluation"]!["metrics"]![0]!["coverage"] = null;
+        Assert.Equal(GateOutcome.Error, Normalize(root).Outcome);
+    }
+
+    [Fact]
+    public void Unbound_metric_context_stays_incomplete()
+    {
+        var root = Positive();
+        root["evaluation"]!["metrics"]![0]!["contextId"] = "absent-context";
+        Assert.Equal(GateOutcome.Incomplete, Normalize(root).Outcome);
+    }
+
+    [Fact]
+    public void Applicable_unscored_metric_stays_incomplete()
+    {
+        var root = Positive();
+        root["evaluation"]!["metrics"]![0]!["crap"] = null;
+        Assert.Equal(GateOutcome.Incomplete, Normalize(root).Outcome);
+    }
+
+    [Fact]
+    public void Count_gap_requires_reported_non_applicability()
+    {
+        var root = JsonNode.Parse(Crap4CSharpObservedContractTests.Report(true, "pass", "completed", 0, 2, 1, 0))!;
+        root["evaluation"]!["callables"] = new JsonArray();
+        Assert.Equal(GateOutcome.Incomplete, Normalize(root).Outcome);
+    }
+
+    private static JsonNode Positive() =>
+        JsonNode.Parse(Crap4CSharpObservedContractTests.Report(true, "pass", "completed", 0, 1, 1, 0))!;
+
     private static NormalizedEvidence Normalize(JsonNode root) =>
         new Crap4CSharpAdapter().Normalize(JsonSerializer.SerializeToUtf8Bytes(root),
             new ToolCapability("crap4csharp", "0.1.0+1129c9d3280168b294f9fed1542f81ca716c6d53", "1.0", true, true));
