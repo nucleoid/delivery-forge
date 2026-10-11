@@ -343,6 +343,47 @@ public sealed class GitHubCliAdapterTests
         Assert.Equal(0, runner.Mutations);
     }
 
+    [Theory]
+    [InlineData("workflow_dispatch")]
+    [InlineData("missing-run")]
+    [InlineData("foreign-repository")]
+    [InlineData("wrong-head")]
+    [InlineData("wrong-suite")]
+    [InlineData("missing-job")]
+    [InlineData("wrong-check-association")]
+    [InlineData("missing-suite")]
+    [InlineData("incomplete-runs")]
+    [InlineData("incomplete-jobs")]
+    public async Task Actions_ruleset_check_requires_exact_eligible_run_and_job_provenance(string shape)
+    {
+        var target = Target with { Repository = "fixture/forge-disposable-actions-" + Guid.NewGuid().ToString("N") };
+        var runner = new CliFixtureRunner { RepositoryTarget = target, RulesShape = "complete", ActionsShape = shape };
+        var parent = Parent(target);
+        var result = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
+            .MergeNormalAsync(Mutation(target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Rejected, result.Outcome);
+        Assert.Equal(0, runner.Mutations);
+    }
+
+    [Theory]
+    [InlineData("push")]
+    [InlineData("pull_request")]
+    [InlineData("pull_request_review")]
+    [InlineData("pull_request_target")]
+    [InlineData("deployment")]
+    [InlineData("deployment_status")]
+    [InlineData("external-app")]
+    public async Task Exact_eligible_workflow_or_external_app_check_is_a_positive_control(string shape)
+    {
+        var target = Target with { Repository = "fixture/forge-disposable-actions-control-" + Guid.NewGuid().ToString("N") };
+        var runner = new CliFixtureRunner { RepositoryTarget = target, RulesShape = "complete", ActionsShape = shape };
+        var parent = Parent(target);
+        var result = await new GitHubCliAdapter(Configuration(), runner, parent, parent.IssueGrant())
+            .MergeNormalAsync(Mutation(target: target), TestContext.Current.CancellationToken);
+        Assert.Equal(GitHostMutationOutcome.Confirmed, result.Outcome);
+        Assert.Equal(1, runner.Mutations);
+    }
+
     private sealed class CliFixtureRunner : IGitHubCliExecutor
     {
         public List<IReadOnlyList<string>> Calls { get; } = [];
@@ -358,6 +399,7 @@ public sealed class GitHubCliAdapterTests
         public string? RulesShape { get; set; }
         public bool EmptyStatuses { get; set; }
         public string? SameNameStatusState { get; set; }
+        public string? ActionsShape { get; set; }
         public TaskCompletionSource ReleaseMutation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public Task<GitHubCliResult>? MutationTask { get; private set; }
         private bool merged;
@@ -421,6 +463,11 @@ public sealed class GitHubCliAdapterTests
             if (SameNameStatusState is not null && endpoint.Contains("/status", StringComparison.Ordinal))
                 body = new JsonObject { ["state"] = SameNameStatusState, ["total_count"] = 1,
                     ["statuses"] = new JsonArray(new JsonObject { ["context"] = "ci", ["state"] = SameNameStatusState }) }.ToJsonString();
+            if (ActionsShape is not null)
+            {
+                if (endpoint.Contains("/actions/runs/", StringComparison.Ordinal) && endpoint.Contains("/jobs", StringComparison.Ordinal)) body = ActionsJobs();
+                else if (endpoint.Contains("/actions/runs", StringComparison.Ordinal)) body = ActionsRuns();
+            }
             return new(0, body, "");
         }
         private string RulePage(string endpoint)
@@ -446,7 +493,7 @@ public sealed class GitHubCliAdapterTests
             }
             else
             {
-                rules.Add(Required("security", 123));
+                rules.Add(Required("security", ActionsShape is not null and not "external-app" ? 15368 : 123));
                 if (RulesShape is "multiple-layers-missing" or "multiple-layers-pass") rules.Add(Required("audit", 456));
             }
             return rules.ToJsonString();
@@ -457,10 +504,48 @@ public sealed class GitHubCliAdapterTests
             { ["id"] = app, ["name"] = name, ["head_sha"] = PublicationFixture.Commit('b'), ["status"] = "completed",
                 ["conclusion"] = conclusion, ["app"] = new JsonObject { ["id"] = app } };
             var runs = new JsonArray();
+            if (ActionsShape is not null)
+            {
+                var action = Run("security", ActionsShape == "external-app" ? 123 : 15368, "success");
+                action["id"] = 500;
+                action["url"] = "https://api.github.com/repos/" + RepositoryTarget.Repository + "/check-runs/500";
+                action["app"]!["slug"] = ActionsShape == "external-app" ? "external-provider" : "github-actions";
+                if (ActionsShape != "missing-suite") action["check_suite"] = new JsonObject { ["id"] = 900 };
+                runs.Add(action);
+                return new JsonObject { ["total_count"] = 1, ["check_runs"] = runs }.ToJsonString();
+            }
             if (RulesShape != "missing") runs.Add(Run("security", RulesShape == "wrong-integration" ? 999 : 123,
                 RulesShape == "failed" ? "failure" : "success"));
             if (RulesShape == "multiple-layers-pass") runs.Add(Run("audit", 456, "success"));
             return new JsonObject { ["total_count"] = runs.Count, ["check_runs"] = runs }.ToJsonString();
+        }
+        private string ActionsRuns()
+        {
+            var runs = new JsonArray();
+            if (ActionsShape != "missing-run") runs.Add(new JsonObject
+            {
+                ["id"] = 700, ["check_suite_id"] = ActionsShape == "wrong-suite" ? 901 : 900,
+                ["head_sha"] = PublicationFixture.Commit(ActionsShape == "wrong-head" ? '9' : 'b'),
+                ["event"] = ActionsShape is "workflow_dispatch" or "push" or "pull_request" or "pull_request_review" or
+                    "pull_request_target" or "deployment" or "deployment_status" ? ActionsShape : "pull_request",
+                ["status"] = "completed", ["conclusion"] = "success", ["run_attempt"] = 1,
+                ["repository"] = new JsonObject { ["full_name"] = ActionsShape == "foreign-repository" ? "foreign/other" : RepositoryTarget.Repository },
+                ["url"] = "https://api.github.com/repos/" + RepositoryTarget.Repository + "/actions/runs/700"
+            });
+            return new JsonObject { ["total_count"] = ActionsShape == "incomplete-runs" ? runs.Count + 1 : runs.Count, ["workflow_runs"] = runs }.ToJsonString();
+        }
+        private string ActionsJobs()
+        {
+            var jobs = new JsonArray();
+            if (ActionsShape != "missing-job") jobs.Add(new JsonObject
+            {
+                ["id"] = 500, ["run_id"] = 700, ["head_sha"] = PublicationFixture.Commit('b'), ["name"] = "security",
+                ["status"] = "completed", ["conclusion"] = "success",
+                ["check_run_url"] = "https://api.github.com/repos/" + RepositoryTarget.Repository + "/check-runs/" +
+                    (ActionsShape == "wrong-check-association" ? "501" : "500"),
+                ["run_url"] = "https://api.github.com/repos/" + RepositoryTarget.Repository + "/actions/runs/700"
+            });
+            return new JsonObject { ["total_count"] = ActionsShape == "incomplete-jobs" ? jobs.Count + 1 : jobs.Count, ["jobs"] = jobs }.ToJsonString();
         }
         private string AppProtection()
         {
