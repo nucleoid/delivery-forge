@@ -11,6 +11,7 @@ public sealed class OwnedWindowsLifecycleTests
     public async Task Exited_root_with_real_descendant_holding_pipes_times_out_and_settles_whole_owned_tree()
     {
         using var bound = Bound();
+        if (!OperatingSystem.IsWindows()) { await AssertUnsupportedWindowsProof("root-exit", bound.Token); return; }
         var run = await TreeRun.CreateAsync("root-exit", bound.Token);
         await ExecuteAndObserve(run, cancelAfterEntry: false, bound.Token);
     }
@@ -19,6 +20,7 @@ public sealed class OwnedWindowsLifecycleTests
     public async Task Timeout_with_real_root_and_descendant_settles_whole_owned_tree_and_drains()
     {
         using var bound = Bound();
+        if (!OperatingSystem.IsWindows()) { await AssertUnsupportedWindowsProof("root-hold", bound.Token); return; }
         var run = await TreeRun.CreateAsync("root-hold", bound.Token);
         await ExecuteAndObserve(run, cancelAfterEntry: false, bound.Token);
     }
@@ -27,8 +29,16 @@ public sealed class OwnedWindowsLifecycleTests
     public async Task Caller_cancellation_after_real_child_entry_settles_whole_owned_tree_without_timeout()
     {
         using var bound = Bound();
+        if (!OperatingSystem.IsWindows()) { await AssertUnsupportedWindowsProof("root-hold", bound.Token); return; }
         var run = await TreeRun.CreateAsync("root-hold", bound.Token);
         await ExecuteAndObserve(run, cancelAfterEntry: true, bound.Token);
+    }
+
+    private static async Task AssertUnsupportedWindowsProof(string mode, CancellationToken token)
+    {
+        var limitation = await Assert.ThrowsAsync<PlatformNotSupportedException>(() => TreeRun.CreateAsync(mode, token));
+        Assert.Contains("INCOMPLETE Windows creation-owned job lifecycle is not claimed", limitation.Message, StringComparison.Ordinal);
+        // This path verifies typed fixture refusal only; it never counts as a Windows containment execution.
     }
 
     private static async Task ExecuteAndObserve(TreeRun run, bool cancelAfterEntry, CancellationToken outer)

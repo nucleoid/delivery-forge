@@ -38,5 +38,16 @@ jobs:
         with:
           dotnet-version: 10.0.401
       - run: dotnet restore DeliveryForge.slnx --locked-mode
+      - name: Build actual owned lifecycle helper and bind fixture inputs
+        shell: pwsh
+        run: |
+          $helperOutput = Join-Path $env:RUNNER_TEMP ('delivery-forge-owned-tree-helper-' + [guid]::NewGuid().ToString('N'))
+          dotnet build components/evidence/DeliveryForge.Evidence.Tests/Fixtures/OwnedProcessTreeHelper/OwnedProcessTreeHelper.csproj --configuration Release --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false -o $helperOutput
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $hostCommand = Get-Command dotnet -CommandType Application | Select-Object -First 1
+          $helperDll = Join-Path $helperOutput 'OwnedProcessTreeHelper.dll'
+          if (-not (Test-Path -LiteralPath $hostCommand.Source) -or -not (Test-Path -LiteralPath $helperDll)) { throw 'Actual SDK/helper binding is missing' }
+          "DELIVERY_FORGE_DOTNET_HOST=$($hostCommand.Source)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DELIVERY_FORGE_LIFECYCLE_HELPER_DLL=$helperDll" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - run: dotnet test DeliveryForge.slnx --no-restore --configuration Release
       - run: dotnet format DeliveryForge.slnx --no-restore --verify-no-changes

@@ -9,6 +9,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
     private readonly Func<Process, bool> _hasExited;
     private readonly Func<Task, TimeSpan, Task> _waitForDrain;
     private readonly TimeSpan _waitTimeout;
+    private readonly bool _creationOwnedWindows;
 
     public ProcessCommandExecutor()
         : this(
@@ -17,6 +18,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             waitForDrain: null,
             DefaultWaitTimeout)
     {
+        _creationOwnedWindows = true;
     }
 
     internal ProcessCommandExecutor(
@@ -37,6 +39,8 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
+        if (_creationOwnedWindows && OperatingSystem.IsWindows())
+            return await WindowsCommandLifetime.ExecuteAsync(invocation, timeout, cancellationToken).ConfigureAwait(false);
         var startInfo = new ProcessStartInfo
         {
             FileName = invocation.FileName,
