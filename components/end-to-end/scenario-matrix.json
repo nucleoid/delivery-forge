@@ -6,7 +6,7 @@
   "fixture": true,
   "productionCertified": false,
   "firstFullRealRunCertified": false,
-  "stage": "historical GREEN43/43 at2223 used8adbase; actual accepted10 merged and pin8c; native ownership/provision/control RED8 pending;51 source tests and52 scenario specs are different counts; fullremaining audit/crash12/golden notcomplete",
+  "stage": "historical GREEN43/43 at2223 used8adbase; actual accepted10 merged and pin8c; nativeRED6FAIL2PASSconfirmed; combinedGREEN51candidatepending;51 source tests and52 scenario specs are different counts; fullremaining audit/crash12/golden notcomplete",
   "seed": 11017,
   "budget": { "maximumScenarioSeconds": 120, "maximumCommandSeconds": 15, "maximumOwnedChildSeconds": 30, "cpuCores": 2, "memoryMiB": 4096, "tokens": 1000, "cost": 0 },
   "runtimeArtifacts": "components/end-to-end/artifacts/test-runs/<unique-owned-runId>",

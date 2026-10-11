@@ -120,8 +120,9 @@ public sealed class NativeExecutionScenarioTests
             (await runtime.GitAsync(TestContext.Current.CancellationToken, "worktree", "list", "--porcelain")).Replace('\\', '/'),
             OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
         using var writer = runtime.Worktrees.AcquireWriter(runtime.Worktree, runtime.RuntimeId, Guid.NewGuid().ToString("N"));
+        runtime.RecordWriterLease(writer);
         Assert.Throws<DeliveryForge.Execution.Git.WorktreeBoundaryException>(() => runtime.Worktrees.AcquireWriter(runtime.Worktree, "foreign-fixture", "foreign-token"));
-        artifacts.MarkAssertionsPassed(); // Runtime disposal archives/retains; filesystem cleanup is still a RED stub.
+        artifacts.MarkAssertionsPassed(); // This direct control retains its live runtime; cleanup orchestration is validated separately.
     }
 
     [Fact(Timeout = 120_000)]

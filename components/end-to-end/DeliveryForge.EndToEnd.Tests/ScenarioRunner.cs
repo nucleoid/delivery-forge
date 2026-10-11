@@ -110,7 +110,9 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
             "execution.unknown-host" or "cleanup.changed-owner-marker" or "cleanup.foreign-reparse-entry")
         {
             if (_runtime is null) throw new InvalidOperationException("Native fixture scenarios require their live owned runtime reference.");
-            throw new NotImplementedException("Native execution and owned runtime cleanup require compiled public-boundary RED.");
+            await NativeExecutionOrchestrator.ObserveAsync(run, _runtime, name, receiptIds, invariants, deadline.Token);
+            outcome = GateOutcome.Incomplete;
+            limitations = ["Public native-task/control and ownership contract fixture only; no actual model worker, quality PASS or full-real certificate."];
         }
         else
         {

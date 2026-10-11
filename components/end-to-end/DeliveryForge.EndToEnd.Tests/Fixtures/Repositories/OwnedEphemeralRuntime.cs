@@ -3,6 +3,7 @@ using System.Text.Json;
 using DeliveryForge.Evidence;
 using DeliveryForge.Execution;
 using DeliveryForge.Execution.Git;
+using DeliveryForge.Execution.Host;
 using DeliveryForge.Planning;
 
 namespace DeliveryForge.EndToEnd.Tests;
@@ -14,6 +15,14 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
     private readonly string _git;
     private readonly byte[] _markerBytes;
     private int _commandSequence;
+    private bool _removed;
+    private bool _nativeUnknown;
+    private string? _writerRunId;
+    private string? _writerToken;
+    private ExecutionCoordinator? _execution;
+    private NativeFixtureControl? _control;
+    private AgentRunBinding? _binding;
+    private HashSet<string> _ownedEntries = new(StringComparer.Ordinal);
     private OwnedEphemeralRuntime(OwnedScenarioRun artifacts, string git)
     {
         _artifacts = artifacts; _git = git;
@@ -68,8 +77,9 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
         {
             fixture = true, productionCertified = false, runtime.Root, runtime.RuntimeId, runtime.Repository, runtime.Worktree,
             expectedMarkerSha256 = runtime.ExpectedMarkerSha256, integratedBaseCommit = artifacts.IntegratedSource.Commit,
-            limitation = "Owned platform Temp live runtime only; durable artifacts stay in source-owned ignored leaf. Cleanup remains RED stub."
+            limitation = "Owned platform Temp live runtime only; durable artifacts stay in source-owned ignored leaf. Cleanup needs fresh ownership/quiescence proof."
         }, cancellationToken);
+        runtime.CaptureOwnedManifest();
         return runtime;
     }
 
@@ -92,7 +102,10 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
             TimeSpan.FromSeconds(15), cancellationToken);
         await _artifacts.WriteNewJsonAsync($"runtime-command-{++_commandSequence:D4}.json", new { fixture = true, Root, arguments, result }, CancellationToken.None);
         if (result.ExitCode != 0 || result.TimedOut || result.Cancelled || !result.OwnedProcessQuiescent)
+        {
+            _nativeUnknown |= !result.OwnedProcessQuiescent;
             throw new InvalidOperationException("Owned runtime Git failed or remained uncertain: " + result.StandardError);
+        }
         return result.StandardOutput.Trim();
     }
 
@@ -103,15 +116,121 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
         return Processes.StartOwned(new(executable, arguments), RuntimeId);
     }
 
-    public Task<bool> TryCleanupAsync(CancellationToken cancellationToken = default) =>
-        throw new NotImplementedException("Owned filesystem cleanup requires compiled ownership/provision RED; retain this live runtime.");
+    public void RecordWriterLease(WriterLease writer)
+    {
+        _writerRunId = writer.RunId; _writerToken = writer.WriterToken;
+        CaptureOwnedManifest();
+    }
+    internal void BindSession(ExecutionCoordinator execution, NativeFixtureControl control, AgentRunBinding binding, AgentRequest request)
+    {
+        if (_binding is not null || binding.RunId != request.RunId || binding.RequestIdentity != request.RequestIdentity ||
+            request.Worktree != Worktree || request.RequestIdentity != WorkerEnvelope.ComputeRequestIdentity(request) ||
+            execution.StoreRootPath != Store.RootPath) throw new InvalidOperationException("Native fixture session binding differs.");
+        _execution = execution; _control = control; _binding = binding;
+        _writerRunId = request.RunId; _writerToken = request.WriterToken;
+        CaptureOwnedManifest();
+    }
+
+    public async Task<bool> TryCleanupAsync(CancellationToken cancellationToken = default)
+    {
+        if (_removed) return true;
+        try
+        {
+            RequirePlainOutsideRepositories(Root);
+            if (Path.GetRelativePath(Prefix, Path.GetFullPath(Root)) != RuntimeId || _nativeUnknown ||
+                !File.Exists(MarkerPath) || !File.ReadAllBytes(MarkerPath).SequenceEqual(_markerBytes)) return false;
+            var allowed = new HashSet<string>(StringComparer.Ordinal) { "owner.json", "repository", "worktree", "results", "receipts" };
+            if (Directory.EnumerateFileSystemEntries(Root).Any(path => !allowed.Contains(Path.GetFileName(path)))) return false;
+            var pending = new Stack<string>(); pending.Push(Root);
+            while (pending.TryPop(out var directory))
+                foreach (var path in Directory.EnumerateFileSystemEntries(directory))
+                {
+                    if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0) return false;
+                    if (Directory.Exists(path)) pending.Push(path);
+                }
+            var allowedEntries = new HashSet<string>(_ownedEntries, StringComparer.Ordinal);
+            foreach (var runId in await Store.DiscoverRunIdsAsync(cancellationToken))
+            {
+                var history = await Store.RecoverAsync(runId, cancellationToken);
+                foreach (var item in history.Records)
+                {
+                    AddWithParents(allowedEntries, item.Path);
+                    AddWithParents(allowedEntries, Path.Combine(Path.GetDirectoryName(item.Path)!, "current.json"));
+                }
+            }
+            if (Directory.EnumerateFileSystemEntries(Root, "*", SearchOption.AllDirectories)
+                .Any(path => !allowedEntries.Contains(Path.GetRelativePath(Root, path)))) return false;
+            var identities = Processes.GetOwnedIdentities(RuntimeId).Concat(_binding is null ? [] : Processes.GetOwnedIdentities(_binding.RunId)).Distinct().ToArray();
+            if (identities.Any(identity => Processes.Observe(identity).Outcome != ProcessControlOutcome.AlreadyExited)) return false;
+            if (_binding is not null)
+            {
+                if (_execution is null || _control is null || _execution.HasPendingControlOperations(_binding.RunId)) return false;
+                var observed = await _control.ControlAsync(_binding, AgentControlAction.Stop, TimeSpan.FromSeconds(2), cancellationToken);
+                if (observed.Binding != _binding || !observed.CapabilitySupported || observed.Activity != AgentActivityState.Quiescent ||
+                    observed.Action != AgentControlAction.Stop || string.IsNullOrWhiteSpace(observed.EvidenceReference)) return false;
+            }
+            else if ((await Store.DiscoverRunIdsAsync(cancellationToken)).Count != 0) return false;
+            var registered = (await GitAsync(cancellationToken, "worktree", "list", "--porcelain", "-z")).Split('\0')
+                .Where(item => item.StartsWith("worktree ", StringComparison.Ordinal)).Select(item => Path.GetFullPath(item[9..])).ToArray();
+            var comparison = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+            if (registered.Length is < 1 or > 2 || registered.Any(path => !comparison.Equals(path, Repository) && !comparison.Equals(path, Worktree))) return false;
+            var repository = await Reader.ReadAsync(Repository, "refs/heads/main", cancellationToken);
+            if (repository.Dirty || repository.Shallow) return false;
+            if (Directory.Exists(Worktree))
+            {
+                if (!registered.Contains(Worktree, comparison) || _writerRunId is null || _writerToken is null) return false;
+                var observation = await Worktrees.ObserveAsync(Worktree, cancellationToken);
+                if (!observation.IsClean) return false;
+                using var exclusive = Worktrees.RecoverWriter(Worktree, _writerRunId, _writerToken);
+            }
+            else if (registered.Contains(Worktree, comparison)) return false;
+            await ArchiveAsync(cancellationToken);
+            if (!File.ReadAllBytes(MarkerPath).SequenceEqual(_markerBytes) || identities.Any(identity => Processes.Observe(identity).Outcome != ProcessControlOutcome.AlreadyExited)) return false;
+            if (Directory.Exists(Worktree)) await GitAsync(cancellationToken, "worktree", "remove", "--force", Worktree);
+            var finalRegistered = await GitAsync(cancellationToken, "worktree", "list", "--porcelain", "-z");
+            if (finalRegistered.Replace('\\', '/').Contains(Worktree.Replace('\\', '/'), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) return false;
+            RequirePlainOutsideRepositories(Root);
+            if (!File.ReadAllBytes(MarkerPath).SequenceEqual(_markerBytes)) return false;
+            if (Directory.EnumerateFileSystemEntries(Root, "*", SearchOption.AllDirectories)
+                .Any(path => (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0 ||
+                    !allowedEntries.Contains(Path.GetRelativePath(Root, path)))) return false;
+            foreach (var file in Directory.EnumerateFiles(Root, "*", SearchOption.AllDirectories))
+                File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly);
+            Directory.Delete(Root, recursive: true);
+            _removed = true;
+            await _artifacts.WriteNewJsonAsync("runtime-cleanup.json", new { fixture = true, Root, RuntimeId, actualOwnedQuiescence = true, gitRegistrationRemoved = true, archivedBeforeDeletion = true }, cancellationToken);
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or WorktreeBoundaryException or InvalidOperationException)
+        {
+            _artifacts.RetainArtifacts("Runtime cleanup remains uncertain: " + exception.Message);
+            return false;
+        }
+    }
+
+    private void CaptureOwnedManifest()
+    {
+        _ownedEntries = Directory.EnumerateFileSystemEntries(Root, "*", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(Root, path)).ToHashSet(StringComparer.Ordinal);
+    }
+    private void AddWithParents(HashSet<string> allowed, string path)
+    {
+        for (var current = Path.GetFullPath(path); current != Root; current = Path.GetDirectoryName(current)!)
+        {
+            var relative = Path.GetRelativePath(Root, current);
+            if (Path.IsPathFullyQualified(relative) || relative.StartsWith("..", StringComparison.Ordinal))
+                throw new IOException("Owned store record escaped its runtime root.");
+            allowed.Add(relative);
+        }
+    }
 
     public async ValueTask DisposeAsync()
     {
-        _artifacts.RetainArtifacts("Native runtime retained while new cleanup behavior remains unvalidated: " + Root);
+        if (_removed) { await Processes.DisposeAsync(); return; }
+        _artifacts.RetainArtifacts("Native runtime retained after nonpass or unresolved cleanup: " + Root);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
         var observations = new List<object>();
-        foreach (var identity in Processes.GetOwnedIdentities(RuntimeId))
+        foreach (var identity in Processes.GetOwnedIdentities(RuntimeId).Concat(_binding is null ? [] : Processes.GetOwnedIdentities(_binding.RunId)).Distinct())
         {
             var before = Processes.Observe(identity);
             ProcessControlResult? controlled = null;
@@ -124,8 +243,14 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
         {
             fixture = true, Root, RuntimeId, observations, expectedMarkerSha256 = ExpectedMarkerSha256,
             actualMarkerSha256 = File.Exists(MarkerPath) ? Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(MarkerPath, deadline.Token))) : null,
-            retained = true, limitation = "No recursive Temp removal or Git worktree cleanup before compiled ownership RED."
+            retained = true, limitation = "Unresolved or nonpassing live runtime retained; archived data does not grant cleanup authority."
         }, CancellationToken.None);
+        await ArchiveAsync(deadline.Token);
+    }
+
+    private async Task ArchiveAsync(CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
         var archive = Path.Combine(_artifacts.Root, "runtime-archive-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(archive);
         var stack = new Stack<string>(); stack.Push(Root);
@@ -141,6 +266,8 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
                 Directory.CreateDirectory(Path.GetDirectoryName(target)!);
                 File.Copy(entry, target, overwrite: false);
             }
+        await _artifacts.WriteNewJsonAsync("runtime-archive-index-" + Guid.NewGuid().ToString("N") + ".json",
+            new { fixture = true, Root, archive, count, bytes }, cancellationToken);
     }
 
     private static void RequirePlainOutsideRepositories(string path)
