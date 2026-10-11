@@ -75,6 +75,46 @@ public sealed class CertifiedMutationReportTests
         Assert.Throws<MutationReportFormatException>(() => Mutate4CSharpReportV2.ReadData(bytes));
     }
 
+    [Theory]
+    [InlineData("expectedMembers")]
+    [InlineData("accountedMembers")]
+    public async Task Incomplete_report_accepts_distinct_decoded_members_with_escaped_JSON_spelling(string property)
+    {
+        var node = JsonNode.Parse(await MutationReportInputs.ReadAsync("strong"))!.AsObject();
+        var condition = new JsonObject
+        {
+            ["code"] = "OVERALL_DEADLINE_EXCEEDED",
+            ["message"] = "The overall deadline was exceeded."
+        };
+        node["incompleteConditions"] = new JsonArray(condition);
+        node["reasons"] = new JsonArray(condition.DeepClone());
+        node["outcome"] = "INCOMPLETE";
+        node["exitCode"] = 4;
+        var accounting = node["suites"]![0]!["accounting"]!;
+        var parent = property == "expectedMembers" ? accounting["configuration"]! : accounting;
+        var firstMember = parent[property]![0]!.GetValue<string>();
+        const string secondMember = "Distinct.Tests.dll";
+        Assert.NotEqual(firstMember, secondMember);
+        parent[property] = new JsonArray(firstMember, secondMember);
+        var first = JsonSerializer.Serialize(firstMember);
+        var fragment = "\"" + property + "\":[" + first + ",\"Distinct.Tests.dll\"]";
+        var replacement = "\"" + property + "\":[" + first + ",\"\\u0044istinct.Tests.dll\"]";
+        var text = node.ToJsonString();
+        Assert.Contains(fragment, text, StringComparison.Ordinal);
+        var bytes = Encoding.UTF8.GetBytes(text.Replace(fragment, replacement, StringComparison.Ordinal));
+        using var decoded = JsonDocument.Parse(bytes);
+        var parsedAccounting = decoded.RootElement.GetProperty("suites")[0].GetProperty("accounting");
+        var parsedMembers = (property == "expectedMembers" ? parsedAccounting.GetProperty("configuration") : parsedAccounting).GetProperty(property);
+        Assert.Equal(firstMember, parsedMembers[0].GetString());
+        Assert.Equal(secondMember, parsedMembers[1].GetString());
+        Assert.Contains("\\u0044", parsedMembers[1].GetRawText(), StringComparison.Ordinal);
+        Assert.NotEqual(parsedMembers[0].GetString(), parsedMembers[1].GetString());
+        // Acceptance here is only of complete INCOMPLETE data, never suite or gate authority.
+        var data = Mutate4CSharpReportV2.ReadData(bytes);
+        Assert.Equal(GateOutcome.Incomplete, data.ClaimedOutcome);
+        Assert.Equal(4, data.ClaimedExitCode);
+    }
+
     [Fact]
     public async Task Duplicate_JSON_properties_do_not_become_last_value_authority()
     {
