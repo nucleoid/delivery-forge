@@ -271,6 +271,9 @@ public sealed class LocalSingleScheduler
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             deadline.CancelAfter(Remaining());
             await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
+            await PersistAsync("resuming", deadline.Token).ConfigureAwait(false);
+            if (_relinquished || Volatile.Read(ref _stopped) != 0)
+                throw new SchedulingException("Stop or parent transfer arrived before resume control; no host send is authorized.");
             var resumed = await _execution.ResumeAsync(_worker.RunId, _controlTimeout, deadline.Token).ConfigureAwait(false);
             if (resumed.Reconciliation.Action != ReconciliationAction.ResumeDispatch || resumed.Record is null)
             {

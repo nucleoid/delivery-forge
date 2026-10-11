@@ -184,4 +184,65 @@ public sealed partial class LocalSingleTests
             if (!await scheduler.StopAsync(Cancellation)) Assert.True(await scheduler.ReconcileCleanupAsync(Cancellation));
         }
     }
+
+    [Fact(Timeout = 180_000)]
+    public async Task ClosedNamespace_case_distinct_run_claim_cannot_reuse_another_run_closure_proof()
+    {
+        using var repository = new PlanningRepository();
+        await repository.InitializeAsync();
+        var plan = await repository.FreezeAsync();
+        var store = new RunStore(Path.Combine(repository.Root, "results"));
+        var worktrees = new WorktreeManager();
+        await using var processes = new ProcessControl();
+        using var execution = new ExecutionCoordinator(store, worktrees, processes);
+        var closed = LocalSingleScheduler.Create(plan, Worker(repository, plan, "case-run"), Demand, Budget(), store, execution, worktrees, repository.Reader);
+        await closed.ReserveAsync(Cancellation);
+        Assert.True(await closed.StopAsync(Cancellation));
+        await store.AppendAsync("CASE-RUN-scheduler", "local-scheduler-checkpoint", new { profile = "local-single", phase = "prepared", runId = "CASE-RUN" }, Cancellation);
+        var fresh = LocalSingleScheduler.Create(plan, Worker(repository, plan, "new-after-case"), Demand, Budget(), store, execution, worktrees, repository.Reader);
+        try { await Assert.ThrowsAsync<SchedulingException>(() => fresh.ReserveAsync(Cancellation)); }
+        finally { Assert.True(await fresh.StopAsync(Cancellation)); }
+    }
+
+    [Fact(Timeout = 180_000)]
+    public async Task ConcurrentPause_during_resume_never_returns_a_dispatchable_request()
+    {
+        using var repository = new PlanningRepository();
+        await repository.InitializeAsync();
+        var plan = await repository.FreezeAsync();
+        var worker = Worker(repository, plan, "pause-during-resume");
+        var store = new RunStore(Path.Combine(repository.Root, "results"));
+        var worktrees = new WorktreeManager();
+        await using var processes = new ProcessControl();
+        var control = new DelayedFixtureControl();
+        using var execution = new ExecutionCoordinator(store, worktrees, processes, control);
+        var scheduler = LocalSingleScheduler.Create(plan, worker, Demand, Budget(), store, execution, worktrees, repository.Reader);
+        Task<AgentRequest>? resume = null;
+        Task? pause = null;
+        try
+        {
+            var ticket = await scheduler.ReserveAsync(Cancellation);
+            var request = await scheduler.ProvisionAndPrepareAsync(ticket, Cancellation);
+            await execution.AcceptAsync(Accepted(request), Cancellation);
+            await scheduler.PauseAsync(Cancellation);
+            control.Block(AgentControlAction.Resume);
+            resume = scheduler.ResumeAsync(ticket, Cancellation);
+            await control.Entered.Task.WaitAsync(TimeSpan.FromSeconds(10), Cancellation);
+            pause = scheduler.PauseAsync(Cancellation); // Public ingress is synchronous before its first awaited serial gate.
+            control.Release();
+            await Assert.ThrowsAsync<SchedulingException>(async () => await resume);
+            await pause;
+        }
+        finally
+        {
+            control.Release();
+            if (resume is not null)
+            {
+                try { await resume.WaitAsync(TimeSpan.FromSeconds(10), Cancellation); }
+                catch (SchedulingException) { }
+            }
+            if (pause is not null) await pause;
+            if (!await scheduler.StopAsync(Cancellation)) Assert.True(await scheduler.ReconcileCleanupAsync(Cancellation));
+        }
+    }
 }
