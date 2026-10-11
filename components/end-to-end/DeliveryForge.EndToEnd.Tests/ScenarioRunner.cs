@@ -83,6 +83,10 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
             outcome = corrupt ? GateOutcome.Error : GateOutcome.Incomplete;
             limitations = ["Corrupt immutable bytes were rejected; independent diagnostic evidence does not repair or authorize the corrupt history."];
         }
+        else if (name is "quality.worker-policy-shadow" or "quality.caller-baseline-gaming" or "quality.incomplete-mutation-preview")
+        {
+            throw new NotImplementedException("Public quality safety orchestration requires compiled behavior RED before implementation.");
+        }
         else
         {
             limitations = ["This scenario remains planned and has no executed behavior evidence: " + name,
