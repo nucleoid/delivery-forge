@@ -314,7 +314,7 @@ internal static class ColdRecoveryOrchestrator
         using var diagnosticDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
         await artifacts.WriteNewJsonAsync(name, payload, diagnosticDeadline.Token);
     }
-    private static async Task WaitForActualExitAsync(OwnedScenarioRun artifacts, ProcessControl processes, ProcessIdentity identity, CancellationToken cancellationToken)
+    internal static async Task WaitForActualExitAsync(OwnedScenarioRun artifacts, ProcessControl processes, ProcessIdentity identity, CancellationToken cancellationToken)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); deadline.CancelAfter(TimeSpan.FromSeconds(5));
         var observations = new List<ProcessControlResult>();
