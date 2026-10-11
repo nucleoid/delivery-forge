@@ -45,7 +45,7 @@ public sealed class ReviewAuthorityHost
     private readonly string _rootIdentity;
     private readonly DateTimeOffset? _testNow;
     private readonly ProductionReviewAuthorityConfiguration? _production;
-    private readonly ReviewAuthorityRootContext? _rootContext;
+    private ReviewAuthorityRootContext? _rootContext; // Assigned once by construction or the private unpublished bootstrap.
     private readonly object _issuer = new();
     private readonly ConcurrentDictionary<string, byte> _revokedCapabilities = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, IssuedReviewerCapability> _capabilities = new(StringComparer.Ordinal);
@@ -71,10 +71,68 @@ public sealed class ReviewAuthorityHost
 
     // Test-only same-issuer bootstrap. No caller root/source/view opaque identities and no live members
     // escape until real protected policy provenance and the immutable root have been joined.
-    public static Task<ProtectedReviewFixtureBootstrap> CreateProtectedGitContractFixtureAsync(
-        ProtectedReviewFixtureConfiguration configuration, CancellationToken cancellationToken = default) =>
-        Task.FromException<ProtectedReviewFixtureBootstrap>(new NotImplementedException(
-            "Single-issuer protected Git policy/view/root fixture bootstrap is RED."));
+    public static async Task<ProtectedReviewFixtureBootstrap> CreateProtectedGitContractFixtureAsync(
+        ProtectedReviewFixtureConfiguration configuration, CancellationToken cancellationToken = default)
+    {
+        var started = Stopwatch.GetTimestamp();
+        ArgumentNullException.ThrowIfNull(configuration);
+        var total = configuration.EntireBudget;
+        if (total <= TimeSpan.Zero || total > TimeSpan.FromSeconds(15) || string.IsNullOrWhiteSpace(configuration.RunIdentity) ||
+            configuration.RunIdentity.Length > 256 || configuration.MaximumEvidenceBytes <= 0 || configuration.MaximumEvidenceBytes > 16 * 1024 * 1024)
+            throw new ArgumentException("Protected fixture bootstrap requires one finite original allowance and bounded inputs.");
+        TimeSpan Remaining()
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var left = total - Stopwatch.GetElapsedTime(started);
+            if (left <= TimeSpan.Zero) throw new TimeoutException("Original protected fixture bootstrap allowance expired.");
+            return left;
+        }
+        _ = Remaining();
+        var plan = ContractValidator.ParseAndValidate(configuration.FrozenPlanContract);
+        var evidencePolicy = ContractValidator.ParseAndValidate(configuration.EvidencePolicyContract);
+        if (plan.SchemaName != "plan" || evidencePolicy.SchemaName != "evidence-policy")
+            throw new ArgumentException("Fixture bootstrap requires schema-valid immutable plan/evidence policy inputs.");
+        using var planJson = JsonDocument.Parse(plan.CanonicalBytes);
+        var protectedBase = planJson.RootElement.GetProperty("baseCommit").GetString()!;
+        // This host remains unpublished until its own source/view/policy and immutable root are joined.
+        var host = CreateIsolatedTest();
+        var preparation = await host.PrepareIsolatedTestGitEvidenceAsync(configuration.SourceRoot, configuration.WorkerGitDirectory,
+            configuration.TrustedGitExecutable, configuration.MaximumEvidenceBytes, Remaining(), cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (preparation.Observation.Outcome == ReviewGitPreparationOutcome.TimedOut)
+            throw new TimeoutException("Original protected fixture preparation allowance expired.");
+        if (preparation.Observation.Outcome != ReviewGitPreparationOutcome.Prepared || preparation.Context is null ||
+            !preparation.Observation.OwnedProcessQuiescent || !preparation.Observation.RootExitObserved ||
+            !preparation.Observation.StandardOutputDrainCompleted || !preparation.Observation.StandardErrorDrainCompleted)
+            throw new ReviewPreflightException("Protected fixture bootstrap preparation is incomplete: " + preparation.Observation.Reason,
+                residualProcessUncertain: !preparation.Observation.OwnedProcessQuiescent);
+        var view = preparation.Context;
+        // On any refusal retain the owned view for diagnostics; deleting it is not process closure proof.
+        _ = Remaining();
+        var source = host.FreezeProtectedSource(view, protectedBase, view.SourceAuthorityIdentity);
+        var policy = await new ProtectedReviewPolicyResolver(source).ResolveBoundedAsync(
+            configuration.RelativePolicyPath, Remaining(), cancellationToken).ConfigureAwait(false);
+        _ = Remaining();
+        if (!policy.Trusted || policy.Fixture || policy.Advisory || policy.SourceRealm != ReviewAuthorityRealm.Test ||
+            policy.SourceRevision != protectedBase || policy.SourceAuthorityIdentity != view.SourceAuthorityIdentity ||
+            policy.ProtectedObjectViewIdentity != view.ProtectedObjectViewIdentity || policy.AuthorityKind != ReviewPolicyAuthorityKind.ProtectedGitBase)
+            throw new ReviewPolicyException("Same-issuer protected policy provenance did not join the original Test object view.");
+        var root = new ReviewAuthorityRootContext(configuration.RunIdentity, plan.Identity, evidencePolicy.Identity,
+            policy.ContentIdentity, policy.SourceRevision, policy.AuthorityKind, view.SourceAuthorityIdentity, view.SourceRoot,
+            protectedBase, view.ProtectedObjectViewIdentity);
+        host.FreezeUnpublishedFixtureRoot(root);
+        _ = Remaining();
+        return new(host, view, source, policy, root);
+    }
+
+    private void FreezeUnpublishedFixtureRoot(ReviewAuthorityRootContext root)
+    {
+        if (_realm != ReviewAuthorityRealm.Test || _production is not null || _rootContext is not null ||
+            !_requests.IsEmpty || !_capabilities.IsEmpty || !_acceptances.IsEmpty || !_revokedCapabilities.IsEmpty ||
+            root.SourceAuthorityIdentity != _rootIdentity)
+            throw new InvalidOperationException("Only an unpublished original Test issuer may freeze its root once, before members.");
+        _rootContext = root;
+    }
 
     // Bounded Test-only preparation; observations are data and cannot issue/rebind opaque ownership.
     public async Task<ReviewGitPreparationResult> PrepareIsolatedTestGitEvidenceAsync(

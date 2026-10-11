@@ -12,6 +12,9 @@ public sealed class ProtectedReviewFixtureConfiguration
         string sourceRoot, string workerGitDirectory, string trustedGitExecutable, string relativePolicyPath,
         long maximumEvidenceBytes, TimeSpan entireBudget)
     {
+        ArgumentNullException.ThrowIfNull(frozenPlanContract); ArgumentNullException.ThrowIfNull(evidencePolicyContract);
+        if (frozenPlanContract.Length > 1024 * 1024 || evidencePolicyContract.Length > 1024 * 1024)
+            throw new ArgumentException("Fixture bootstrap contract inputs exceed1MiB.");
         RunIdentity = runIdentity; _plan = (byte[])frozenPlanContract.Clone(); _evidencePolicy = (byte[])evidencePolicyContract.Clone();
         SourceRoot = sourceRoot; WorkerGitDirectory = workerGitDirectory; TrustedGitExecutable = trustedGitExecutable;
         RelativePolicyPath = relativePolicyPath; MaximumEvidenceBytes = maximumEvidenceBytes; EntireBudget = entireBudget;
