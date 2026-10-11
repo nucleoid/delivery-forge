@@ -36,6 +36,9 @@ internal static class Crap4CSharpResultSchema
         }
         if (schema.TryGetProperty("allOf", out var all))
             foreach (var child in all.EnumerateArray()) Check(value, child, path, root);
+        if (schema.TryGetProperty("anyOf", out var alternatives))
+            Require(alternatives.EnumerateArray().Any(candidate => Accepts(value, candidate, path, root)),
+                path, "no declared schema alternative matches");
         if (schema.TryGetProperty("type", out var type))
         {
             var matches = type.ValueKind == JsonValueKind.Array
@@ -107,6 +110,12 @@ internal static class Crap4CSharpResultSchema
         "integer" => value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var integer) && double.IsFinite(integer) && Math.Truncate(integer) == integer,
         _ => throw new InvalidOperationException("Unsupported vendor schema type.")
     };
+
+    private static bool Accepts(JsonElement value, JsonElement schema, string path, JsonElement root)
+    {
+        try { Check(value, schema, path, root); return true; }
+        catch (InvalidReport) { return false; }
+    }
 
     private static void Require(bool condition, string path, string reason)
     {
