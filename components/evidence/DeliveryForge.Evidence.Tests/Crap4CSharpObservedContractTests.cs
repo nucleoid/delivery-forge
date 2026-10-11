@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using DeliveryForge.Evidence.Adapters;
 
 namespace DeliveryForge.Evidence.Tests;
@@ -29,6 +30,7 @@ public sealed class Crap4CSharpObservedContractTests
     [InlineData(false, "unknown", "cancelled", 1, 1, 0, 1, GateOutcome.Incomplete)]
     [InlineData(true, "pass", "completed", 0, 1, 0, 1, GateOutcome.Incomplete)]
     [InlineData(true, "notApplicable", "completed", 0, 0, 0, 0, GateOutcome.NotApplicable)]
+    [InlineData(true, "notApplicable", "completed", 0, 2, 1, 0, GateOutcome.NotApplicable)]
     public void Documented_outcome_and_exit_contract_is_preserved(
         bool completed, string decision, string status, int exit, int methods, int known, int unknown,
         GateOutcome expected)
@@ -46,7 +48,6 @@ public sealed class Crap4CSharpObservedContractTests
     [InlineData(false, "unknown", "cancelled", 2, 1, 0, 1)]
     [InlineData(true, "pass", "completed", 0, 1, 2, -1)]
     [InlineData(true, "pass", "completed", 0, 1, 0, 2)]
-    [InlineData(true, "pass", "completed", 0, 2, 1, 0)]
     public void Contradictory_exits_or_counts_are_orchestration_errors(
         bool completed, string decision, string status, int exit, int methods, int known, int unknown)
     {
@@ -68,22 +69,45 @@ public sealed class Crap4CSharpObservedContractTests
         new Crap4CSharpAdapter().Normalize(report,
             new ToolCapability("crap4csharp", Version, "1.0", true, true));
 
-    private static byte[] Report(
-        bool completed, string decision, string status, int exit, int methods, int known, int unknown) =>
-        JsonSerializer.SerializeToUtf8Bytes(new
+    // Synthetic complete protocol documents, not installed or compiled tool evidence.
+    internal static byte[] Report(
+        bool completed, string decision, string status, int exit, int methods, int known, int unknown)
+    {
+        var root = JsonNode.Parse(File.ReadAllText(Path.Combine(AppContext.BaseDirectory,
+            "Fixtures", "Crap4CSharp", "not-applicable.json")))!.AsObject();
+        var evaluation = root["evaluation"]!.AsObject();
+        evaluation["scope"]!["sources"] = new JsonArray("Fixture.cs");
+        evaluation["artifacts"] = new JsonArray();
+        evaluation["contexts"]![0]!["id"] = "fixture-context";
+        evaluation["coverage"] = JsonSerializer.SerializeToNode(new { methods, known, unknown, reasons = new { } });
+        evaluation["decision"] = JsonSerializer.SerializeToNode(new
+        { completed, policyDecision = decision, reason = "contract.fixture" });
+        evaluation["checks"] = new JsonArray();
+        var metrics = new JsonArray();
+        var callables = new JsonArray();
+        for (var index = 0; index < Math.Max(0, methods); index++)
         {
-            schemaVersion = "1.0",
-            toolVersion = Version,
-            evaluation = new
+            metrics.Add(JsonSerializer.SerializeToNode(new
             {
-                coverage = new { methods, known, unknown },
-                decision = new { completed, policyDecision = decision, reason = "contract.fixture" }
-            },
-            run = new
+                contextId = "fixture-context", path = "Fixture.cs", methodIdentity = $"fixture-{index}",
+                signature = (string?)null, span = new { startLine = 1, endLine = 1 }, complexity = 1,
+                coverage = index < known ? (double?)1 : null,
+                crap = index < known ? (double?)(decision == "fail" ? 10 : 1) : null,
+                coverageReason = index < known ? null : "coverage.unavailable"
+            }));
+            callables.Add(JsonSerializer.SerializeToNode(new
             {
-                status,
-                exitCode = exit,
-                cancellation = new { timedOut = false, cancelled = status == "cancelled" }
-            }
-        });
+                callableId = $"fixture-{index}",
+                applicability = index < known + unknown ? "applicable" : "not-applicable",
+                coverageStatus = index < known ? "known" : index < known + unknown ? "unknown" : "not-applicable"
+            }));
+        }
+        evaluation["metrics"] = metrics;
+        evaluation["callables"] = callables;
+        var run = root["run"]!.AsObject();
+        run["status"] = status;
+        run["exitCode"] = exit;
+        run["cancellation"]!["cancelled"] = status == "cancelled";
+        return JsonSerializer.SerializeToUtf8Bytes(root);
+    }
 }
