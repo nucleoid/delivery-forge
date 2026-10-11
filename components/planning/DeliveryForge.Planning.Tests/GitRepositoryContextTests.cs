@@ -621,24 +621,24 @@ public sealed class GitRepositoryContextTests : IDisposable
             limitation.Contains(headCommit, StringComparison.Ordinal));
     }
 
-    [Fact]
-    public async Task Symlink_segment_work_is_globally_bounded_and_fails_conservatively()
+    [Theory(Timeout = 60_000)]
+    [InlineData(130)] // Below the target-size cap, above the segment-work cap.
+    [InlineData(5_000)] // Above the target-size cap.
+    public async Task Symlink_segment_and_target_limits_fail_conservatively(int repetitions)
     {
         InitializeRepository();
         Directory.CreateDirectory(Path.Combine(_root, "dir"));
         File.WriteAllText(Path.Combine(_root, "dir", ".keep"), "kept");
         Run("git", "add dir/.keep");
-        var target = string.Join('/', Enumerable.Repeat("dir/..", 5_000)) + "/tracked.txt";
+        var target = string.Join('/', Enumerable.Repeat("dir/..", repetitions)) + "/tracked.txt";
         AddCommittedSymlink("bounded", target);
         Run("git", "commit -q -m bounded-symlink");
         var reader = new GitRepositoryContextReader();
         var context = await reader.ReadAsync(_root, "HEAD", TestContext.Current.CancellationToken);
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
-
-        var file = await reader.ReadFileAsync(context, "bounded", deadline.Token);
+        var file = await reader.ReadFileAsync(context, "bounded", TestContext.Current.CancellationToken);
 
         Assert.True(file.EscapesWorktree);
-        Assert.NotEqual(SymlinkResolution.InTree, file.SymlinkResolution);
+        Assert.Equal(SymlinkResolution.BoundExceeded, file.SymlinkResolution);
     }
 
     [Fact]
