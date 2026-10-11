@@ -12,6 +12,9 @@ public sealed record ProcessIdentity(int ProcessId, long PlatformStartIdentity, 
 public sealed record OwnedProcess(Process Process, ProcessIdentity Identity, string? RunId = null);
 public enum ProcessControlOutcome { LiveOwned, Quiesced, AlreadyExited, IdentityUnknown, TimedOut, UnsupportedPlatform, ControlFailed }
 public sealed record ProcessControlResult(ProcessControlOutcome Outcome, string Reason);
+// Diagnostic observation data only; no native handle, adoption or signaling authority.
+public sealed record OwnedProcessImageObservation(ProcessControlOutcome Outcome, string RequestedLaunch,
+    string ObservedImagePath, long PlatformStartIdentity, string Stage, string Reason);
 
 public sealed class ProcessControl : IAsyncDisposable
 {
@@ -49,6 +52,9 @@ public sealed class ProcessControl : IAsyncDisposable
     public IReadOnlyList<ProcessControlResult> ObserveOwned(string runId) =>
         _owned.Values.Where(owned => owned.RunId == runId)
             .Select(owned => Observe(owned.Identity)).ToArray();
+
+    public OwnedProcessImageObservation ObserveOwnedImage(ProcessIdentity expectedRegisteredIdentity) =>
+        throw new NotImplementedException("Owned-handle image observation requires compiled RED; caller identity is not adoption authority.");
 
     public IReadOnlyList<ProcessIdentity> GetOwnedIdentities(string runId) =>
         _owned.Values.Where(owned => owned.RunId == runId)
