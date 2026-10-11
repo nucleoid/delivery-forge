@@ -1,0 +1,1 @@
+Schema copied unchanged from nucleoid/crap4csharp at1129c9d3280168b294f9fed1542f81ca716c6d53, docs/result-schema-v1.json. The adjacent MIT license applies. This is the vendor result contract; Forge wire schemas are unchanged.

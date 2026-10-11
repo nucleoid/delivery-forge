@@ -21,6 +21,9 @@ public sealed class Crap4CSharpAdapter
             if (!capability.Supported)
                 return NormalizedEvidence.Incomplete("Crap4CSharp executable capability is not proven.", capability.Fixture);
             var root = document.RootElement;
+            var schemaError = Crap4CSharpResultSchema.Validate(root);
+            if (schemaError is not null)
+                return NormalizedEvidence.Error("Malformed Crap4CSharp result: " + schemaError, capability.Fixture);
             if (!TryString(root, "schemaVersion", out var schemaVersion) ||
                 !schemaVersion.StartsWith("1.", StringComparison.Ordinal) ||
                 !string.Equals(schemaVersion, capability.FormatVersion, StringComparison.Ordinal))
@@ -43,7 +46,8 @@ public sealed class Crap4CSharpAdapter
                 !TryInt(coverage, "known", out var knownCount) ||
                 !TryInt(coverage, "unknown", out var unknownCount) ||
                 methodCount < 0 || knownCount < 0 || unknownCount < 0 ||
-                (long)knownCount + unknownCount != methodCount)
+                (long)knownCount + unknownCount > methodCount ||
+                evaluation.GetProperty("metrics").GetArrayLength() != methodCount)
                 return NormalizedEvidence.Error("Crap4CSharp coverage summary is malformed.", capability.Fixture);
             if (!TryInt(run, "exitCode", out var exitCode))
                 return NormalizedEvidence.Error("Crap4CSharp run exit is missing.", capability.Fixture);
