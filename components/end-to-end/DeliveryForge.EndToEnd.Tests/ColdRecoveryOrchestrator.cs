@@ -38,6 +38,7 @@ internal static class ColdRecoveryOrchestrator
         var restoredForCleanup = false;
         var completionAfterRegistration = false;
         var freshOutcome = "not requested";
+        Exception? primaryFailure = null;
         var delayed = scenario.StartsWith("cold.delayed-completion", StringComparison.Ordinal);
         try
         {
@@ -69,7 +70,7 @@ internal static class ColdRecoveryOrchestrator
             if (delayed)
             {
                 await WriteCreateNewAsync(barrier, [1], cancellationToken);
-                await WaitForActualExitAsync(runtime.Processes, child.Identity, cancellationToken);
+                await WaitForActualExitAsync(artifacts, runtime.Processes, child.Identity, cancellationToken);
                 completionAfterRegistration = File.Exists(childArtifact) &&
                     await File.ReadAllTextAsync(childArtifact, cancellationToken) == "owned-child-completed";
                 if (!completionAfterRegistration) throw new InvalidOperationException("Actual barrier child did not produce its owned result.");
@@ -183,8 +184,25 @@ internal static class ColdRecoveryOrchestrator
                 }
             }
         }
+        catch (Exception exception)
+        {
+            primaryFailure = exception;
+            try
+            {
+                await WriteDiagnosticAsync(artifacts, "cold-primary-failure.json", new
+                {
+                    fixture = true, scenario, type = exception.GetType().FullName, message = Bound(exception.Message), stack = Bound(exception.StackTrace),
+                    ownedObservations = runtime.Processes.GetAllOwnedIdentities().Select(identity => new { identity, observed = runtime.Processes.Observe(identity) }).ToArray(),
+                    limitation = "Primary exception captured before cleanup; fresh public samples are data, never exit inference or repair."
+                });
+            }
+            catch (Exception diagnosticFailure) { artifacts.RetainArtifacts("Primary cold diagnostic write failed: " + diagnosticFailure.GetType().Name); }
+            throw;
+        }
         finally
         {
+            try
+            {
             using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(30));
             host.Foreign = false;
             if (facts.Required.Count != 0 && !File.Exists(requiredPath))
@@ -211,6 +229,22 @@ internal static class ColdRecoveryOrchestrator
                 if (!settled.Quiescent) throw new InvalidOperationException("Retained original controller did not prove fresh completion cleanup.");
             }
             if (freshController is not null) await freshController.DisposeAsync();
+            }
+            catch (Exception cleanupFailure)
+            {
+                try
+                {
+                    await WriteDiagnosticAsync(artifacts, "cold-cleanup-failure.json", new
+                    {
+                        fixture = true, scenario, type = cleanupFailure.GetType().FullName, message = Bound(cleanupFailure.Message),
+                        primaryType = primaryFailure?.GetType().FullName, primaryMessage = Bound(primaryFailure?.Message),
+                        limitation = "Cleanup failure does not replace the saved primary failure or manufacture quiescence."
+                    });
+                }
+                catch (Exception diagnosticFailure) { artifacts.RetainArtifacts("Cold cleanup diagnostic write failed: " + diagnosticFailure.GetType().Name); }
+                if (primaryFailure is not null) throw new AggregateException("Primary cold failure and cleanup failure retained.", primaryFailure, cleanupFailure);
+                throw;
+            }
         }
         var history = await runtime.Store.RecoverAsync(worker.RunId, cancellationToken);
         invariants["fresh-store-coordinator-lifetime"] = receiverExecution is not null;
@@ -274,15 +308,42 @@ internal static class ColdRecoveryOrchestrator
         await using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough);
         await stream.WriteAsync(bytes, cancellationToken); await stream.FlushAsync(cancellationToken); stream.Flush(true);
     }
-    private static async Task WaitForActualExitAsync(ProcessControl processes, ProcessIdentity identity, CancellationToken cancellationToken)
+    private static string? Bound(string? value) => value is { Length: > 8192 } ? value[..8192] : value;
+    private static async Task WriteDiagnosticAsync(OwnedScenarioRun artifacts, string name, object payload)
+    {
+        using var diagnosticDeadline = new CancellationTokenSource(TimeSpan.FromSeconds(2));
+        await artifacts.WriteNewJsonAsync(name, payload, diagnosticDeadline.Token);
+    }
+    private static async Task WaitForActualExitAsync(OwnedScenarioRun artifacts, ProcessControl processes, ProcessIdentity identity, CancellationToken cancellationToken)
     {
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); deadline.CancelAfter(TimeSpan.FromSeconds(5));
+        var observations = new List<ProcessControlResult>();
+        Exception? pollFailure = null;
+        try
+        {
         while (true)
         {
             var observed = processes.Observe(identity);
+            if (observations.Count >= 256) throw new InvalidOperationException("Actual child exit sampler exceeded its finite observation bound.");
+            observations.Add(observed);
             if (observed.Outcome == ProcessControlOutcome.AlreadyExited) return;
             if (observed.Outcome != ProcessControlOutcome.LiveOwned) throw new InvalidOperationException("Actual child exit is uncertain: " + observed.Reason);
             await Task.Delay(20, deadline.Token);
+        }
+        }
+        catch (Exception exception) { pollFailure = exception; throw; }
+        finally
+        {
+            try
+            {
+                await WriteDiagnosticAsync(artifacts, "cold-child-exit-poll.json", new { fixture = true, identity, observations,
+                    limitation = "Actual public original-controller observations; no native retry, ignored mismatch, PID adoption or cached-exit success." });
+            }
+            catch (Exception diagnosticFailure)
+            {
+                artifacts.RetainArtifacts("Actual exit poll diagnostic write failed: " + diagnosticFailure.GetType().Name);
+                if (pollFailure is null) throw;
+            }
         }
     }
     private static void RequirePlainOwnedResult(OwnedEphemeralRuntime runtime, string path, bool requireAbsent = true)
