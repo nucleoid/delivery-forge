@@ -16,6 +16,10 @@ public sealed class PublicationAuthorityHost
     public static PublicationAuthorityHost CreateIsolatedFixture(ReviewAuthorityHost reviewHost) =>
         new(reviewHost ?? throw new ArgumentNullException(nameof(reviewHost)));
 
+    public static PublicationAuthorityHost CreateReconciledFixture(
+        PublicationAuthorityHost priorHost, PublicationRun registeredPrior, ReviewAuthorityHost newReviewHost) =>
+        throw new InvalidOperationException("New-root explicit publication lineage is not implemented at this RED checkpoint.");
+
     public static PublicationAuthorityHost CreateProduction() => throw new PublicationUnavailableException(
         "Production publication is INCOMPLETE: live source/ownership and disposable-target authorization are unconfigured.");
 

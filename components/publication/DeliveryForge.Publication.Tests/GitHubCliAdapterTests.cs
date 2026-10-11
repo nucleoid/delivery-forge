@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json.Nodes;
 using DeliveryForge.Contracts.Models;
 using DeliveryForge.Publication.GitHost;
 
@@ -136,7 +137,12 @@ public sealed class GitHubCliAdapterTests
             Assert.Equal(GitHostMutationOutcome.Uncertain, replay.Outcome);
             Assert.Equal(1, runner.Mutations);
         }
-        finally { runner.ReleaseMutation.TrySetResult(); }
+        finally
+        {
+            runner.ReleaseMutation.TrySetResult();
+            if (runner.MutationTask is not null)
+                await runner.MutationTask.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        }
     }
 
     [Fact]
@@ -177,20 +183,31 @@ public sealed class GitHubCliAdapterTests
         public bool BlockMutation { get; set; }
         public bool FailMutation { get; set; }
         public TaskCompletionSource ReleaseMutation { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public Task<GitHubCliResult>? MutationTask { get; private set; }
+        private bool merged;
         public int Mutations => Calls.Count(call => call.Count > 1 && call[0] == "pr" && call[1] is "merge" or "create" or "edit");
-        public async Task<GitHubCliResult> ExecuteAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+        public Task<GitHubCliResult> ExecuteAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
+        {
+            var task = ExecuteCoreAsync(arguments, cancellationToken);
+            if (arguments.Count > 1 && arguments[0] == "pr" && arguments[1] is "merge" or "create" or "edit") MutationTask = task;
+            return task;
+        }
+        private async Task<GitHubCliResult> ExecuteCoreAsync(IReadOnlyList<string> arguments, CancellationToken cancellationToken)
         {
             Calls.Add(arguments.ToArray());
             if (arguments.Count > 1 && arguments[0] == "pr" && arguments[1] is "merge" or "create" or "edit")
             {
                 if (BlockMutation) await ReleaseMutation.Task;
                 if (FailMutation) return new(1, "", "fixture lost result");
+                if (arguments[1] == "merge") merged = true;
+                if (arguments[1] == "create") PrExists = true;
             }
             var endpoint = arguments.Count > 1 ? arguments[1] : "";
             var body = arguments[0] == "--version" ? "gh version 2.80.0 (2025-10-01)" : arguments[0] == "auth" ? "Logged in" :
                 arguments[0] == "pr" ? "https://github.com/fixture/forge-disposable-10/pull/10" :
                 endpoint.Contains("git/ref/heads/work", StringComparison.Ordinal) ? "{\"object\":{\"sha\":\"" + PublicationFixture.Commit('b') + "\"}}" :
-                endpoint.Contains("git/ref/heads/main", StringComparison.Ordinal) ? "{\"object\":{\"sha\":\"" + PublicationFixture.Commit('a') + "\"}}" :
+                endpoint.Contains("git/ref/heads/main", StringComparison.Ordinal) ? "{\"object\":{\"sha\":\"" + PublicationFixture.Commit(merged ? 'd' : 'a') + "\"}}" :
+                endpoint.Contains("/pulls/", StringComparison.Ordinal) ? PrDocument().ToJsonString() :
                 endpoint.Contains("/pulls", StringComparison.Ordinal) ? PrJson() :
                 endpoint.EndsWith("/protection", StringComparison.Ordinal) ? "{\"required_status_checks\":{\"contexts\":[\"ci\"]},\"required_pull_request_reviews\":{}}" :
                 endpoint.Contains("/rules/branches/", StringComparison.Ordinal) ? MergeQueue ? "[{\"type\":\"merge_queue\"}]" : "[]" :
@@ -206,13 +223,22 @@ public sealed class GitHubCliAdapterTests
         private string PrJson()
         {
             if (!PrExists) return "[]";
+            return new JsonArray(PrDocument()).ToJsonString();
+        }
+        private JsonObject PrDocument()
+        {
             var marker = "delivery-forge-publication:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("cli-key")));
-            return $$$"""
-                [{ "number":10, "html_url":"https://github.com/fixture/forge-disposable-10/pull/10",
-                   "head":{"sha":"{{{PublicationFixture.Commit('b')}}}","ref":"work","repo":{"full_name":"fixture/forge-disposable-10"}},
-                   "base":{"ref":"main","sha":"{{{PublicationFixture.Commit('a')}}}"},"body":"<!-- {{{marker}}} -->",
-                   "merged_at":null,"merge_commit_sha":null }]
-                """;
+            return new JsonObject
+            {
+                ["number"] = 10, ["html_url"] = "https://github.com/fixture/forge-disposable-10/pull/10",
+                ["head"] = new JsonObject { ["sha"] = PublicationFixture.Commit('b'), ["ref"] = "work",
+                    ["repo"] = new JsonObject { ["full_name"] = "fixture/forge-disposable-10" } },
+                ["base"] = new JsonObject { ["sha"] = PublicationFixture.Commit('a'), ["ref"] = "main",
+                    ["repo"] = new JsonObject { ["full_name"] = "fixture/forge-disposable-10" } },
+                ["body"] = "<!-- " + marker + " -->", ["state"] = merged ? "closed" : "open", ["auto_merge"] = null,
+                ["merged_at"] = merged ? "2026-10-11T00:00:01Z" : null,
+                ["merge_commit_sha"] = merged ? PublicationFixture.Commit('d') : null
+            };
         }
     }
 }

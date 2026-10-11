@@ -13,17 +13,22 @@ namespace DeliveryForge.Publication.Tests;
 
 public sealed class PublicationFixture
 {
-    public PublicationFixture()
+    private readonly AuthorizationCeiling permittedCeiling;
+    public PublicationFixture() : this("publication-fixture-run", 'e', "merge", '2', '3', null) { }
+
+    private PublicationFixture(string runIdentity, char planIdentity, string evidenceCeiling,
+        char independentArtifact, char hostedArtifact, string? sourceRoot)
     {
+        permittedCeiling = evidenceCeiling == "merge" ? AuthorizationCeiling.Merge : AuthorizationCeiling.Pr;
         Policy = Contract($$"""
             { "schemaVersion":"1.0.0", "kind":"evidence-policy", "identity":"{{Id('0')}}",
               "policyId":"publication-fixture", "requiredGates":["build","test"],
-              "authorizedCeiling":"merge", "requireIndependentReview":true,
+              "authorizedCeiling":"{{evidenceCeiling}}", "requireIndependentReview":true,
               "allowedNotApplicable":["coverage"], "createdAt":"2026-10-11T00:00:01Z" }
             """);
-        Root = new ReviewAuthorityRootContext("publication-fixture-run", Id('e'), Policy.Identity,
+        Root = new ReviewAuthorityRootContext(runIdentity, Id(planIdentity), Policy.Identity,
             Id('f'), Commit('f'), ReviewPolicyAuthorityKind.Caller, "fixture-source",
-            Path.GetFullPath(Path.Combine(Path.GetTempPath(), "publication-fixture-source")), Commit('a'), "fixture-view");
+            sourceRoot ?? Path.GetFullPath(Path.Combine(Path.GetTempPath(), "publication-fixture-source")), Commit('a'), "fixture-view");
         ReviewHost = ReviewAuthorityHost.CreateIsolatedTest(Root, Time);
         var reviewPolicy = ReviewHost.CreateContractFixturePolicy(
             [new FamilyPair("gpt", "claude"), new FamilyPair("gpt", "github-hosted")],
@@ -33,14 +38,16 @@ public sealed class PublicationFixture
         Receiver = ReviewHost.CreateTransitionReceiver(independentContext, hostedContext);
         Patch = new PatchIdentity(Commit('a'), Commit('b'), Commit('c'), Id('d'), Root.PlanIdentity,
             new Dictionary<string, string> { ["tests"] = Id('1') }, "git version fixture", ["git", "diff"]);
-        Review = IssueReview(reviewPolicy, "claude", independentContext, Id('2'), ReviewEvidenceRole.Independent);
-        HostedReview = IssueReview(reviewPolicy, "github-hosted", hostedContext, Id('3'), ReviewEvidenceRole.Hosted);
+        Review = IssueReview(reviewPolicy, "claude", independentContext, Id(independentArtifact), ReviewEvidenceRole.Independent);
+        HostedReview = IssueReview(reviewPolicy, "github-hosted", hostedContext, Id(hostedArtifact), ReviewEvidenceRole.Hosted);
         Gates = [Gate("build", "PASS"), Gate("test", "PASS")];
         Ci = Gate("ci", "PASS");
         Authority = PublicationAuthorityHost.CreateIsolatedFixture(ReviewHost);
     }
 
     public static DateTimeOffset Time => DateTimeOffset.Parse("2026-10-11T00:00:01Z");
+    public static PublicationFixture NewRoot(string? sourceRoot = null) =>
+        new("publication-new-root", '9', "pr", '7', '8', sourceRoot);
     public ReviewAuthorityRootContext Root { get; }
     public ReviewAuthorityHost ReviewHost { get; }
     public PublicationAuthorityHost Authority { get; }
@@ -56,7 +63,7 @@ public sealed class PublicationFixture
     public PublicationRunDefinition Definition(AuthorizationCeiling ceiling = AuthorizationCeiling.Merge) => new(
         Root.RunIdentity, "revision-" + Guid.NewGuid().ToString("N"), null, ceiling, Target, Patch, Policy, Gates, Ci, Review, HostedReview, Receiver);
 
-    public TransitionEvidence Transition => new(AuthorizationCeiling.Merge, Patch.BaseCommit, Patch.HeadCommit,
+    public TransitionEvidence Transition => new(permittedCeiling, Patch.BaseCommit, Patch.HeadCommit,
         Patch.HeadTree, Policy: Policy, GateReceipts: Gates, CiReceipt: Ci,
         ReviewReceipt: Review, HostReviewReceipt: HostedReview);
 

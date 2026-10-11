@@ -316,6 +316,9 @@ public sealed class ReviewAuthorityHost
             throw new InvalidOperationException("Publication fixture binding does not match the immutable review issuer root.");
     }
 
+    public void EnsureContractFixturePredecessorScope(ReviewAuthorityHost predecessor) =>
+        throw new InvalidOperationException("New-root fixture scope reconciliation is not implemented at this RED checkpoint.");
+
     // Fixture setup support, not a live policy resolver or production authority path.
     public ReviewPolicy CreateContractFixturePolicy(
         IReadOnlyList<FamilyPair> families,

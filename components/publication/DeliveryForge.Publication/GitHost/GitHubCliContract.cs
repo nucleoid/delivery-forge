@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using DeliveryForge.Contracts.Models;
 
 namespace DeliveryForge.Publication.GitHost;
@@ -17,12 +18,15 @@ public interface IGitHubCliExecutor
 public sealed class ParentDisposableGitHubAuthority
 {
     private readonly ConcurrentDictionary<ParentDisposableGitHubGrant, byte> grants = new();
+    private readonly long startedAt = Stopwatch.GetTimestamp();
+    private readonly TimeSpan lifetime;
     private ParentDisposableGitHubAuthority(string reference, PublicationTarget target, AuthorizationCeiling ceiling, DateTimeOffset validUntil)
     {
         AuthorizationReference = reference;
         Target = target;
         Ceiling = ceiling;
         ValidUntil = validUntil;
+        lifetime = validUntil - DateTimeOffset.UtcNow;
     }
     internal string AuthorizationReference { get; }
     internal PublicationTarget Target { get; }
@@ -44,13 +48,20 @@ public sealed class ParentDisposableGitHubAuthority
         grants.TryAdd(grant, 0);
         return grant;
     }
-    public void Revoke(ParentDisposableGitHubGrant grant) => grants.TryRemove(grant, out _);
+    public void Revoke(ParentDisposableGitHubGrant grant)
+    {
+        if (grants.TryRemove(grant, out _)) grant.Cancel();
+    }
     internal bool Owns(ParentDisposableGitHubGrant grant) => ReferenceEquals(grant.Issuer, this) &&
-        grants.ContainsKey(grant) && DateTimeOffset.UtcNow <= ValidUntil;
+        grants.ContainsKey(grant) && DateTimeOffset.UtcNow <= ValidUntil && Remaining > TimeSpan.Zero;
+    internal TimeSpan Remaining => lifetime - Stopwatch.GetElapsedTime(startedAt);
 }
 
 public sealed class ParentDisposableGitHubGrant
 {
+    private readonly CancellationTokenSource revoked = new();
     internal ParentDisposableGitHubGrant(ParentDisposableGitHubAuthority issuer) => Issuer = issuer;
     internal ParentDisposableGitHubAuthority Issuer { get; }
+    internal CancellationToken Revocation => revoked.Token;
+    internal void Cancel() => revoked.Cancel();
 }
