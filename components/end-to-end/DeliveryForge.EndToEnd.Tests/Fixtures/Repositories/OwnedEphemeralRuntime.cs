@@ -25,6 +25,7 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
     private NativeFixtureControl? _control;
     private AgentRunBinding? _binding;
     private LocalSingleScheduler? _scheduler;
+    private readonly List<(LocalSingleScheduler Scheduler, ExecutionCoordinator Execution)> _coldOwners = [];
     private HashSet<string> _ownedEntries = new(StringComparer.Ordinal);
     private OwnedEphemeralRuntime(OwnedScenarioRun artifacts, string git)
     {
@@ -133,6 +134,8 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
         _execution = execution;
         _control = control;
     }
+    internal void RetainColdOwner(LocalSingleScheduler scheduler, ExecutionCoordinator execution) =>
+        _coldOwners.Add((scheduler, execution)); // Actual live owner references, never reconstructed from checkpoint data.
     internal void BindSession(ExecutionCoordinator execution, NativeFixtureControl control, AgentRunBinding binding, AgentRequest request)
     {
         if (_binding is not null || binding.RunId != request.RunId || binding.RequestIdentity != request.RequestIdentity ||
@@ -273,6 +276,12 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
         if (_removed) { await Processes.DisposeAsync(); return; }
         _artifacts.RetainArtifacts("Native runtime retained after nonpass or unresolved cleanup: " + Root);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        foreach (var owner in _coldOwners)
+        {
+            if (await owner.Scheduler.StopAsync(deadline.Token) || await owner.Scheduler.ReconcileCleanupAsync(deadline.Token))
+                owner.Execution.Dispose();
+            else _artifacts.RetainArtifacts("Cold owning references/capacity remain retained: " + owner.Scheduler.CleanupLimitation);
+        }
         var schedulerClosed = _scheduler is null;
         if (_scheduler is not null)
         {
