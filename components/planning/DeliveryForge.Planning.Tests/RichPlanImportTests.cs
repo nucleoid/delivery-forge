@@ -177,7 +177,7 @@ internal sealed class ImportRepositoryFixture : IAsyncDisposable
         if (left <= TimeSpan.Zero) throw new TimeoutException("Original import fixture work allowance expired.");
         return left;
     }
-    private TimeSpan CleanupRemaining()
+    internal TimeSpan CleanupRemaining()
     {
         var elapsed = Stopwatch.GetElapsedTime(_started);
         var end = TimeSpan.FromSeconds(120);
@@ -219,6 +219,12 @@ internal sealed class ImportRepositoryFixture : IAsyncDisposable
     private async Task Wait(Task task)
     {
         Track(task); await task.WaitAsync(WorkRemaining(), WorkToken); _ = WorkRemaining();
+    }
+    internal async Task<T> ObserveCleanup<T>(Func<Task<T>> operation)
+    {
+        _cleanupStarted ??= Stopwatch.GetElapsedTime(_started);
+        _ = CleanupRemaining(); var actual = operation(); Track(actual);
+        var value = await actual.WaitAsync(CleanupRemaining()); _ = CleanupRemaining(); return value;
     }
     internal async Task<string> Command(string cwd, params string[] arguments)
     {
