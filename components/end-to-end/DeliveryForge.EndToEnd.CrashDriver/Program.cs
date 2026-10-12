@@ -18,8 +18,17 @@ internal static class Program
         var observed = await new GitRepositoryContextReader().ReadAsync(Path.Combine(input.RuntimeRoot, "repository"), "refs/heads/main", lifetime.Token);
         if (observed.Commit != input.RuntimeBaseCommit) throw new InvalidOperationException("Exact fixture repository base is not current.");
         await EarlyDriverComposition.WriteJson(Path.Combine(input.ArtifactRoot, "driver-" + input.Mode + "-preflight.json"), new
-        { fixture = true, input.Stage, input.Nonce, observed.Commit, observed.Tree, observed.HeadCommit, mode = input.Mode,
-            processIdDiagnosticOnly = Environment.ProcessId, limitation = "Driver stdout/stderr inherit outer SDK capture; this file is owned diagnostic data only." }, lifetime.Token);
+        {
+            fixture = true,
+            input.Stage,
+            input.Nonce,
+            observed.Commit,
+            observed.Tree,
+            observed.HeadCommit,
+            mode = input.Mode,
+            processIdDiagnosticOnly = Environment.ProcessId,
+            limitation = "Driver stdout/stderr inherit outer SDK capture; this file is owned diagnostic data only."
+        }, lifetime.Token);
         if (MiddleDriverComposition.Supports(input.Stage)) await MiddleDriverComposition.RunAsync(input, observed, lifetime.Token);
         else await EarlyDriverComposition.RunAsync(input, observed, lifetime.Token);
     }

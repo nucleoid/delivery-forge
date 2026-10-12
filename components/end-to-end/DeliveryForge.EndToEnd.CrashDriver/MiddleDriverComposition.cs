@@ -93,8 +93,14 @@ internal static class MiddleDriverComposition
                 using var result = JsonDocument.Parse(await Read(boundary, input, token));
                 if (result.RootElement.GetProperty("nonce").GetString() != input.Nonce) throw new IOException("Actual child result nonce differs.");
                 var observation = Path.Combine(input.ArtifactRoot, "original-completed-child.json");
-                await Write(observation, new { fixture = true, child.Identity, samples, originalNaturalExit = true,
-                    resultSha256 = Hash(await Read(boundary, input, token)) }, token);
+                await Write(observation, new
+                {
+                    fixture = true,
+                    child.Identity,
+                    samples,
+                    originalNaturalExit = true,
+                    resultSha256 = Hash(await Read(boundary, input, token))
+                }, token);
                 files.Add(boundary); files.Add(observation);
             }
             else if (input.Stage == "gate-receipt-written")
@@ -111,9 +117,18 @@ internal static class MiddleDriverComposition
                 files.Add(Path.Combine(input.ArtifactRoot, "actual-driver-gate-configuration.json"));
                 files.Add(Path.Combine(input.ArtifactRoot, "actual-driver-gate-provenance.json"));
                 var gateObservation = Path.Combine(input.ArtifactRoot, "actual-driver-gate-observation.json");
-                await Write(gateObservation, new { fixture = true, productionCertified = false, actual, trx, trxPassed, trxFailed,
-                    originalCaseStarted = input.OriginalCaseStarted, totalSeconds = 540,
-                    limitation = "Actual SDK/test/TRX/canonical advisory gate; no required producer authority." }, token);
+                await Write(gateObservation, new
+                {
+                    fixture = true,
+                    productionCertified = false,
+                    actual,
+                    trx,
+                    trxPassed,
+                    trxFailed,
+                    originalCaseStarted = input.OriginalCaseStarted,
+                    totalSeconds = 540,
+                    limitation = "Actual SDK/test/TRX/canonical advisory gate; no required producer authority."
+                }, token);
                 files.Add(gateObservation);
             }
             else
@@ -131,9 +146,16 @@ internal static class MiddleDriverComposition
                 reviewRequest = new(patch, "gpt", capability, "source", review.Policy.PolicyIdentity);
                 registered = review.Host.RegisterRequest(reviewContext.RequestIdentity, reviewRequest, reviewContext);
                 var registrationPath = Path.Combine(input.ArtifactRoot, "actual-review-registration.json");
-                await Write(registrationPath, new { fixture = true, registered.RequestIdentity, context = reviewContext, request = reviewRequest,
-                    evidencePolicyPath = evidencePath, sourceRoot = repository.RepositoryRoot,
-                    limitation = "Diagnostic public context/request DATA only; no serialized opaque registration or proof." }, token);
+                await Write(registrationPath, new
+                {
+                    fixture = true,
+                    registered.RequestIdentity,
+                    context = reviewContext,
+                    request = reviewRequest,
+                    evidencePolicyPath = evidencePath,
+                    sourceRoot = repository.RepositoryRoot,
+                    limitation = "Diagnostic public context/request DATA only; no serialized opaque registration or proof."
+                }, token);
                 files.Add(registrationPath); boundary = registrationPath;
                 if (input.Stage == "review-receipt")
                 {
@@ -149,12 +171,25 @@ internal static class MiddleDriverComposition
             await Write(Path.Combine(input.ArtifactRoot, "setup-complete-" + input.Nonce + ".json"), new { fixture = true, input.Stage, input.Nonce }, token);
             await Write(Path.Combine(input.ArtifactRoot, "ready-" + input.Stage + "-" + input.Nonce + ".json"), new
             {
-                fixture = true, productionCertified = false, input.Stage, input.Nonce, frozenBaseCommit = plan.BaseCommit,
-                planContractPath = planPath, planBundlePath = bundlePath, storeRoot = store.RootPath, runId,
-                boundaryArtifactPath = boundary, durableFiles = durable, reviewerCallsBeforeCrash = reviewerCalls,
-                ownPinnedAcceptanceObserved = ownAcceptance, originalChildOutcome = childOutcome,
-                actualGateOutcome = gateOutcome, actualTrxPassed = trxPassed, actualTrxFailed = trxFailed,
-                originalCaseStarted = input.OriginalCaseStarted, input.IntegratedBaseCommit
+                fixture = true,
+                productionCertified = false,
+                input.Stage,
+                input.Nonce,
+                frozenBaseCommit = plan.BaseCommit,
+                planContractPath = planPath,
+                planBundlePath = bundlePath,
+                storeRoot = store.RootPath,
+                runId,
+                boundaryArtifactPath = boundary,
+                durableFiles = durable,
+                reviewerCallsBeforeCrash = reviewerCalls,
+                ownPinnedAcceptanceObserved = ownAcceptance,
+                originalChildOutcome = childOutcome,
+                actualGateOutcome = gateOutcome,
+                actualTrxPassed = trxPassed,
+                actualTrxFailed = trxFailed,
+                originalCaseStarted = input.OriginalCaseStarted,
+                input.IntegratedBaseCommit
             }, token);
             await WaitRelease(input, token);
             if (input.Stage == "review-registration")
@@ -165,9 +200,16 @@ internal static class MiddleDriverComposition
                 ownAcceptance = true;
             }
             if (scheduler is not null && !await scheduler.StopAsync(token)) throw new InvalidOperationException("Original normal-release scheduler closure is uncertain.");
-            await Write(Path.Combine(input.ArtifactRoot, "normal-release-result.json"), new { fixture = true, input.Stage,
-                actualReadyReached = true, normalReleaseInsteadOfKill = true, ownPinnedAcceptanceObserved = ownAcceptance,
-                actualGateOutcome = gateOutcome, originalChildOutcome = childOutcome }, token);
+            await Write(Path.Combine(input.ArtifactRoot, "normal-release-result.json"), new
+            {
+                fixture = true,
+                input.Stage,
+                actualReadyReached = true,
+                normalReleaseInsteadOfKill = true,
+                ownPinnedAcceptanceObserved = ownAcceptance,
+                actualGateOutcome = gateOutcome,
+                originalChildOutcome = childOutcome
+            }, token);
         }
         finally { review?.Dispose(); }
     }
@@ -184,9 +226,17 @@ internal static class MiddleDriverComposition
     }
     private static byte[] EvidencePolicy(string nonce)
     {
-        var node = new JsonObject { ["schemaVersion"] = "1.0.0", ["kind"] = "evidence-policy", ["policyId"] = "middle-" + nonce,
-            ["requiredGates"] = new JsonArray("test"), ["authorizedCeiling"] = "pr", ["requireIndependentReview"] = true,
-            ["allowedNotApplicable"] = new JsonArray(), ["createdAt"] = DateTimeOffset.UtcNow.UtcDateTime.ToString("O", CultureInfo.InvariantCulture) };
+        var node = new JsonObject
+        {
+            ["schemaVersion"] = "1.0.0",
+            ["kind"] = "evidence-policy",
+            ["policyId"] = "middle-" + nonce,
+            ["requiredGates"] = new JsonArray("test"),
+            ["authorizedCeiling"] = "pr",
+            ["requireIndependentReview"] = true,
+            ["allowedNotApplicable"] = new JsonArray(),
+            ["createdAt"] = DateTimeOffset.UtcNow.UtcDateTime.ToString("O", CultureInfo.InvariantCulture)
+        };
         node["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(node.ToJsonString()));
         return CanonicalJson.Canonicalize(Encoding.UTF8.GetBytes(node.ToJsonString()));
     }
@@ -200,8 +250,17 @@ internal static class MiddleDriverComposition
         var request = registered.Request;
         var now = DateTimeOffset.UtcNow;
         var raw = Path.Combine(input.ArtifactRoot, "actual-external-fixture-review-raw.json");
-        await Write(raw, new { fixture = true, actualModelCall = false, oppositeFamilyCertification = false, registered.RequestIdentity,
-            request, verdict = "ship", findings = Array.Empty<ReviewFinding>(), completedAt = now }, token);
+        await Write(raw, new
+        {
+            fixture = true,
+            actualModelCall = false,
+            oppositeFamilyCertification = false,
+            registered.RequestIdentity,
+            request,
+            verdict = "ship",
+            findings = Array.Empty<ReviewFinding>(),
+            completedAt = now
+        }, token);
         var digest = Hash(await Read(raw, input, token));
         var execution = bootstrap.Host.RecordExecution(registered, capability, "middle-execution-" + input.Nonce,
             true, true, digest, "ship", now);
@@ -221,8 +280,14 @@ internal static class MiddleDriverComposition
         catch (InvalidWorkflowTransitionException) { denied = true; }
         if (!denied) throw new InvalidOperationException("Test review became production transition authority.");
         var ledger = Path.Combine(input.ArtifactRoot, "actual-middle-reviewer-fixture-ledger.json");
-        await Write(ledger, new { fixture = true, actualModelCalls = 0, calls = new[] { new { registered.RequestIdentity, raw, digest, capability.ProofIdentity } },
-            ownPinnedTestAcceptanceObserved = true, productionTransitionDenied = denied }, token);
+        await Write(ledger, new
+        {
+            fixture = true,
+            actualModelCalls = 0,
+            calls = new[] { new { registered.RequestIdentity, raw, digest, capability.ProofIdentity } },
+            ownPinnedTestAcceptanceObserved = true,
+            productionTransitionDenied = denied
+        }, token);
         files.Add(raw); files.Add(receipt); files.Add(ledger);
         return receipt;
     }
@@ -260,19 +325,38 @@ internal static class MiddleDriverComposition
         var policy = await new ProtectedGitPolicyResolver(executor, clone, input.RuntimeBaseCommit).ResolveAsync(".forge/evidence-policy.json", token);
         var reader = new GitRepositoryIdentityReader(executor, clone, input.RuntimeBaseCommit);
         var before = await reader.ReadAsync(token);
-        var configuration = JsonSerializer.SerializeToUtf8Bytes(new { fixture = true, invocation, originalCaseStarted = input.OriginalCaseStarted,
-            totalSeconds = 540, input.Mode, input.Nonce, frozenBase = input.RuntimeBaseCommit });
+        var configuration = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            fixture = true,
+            invocation,
+            originalCaseStarted = input.OriginalCaseStarted,
+            totalSeconds = 540,
+            input.Mode,
+            input.Nonce,
+            frozenBase = input.RuntimeBaseCommit
+        });
         var configPath = Path.Combine(input.ArtifactRoot, "actual-driver-gate-configuration.json"); await WriteBytes(configPath, configuration, token);
         var gate = await new GateRunner(executor, reader, clone, input.RuntimeBaseCommit).RunAsync(new("test", policy, detection.Capability,
             EvidenceAdapterKind.DotNet, Hash(configuration), before, invocation, "actual-middle-driver",
             Remaining(input, 75), Path.Combine(input.ArtifactRoot, "actual-driver-gates")), token);
         var provenance = Path.Combine(input.ArtifactRoot, "actual-driver-gate-provenance.json");
-        await Write(provenance, new { fixture = true, productionCertified = false, clone, detection, restored,
-            originalCaseStarted = input.OriginalCaseStarted, actualSdkHash = HashFile(host), actualProjectHash = HashFile(project),
+        await Write(provenance, new
+        {
+            fixture = true,
+            productionCertified = false,
+            clone,
+            detection,
+            restored,
+            originalCaseStarted = input.OriginalCaseStarted,
+            actualSdkHash = HashFile(host),
+            actualProjectHash = HashFile(project),
             actualLockHash = HashFile(Path.Combine(clone, "Subject.Tests", "packages.lock.json")),
-            actualPolicyHash = HashFile(Path.Combine(clone, ".forge", "evidence-policy.json")), trx, configurationPath = configPath,
+            actualPolicyHash = HashFile(Path.Combine(clone, ".forge", "evidence-policy.json")),
+            trx,
+            configurationPath = configPath,
             calls = executor.Calls,
-            limitation = "Actual fresh cold test/TRX gate in distinct original/calibration clone; SAME case clock, no certified quality PASS." }, token);
+            limitation = "Actual fresh cold test/TRX gate in distinct original/calibration clone; SAME case clock, no certified quality PASS."
+        }, token);
         return gate;
     }
 
@@ -403,19 +487,34 @@ internal static class MiddleDriverComposition
         if (after.Records.Any(record => record.Kind is "worker-completed" or "resumed")) throw new InvalidOperationException("Recovery minted completion/resume from stored bytes.");
         await Write(Path.Combine(input.ArtifactRoot, "recovery-result.json"), new
         {
-            fixture = true, productionCertified = false, input.Stage, input.Nonce, specificSafeRefusal = refusal,
-            oldBytesBecameAuthority = false, newWorkerLaunches = processes.GetAllOwnedIdentities().Count,
-            newCommandLaunches = processes.GetAllOwnedIdentities().Count, resumeCalls = host.Ledger.Count(result => result.Action == AgentControlAction.Resume),
-            signalOldNativeCalls = 0, newGateExecutions = 0, newReviewerCalls = 0, publicationCalls = 0, destructiveCleanupCalls = 0,
+            fixture = true,
+            productionCertified = false,
+            input.Stage,
+            input.Nonce,
+            specificSafeRefusal = refusal,
+            oldBytesBecameAuthority = false,
+            newWorkerLaunches = processes.GetAllOwnedIdentities().Count,
+            newCommandLaunches = processes.GetAllOwnedIdentities().Count,
+            resumeCalls = host.Ledger.Count(result => result.Action == AgentControlAction.Resume),
+            signalOldNativeCalls = 0,
+            newGateExecutions = 0,
+            newReviewerCalls = 0,
+            publicationCalls = 0,
+            destructiveCleanupCalls = 0,
             freshControllerOwnedNativeCount = processes.GetAllOwnedIdentities().Count,
             observedWorkerCompletedCount = after.Records.Count(record => record.Kind == "worker-completed"),
-            observedProcessRegisteredCount = registrationCount, recordedChildFreshControllerOutcome = childOutcome,
+            observedProcessRegisteredCount = registrationCount,
+            recordedChildFreshControllerOutcome = childOutcome,
             originalDriverPositivelyObservedChildExit = root.GetProperty("originalChildOutcome").GetString() == "AlreadyExited",
-            actualGateOutcome = gateOutcome, actualTrxPassed = root.GetProperty("actualTrxPassed").GetInt32(), actualTrxFailed = root.GetProperty("actualTrxFailed").GetInt32(),
+            actualGateOutcome = gateOutcome,
+            actualTrxPassed = root.GetProperty("actualTrxPassed").GetInt32(),
+            actualTrxFailed = root.GetProperty("actualTrxFailed").GetInt32(),
             originalReviewerCallsBeforeCrash = root.GetProperty("reviewerCallsBeforeCrash").GetInt32(),
             originalPinnedTestAcceptanceObserved = root.GetProperty("ownPinnedAcceptanceObserved").GetBoolean(),
-            freshPinnedReceiverRejectedOriginalReceipt = rejected, productionTransitionDenied = productionDenied,
-            independentlyReopenedDurableFiles = reopened, hostCallLedger = host.Ledger,
+            freshPinnedReceiverRejectedOriginalReceipt = rejected,
+            productionTransitionDenied = productionDenied,
+            independentlyReopenedDurableFiles = reopened,
+            hostCallLedger = host.Ledger,
             limitation = "No old PID adoption, SDK/reviewer rerun, publication or original runtime deletion. New source-view Dispose is not old-runtime cleanup."
         }, token);
     }
@@ -505,10 +604,18 @@ internal static class MiddleDriverComposition
         _ = Remaining(input, 1);
         await Write(Path.Combine(input.ArtifactRoot, "actual-fresh-required-gate-denial.json"), new
         {
-            fixture = true, productionCertified = false, receipt.Identity, canonicalOutcome = gate.GetProperty("outcome").GetString(),
-            freshSource = actualRepository, freshPolicy = policy, currentToolSha256 = HashFile(host), rawFiles,
-            actualRequiredGateTransition = "Evaluating -> IndependentReview", denial,
-            freshReadOnlyGitCalls = executor.Calls, newGateProducerExecutions = 0
+            fixture = true,
+            productionCertified = false,
+            receipt.Identity,
+            canonicalOutcome = gate.GetProperty("outcome").GetString(),
+            freshSource = actualRepository,
+            freshPolicy = policy,
+            currentToolSha256 = HashFile(host),
+            rawFiles,
+            actualRequiredGateTransition = "Evaluating -> IndependentReview",
+            denial,
+            freshReadOnlyGitCalls = executor.Calls,
+            newGateProducerExecutions = 0
         }, token);
         return ("Incomplete", counts.Passed, counts.Failed);
     }

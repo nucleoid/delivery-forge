@@ -74,10 +74,21 @@ internal static class EarlyDriverComposition
         await WriteJson(Path.Combine(input.ArtifactRoot, "setup-complete-" + input.Nonce + ".json"), new { fixture = true, input.Stage, input.Nonce }, token);
         await WriteJson(Path.Combine(input.ArtifactRoot, "ready-" + input.Stage + "-" + input.Nonce + ".json"), new
         {
-            fixture = true, productionCertified = false, input.Stage, input.Nonce, frozenBaseCommit = plan.BaseCommit,
-            input.IntegratedBaseCommit, planContractPath = contract, planBundlePath = bundle, storeRoot = store.RootPath, runId,
-            durableFiles = files, observedKinds = history.Records.Select(record => record.Kind).ToArray(),
-            childNaturalSeconds = 15, plan.ContractIdentity, limitation = "Diagnostic bytes do not import live FrozenPlan/ticket/process authority."
+            fixture = true,
+            productionCertified = false,
+            input.Stage,
+            input.Nonce,
+            frozenBaseCommit = plan.BaseCommit,
+            input.IntegratedBaseCommit,
+            planContractPath = contract,
+            planBundlePath = bundle,
+            storeRoot = store.RootPath,
+            runId,
+            durableFiles = files,
+            observedKinds = history.Records.Select(record => record.Kind).ToArray(),
+            childNaturalSeconds = 15,
+            plan.ContractIdentity,
+            limitation = "Diagnostic bytes do not import live FrozenPlan/ticket/process authority."
         }, token);
         await WaitFile(Path.Combine(input.ArtifactRoot, "release-" + input.Nonce), TimeSpan.FromSeconds(15), token);
         if (await File.ReadAllTextAsync(Path.Combine(input.ArtifactRoot, "release-" + input.Nonce), token) != input.Nonce)
@@ -92,8 +103,14 @@ internal static class EarlyDriverComposition
             if (!await scheduler.StopAsync(token)) throw new InvalidOperationException("Normal-release actual owner closure failed: " + scheduler.CleanupLimitation);
         }
         execution.Dispose();
-        await WriteJson(Path.Combine(input.ArtifactRoot, "normal-release-result.json"), new { fixture = true, input.Stage,
-            actualReadyReached = true, normalReleaseInsteadOfKill = true, limitation = "Normal release calibration only; no model-worker certification." }, token);
+        await WriteJson(Path.Combine(input.ArtifactRoot, "normal-release-result.json"), new
+        {
+            fixture = true,
+            input.Stage,
+            actualReadyReached = true,
+            normalReleaseInsteadOfKill = true,
+            limitation = "Normal release calibration only; no model-worker certification."
+        }, token);
     }
 
     private static async Task RecoverAsync(DriverInput input, CancellationToken token)
@@ -158,17 +175,29 @@ internal static class EarlyDriverComposition
         execution.Dispose();
         await WriteJson(Path.Combine(input.ArtifactRoot, "recovery-result.json"), new
         {
-            fixture = true, productionCertified = false, input.Stage, input.Nonce, specificSafeRefusal = refusal, ownerReason,
-            newWorkerLaunches = processes.GetAllOwnedIdentities().Count, resumeCalls = host.Ledger.Count(item => item.Action == AgentControlAction.Resume),
-            signalOldNativeCalls = signalsToOldNative, publicationCalls = 0, destructiveCleanupCalls = 0, oldTicketOrReceiptBecameAuthority = false,
+            fixture = true,
+            productionCertified = false,
+            input.Stage,
+            input.Nonce,
+            specificSafeRefusal = refusal,
+            ownerReason,
+            newWorkerLaunches = processes.GetAllOwnedIdentities().Count,
+            resumeCalls = host.Ledger.Count(item => item.Action == AgentControlAction.Resume),
+            signalOldNativeCalls = signalsToOldNative,
+            publicationCalls = 0,
+            destructiveCleanupCalls = 0,
+            oldTicketOrReceiptBecameAuthority = false,
             freshControllerOwnedNativeCount = processes.GetAllOwnedIdentities().Count,
             observedWorkerPreparedCount = after.Records.Count(item => item.Kind == "worker-prepared"),
             observedWorkerAcceptedCount = after.Records.Count(item => item.Kind == "worker-accepted"),
             observedProcessRegisteredCount = after.Records.Count(item => item.Kind == "process-registered"),
             observedWorkerCompletedCount = after.Records.Count(item => item.Kind == "worker-completed"),
-            independentlyReopenedDurableFiles = reopened, recordedChildFreshControllerOutcome = childOutcome,
-            unknownChildRetainsResources = unknownChild, externalHostFixtureExplicitlyMarked = host.Ledger.Count != 0,
-            hostCallLedger = host.Ledger, retained = true,
+            independentlyReopenedDurableFiles = reopened,
+            recordedChildFreshControllerOutcome = childOutcome,
+            unknownChildRetainsResources = unknownChild,
+            externalHostFixtureExplicitlyMarked = host.Ledger.Count != 0,
+            hostCallLedger = host.Ledger,
+            retained = true,
             limitation = "Unknown registry membership never adopts/signals stored PIDs; no publication/cleanup capability configured."
         }, token);
     }
