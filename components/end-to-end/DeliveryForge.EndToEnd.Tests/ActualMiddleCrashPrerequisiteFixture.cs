@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using System.Xml;
 using System.Xml.Linq;
 using DeliveryForge.Contracts.Serialization;
+using DeliveryForge.Contracts.Models;
 using DeliveryForge.Contracts.State;
 using DeliveryForge.Contracts.Validation;
 using DeliveryForge.Evidence;
@@ -71,7 +72,7 @@ internal static class ActualMiddleCrashPrerequisiteFixture
                 root.ReviewPolicyAuthorityKind, root.SourceAuthorityIdentity, root.SourceRoot, root.ProtectedBaseCommit, root.ProtectedObjectViewIdentity);
             var receiver = bootstrap.Host.CreateTransitionReceiver(contextData);
             var patch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, source.BaseCommit, source.HeadCommit,
-                source.Plan.ContractIdentity, [], token);
+                source.Plan.ContractIdentity, new Dictionary<string, string>(), token);
             var reviewer = new ReviewerCapability("explicit-middle-review-fixture", "1.0.0", "claude", true, true, false, ["source"]);
             var request = new ReviewRequest(patch, "gpt", reviewer, "source", bootstrap.Policy.PolicyIdentity);
             var registered = bootstrap.Host.RegisterRequest(contextData.RequestIdentity, request, contextData);
