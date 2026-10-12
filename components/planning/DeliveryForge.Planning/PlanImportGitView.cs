@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
+using System.Text;
 using Microsoft.Win32.SafeHandles;
 
 namespace DeliveryForge.Planning;
@@ -36,7 +37,21 @@ internal sealed class PlanImportGitView : IDisposable
             {
                 life.Check(); var path = Path.Combine(_directory, file.Key.Replace('/', Path.DirectorySeparatorChar));
                 Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                _carriers.Add(new Carrier(path, file.Value)); life.Check();
+                string? symbolicHead = null;
+                if (OperatingSystem.IsLinux() && file.Key == "HEAD")
+                {
+                    // Git validates HEAD symlinks as legacy refs/ symbolic references,
+                    // not as ordinary file links. A /proc FD link is not a repository HEAD.
+                    var text = new UTF8Encoding(false, true).GetString(file.Value);
+                    if (!text.StartsWith("ref: refs/", StringComparison.Ordinal))
+                        throw new PlanningException("Detached or unsupported HEAD cannot be reconciled as a fresh branch import.");
+                    symbolicHead = text[5..].TrimEnd('\r', '\n');
+                    if (!symbolicHead.StartsWith("refs/", StringComparison.Ordinal) || symbolicHead.Length > 240 ||
+                        symbolicHead.Any(char.IsWhiteSpace) || symbolicHead.Contains('\\') || symbolicHead.Contains('\0') ||
+                        symbolicHead.Split('/').Any(part => part is "" or "." or ".."))
+                        throw new PlanningException("Unsupported original HEAD symbolic reference.");
+                }
+                _carriers.Add(new Carrier(path, file.Value, symbolicHead)); life.Check();
             }
             Verify();
         }
@@ -69,7 +84,8 @@ internal sealed class PlanImportGitView : IDisposable
         private readonly SafeFileHandle? _handle;
         private readonly FileStream? _windows;
         private readonly object? _windowsIdentity;
-        internal Carrier(string path, byte[] bytes)
+        private readonly bool _symbolicHead;
+        internal Carrier(string path, byte[] bytes, string? symbolicHead)
         {
             _path = path;
             if (OperatingSystem.IsLinux())
@@ -83,7 +99,8 @@ internal sealed class PlanImportGitView : IDisposable
                     { output.Write(bytes); output.Flush(); }
                     if (Fcntl(descriptor, 1033, 15) != 0 || Fcntl(descriptor, 1034, 0) != 15) // F_ADD/GET_SEALS; SEAL/SHRINK/GROW/WRITE
                         throw new PlanningException("Original import metadata sealing failed.");
-                    _target = "/proc/" + Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/fd/" + descriptor.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    _symbolicHead = symbolicHead is not null;
+                    _target = symbolicHead ?? "/proc/" + Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/fd/" + descriptor.ToString(System.Globalization.CultureInfo.InvariantCulture);
                     File.CreateSymbolicLink(path, _target); Verify();
                 }
                 catch { _handle.Dispose(); throw; }
@@ -106,6 +123,9 @@ internal sealed class PlanImportGitView : IDisposable
                     _handle.DangerousAddRef(ref pinned); var descriptor = checked((int)_handle.DangerousGetHandle().ToInt64());
                     if (_handle.IsClosed || Fcntl(descriptor, 1034, 0) != 15 || new FileInfo(_path).LinkTarget != _target)
                         throw new PlanningException("Original sealed import metadata carrier changed.");
+                    if (_symbolicHead && (!_target!.StartsWith("refs/", StringComparison.Ordinal) ||
+                        !Path.GetFullPath(Path.Combine(Path.GetDirectoryName(_path)!, _target)).StartsWith(Path.GetDirectoryName(_path)! + Path.DirectorySeparatorChar, StringComparison.Ordinal)))
+                        throw new PlanningException("Original symbolic HEAD escaped its private reference namespace.");
                 }
                 finally { if (pinned) _handle.DangerousRelease(); }
             }
