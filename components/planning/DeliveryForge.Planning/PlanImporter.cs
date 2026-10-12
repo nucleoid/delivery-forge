@@ -35,11 +35,17 @@ public static class PlanImporter
             throw new ArgumentOutOfRangeException(nameof(entireBudget));
         if (richBundle.Length is 0 or > MaximumBundleBytes)
             throw new PlanningException("Rich planning bundle exceeds the bounded import byte allowance.");
+        if (string.IsNullOrWhiteSpace(source.TrustedGitExecutable) || !System.IO.Path.IsPathFullyQualified(source.TrustedGitExecutable))
+            throw new PlanningException("An explicit absolute trusted Git executable is required for import; ambient fallback is refused.");
         using var life = new PlanImportLifetime(entireBudget, cancellationToken);
-        // Snapshot caller memory before any asynchronous handoff. All later checks
-        // use these same owned bytes, never a mutable caller view.
-        var ownedBundle = richBundle.ToArray();
-        life.Check();
+        // Own caller bytes before the first asynchronous handoff.
+        var ownedBundle = richBundle.ToArray(); life.Check();
+        // Plain existing regular selection BEFORE any source namespace/helper access.
+        await life.Observe(() =>
+        {
+            try { using var selected = new PlanImportFilesystem.FileBinding(source.TrustedGitExecutable); selected.Verify(); return true; }
+            catch (PlanningException error) { throw new PlanningException("Explicit trusted Git executable must be a plain existing regular file: " + error.Message); }
+        });
         using var codec = await life.Observe(() => new RichPlanImportCodec(ownedBundle));
         var material = codec.Material;
         RichPlanImportCodec.Require(codec.Identity == expectations.BundleIdentity && codec.ContractIdentity == expectations.ContractIdentity,
@@ -57,7 +63,11 @@ public static class PlanImporter
         if (requirement == "required" && freshImportedContext is null) return NotReady("Required imported context must be freshly supplied and verified; saved availability is not proof.");
         var fresh = await life.Observe(() => CaptureFreshEnvelope(freshImportedContext));
         using var root = await life.Observe(() => new PlanImportFilesystem.DirectoryBinding(System.IO.Path.GetFullPath(source.RepositoryRoot)));
-        var reader = await life.Observe(() => GitRepositoryContextReader.ForImport(source.TrustedGitExecutable, life));
+        PlanImportGitView view;
+        try { view = await life.Observe(() => new PlanImportGitView(source.RepositoryRoot, source.TrustedGitExecutable, life)); }
+        catch (PlanningException error) { return NotReady(error.Message); }
+        using var ownedView = view;
+        var reader = await life.Observe(() => GitRepositoryContextReader.ForImport(source.TrustedGitExecutable, life, view));
         PlanImportSourceSnapshot before;
         try { before = await PlanImportSourceSnapshot.Capture(source.RepositoryRoot, reader, life); }
         catch (PlanningException error) { return NotReady(error.Message); }

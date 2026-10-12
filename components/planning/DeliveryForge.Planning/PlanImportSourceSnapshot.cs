@@ -3,30 +3,15 @@ using System.Text;
 
 namespace DeliveryForge.Planning;
 
-internal sealed record PlanImportSourceSnapshot(string IndexHash, string ConfigurationHash, string WorktreeHash, string Flags,
+internal sealed record PlanImportSourceSnapshot(string MetadataHash, string IndexHash, string ConfigurationHash, string WorktreeHash, string Flags,
     string Head, string Status)
 {
     private static readonly UTF8Encoding Utf8 = new(false, true);
     internal static async Task<PlanImportSourceSnapshot> Capture(string root, GitRepositoryContextReader reader, PlanImportLifetime life)
     {
-        var metadata = Path.Combine(root, ".git");
-        if (!await life.Observe(() => Directory.Exists(metadata)))
-        {
-            var marker = Utf8.GetString(await life.Observe(() => PlanImportFilesystem.Read(metadata, 4096, life))).Trim();
-            RichPlanImportCodec.Require(marker.StartsWith("gitdir: ", StringComparison.Ordinal), "Unsupported worktree metadata marker.");
-            metadata = Path.GetFullPath(marker[8..], root);
-        }
-        await life.Observe(() => { PlanImportFilesystem.Plain(metadata); return true; });
-        var common = metadata;
-        var commonMarker = Path.Combine(metadata, "commondir");
-        if (await life.Observe(() => File.Exists(commonMarker)))
-            common = Path.GetFullPath(Utf8.GetString(await life.Observe(() => PlanImportFilesystem.Read(commonMarker, 4096, life))).Trim(), metadata);
-        await life.Observe(() => { PlanImportFilesystem.Plain(common); return true; });
-        var config = await life.Observe(() => PlanImportFilesystem.Read(Path.Combine(common, "config"), 1024 * 1024, life));
-        ValidateConfiguration(Utf8.GetString(config)); // BEFORE status/filter-capable Git or repository reader.
-        foreach (var path in new[] { Path.Combine(metadata, "config.worktree"), Path.Combine(common, "info", "grafts"), Path.Combine(common, "objects", "info", "alternates") })
-            if (await life.Observe(() => Path.Exists(path))) throw new PlanningException("Import Git routing/external object authority is unsupported.");
-        var index = await life.Observe(() => PlanImportFilesystem.Read(Path.Combine(metadata, "index"), 16 * 1024 * 1024, life));
+        var actualMetadata = await life.Observe(() => PlanImportGitMetadata.Read(root, life));
+        var config = actualMetadata.Files["config"]; var index = actualMetadata.Files["index"];
+        RichPlanImportCodec.Require(actualMetadata.Digest == reader.ImportMetadataDigest, "Actual Git metadata changed from the frozen original import view.");
         var flags = Utf8.GetString(await life.Run(() => reader.ImportGitBytes(root, life.Token, "ls-files", "-v", "-z")));
         var entries = flags.Split('\0', StringSplitOptions.RemoveEmptyEntries);
         RichPlanImportCodec.Require(entries.Length <= 100_000 && entries.All(entry => entry.Length > 2 && entry[0] == 'H'),
@@ -58,10 +43,10 @@ internal sealed record PlanImportSourceSnapshot(string IndexHash, string Configu
         var head = Utf8.GetString(await life.Run(() => reader.ImportGitBytes(root, life.Token, "rev-parse", "--verify", "HEAD^{commit}"))).Trim();
         var status = Utf8.GetString(await life.Run(() => reader.ImportGitBytes(root, life.Token, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching")));
         life.Check();
-        return new(Convert.ToHexStringLower(SHA256.HashData(index)), Convert.ToHexStringLower(SHA256.HashData(config)),
+        return new(actualMetadata.Digest, Convert.ToHexStringLower(SHA256.HashData(index)), Convert.ToHexStringLower(SHA256.HashData(config)),
             Convert.ToHexStringLower(worktree.GetHashAndReset()), flags, head, status);
     }
-    private static void ValidateConfiguration(string text)
+    internal static void ValidateConfiguration(string text)
     {
         if (text.Contains('\0') || text.Contains('\\')) throw new PlanningException("Escaped/continued import Git configuration is unsupported.");
         var section = "";

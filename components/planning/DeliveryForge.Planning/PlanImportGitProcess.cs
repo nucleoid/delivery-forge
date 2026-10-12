@@ -10,18 +10,21 @@ public sealed partial class GitRepositoryContextReader
     // disposed as a substitute for observing completion, and never grant readiness.
     private sealed record ImportGitObservation(Task[] Tasks, IReadOnlyList<Exception> Errors);
     private static readonly ConcurrentDictionary<Process, ImportGitObservation> RetainedImportGit = new();
+    private readonly ConcurrentDictionary<Process, byte> _importOriginals = new();
+    internal bool HasUnsettledImportProcess => !_importOriginals.IsEmpty;
     private async Task<GitResult> RunImportProcess(ProcessStartInfo startInfo, CancellationToken caller, bool allowFailure)
     {
         caller.ThrowIfCancellationRequested();
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(caller);
         timeout.CancelAfter(GitOperationTimeout);
         var original = new Process { StartInfo = startInfo };
+        _importOriginals.TryAdd(original, 0);
         Task<byte[]>? stdout = null; Task<byte[]>? stderr = null; Task? exit = null; Task? cleanupExit = null;
         var errors = new List<Exception>();
         var started = false;
         try
         {
-            _importLifetime!.Check();
+            _importLifetime!.Check(); _importView!.Verify();
             if (!original.Start()) throw new PlanningException("Unable to start import Git.");
             started = true;
             stdout = ReadBoundedAsync(original.StandardOutput.BaseStream, timeout.Token);
@@ -64,7 +67,7 @@ public sealed partial class GitRepositoryContextReader
             var closed = !started;
             if (started && stdout is not null && stderr is not null && exit is not null && tasks.All(task => task.Status == TaskStatus.RanToCompletion))
             { try { closed = original.HasExited; } catch (InvalidOperationException) { closed = false; } }
-            if (closed) { RetainedImportGit.TryRemove(original, out _); original.Dispose(); }
+            if (closed) { RetainedImportGit.TryRemove(original, out _); _importOriginals.TryRemove(original, out _); original.Dispose(); }
             else RetainedImportGit[original] = new(tasks, errors.ToArray()); // Pending/error observations remain rooted, not closure proof.
         }
     }

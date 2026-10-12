@@ -6,6 +6,7 @@ namespace DeliveryForge.Planning;
 internal sealed class PlanImportLifetime : IDisposable
 {
     private static readonly ConcurrentDictionary<Task, PlanImportLifetime> Retained = new();
+    private readonly ConcurrentDictionary<Task, byte> _actual = new();
     private readonly long _started = Stopwatch.GetTimestamp();
     private readonly TimeSpan _total;
     private readonly CancellationTokenSource _wall;
@@ -18,6 +19,7 @@ internal sealed class PlanImportLifetime : IDisposable
     internal void Check() => _ = Remaining();
     internal async Task<T> Wait<T>(Task<T> actual)
     {
+        _actual.TryAdd(actual, 0);
         _ = actual.ContinueWith(task => _ = task.Exception, CancellationToken.None,
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         try { var value = await actual.WaitAsync(Remaining(), Token).ConfigureAwait(false); Check(); return value; }
@@ -27,6 +29,7 @@ internal sealed class PlanImportLifetime : IDisposable
     { Check(); return Wait(Task.Run(() => { Check(); return operation(); }, CancellationToken.None)); }
     internal Task<T> Run<T>(Func<Task<T>> operation)
     { Check(); return Wait(Task.Run(() => { Check(); return operation(); }, CancellationToken.None)); }
+    internal bool HasPendingTasks => _actual.Keys.Any(task => !task.IsCompleted);
     public void Dispose()
     { try { _wall.Cancel(); } finally { _wall.Dispose(); } } // Request only, never native/source-settlement proof.
 }

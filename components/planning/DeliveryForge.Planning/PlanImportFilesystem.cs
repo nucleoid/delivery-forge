@@ -6,6 +6,18 @@ namespace DeliveryForge.Planning;
 // Private original handles bind source namespace; observations never grant filesystem control.
 internal static class PlanImportFilesystem
 {
+    internal sealed class FileBinding : IDisposable
+    {
+        private readonly string _path;
+        private readonly SafeFileHandle _handle;
+        private readonly Identity _identity;
+        internal FileBinding(string path)
+        { _path = path; Plain(path); _handle = Open(path, false);
+            try { _identity = Held(_handle, false); Verify(); } catch { _handle.Dispose(); throw; } }
+        internal void Verify()
+        { Plain(_path); using var current = Open(_path, false); if (Held(current, false) != _identity || Held(_handle, false) != _identity) throw new PlanningException("Original explicit Git file namespace changed."); }
+        public void Dispose() => _handle.Dispose();
+    }
     internal sealed class DirectoryBinding : IDisposable
     {
         private readonly string _path;
@@ -80,6 +92,19 @@ internal static class PlanImportFilesystem
         if (Statx(fd, path, flags, 0x101, out var info) != 0 || (info.Mask & 0x101) != 0x101 ||
             (info.Mode & 0xF000) != (directory ? 0x4000 : 0x8000) || info.Inode == 0) throw new PlanningException("Original import regular/directory kind or inode unavailable.");
         return new(((ulong)info.Major << 32) | info.Minor, info.Inode, 0);
+    }
+    internal static object CaptureFileIdentity(SafeFileHandle handle) => Held(handle, false);
+    internal static void VerifyFileIdentity(string path, SafeFileHandle original, object expected)
+    {
+        Plain(path);
+        if (expected is not Identity identity) throw new PlanningException("Original immutable metadata identity unavailable.");
+        if (OperatingSystem.IsWindows())
+        {
+            using var current = WindowsOpen(path, 0, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero, FileMode.Open, 0x00200000 | 0x02000000, IntPtr.Zero);
+            if (current.IsInvalid || Held(current, false) != identity || Held(original, false) != identity)
+                throw new PlanningException("Original immutable metadata file namespace changed.");
+        }
+        else throw new PlanningException("This identity verifier is Windows-only.");
     }
     private sealed record Identity(ulong Device, ulong Low, ulong High);
     [StructLayout(LayoutKind.Explicit, Size = 256)] private struct LinuxInfo
