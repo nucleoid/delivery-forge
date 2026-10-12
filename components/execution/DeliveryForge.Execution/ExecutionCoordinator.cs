@@ -416,23 +416,23 @@ public sealed class ExecutionCoordinator : IDisposable
             limitations.Add("Fresh checkpoint was not observed while the original host control remains unsettled; current bound cleanup is required after actual task settlement.");
         }
         else try
-        {
-            var worktree = await _worktrees.ObserveAsync(prepared.Request.Worktree, cancellationToken).ConfigureAwait(false);
-            await _worktrees.EnsureDescendsFromAsync(prepared.Request.Worktree, prepared.Request.BaseCommit,
-                worktree.HeadCommit, cancellationToken).ConfigureAwait(false);
-            var facts = await ObserveOwnedFactsAsync(prepared.Request, worktree, true, cancellationToken).ConfigureAwait(false);
-            limitations.Add("External dependency, lease, and authorization-revocation facts belong to later adapters and are not claimed by the issue #5 core.");
-            checkpoint = new AgentCheckpoint(prepared.Request.RequestIdentity, worktree.HeadCommit, worktree.TreeId,
-                worktree.StatusEntries, worktree.Snapshot, observedProcessState, facts.RequiredArtifactPaths, facts, limitations.ToArray(),
-                requestedState == WorkflowState.Paused
-                    ? "Re-observe request/plan/base/authorization facts owned by this core, Git, declared artifacts, writer ownership, adapter activity, and process identity before resume dispatch."
-                    : "Stopped terminally; preserve the assigned worktree and evidence until separately authorized cleanup.");
-        }
-        catch (Exception exception)
-        {
-            quiescent = false;
-            limitations.Add($"Post-control checkpoint observation failed: {exception.Message}");
-        }
+            {
+                var worktree = await _worktrees.ObserveAsync(prepared.Request.Worktree, cancellationToken).ConfigureAwait(false);
+                await _worktrees.EnsureDescendsFromAsync(prepared.Request.Worktree, prepared.Request.BaseCommit,
+                    worktree.HeadCommit, cancellationToken).ConfigureAwait(false);
+                var facts = await ObserveOwnedFactsAsync(prepared.Request, worktree, true, cancellationToken).ConfigureAwait(false);
+                limitations.Add("External dependency, lease, and authorization-revocation facts belong to later adapters and are not claimed by the issue #5 core.");
+                checkpoint = new AgentCheckpoint(prepared.Request.RequestIdentity, worktree.HeadCommit, worktree.TreeId,
+                    worktree.StatusEntries, worktree.Snapshot, observedProcessState, facts.RequiredArtifactPaths, facts, limitations.ToArray(),
+                    requestedState == WorkflowState.Paused
+                        ? "Re-observe request/plan/base/authorization facts owned by this core, Git, declared artifacts, writer ownership, adapter activity, and process identity before resume dispatch."
+                        : "Stopped terminally; preserve the assigned worktree and evidence until separately authorized cleanup.");
+            }
+            catch (Exception exception)
+            {
+                quiescent = false;
+                limitations.Add($"Post-control checkpoint observation failed: {exception.Message}");
+            }
 
         var terminalReconciliation = reconcileTerminal && current is WorkflowState.Stopped or WorkflowState.Blocked or WorkflowState.Failed or WorkflowState.LocalComplete;
         var target = quiescent ? requestedState : WorkflowState.Blocked;
