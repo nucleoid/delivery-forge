@@ -8,6 +8,22 @@ namespace DeliveryForge.Planning;
 
 public static class PlanFreezer
 {
+    // Import shares the producer validation/identity projection. Supersedes is a
+    // validated portable DATA reference, never a reconstructed predecessor capability.
+    internal static FrozenPlan RestoreForImport(PlanDraft draft, string revision, DateTimeOffset createdAt, string? supersedes)
+    {
+        var frozen = Freeze(draft, revision, createdAt);
+        if (supersedes is null) return frozen;
+        var envelope = JsonNode.Parse(frozen.CanonicalBytes)!.AsObject();
+        envelope["supersedes"] = supersedes;
+        envelope["identity"] = CanonicalJson.ComputeIdentity(JsonSerializer.SerializeToUtf8Bytes(envelope));
+        var bytes = CanonicalJson.Canonicalize(JsonSerializer.SerializeToUtf8Bytes(envelope));
+        return new FrozenPlan(CanonicalJson.ComputeIdentity(bytes), frozen.ContractIdentity, frozen.Revision,
+            frozen.PlanRevision, frozen.ContentDigest, supersedes, frozen.Repository, frozen.WorkItem,
+            draft.Repository.RepositoryRoot, draft.Repository.RequestedRef, draft.Repository.ExactBranchReferenceVerified,
+            draft.Repository.DetachedHead, frozen.BaseCommit, frozen.BaseTree, bytes, frozen.PlanContractBytes,
+            frozen.DownstreamReady, frozen.Limitations);
+    }
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -401,22 +417,18 @@ public static class PlanFreezer
             }
         }
 
-        var visiting = new HashSet<string>(StringComparer.Ordinal);
-        var visited = new HashSet<string>(StringComparer.Ordinal);
-        bool Visit(string id)
+        var pending = byId.ToDictionary(pair => pair.Key, pair => pair.Value.DependsOn.Distinct(StringComparer.Ordinal).Count(byId.ContainsKey), StringComparer.Ordinal);
+        var children = byId.Keys.ToDictionary(id => id, _ => new List<string>(), StringComparer.Ordinal);
+        foreach (var node in byId.Values)
+            foreach (var parent in node.DependsOn.Distinct(StringComparer.Ordinal).Where(byId.ContainsKey)) children[parent].Add(node.Id);
+        var ready = new Queue<string>(pending.Where(pair => pair.Value == 0).Select(pair => pair.Key));
+        var visited = 0;
+        while (ready.TryDequeue(out var id))
         {
-            if (!visiting.Add(id)) return false;
-            if (visited.Contains(id)) { visiting.Remove(id); return true; }
-            foreach (var dependency in byId[id].DependsOn.Where(byId.ContainsKey))
-            {
-                if (!Visit(dependency)) return false;
-            }
-            visiting.Remove(id);
-            visited.Add(id);
-            return true;
+            visited++;
+            foreach (var child in children[id]) if (--pending[child] == 0) ready.Enqueue(child);
         }
-
-        if (byId.Keys.Any(id => !visited.Contains(id) && !Visit(id))) failures.Add("dependency DAG contains a cycle");
+        if (visited != byId.Count) failures.Add("dependency DAG contains a cycle");
     }
 
     private static void ValidatePortablePlan(PlanDraft draft, string revision, List<string> failures)
@@ -496,7 +508,7 @@ public static class PlanFreezer
         _ => throw new PlanningException("Evidence producer kind is not recognized.")
     };
 
-    private static string CaveatWireValue(EvidenceCaveatCode value) => value switch
+    internal static string CaveatWireValue(EvidenceCaveatCode value) => value switch
     {
         EvidenceCaveatCode.Stale => "stale",
         EvidenceCaveatCode.Truncated => "truncated",
@@ -511,7 +523,7 @@ public static class PlanFreezer
         _ => throw new PlanningException("Evidence caveat code is not recognized.")
     };
 
-    private static string MeaningWireValue(ImportedMeaningCode value) => value switch
+    internal static string MeaningWireValue(ImportedMeaningCode value) => value switch
     {
         ImportedMeaningCode.AdditionalRepositoryEvidence => "additional-repository-evidence",
         ImportedMeaningCode.RepositoryConflict => "repository-conflict",
@@ -520,7 +532,7 @@ public static class PlanFreezer
         _ => throw new PlanningException("Imported meaning code is not recognized.")
     };
 
-    private static string NoticeWireValue(PlanningNoticeCode value) => value switch
+    internal static string NoticeWireValue(PlanningNoticeCode value) => value switch
     {
         PlanningNoticeCode.PrivateAdvisoryConflictReported => "private-advisory-conflict-reported",
         PlanningNoticeCode.PrivateAdvisoryLimitationReported => "private-advisory-limitation-reported",
