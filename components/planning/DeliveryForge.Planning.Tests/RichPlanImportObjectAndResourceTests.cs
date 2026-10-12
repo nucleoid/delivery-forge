@@ -27,6 +27,7 @@ public sealed class RichPlanImportObjectAndResourceTests
             }, CancellationToken.None));
             var result = await repository.Wait(PlanImporter.ImportAndReconcileAsync(setup.Plan.CanonicalBytes,
                 setup.Source, setup.Expectations, repository.WorkRemaining(), cancellationToken: repository.WorkToken));
+            await Diagnostic(repository, setup, result);
             if (directories == 600)
             {
                 Assert.False(result.DownstreamReady); Assert.Null(result.Plan);
@@ -34,7 +35,7 @@ public sealed class RichPlanImportObjectAndResourceTests
             }
             else
             {
-                Assert.True(result.DownstreamReady); Assert.NotNull(result.Plan);
+                Assert.True(result.DownstreamReady, string.Join("; ", result.Diagnostics)); Assert.NotNull(result.Plan);
                 Assert.Equal(setup.Plan.CanonicalBytes, result.Plan.CanonicalBytes);
                 Assert.True(result.Resources.MaximumDiscoveredReferenceDirectories >= directories);
             }
@@ -85,7 +86,7 @@ public sealed class RichPlanImportObjectAndResourceTests
             if (alternate)
             {
                 var arrivalPath = Path.Combine(setup.HelperRoot, "alternate-entered.json");
-                await Arrival(repository, arrivalPath);
+                await Arrival(repository, setup, arrivalPath, operation);
                 using var arrival = JsonDocument.Parse(await repository.Wait(File.ReadAllBytesAsync(arrivalPath, repository.WorkToken)));
                 Assert.Equal(setup.Nonce, arrival.RootElement.GetProperty("Nonce").GetString());
                 Assert.Equal(storedHash, arrival.RootElement.GetProperty("originalBlobSha").GetString());
@@ -98,6 +99,7 @@ public sealed class RichPlanImportObjectAndResourceTests
             PlanImportResult? result = null; Exception? importFailure = null;
             try { result = await repository.Wait(operation); }
             catch (Exception failure) { importFailure = failure; }
+            if (result is not null) await Diagnostic(repository, setup, result);
             if (alternate)
             {
                 using var observation = JsonDocument.Parse(await repository.Wait(File.ReadAllBytesAsync(
@@ -116,7 +118,7 @@ public sealed class RichPlanImportObjectAndResourceTests
                 Assert.False(data.GetProperty("externalRoutingConsumed").GetBoolean());
             }
             if (importFailure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(importFailure).Throw();
-            Assert.NotNull(result); Assert.True(result.DownstreamReady); Assert.NotNull(result.Plan);
+            Assert.NotNull(result); Assert.True(result.DownstreamReady, string.Join("; ", result.Diagnostics)); Assert.NotNull(result.Plan);
             Assert.Equal(setup.Plan.CanonicalBytes, result.Plan.CanonicalBytes);
             Assert.Equal(storedHash, Hash(await repository.Wait(File.ReadAllBytesAsync(originalBlob, repository.WorkToken))));
             Assert.False(Path.Exists(Path.Combine(repository.Root, ".git", "objects", "info", "alternates")));
@@ -147,7 +149,8 @@ public sealed class RichPlanImportObjectAndResourceTests
     }
 
     private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
-    private static async Task Arrival(ImportRepositoryFixture repository, string path)
+    private static async Task Arrival(ImportRepositoryFixture repository, RichPlanImportGitSafetyTests.Setup setup,
+        string path, Task<PlanImportResult> operation)
     {
         var started = Stopwatch.GetTimestamp();
         while (true)
@@ -158,8 +161,29 @@ public sealed class RichPlanImportObjectAndResourceTests
             _ = repository.WorkRemaining();
             if (Stopwatch.GetElapsedTime(started) >= TimeSpan.FromSeconds(10)) throw new TimeoutException("Late alternate arrival refused.");
             if (exists) return;
+            if (operation.IsCompleted)
+            {
+                var result = await repository.Wait(operation);
+                await Diagnostic(repository, setup, result);
+                throw new IOException("Import returned before genuine alternate barrier: " + string.Join("; ", result.Diagnostics));
+            }
             await Task.Delay(20, repository.WorkToken);
         }
+    }
+    private static async Task Diagnostic(ImportRepositoryFixture repository, RichPlanImportGitSafetyTests.Setup setup,
+        PlanImportResult result)
+    {
+        // Bounded fixture DATA only; actual public result, never a readiness capability.
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new
+        { fixture = true, setup.Nonce, result.DownstreamReady, result.Diagnostics, result.Resources });
+        if (bytes.Length > 64 * 1024) throw new IOException("Actual import diagnostic exceeds64KiB.");
+        _ = await repository.Wait(Task.Run(() =>
+        {
+            _ = repository.WorkRemaining();
+            var path = Path.Combine(setup.HelperRoot, "public-import-result-" + Guid.NewGuid().ToString("N") + ".json");
+            using var stream = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            stream.Write(bytes); stream.Flush(true); _ = repository.WorkRemaining(); return true;
+        }, CancellationToken.None));
     }
     private static async Task Release(ImportRepositoryFixture repository, RichPlanImportGitSafetyTests.Setup setup, bool cleanup)
     {
