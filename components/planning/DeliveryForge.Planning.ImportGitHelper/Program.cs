@@ -80,6 +80,7 @@ var originalConfigPath = Path.Combine(config.Repository, ".git", "config");
 byte[]? originalConfig = null;
 Process? original = null; Task<byte[]>? stdout = null; Task<byte[]>? stderr = null; Task? exit = null;
 Exception? primary = null; var secondary = new List<Exception>(); var childExit = -1;
+byte[]? stdoutBytes = null; byte[]? stderrBytes = null;
 var cleanupTasks = new List<Task>();
 try
 {
@@ -127,8 +128,9 @@ try
             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
     await Task.WhenAll(stdout, stderr, exit).WaitAsync(Remaining(), deadline.Token); _ = Remaining();
     childExit = original.ExitCode;
-    await Console.OpenStandardOutput().WriteAsync(await stdout, deadline.Token);
-    await Console.OpenStandardError().WriteAsync(await stderr, deadline.Token); _ = Remaining();
+    stdoutBytes = await stdout; stderrBytes = await stderr;
+    await Console.OpenStandardOutput().WriteAsync(stdoutBytes, deadline.Token);
+    await Console.OpenStandardError().WriteAsync(stderrBytes, deadline.Token); _ = Remaining();
 }
 catch (Exception failure) { primary = failure; }
 finally
@@ -161,6 +163,9 @@ finally
             originalExit = original is not null && exit?.IsCompletedSuccessfully == true && original.HasExited,
             stdoutCompleted = stdout?.IsCompletedSuccessfully == true, stderrCompleted = stderr?.IsCompletedSuccessfully == true,
             cleanupTasksSettled = cleanupTasks.All(task => task.IsCompleted),
+            stdoutLength = stdoutBytes?.LongLength, stderrLength = stderrBytes?.LongLength,
+            stdoutSha256 = stdoutBytes is null ? null : Convert.ToHexStringLower(SHA256.HashData(stdoutBytes)),
+            stderrSha256 = stderrBytes is null ? null : Convert.ToHexStringLower(SHA256.HashData(stderrBytes)),
             elapsedSeconds = Stopwatch.GetElapsedTime(started).TotalSeconds,
             primary = primary?.ToString(), secondary = secondary.Select(error => error.ToString()).ToArray() }, cleanup: true);
     }

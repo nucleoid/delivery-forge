@@ -88,7 +88,21 @@ public sealed class RichPlanImportGitSafetyTests
                 Assert.True(receipt.RootElement.GetProperty("stdoutCompleted").GetBoolean());
                 Assert.True(receipt.RootElement.GetProperty("stderrCompleted").GetBoolean());
                 Assert.True(receipt.RootElement.GetProperty("cleanupTasksSettled").GetBoolean());
-                Assert.Equal(0, receipt.RootElement.GetProperty("childExit").GetInt32());
+                var exitCode = receipt.RootElement.GetProperty("childExit").GetInt32();
+                if (exitCode == 1)
+                {
+                    // This ONE actual allowFailure query uses Git's no-match=1
+                    // contract. No other nonzero command is a healthy observation.
+                    var arguments = receipt.RootElement.GetProperty("arguments").EnumerateArray().Select(item => item.GetString()).ToArray();
+                    Assert.True(arguments.Length >= 4);
+                    Assert.Equal(new[] { "config", "--includes", "--get-regexp", "^(remote\\..*\\.promisor|extensions\\.partialclone)$" }, arguments[^4..]);
+                    Assert.Equal(0L, receipt.RootElement.GetProperty("stdoutLength").GetInt64());
+                    Assert.Equal(0L, receipt.RootElement.GetProperty("stderrLength").GetInt64());
+                    var emptyHash = Convert.ToHexStringLower(SHA256.HashData(Array.Empty<byte>()));
+                    Assert.Equal(emptyHash, receipt.RootElement.GetProperty("stdoutSha256").GetString());
+                    Assert.Equal(emptyHash, receipt.RootElement.GetProperty("stderrSha256").GetString());
+                }
+                else Assert.Equal(0, exitCode);
                 Assert.True(receipt.RootElement.GetProperty("elapsedSeconds").GetDouble() < 30);
                 Assert.Equal(JsonValueKind.Null, receipt.RootElement.GetProperty("primary").ValueKind);
                 Assert.Empty(receipt.RootElement.GetProperty("secondary").EnumerateArray());
