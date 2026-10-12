@@ -40,14 +40,22 @@ public sealed class ProcessCommandExecutorTests
     {
         using var temp = new TempDirectory();
         var request = LongRunningRequest(temp.Path);
+        var streamsWritten = Path.Combine(temp.Path, "streams-written");
         var invocation = request.Invocation with
         {
             Arguments = OperatingSystem.IsWindows()
-                ? ["/d", "/s", "/c", "echo actual-stdout & echo actual-stderr 1>&2 & for /L %i in (1,1,2147483647) do @rem"]
-                : ["-c", "printf actual-stdout; printf actual-stderr >&2; exec sleep 30"]
+                ? ["/d", "/s", "/c", $"echo actual-stdout & echo actual-stderr 1>&2 & echo ready>\"{streamsWritten}\" & for /L %i in (1,1,2147483647) do @rem"]
+                : ["-c", $"printf actual-stdout; printf actual-stderr >&2; printf ready > '{streamsWritten.Replace("'", "'\\''", StringComparison.Ordinal)}'; exec sleep 30"]
         };
         var executor = new ProcessCommandExecutor(
-            killTree: process => process.Kill(entireProcessTree: false),
+            killTree: process =>
+            {
+                // This injected diagnostic fixture must actually write both streams before its
+                // deliberate kill; the 100ms command timeout is not a process-startup guarantee.
+                var entered = SpinWait.SpinUntil(() => File.Exists(streamsWritten), TimeSpan.FromSeconds(2));
+                process.Kill(entireProcessTree: false);
+                Assert.True(entered, "Actual command did not write its stream-entry barrier before fixture kill.");
+            },
             hasExited: process => process.HasExited,
             waitForDrain: async (task, _) =>
             {
