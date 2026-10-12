@@ -12,6 +12,80 @@ namespace DeliveryForge.Execution.Tests;
 public sealed class ReviewGitPreparationBoundaryTests
 {
     [Fact(Timeout = 120_000)]
+    public async Task Startup_data_tiny_actual_capture_distinguishes_never_created_from_unknown_closure()
+    {
+        using var bound = Bound(); // Original30 BEFORE real source/Git/helper setup.
+        var fixture = await Fixture.CreateAsync("echo", bound.Token);
+        var result = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
+            new CommandInvocation(fixture.Helper!, [], fixture.Root), TimeSpan.FromTicks(1), 1024, bound.Token);
+        await fixture.SaveCaptureAsync(result, bound.Token);
+        await fixture.SaveStartupInputsAsync(TimeSpan.FromTicks(1), bound.Token);
+        Assert.True(result.Command.TimedOut);
+        Assert.False(result.Command.Cancelled);
+        Assert.Null(result.Command.ExitCode);
+        Assert.False(File.Exists(fixture.EnteredPath));
+        Assert.False(result.RootExitObserved);
+        Assert.False(result.StandardOutputDrainCompleted);
+        Assert.False(result.StandardErrorDrainCompleted);
+        // Genuine returned native capture and retained raw observations precede the missing projection.
+        var data = ReviewGitPreparationCaptureData.FromCapture(result);
+        Assert.True(data.CaptureReturned);
+        Assert.True(data.TimedOut);
+        Assert.False(data.Cancelled);
+        Assert.Null(data.ExitCode);
+        var startup = Assert.IsType<CommandStartupObservation>(data.Startup);
+        Assert.Equal(CommandStartupState.NotAttempted, startup.Creation);
+        Assert.Equal(CommandStartupState.NotAttempted, startup.RootHandle);
+        Assert.Equal(OperatingSystem.IsWindows() ? CommandStartupState.NotAttempted : CommandStartupState.NotApplicable, startup.Resume);
+        Assert.Equal(CommandStartupState.NotAttempted, startup.StandardOutputDrain);
+        Assert.Equal(CommandStartupState.NotAttempted, startup.StandardErrorDrain);
+        Assert.False(data.RootExitObserved);
+        Assert.False(data.StandardOutputDrainCompleted);
+        Assert.False(data.StandardErrorDrainCompleted);
+    }
+
+    [Fact(Timeout = 120_000)]
+    public async Task Startup_data_actual_healthy_echo_preserves_created_and_each_original_drain()
+    {
+        using var bound = Bound();
+        var fixture = await Fixture.CreateAsync("echo", bound.Token);
+        var result = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
+            new CommandInvocation(fixture.Helper!, [], fixture.Root), TimeSpan.FromSeconds(5), 1024, bound.Token);
+        await fixture.SaveCaptureAsync(result, bound.Token);
+        await fixture.SaveStartupInputsAsync(TimeSpan.FromSeconds(5), bound.Token);
+        Assert.Equal(0, result.Command.ExitCode);
+        Assert.False(result.Command.TimedOut);
+        Assert.False(result.Command.Cancelled);
+        Assert.False(result.CaptureBoundExceeded);
+        Assert.True(result.Command.OwnedProcessQuiescent);
+        Assert.True(result.RootExitObserved);
+        Assert.True(result.StandardOutputDrainCompleted);
+        Assert.True(result.StandardErrorDrainCompleted);
+        Assert.Equal(Encoding.UTF8.GetBytes("stdout:λ🙂:" + fixture.Nonce + "\n"), result.StandardOutputBytes);
+        Assert.Equal(Encoding.UTF8.GetBytes("stderr:漢字:" + fixture.Nonce + "\n"), result.StandardErrorBytes);
+        Assert.Equal(fixture.Nonce, await File.ReadAllTextAsync(fixture.EnteredPath, bound.Token));
+        var data = ReviewGitPreparationCaptureData.FromCapture(result);
+        Assert.True(data.CaptureReturned);
+        Assert.Equal(result.Command.ExitCode, data.ExitCode);
+        Assert.Equal(result.Command.OwnedProcessQuiescent, data.OwnedProcessQuiescent);
+        Assert.True(data.RootExitObserved);
+        Assert.True(data.StandardOutputDrainCompleted);
+        Assert.True(data.StandardErrorDrainCompleted);
+        var startup = Assert.IsType<CommandStartupObservation>(data.Startup);
+        Assert.Equal(CommandStartupState.Established, startup.Creation);
+        Assert.Equal(CommandStartupState.Established, startup.RootHandle);
+        Assert.Equal(CommandStartupState.Established, startup.ReaderEndpoints);
+        Assert.Equal(CommandStartupState.Established, startup.StandardOutputDrain);
+        Assert.Equal(CommandStartupState.Established, startup.StandardErrorDrain);
+        var platformState = OperatingSystem.IsWindows() ? CommandStartupState.Established : CommandStartupState.NotApplicable;
+        Assert.Equal(platformState, startup.JobAssignment);
+        Assert.Equal(platformState, startup.Resume);
+        Assert.InRange(startup.OriginalElapsedSeconds, 0, 5);
+        Assert.Equal(5d, startup.OriginalTotalSeconds);
+        Assert.NotEmpty(startup.LastStage);
+    }
+
+    [Fact(Timeout = 120_000)]
     public async Task Bounded_capture_healthy_helper_preserves_exact_multibyte_UTF8_bytes()
     {
         using var bound = Bound();
@@ -209,6 +283,19 @@ public sealed class ReviewGitPreparationBoundaryTests
             { token.ThrowIfCancellationRequested(); if (Stopwatch.GetElapsedTime(started) >= TimeSpan.FromSeconds(5)) throw new TimeoutException("Actual negative helper never entered."); await Task.Delay(10, token); }
         }
         public Task SaveAsync(ReviewGitPreparationResult result, CancellationToken token) => WriteNew(Path.Combine(GitDirectory, "actual-preparation-result.json"), JsonSerializer.SerializeToUtf8Bytes(new { fixture = true, result.Observation, contextIssued = result.Context is not null, retained = true }), token);
+        public async Task SaveStartupInputsAsync(TimeSpan actualBudget, CancellationToken token)
+        {
+            var helperBytes = await File.ReadAllBytesAsync(Helper!, token);
+            var sourceBytes = await File.ReadAllBytesAsync(Path.Combine(Root, "subject.txt"), token);
+            await WriteNew(Path.Combine(GitDirectory, "actual-startup-inputs.json"), JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                fixture = true, productionCertified = false, Nonce, Head, Version, IndexSha256, SpecSha256,
+                invocation = new CommandInvocation(Helper!, [], Root), helperSha256 = Hash(helperBytes),
+                helperLength = helperBytes.Length, sourceSha256 = Hash(sourceBytes),
+                originalCaptureTicks = actualBudget.Ticks, originalFixtureSeconds = 30, helperSelfSeconds = 8,
+                perStreamMaximumBytes = 1024, retained = true
+            }), token);
+        }
         public Task SaveCaptureAsync(BoundedCommandCaptureResult result, CancellationToken token) => WriteNew(
             Path.Combine(GitDirectory, "actual-bounded-capture-result.json"), JsonSerializer.SerializeToUtf8Bytes(new
             {

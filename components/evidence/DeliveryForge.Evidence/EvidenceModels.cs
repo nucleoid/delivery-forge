@@ -129,6 +129,7 @@ public sealed record CommandLifecycleDiagnostics(
     // Observational data only; null until a creation-owned lifecycle actually supplies this proof.
     public CommandOwnedTreeObservation? OwnedTree { get; init; }
     public string? NativeFailure { get; init; }
+    public CommandStartupObservation? Startup { get; init; }
 }
 public sealed record CommandOwnedTreeObservation(bool CreationOwned, bool SettlementObserved, int ActiveProcesses);
 
