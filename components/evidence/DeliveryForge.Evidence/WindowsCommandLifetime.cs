@@ -20,6 +20,13 @@ internal sealed class WindowsCommandLifetime : IDisposable
     private bool _assigned;
     private bool _resumed;
     private string _stage = "create-job";
+    private bool _creationAttempted;
+    private bool _assignmentAttempted;
+    private bool _resumeAttempted;
+    private bool _readerEndpointsAttempted;
+    private BoundedCaptureRetention? _captureRetention;
+    private BoundedCaptureStream? _captureStdout, _captureStderr;
+    private Task? _captureOutputTask, _captureErrorTask;
 
     private WindowsCommandLifetime()
     {
@@ -146,12 +153,16 @@ internal sealed class WindowsCommandLifetime : IDisposable
         uint active = uint.MaxValue;
         var killAttempted = false; var killSucceeded = false;
         string? failure = null, killType = null;
+        string? startupFailureStage = null;
+        var retention = new BoundedCaptureRetention();
+        retention.Add(stdout); retention.Add(stderr);
         try
         {
             owner = new();
+            retention.Add(owner); // BEFORE Start and every original native resource/task.
+            owner._captureRetention = retention; owner._captureStdout = stdout; owner._captureStderr = stderr;
             owner.Start(invocation, started, workBudget, caller);
-            output = BoundedCaptureStream.Observe(stdout.DrainAsync(owner._stdout!.BaseStream));
-            error = BoundedCaptureStream.Observe(stderr.DrainAsync(owner._stderr!.BaseStream));
+            output = owner._captureOutputTask!; error = owner._captureErrorTask!;
             while (true)
             {
                 if (caller.IsCancellationRequested) { cancelled = true; break; }
@@ -163,10 +174,10 @@ internal sealed class WindowsCommandLifetime : IDisposable
                 await Task.Delay(5).ConfigureAwait(false);
             }
         }
-        catch (StartupStoppedException stopped) { cancelled = stopped.Cancelled; timedOut = stopped.TimedOut; }
+        catch (StartupStoppedException stopped) { cancelled = stopped.Cancelled; timedOut = stopped.TimedOut; startupFailureStage = owner?._stage; failure = stopped.Message; retention.Add(stopped); }
         catch (Exception exception) when (exception is Win32Exception or IOException or ArgumentException or InvalidOperationException)
-        { known = false; failure = Bounded(exception); }
-        try
+        { known = false; failure = Bounded(exception); startupFailureStage = owner?._stage ?? "create-job"; retention.Add(exception); }
+        output = owner?._captureOutputTask; error = owner?._captureErrorTask;
         {
             if (owner?._process is not null)
             {
@@ -199,6 +210,14 @@ internal sealed class WindowsCommandLifetime : IDisposable
             var settled = known && rootExited && active == 0;
             var quiescent = settled && outEof && errEof && (!killAttempted || killSucceeded) &&
                 BoundedCaptureStream.Within(started, entireBudget);
+            // Never-created handles can be disposed without claiming helper exit/EOF.
+            var mayDispose = owner is not null && ((!owner._creationAttempted && output is null && error is null) || quiescent);
+            if (mayDispose)
+            {
+                var disposalKnown = owner!.DisposeBoundedKnown(started, entireBudget, retention);
+                if (disposalKnown) retention.ReleaseKnown();
+                else { quiescent = false; failure ??= "Original bounded resource disposition was not timely and complete."; }
+            }
             var outBytes = stdout.Snapshot(); var errBytes = stderr.Snapshot();
             var command = new CommandResult(exit, Encoding.UTF8.GetString(outBytes), Encoding.UTF8.GetString(errBytes), timedOut,
                 cancelled, began, DateTimeOffset.UtcNow, quiescent)
@@ -209,12 +228,24 @@ internal sealed class WindowsCommandLifetime : IDisposable
                     new(errEof, errorStatus == TaskStatus.Faulted, errorStatus == TaskStatus.Canceled, errEof ? Encoding.UTF8.GetString(errBytes) : null))
                 {
                     OwnedTree = new(owner is { _assigned: true, _resumed: true }, settled, active > int.MaxValue ? -1 : (int)active),
-                    NativeFailure = failure
+                    NativeFailure = failure,
+                    Startup = new(
+                        owner?._process is not null ? CommandStartupState.Established : owner?._creationAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
+                        owner?._process is not null ? CommandStartupState.Established : owner?._creationAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
+                        owner?._assigned == true ? CommandStartupState.Established : owner?._assignmentAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
+                        owner?._resumed == true ? CommandStartupState.Established : owner?._resumeAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
+                        owner is { _stdout: not null, _stderr: not null } ? CommandStartupState.Established : owner?._readerEndpointsAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
+                        output is not null ? CommandStartupState.Established : CommandStartupState.NotAttempted,
+                        error is not null ? CommandStartupState.Established : CommandStartupState.NotAttempted,
+                        owner?._stage ?? "create-job", startupFailureStage,
+                        Stopwatch.GetElapsedTime(started).TotalSeconds, entireBudget.TotalSeconds, workBudget.TotalSeconds,
+                        failure is null ? null : CommandStartupObservation.Clip(failure, 2048))
                 }
             };
-            return new(command, outBytes, errBytes, stdout.Exceeded || stderr.Exceeded, rootExited, outEof, errEof);
+            var completed = new BoundedCommandCaptureResult(command, outBytes, errBytes, stdout.Exceeded || stderr.Exceeded, rootExited, outEof, errEof);
+            // Includes snapshot/decoding/startup DATA and result byte copies under the SAME clock.
+            return BoundedCaptureStream.Within(started, entireBudget) ? completed : completed.RefuseLateCompletion();
         }
-        finally { owner?.Dispose(); }
     }
 
     private void Start(CommandInvocation invocation, long originalStarted, TimeSpan originalTimeout, CancellationToken caller)
@@ -253,20 +284,32 @@ internal sealed class WindowsCommandLifetime : IDisposable
             };
             _stage = "create-suspended";
             CheckStartupBudget(originalStarted, originalTimeout, caller);
+            _creationAttempted = true;
             if (!CreateProcessW(executable, commandLine, IntPtr.Zero, IntPtr.Zero, true,
                 0x00000004 | 0x08000000 | 0x00000400 | 0x00080000, environment, directory, ref startup, out var processInfo)) throw Native(_stage);
             _process = new(processInfo.Process); _thread = new(processInfo.Thread);
             _stage = "assign-before-resume";
+            _assignmentAttempted = true;
             if (!AssignProcessToJobObject(_job, _process)) throw Native(_stage);
             _assigned = true;
         }
         // Close every extra child-side endpoint in this parent before execution/EOF observation.
         _outWrite.Dispose(); _outWrite = null; _errWrite.Dispose(); _errWrite = null;
         _inRead.Dispose(); _inRead = null; _inWrite.Dispose(); _inWrite = null;
+        _readerEndpointsAttempted = true;
         _stdout = new(new FileStream(_outRead, FileAccess.Read, 4096, false), Console.OutputEncoding, true);
         _stderr = new(new FileStream(_errRead, FileAccess.Read, 4096, false), Console.OutputEncoding, true);
+        if (_captureRetention is not null)
+        {
+            _stage = "enroll-original-byte-drains";
+            _captureOutputTask = BoundedCaptureStream.Observe(_captureStdout!.DrainAsync(_stdout.BaseStream));
+            _captureRetention.Add(_captureOutputTask);
+            _captureErrorTask = BoundedCaptureStream.Observe(_captureStderr!.DrainAsync(_stderr.BaseStream));
+            _captureRetention.Add(_captureErrorTask);
+        }
         _stage = "resume-owned-root";
         CheckStartupBudget(originalStarted, originalTimeout, caller);
+        _resumeAttempted = true;
         if (ResumeThread(_thread) == uint.MaxValue) throw Native(_stage);
         _resumed = true; _thread.Dispose(); _thread = null;
     }
@@ -375,6 +418,21 @@ internal sealed class WindowsCommandLifetime : IDisposable
         _job.Dispose(); // kill-on-close targets this private job only; disposal is NOT settlement proof.
         _thread?.Dispose(); _process?.Dispose(); _stdout?.Dispose(); _stderr?.Dispose();
         _outRead?.Dispose(); _outWrite?.Dispose(); _errRead?.Dispose(); _errWrite?.Dispose(); _inRead?.Dispose(); _inWrite?.Dispose();
+    }
+
+    private bool DisposeBoundedKnown(long started, TimeSpan budget, BoundedCaptureRetention retention)
+    {
+        var known = true;
+        // This path is entered ONLY after no Create attempt, or observed root+Job0+EACH EOF.
+        foreach (var resource in new IDisposable?[] { _job, _thread, _process, _stdout, _stderr,
+            _outRead, _outWrite, _errRead, _errWrite, _inRead, _inWrite })
+        {
+            if (resource is null) continue;
+            if (!BoundedCaptureStream.Within(started, budget)) { known = false; continue; }
+            try { resource.Dispose(); }
+            catch (Exception failure) { retention.Add(failure); known = false; }
+        }
+        return known && BoundedCaptureStream.Within(started, budget);
     }
 
     private sealed class KernelHandle : SafeHandleZeroOrMinusOneIsInvalid
