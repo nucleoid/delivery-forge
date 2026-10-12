@@ -10,6 +10,7 @@ using DeliveryForge.Contracts.Models;
 using DeliveryForge.Contracts.State;
 using DeliveryForge.Contracts.Validation;
 using DeliveryForge.Evidence;
+using GateOutcome = DeliveryForge.Evidence.GateOutcome;
 using DeliveryForge.Execution;
 using DeliveryForge.Execution.Host;
 using DeliveryForge.Planning;
