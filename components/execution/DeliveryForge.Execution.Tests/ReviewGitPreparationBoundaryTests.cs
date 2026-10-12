@@ -117,7 +117,17 @@ public sealed class ReviewGitPreparationBoundaryTests
         await fixture.SaveAsync(result, bound.Token);
         Assert.Equal(expected, result.Observation.Outcome);
         Assert.Null(result.Context);
-        Assert.True(result.Observation.OwnedProcessQuiescent);
+        var diagnosticBytes = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            mode,
+            cancelAfterEntry,
+            expected,
+            fixture.Nonce,
+            elapsedSeconds = Stopwatch.GetElapsedTime(started).TotalSeconds,
+            result.Observation
+        });
+        var diagnosticMessage = Encoding.UTF8.GetString(diagnosticBytes.AsSpan(0, Math.Min(diagnosticBytes.Length, 16 * 1024)));
+        Assert.True(result.Observation.OwnedProcessQuiescent, diagnosticMessage);
         Assert.True(result.Observation.RootExitObserved);
         Assert.True(result.Observation.StandardOutputDrainCompleted);
         Assert.True(result.Observation.StandardErrorDrainCompleted);

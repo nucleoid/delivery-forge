@@ -95,7 +95,16 @@ public sealed class ProtectedPolicyCaptureFailureTests
         }, wall.Token);
         if (scenario != "unobserved-launch")
         {
-            Assert.True(actual.Command.OwnedProcessQuiescent);
+            var diagnosticBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                actual.Command,
+                actual.RootExitObserved,
+                actual.StandardOutputDrainCompleted,
+                actual.StandardErrorDrainCompleted,
+                actual.CaptureBoundExceeded
+            });
+            var diagnosticMessage = System.Text.Encoding.UTF8.GetString(diagnosticBytes.AsSpan(0, Math.Min(diagnosticBytes.Length, 16 * 1024)));
+            Assert.True(actual.Command.OwnedProcessQuiescent, diagnosticMessage);
             Assert.True(actual.RootExitObserved);
             Assert.True(actual.StandardOutputDrainCompleted); Assert.True(actual.StandardErrorDrainCompleted);
         }

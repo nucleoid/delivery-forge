@@ -23,5 +23,6 @@
     <Compile Remove="Fixtures/QualityInterruption/**/*.cs" />
     <None Remove="Fixtures/QualityInterruption/**/*" />
     <None Include="Fixtures/QualityInterruption/**/*" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../DeliveryForge.EndToEnd.CrashDriver/*.cs;../DeliveryForge.EndToEnd.CrashDriver/*.csproj" Link="Fixtures/ActualParentCrashDriver/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>
