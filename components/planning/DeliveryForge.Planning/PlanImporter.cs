@@ -11,11 +11,12 @@ public sealed record PlanImportExpectations(string BundleIdentity, string Contra
 
 public sealed class PlanImportResult
 {
-    internal PlanImportResult(FrozenPlan? plan, IReadOnlyList<string> diagnostics)
-    { Plan = plan; Diagnostics = Array.AsReadOnly(diagnostics.ToArray()); }
+    internal PlanImportResult(FrozenPlan? plan, IReadOnlyList<string> diagnostics, PlanImportResourceObservation? resources = null)
+    { Plan = plan; Diagnostics = Array.AsReadOnly(diagnostics.ToArray()); Resources = resources ?? new(0, 0, 0); }
     public FrozenPlan? Plan { get; }
     public bool DownstreamReady => Plan?.DownstreamReady == true;
     public IReadOnlyList<string> Diagnostics { get; }
+    public PlanImportResourceObservation Resources { get; }
 }
 
 public static class PlanImporter
@@ -38,6 +39,7 @@ public static class PlanImporter
         if (string.IsNullOrWhiteSpace(source.TrustedGitExecutable) || !System.IO.Path.IsPathFullyQualified(source.TrustedGitExecutable))
             throw new PlanningException("An explicit absolute trusted Git executable is required for import; ambient fallback is refused.");
         using var life = new PlanImportLifetime(entireBudget, cancellationToken);
+        PlanImportResult Refusal(string reason) => new(null, [reason], life.Resources.Snapshot());
         // Own caller bytes before the first asynchronous handoff.
         var ownedBundle = richBundle.ToArray(); life.Check();
         // Plain existing regular selection BEFORE any source namespace/helper access.
@@ -56,31 +58,31 @@ public static class PlanImporter
             "Imported repository/work-item/immutable ceiling differs from trusted expectations.");
         var observations = material.GetProperty("repositoryObservations");
         if (!System.IO.Path.IsPathFullyQualified(source.RepositoryRoot) || !System.IO.Path.IsPathFullyQualified(expectations.RepositoryRoot) ||
-            !SamePath(source.RepositoryRoot, expectations.RepositoryRoot)) return NotReady("Expected local root differs; explicit fresh parent relocation is required.");
+            !SamePath(source.RepositoryRoot, expectations.RepositoryRoot)) return Refusal("Expected local root differs; explicit fresh parent relocation is required.");
         if (source.MutableReference != expectations.MutableReference || source.MutableReference != RichPlanImportCodec.Text(observations, "requestedRef") ||
-            !RepositoryContext.IsFreshnessBearingReference(source.MutableReference)) return NotReady("Exact original mutable ref reconciliation is required.");
+            !RepositoryContext.IsFreshnessBearingReference(source.MutableReference)) return Refusal("Exact original mutable ref reconciliation is required.");
         var requirement = RichPlanImportCodec.Text(material.GetProperty("intake"), "importedContextRequirement");
-        if (requirement == "required" && freshImportedContext is null) return NotReady("Required imported context must be freshly supplied and verified; saved availability is not proof.");
+        if (requirement == "required" && freshImportedContext is null) return Refusal("Required imported context must be freshly supplied and verified; saved availability is not proof.");
         var fresh = await life.Observe(() => CaptureFreshEnvelope(freshImportedContext));
         using var root = await life.Observe(() => new PlanImportFilesystem.DirectoryBinding(System.IO.Path.GetFullPath(source.RepositoryRoot)));
         PlanImportGitView view;
         try { view = await life.Observe(() => new PlanImportGitView(source.RepositoryRoot, source.TrustedGitExecutable, life)); }
-        catch (PlanningException error) { return NotReady(error.Message); }
+        catch (PlanningException error) { return Refusal(error.Message); }
         using var ownedView = view;
         var reader = await life.Observe(() => GitRepositoryContextReader.ForImport(source.TrustedGitExecutable, life, view));
         PlanImportSourceSnapshot before;
         try { before = await PlanImportSourceSnapshot.Capture(source.RepositoryRoot, reader, life); }
-        catch (PlanningException error) { return NotReady(error.Message); }
+        catch (PlanningException error) { return Refusal(error.Message); }
         if (before.Status.Split('\n', StringSplitOptions.RemoveEmptyEntries).Any(line => !line.StartsWith("!! ", StringComparison.Ordinal)))
-            return NotReady("Current source/index status is dirty; fresh reconciliation is required.");
+            return Refusal("Current source/index status is dirty; fresh reconciliation is required.");
         var current = await life.Run(() => reader.ReadAsync(source.RepositoryRoot, source.MutableReference, life.Token));
         if (!SamePath(current.RepositoryRoot, source.RepositoryRoot) || current.Commit != RichPlanImportCodec.Text(material, "baseCommit") ||
-            current.Tree != RichPlanImportCodec.Text(material, "baseTree")) return NotReady("Actual base/root differs from the frozen plan.");
+            current.Tree != RichPlanImportCodec.Text(material, "baseTree")) return Refusal("Actual base/root differs from the frozen plan.");
         if (current.HeadCommit != RichPlanImportCodec.Text(observations, "headCommit") || current.HeadTree != RichPlanImportCodec.Text(observations, "headTree") ||
             current.Dirty || current.Shallow || current.DetachedHead || !current.ExactBranchReferenceVerified || current.Submodules.Count != 0)
-            return NotReady("Actual current HEAD/index/history/ref observations require fresh reconciliation.");
+            return Refusal("Actual current HEAD/index/history/ref observations require fresh reconciliation.");
         var draft = await codec.Draft(current, reader, life, fresh);
-        if (!draft.Intake.Ready) return new(null, draft.Intake.Limitations);
+        if (!draft.Intake.Ready) return new(null, draft.Intake.Limitations, life.Resources.Snapshot());
         // The same producer validator/digest/command/DAG projection is used, not a loader constructor.
         var frozen = await life.Observe(() => PlanFreezer.RestoreForImport(draft, codec.Revision, codec.CreatedAt, codec.Supersedes));
         RichPlanImportCodec.Require(frozen.Identity == codec.Identity && frozen.ContractIdentity == codec.ContractIdentity &&
@@ -93,9 +95,9 @@ public static class PlanImporter
         await life.Observe(() => { root.Verify(); return true; });
         if (before != after || final.Commit != current.Commit || final.Tree != current.Tree || final.HeadCommit != current.HeadCommit ||
             final.HeadTree != current.HeadTree || final.Dirty || final.DetachedHead || final.Shallow || !final.ExactBranchReferenceVerified)
-            return NotReady("Source/index/root/ref changed during the original import operation.");
+            return Refusal("Source/index/root/ref changed during the original import operation.");
         life.Check();
-        return new(frozen, []);
+        return new(frozen, [], life.Resources.Snapshot());
     }
     private static PlanImportResult NotReady(string reason) => new(null, [reason]);
     private static bool SamePath(string left, string right) => string.Equals(System.IO.Path.GetFullPath(left), System.IO.Path.GetFullPath(right),

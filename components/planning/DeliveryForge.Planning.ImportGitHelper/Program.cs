@@ -81,9 +81,53 @@ byte[]? originalConfig = null;
 Process? original = null; Task<byte[]>? stdout = null; Task<byte[]>? stderr = null; Task? exit = null;
 Exception? primary = null; var secondary = new List<Exception>(); var childExit = -1;
 byte[]? stdoutBytes = null; byte[]? stderrBytes = null;
+string? originalBlob = null, externalBlob = null, alternateFile = null, originalBlobSha = null;
+bool blobMoved = false, externalRoutingConsumed = false;
+byte[]? ownedAlternateBytes = null;
+bool alternateCreated = false;
 var cleanupTasks = new List<Task>();
 try
 {
+    if (config.Alternate && args.Length >= 4 && args[^4] == "cat-file" && args[^3] == "blob" && args[^2] == "--end-of-options" && args[^1] == config.BlobId &&
+        !File.Exists(Path.Combine(home, "alternate-entered.json")))
+    {
+        if (config.BlobId is null || config.BlobId.Length != 40 || !config.BlobId.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f') ||
+            config.ObjectDirectory is null || !Path.IsPathFullyQualified(config.ObjectDirectory) || config.StoredSha256 is null)
+            throw new IOException("Exact owned alternate stimulus is unavailable.");
+        var objectRoot = Path.Combine(config.Repository, ".git", "objects");
+        foreach (var path in new[] { objectRoot, config.ObjectDirectory })
+            for (DirectoryInfo? entry = new(path); entry is not null; entry = entry.Parent)
+                if (!entry.Exists || entry.LinkTarget is not null || (entry.Attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new IOException("Owned object directory is missing or redirected.");
+        originalBlob = Path.Combine(objectRoot, config.BlobId[..2], config.BlobId[2..]);
+        externalBlob = Path.Combine(config.ObjectDirectory, config.BlobId[..2], config.BlobId[2..]);
+        alternateFile = Path.Combine(objectRoot, "info", "alternates");
+        if (Path.Exists(alternateFile) || Path.Exists(externalBlob)) throw new IOException("Owned alternate stimulus collision.");
+        if (new FileInfo(originalBlob).Length > 8 * 1024 * 1024) throw new IOException("Actual loose blob exceeds8MiB.");
+        originalBlobSha = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(originalBlob, deadline.Token)));
+        if (originalBlobSha != config.StoredSha256) throw new IOException("Actual original loose blob bytes differ.");
+        NewJson(Path.Combine(home, "alternate-entered.json"), new { config.Nonce, arguments = args, originalBlobSha });
+        var left = Remaining(); var barrierEnd = Stopwatch.GetElapsedTime(started) + (left < TimeSpan.FromSeconds(10) ? left : TimeSpan.FromSeconds(10));
+        while (true)
+        {
+            _ = Remaining(); if (Stopwatch.GetElapsedTime(started) >= barrierEnd) throw new TimeoutException("Alternate barrier expired.");
+            var released = File.Exists(Path.Combine(home, "alternate-release.json"));
+            _ = Remaining(); if (Stopwatch.GetElapsedTime(started) >= barrierEnd) throw new TimeoutException("Late alternate release refused.");
+            if (released) break; await Task.Delay(20, deadline.Token);
+        }
+        using var release = JsonDocument.Parse(await File.ReadAllBytesAsync(Path.Combine(home, "alternate-release.json"), deadline.Token));
+        _ = Remaining(); if (Stopwatch.GetElapsedTime(started) >= barrierEnd || release.RootElement.GetProperty("nonce").GetString() != config.Nonce)
+            throw new IOException("Alternate release window/nonce differs.");
+        Directory.CreateDirectory(Path.GetDirectoryName(externalBlob)!);
+        _ = Remaining(); File.Move(originalBlob, externalBlob, overwrite: false); blobMoved = true; _ = Remaining();
+        if (File.Exists(originalBlob) || Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(externalBlob, deadline.Token))) != originalBlobSha)
+            throw new IOException("Actual owned blob move differs.");
+        Directory.CreateDirectory(Path.GetDirectoryName(alternateFile)!);
+        ownedAlternateBytes = Encoding.UTF8.GetBytes(config.ObjectDirectory.Replace('\\', '/') + "\n");
+        using (var output = new FileStream(alternateFile, FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+        { alternateCreated = true; output.Write(ownedAlternateBytes); output.Flush(true); }
+        _ = Remaining();
+    }
     if (config.Race && args.Contains("status", StringComparer.Ordinal) && !File.Exists(Path.Combine(home, "race-entered.json")))
     {
         originalConfig = await File.ReadAllBytesAsync(originalConfigPath, deadline.Token);
@@ -129,6 +173,15 @@ try
     await Task.WhenAll(stdout, stderr, exit).WaitAsync(Remaining(), deadline.Token); _ = Remaining();
     childExit = original.ExitCode;
     stdoutBytes = await stdout; stderrBytes = await stderr;
+    if (blobMoved)
+    {
+        var actualObjects = Environment.GetEnvironmentVariable("GIT_OBJECT_DIRECTORY");
+        externalRoutingConsumed = actualObjects == Path.Combine(config.Repository, ".git", "objects") &&
+            !File.Exists(originalBlob) && File.Exists(externalBlob) && childExit == 0;
+        NewJson(Path.Combine(home, "alternate-observed.json"), new { config.Nonce, childExit, actualObjects,
+            externalRoutingConsumed, stdoutLength = stdoutBytes.LongLength, stdoutSha256 = Convert.ToHexStringLower(SHA256.HashData(stdoutBytes)),
+            originalBlobSha, externalBlobSha = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(externalBlob!, deadline.Token))) });
+    }
     await Console.OpenStandardOutput().WriteAsync(stdoutBytes, deadline.Token);
     await Console.OpenStandardError().WriteAsync(stderrBytes, deadline.Token); _ = Remaining();
 }
@@ -150,6 +203,25 @@ finally
     }
     if (originalConfig is not null)
         await Attempt(() => File.WriteAllBytesAsync(originalConfigPath, originalConfig, CancellationToken.None));
+    if (blobMoved && originalBlob is not null && externalBlob is not null)
+        await Attempt(async () =>
+        {
+            var external = new FileInfo(externalBlob);
+            if (!external.Exists || external.LinkTarget is not null || (external.Attributes & FileAttributes.ReparsePoint) != 0 ||
+                external.Length > 8 * 1024 * 1024 || Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(externalBlob, CancellationToken.None))) != originalBlobSha ||
+                Path.Exists(originalBlob)) throw new IOException("Owned loose object changed; no replacement restoration.");
+            File.Move(externalBlob, originalBlob, overwrite: false);
+            if (Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(originalBlob, CancellationToken.None))) != originalBlobSha)
+                throw new IOException("Original owned blob restoration differs."); blobMoved = false; });
+    if (alternateCreated && alternateFile is not null)
+        await Attempt(async () =>
+        {
+            var entry = new FileInfo(alternateFile);
+            if (!entry.Exists || entry.LinkTarget is not null || (entry.Attributes & FileAttributes.ReparsePoint) != 0 ||
+                entry.Length > 4096 || !(await File.ReadAllBytesAsync(alternateFile, CancellationToken.None)).SequenceEqual(ownedAlternateBytes!))
+                throw new IOException("Own alternate entry changed; retained rather than deleting another entry.");
+            File.Delete(alternateFile); alternateCreated = false;
+        });
     if (original is not null)
     {
         await Attempt(() => { if (!original.HasExited) original.Kill(entireProcessTree: false); return Task.CompletedTask; });
@@ -190,4 +262,5 @@ if (primary is not null || secondary.Count != 0)
 _ = CleanupRemaining();
 return childExit;
 
-internal sealed record Configuration(string Git, string Repository, string Nonce, bool Race);
+internal sealed record Configuration(string Git, string Repository, string Nonce, bool Race,
+    bool Alternate = false, string? BlobId = null, string? ObjectDirectory = null, string? StoredSha256 = null);

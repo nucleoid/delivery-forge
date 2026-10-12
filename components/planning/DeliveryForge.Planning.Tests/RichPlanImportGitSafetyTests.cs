@@ -171,7 +171,7 @@ public sealed class RichPlanImportGitSafetyTests
             await Task.Delay(20, repository.WorkToken);
         }
     }
-    private static async Task<Setup> Prepare(ImportRepositoryFixture repository, bool race)
+    internal static async Task<Setup> Prepare(ImportRepositoryFixture repository, bool race)
     {
         await repository.InitializeAsync();
         await repository.Wait(File.WriteAllTextAsync(Path.Combine(repository.Root, ".gitattributes"), "tracked.txt filter=owned-test\n", repository.WorkToken).ContinueWith(done =>
@@ -220,5 +220,5 @@ public sealed class RichPlanImportGitSafetyTests
         var source = new PlanImportSource(repository.Root, "refs/heads/main", Path.Combine(helperRoot, Path.GetFileName(supplied)));
         return new(plan, source, new(plan.Identity, plan.ContractIdentity, request.Repository, request.WorkItem, repository.Root, source.MutableReference, request.RequestedCeiling), helperRoot, nonce);
     }
-    private sealed record Setup(FrozenPlan Plan, PlanImportSource Source, PlanImportExpectations Expectations, string HelperRoot, string Nonce);
+    internal sealed record Setup(FrozenPlan Plan, PlanImportSource Source, PlanImportExpectations Expectations, string HelperRoot, string Nonce);
 }

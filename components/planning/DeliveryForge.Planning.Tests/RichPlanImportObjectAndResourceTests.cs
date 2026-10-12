@@ -1,0 +1,178 @@
+using System.Diagnostics;
+using System.Security.Cryptography;
+using System.Text.Json;
+
+namespace DeliveryForge.Planning.Tests;
+
+public sealed class RichPlanImportObjectAndResourceTests
+{
+    [Theory(Timeout = 120_000)]
+    [InlineData(8)]
+    [InlineData(600)]
+    public async Task Actual_reference_discovery_and_pending_frontier_respect_512_directory_profile(int directories)
+    {
+        await using var repository = new ImportRepositoryFixture(TestContext.Current.CancellationToken);
+        try
+        {
+            var setup = await RichPlanImportGitSafetyTests.Prepare(repository, false);
+            _ = await repository.Wait(Task.Run(() =>
+            {
+                for (var i = 0; i < directories; i++)
+                {
+                    _ = repository.WorkRemaining();
+                    Directory.CreateDirectory(Path.Combine(repository.Root, ".git", "refs", "owned-empty-" + i.ToString("D4")));
+                    _ = repository.WorkRemaining();
+                }
+                return true;
+            }, CancellationToken.None));
+            var result = await repository.Wait(PlanImporter.ImportAndReconcileAsync(setup.Plan.CanonicalBytes,
+                setup.Source, setup.Expectations, repository.WorkRemaining(), cancellationToken: repository.WorkToken));
+            if (directories == 600)
+            {
+                Assert.False(result.DownstreamReady); Assert.Null(result.Plan);
+                Assert.Contains(result.Diagnostics, item => item.Contains("reference directory bound", StringComparison.OrdinalIgnoreCase));
+            }
+            else
+            {
+                Assert.True(result.DownstreamReady); Assert.NotNull(result.Plan);
+                Assert.Equal(setup.Plan.CanonicalBytes, result.Plan.CanonicalBytes);
+                Assert.True(result.Resources.MaximumDiscoveredReferenceDirectories >= directories);
+            }
+            // Owner records ACTUAL discoveries/frontier before push, including on typed refusal.
+            // The old eventual pop bound is insufficient and still runs unchanged in this RED.
+            Assert.InRange(result.Resources.MaximumDiscoveredReferenceDirectories, 1, 512);
+            Assert.InRange(result.Resources.MaximumQueuedReferenceDirectories, 1, 512);
+            Assert.True(result.Resources.MaximumEnumeratedReferenceEntries >= directories);
+        }
+        catch (Exception failure) { repository.Primary = failure; throw; }
+    }
+
+    [Theory(Timeout = 120_000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Actual_blob_read_cannot_consume_transient_live_external_object_routing(bool alternate)
+    {
+        await using var repository = new ImportRepositoryFixture(TestContext.Current.CancellationToken);
+        RichPlanImportGitSafetyTests.Setup? setup = null;
+        Task<PlanImportResult>? operation = null;
+        Exception? primary = null; var secondary = new List<Exception>();
+        try
+        {
+            setup = await RichPlanImportGitSafetyTests.Prepare(repository, false);
+            var blob = await repository.Command(repository.Root, "rev-parse", "--verify", "HEAD:tracked.txt");
+            Assert.Equal(40, blob.Length);
+            var originalBlob = Path.Combine(repository.Root, ".git", "objects", blob[..2], blob[2..]);
+            var stored = await repository.Wait(File.ReadAllBytesAsync(originalBlob, repository.WorkToken));
+            var storedHash = Hash(stored);
+            var expectedOutput = await repository.Wait(File.ReadAllBytesAsync(Path.Combine(repository.Root, "tracked.txt"), repository.WorkToken));
+            var externalRoot = repository.Root + "-owned-external-objects";
+            _ = await repository.Wait(Task.Run(() =>
+            {
+                _ = repository.WorkRemaining();
+                if (Path.Exists(externalRoot)) throw new IOException("Fresh owned object namespace collision.");
+                Directory.CreateDirectory(externalRoot); _ = repository.WorkRemaining(); return true;
+            }, CancellationToken.None));
+            var configuration = JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                Git = repository.Git, Repository = repository.Root, Nonce = setup.Nonce, Race = false,
+                Alternate = alternate, BlobId = blob, ObjectDirectory = externalRoot, StoredSha256 = storedHash
+            });
+            _ = await repository.Wait(File.WriteAllBytesAsync(Path.Combine(setup.HelperRoot, "git-helper.json"), configuration,
+                repository.WorkToken).ContinueWith(done => { done.GetAwaiter().GetResult(); return true; },
+                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default));
+            operation = PlanImporter.ImportAndReconcileAsync(setup.Plan.CanonicalBytes, setup.Source, setup.Expectations,
+                repository.WorkRemaining(), cancellationToken: repository.WorkToken);
+            if (alternate)
+            {
+                var arrivalPath = Path.Combine(setup.HelperRoot, "alternate-entered.json");
+                await Arrival(repository, arrivalPath);
+                using var arrival = JsonDocument.Parse(await repository.Wait(File.ReadAllBytesAsync(arrivalPath, repository.WorkToken)));
+                Assert.Equal(setup.Nonce, arrival.RootElement.GetProperty("Nonce").GetString());
+                Assert.Equal(storedHash, arrival.RootElement.GetProperty("originalBlobSha").GetString());
+                Assert.Equal(new[] { "cat-file", "blob", "--end-of-options", blob },
+                    arrival.RootElement.GetProperty("arguments").EnumerateArray().Select(item => item.GetString()).ToArray()[^4..]);
+                Assert.Equal(storedHash, Hash(await repository.Wait(File.ReadAllBytesAsync(originalBlob, repository.WorkToken))));
+                Assert.False(Path.Exists(Path.Combine(repository.Root, ".git", "objects", "info", "alternates")));
+                await Release(repository, setup, false);
+            }
+            PlanImportResult? result = null; Exception? importFailure = null;
+            try { result = await repository.Wait(operation); }
+            catch (Exception failure) { importFailure = failure; }
+            if (alternate)
+            {
+                using var observation = JsonDocument.Parse(await repository.Wait(File.ReadAllBytesAsync(
+                    Path.Combine(setup.HelperRoot, "alternate-observed.json"), repository.WorkToken)));
+                var data = observation.RootElement;
+                Assert.Equal(setup.Nonce, data.GetProperty("Nonce").GetString());
+                Assert.Equal(0, data.GetProperty("childExit").GetInt32());
+                Assert.Equal(expectedOutput.LongLength, data.GetProperty("stdoutLength").GetInt64());
+                Assert.Equal(Hash(expectedOutput), data.GetProperty("stdoutSha256").GetString());
+                Assert.Equal(storedHash, data.GetProperty("externalBlobSha").GetString());
+                Assert.Equal(storedHash, Hash(await repository.Wait(File.ReadAllBytesAsync(originalBlob, repository.WorkToken))));
+                Assert.False(Path.Exists(Path.Combine(repository.Root, ".git", "objects", "info", "alternates")));
+                Assert.False(Path.Exists(Path.Combine(externalRoot, blob[..2], blob[2..])));
+                // Actual source blob absent + exact external blob present while real Git returned
+                // original bytes. This observation is DATA, not imported object/source authority.
+                Assert.False(data.GetProperty("externalRoutingConsumed").GetBoolean());
+            }
+            if (importFailure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(importFailure).Throw();
+            Assert.NotNull(result); Assert.True(result.DownstreamReady); Assert.NotNull(result.Plan);
+            Assert.Equal(setup.Plan.CanonicalBytes, result.Plan.CanonicalBytes);
+            Assert.Equal(storedHash, Hash(await repository.Wait(File.ReadAllBytesAsync(originalBlob, repository.WorkToken))));
+            Assert.False(Path.Exists(Path.Combine(repository.Root, ".git", "objects", "info", "alternates")));
+            Assert.False(Path.Exists(Path.Combine(externalRoot, blob[..2], blob[2..])));
+        }
+        catch (Exception failure) { primary = failure; repository.Primary = failure; throw; }
+        finally
+        {
+            // Release and observe independently before repository disposal. Actual tasks/handles
+            // remain rooted by the fixture on unknown; no unconditional file restoration/deletion.
+            if (setup is not null && alternate)
+                try
+                {
+                    if (!File.Exists(Path.Combine(setup.HelperRoot, "alternate-release.json")))
+                        await Release(repository, setup, true);
+                }
+                catch (Exception failure) { secondary.Add(failure); }
+            if (operation is not null)
+                try { _ = await repository.ObserveCleanup(() => operation); }
+                catch (Exception failure) { if (!ReferenceEquals(failure, primary)) secondary.Add(failure); }
+            if (secondary.Count > 0)
+            {
+                var combined = new AggregateException("Actual import and independent original release/operation observations",
+                    primary is null ? secondary : new[] { primary }.Concat(secondary));
+                repository.Primary = combined; throw combined;
+            }
+        }
+    }
+
+    private static string Hash(byte[] bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
+    private static async Task Arrival(ImportRepositoryFixture repository, string path)
+    {
+        var started = Stopwatch.GetTimestamp();
+        while (true)
+        {
+            _ = repository.WorkRemaining();
+            if (Stopwatch.GetElapsedTime(started) >= TimeSpan.FromSeconds(10)) throw new TimeoutException("Original alternate arrival expired.");
+            var exists = await repository.Wait(Task.Run(() => File.Exists(path), CancellationToken.None));
+            _ = repository.WorkRemaining();
+            if (Stopwatch.GetElapsedTime(started) >= TimeSpan.FromSeconds(10)) throw new TimeoutException("Late alternate arrival refused.");
+            if (exists) return;
+            await Task.Delay(20, repository.WorkToken);
+        }
+    }
+    private static async Task Release(ImportRepositoryFixture repository, RichPlanImportGitSafetyTests.Setup setup, bool cleanup)
+    {
+        Task<bool> Write() => Task.Run(() =>
+        {
+            void Check() { _ = cleanup ? repository.CleanupRemaining() : repository.WorkRemaining(); }
+            Check(); var target = Path.Combine(setup.HelperRoot, "alternate-release.json");
+            var staged = target + ".pending-" + Guid.NewGuid().ToString("N");
+            using (var stream = new FileStream(staged, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            { stream.Write(JsonSerializer.SerializeToUtf8Bytes(new { nonce = setup.Nonce })); stream.Flush(true); }
+            Check(); File.Move(staged, target, overwrite: false); Check(); return true;
+        }, CancellationToken.None);
+        if (cleanup) _ = await repository.ObserveCleanup(Write);
+        else _ = await repository.Wait(Write());
+    }
+}

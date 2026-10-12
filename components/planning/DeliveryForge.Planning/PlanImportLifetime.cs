@@ -7,6 +7,7 @@ internal sealed class PlanImportLifetime : IDisposable
 {
     private static readonly ConcurrentDictionary<Task, PlanImportLifetime> Retained = new();
     private readonly ConcurrentDictionary<Task, byte> _actual = new();
+    internal PlanImportResourceCollector Resources { get; } = new();
     private readonly long _started = Stopwatch.GetTimestamp();
     private readonly TimeSpan _total;
     private readonly CancellationTokenSource _wall;

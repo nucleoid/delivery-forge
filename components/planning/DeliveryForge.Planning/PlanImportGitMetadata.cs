@@ -49,6 +49,8 @@ internal sealed record PlanImportGitMetadata(string Root, string Metadata, strin
         {
             if (!Directory.Exists(source)) return;
             var pending = new Stack<string>(); pending.Push(source); var directories = 0; var references = 0;
+            var discovered = 1; var entries = 0;
+            life.Resources.Observe(discovered, pending.Count, entries);
             while (pending.TryPop(out var directory))
             {
                 life.Check(); PlanImportFilesystem.Plain(directory);
@@ -56,7 +58,21 @@ internal sealed record PlanImportGitMetadata(string Root, string Metadata, strin
                 foreach (var path in Directory.EnumerateFileSystemEntries(directory))
                 {
                     life.Check(); PlanImportFilesystem.Plain(path);
-                    if (Directory.Exists(path)) { pending.Push(path); continue; }
+                    try { entries = checked(entries + 1); }
+                    catch (OverflowException) { throw new PlanningException("Reference observation counter overflow."); }
+                    life.Resources.Observe(discovered, pending.Count, entries);
+                    if (Directory.Exists(path))
+                    {
+                        try { discovered = checked(discovered + 1); }
+                        catch (OverflowException) { throw new PlanningException("Reference discovery observation overflow."); }
+                        // RECORD actual frontier before push; intentionally no quota repair
+                        // until Root has compiled this resource-contract RED.
+                        int queued;
+                        try { queued = checked(pending.Count + 1); }
+                        catch (OverflowException) { throw new PlanningException("Reference frontier observation overflow."); }
+                        life.Resources.Observe(discovered, queued, entries);
+                        pending.Push(path); continue;
+                    }
                     RichPlanImportCodec.Require(++references <= 1024, "Actual Git reference file bound exceeded.");
                     var relative = Path.GetRelativePath(source, path).Replace(Path.DirectorySeparatorChar, '/');
                     RichPlanImportCodec.Require(!relative.Split('/').Any(part => part is "" or "." or "..") && !relative.EndsWith(".lock", StringComparison.Ordinal), "Unsupported/in-progress Git reference.");
