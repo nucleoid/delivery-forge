@@ -73,45 +73,53 @@ internal sealed class PlanImportGitView : IDisposable
         var packs = new HashSet<string>(StringComparer.Ordinal);
         var indexes = new HashSet<string>(StringComparer.Ordinal);
         var packAuxiliaries = new HashSet<string>(StringComparer.Ordinal);
+        var admitted = new List<ObjectAdmission>();
+        var ownDirectories = new List<string>();
         bool Hex(string value) => value.Length > 0 && value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
-        void Entry(string path)
+        void Entry(FileSystemInfo entry)
         {
             _life.Check();
             if (++entries > maximumEntries) throw new PlanningException("Immutable object entry bound exceeded.");
-            PlanImportFilesystem.Plain(path);
+            PlanImportFilesystem.Plain(entry.FullName);
+            if (entry.LinkTarget is not null || (entry.Attributes & FileAttributes.ReparsePoint) != 0)
+                throw new PlanningException("Immutable object admission traverses a redirected entry.");
         }
-        void Capture(string source, string relative)
+        void Admit(FileInfo file, string relative, bool copy, int maximum)
         {
             _life.Check();
-            if (++files > maximumFiles) throw new PlanningException("Immutable object file bound exceeded.");
-            var content = PlanImportFilesystem.Read(source, maximumFileBytes, _life);
-            if (content.LongLength > maximumTotalBytes - bytes) throw new PlanningException("Immutable object aggregate byte bound exceeded.");
-            bytes += content.LongLength;
-            var target = Path.Combine(_objects, relative.Replace('/', Path.DirectorySeparatorChar));
-            _carriers.Add(new Carrier(target, content, null)); _life.Check();
+            // Reject the actual first excess BEFORE any object body read/pin/carrier allocation.
+            if (copy && ++files > maximumFiles) throw new PlanningException("Immutable object file bound exceeded.");
+            var length = file.Length;
+            if (length < 0 || length > maximum) throw new PlanningException("Import metadata byte bound exceeded.");
+            if (copy)
+            {
+                if (length > maximumTotalBytes - bytes) throw new PlanningException("Immutable object aggregate byte bound exceeded.");
+                bytes += length;
+            }
+            admitted.Add(new(file.FullName, relative, length, file.CreationTimeUtc, file.LastWriteTimeUtc, copy, maximum));
+            _life.Check();
         }
-        foreach (var directory in Directory.EnumerateFileSystemEntries(_sourceObjects))
+        foreach (var directory in new DirectoryInfo(_sourceObjects).EnumerateFileSystemInfos())
         {
             Entry(directory);
-            var name = Path.GetFileName(directory);
-            if (!Directory.Exists(directory) || !(name is "pack" or "info" || name.Length == 2 && Hex(name)))
+            var name = directory.Name;
+            if (directory is not DirectoryInfo sourceDirectory || !(name is "pack" or "info" || name.Length == 2 && Hex(name)))
                 throw new PlanningException("Unsupported immutable object root shape.");
             if (++directories > maximumDirectories) throw new PlanningException("Immutable object directory bound exceeded.");
-            _leases.Add(new PlanImportFilesystem.DirectoryBinding(directory));
+            _leases.Add(new PlanImportFilesystem.DirectoryBinding(directory.FullName));
             var ownDirectory = Path.Combine(_objects, name);
-            Directory.CreateDirectory(ownDirectory); _life.Check();
-            _leases.Add(new PlanImportFilesystem.DirectoryBinding(ownDirectory));
-            foreach (var path in Directory.EnumerateFileSystemEntries(directory))
+            ownDirectories.Add(ownDirectory);
+            foreach (var entry in sourceDirectory.EnumerateFileSystemInfos())
             {
-                Entry(path);
-                var leaf = Path.GetFileName(path);
-                if (Directory.Exists(path)) throw new PlanningException("Nested object routing/acceleration directories are unsupported.");
+                Entry(entry);
+                var leaf = entry.Name;
+                if (entry is not FileInfo file) throw new PlanningException("Nested object routing/acceleration directories are unsupported.");
                 if (name == "info")
                 {
                     // Server-info lists are not local object authority. Do not copy them.
                     // Alternates, HTTP alternates, grafts and commit-graph formats cannot route this view.
                     if (leaf != "packs") throw new PlanningException("Unsupported external object routing or acceleration metadata.");
-                    _ = PlanImportFilesystem.Read(path, 1024 * 1024, _life); continue;
+                    Admit(file, name + "/" + leaf, false, 1024 * 1024); continue;
                 }
                 if (name == "pack")
                 {
@@ -126,11 +134,44 @@ internal sealed class PlanImportGitView : IDisposable
                 }
                 else if (leaf.Length is not (38 or 62) || !Hex(leaf))
                     throw new PlanningException("Unsupported loose object encoding or in-progress object file.");
-                Capture(path, name + "/" + leaf);
+                Admit(file, name + "/" + leaf, true, maximumFileBytes);
             }
         }
         if (!packs.SetEquals(indexes)) throw new PlanningException("Immutable packed objects require matching pack/index pairs.");
         if (!packAuxiliaries.IsSubsetOf(packs)) throw new PlanningException("Immutable pack auxiliary has no matching ordinary pack.");
+        // Admission is bounded DATA, not authority. Reverify original directory bindings and
+        // each current source epoch, then actual no-follow held file identity around body capture.
+        Verify();
+        foreach (var directory in ownDirectories)
+        {
+            _life.Check(); Directory.CreateDirectory(directory); _life.Check();
+            _leases.Add(new PlanImportFilesystem.DirectoryBinding(directory));
+        }
+        foreach (var file in admitted)
+        {
+            _life.Check();
+            using var original = new PlanImportFilesystem.FileBinding(file.Source);
+            CheckObjectEpoch(file); original.Verify();
+            var content = PlanImportFilesystem.Read(file.Source, file.Maximum, _life);
+            if (content.LongLength != file.Length) throw new PlanningException("Object source changed from its admitted length.");
+            original.Verify(); CheckObjectEpoch(file);
+            if (file.Copy)
+                _carriers.Add(new Carrier(Path.Combine(_objects, file.Relative.Replace('/', Path.DirectorySeparatorChar)), content, null));
+            original.Verify(); CheckObjectEpoch(file); _life.Check();
+        }
+        // Directory identities remain original; do not infer closure from cached admission rows.
+        Verify();
+        _life.Check();
+    }
+    private sealed record ObjectAdmission(string Source, string Relative, long Length,
+        DateTime CreatedUtc, DateTime WrittenUtc, bool Copy, int Maximum);
+    private void CheckObjectEpoch(ObjectAdmission original)
+    {
+        _life.Check(); PlanImportFilesystem.Plain(original.Source);
+        var current = new FileInfo(original.Source);
+        if (!current.Exists || current.LinkTarget is not null || (current.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0 ||
+            current.Length != original.Length || current.CreationTimeUtc != original.CreatedUtc || current.LastWriteTimeUtc != original.WrittenUtc)
+            throw new PlanningException("Object source epoch changed from bounded admission.");
         _life.Check();
     }
     internal void Attach(GitRepositoryContextReader reader) => _reader = reader;

@@ -5,6 +5,7 @@ using DeliveryForge.Contracts.Serialization;
 
 namespace DeliveryForge.Planning.Tests;
 
+[Collection(RichPlanImportFixtureCollection.Name)]
 public sealed class RichPlanImportGitSafetyTests
 {
     [Theory(Timeout = 120_000)]

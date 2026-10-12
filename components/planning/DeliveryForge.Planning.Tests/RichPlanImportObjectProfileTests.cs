@@ -3,6 +3,7 @@ using System.Text.Json;
 
 namespace DeliveryForge.Planning.Tests;
 
+[Collection(RichPlanImportFixtureCollection.Name)]
 public sealed class RichPlanImportObjectProfileTests
 {
     [Fact(Timeout = 120_000)]
