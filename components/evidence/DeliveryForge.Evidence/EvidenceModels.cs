@@ -113,7 +113,24 @@ public sealed record CommandResult(
     bool Cancelled,
     DateTimeOffset StartedAt,
     DateTimeOffset CompletedAt,
-    bool OwnedProcessQuiescent = true);
+    bool OwnedProcessQuiescent = true)
+{
+    // Optional immutable observations only; not process ownership, signaling or settlement authority.
+    public CommandLifecycleDiagnostics? LifecycleDiagnostics { get; init; }
+}
+
+public sealed record CommandStreamObservation(bool CompletedSuccessfully, bool Faulted, bool Cancelled, string? CompletedText);
+public sealed record CommandLifecycleDiagnostics(
+    bool KillAttempted, bool KillSucceeded, string? KillExceptionType, string? KillExceptionDetail,
+    bool KillExceptionDetailTruncated, bool ExitWaitCompleted, bool RootExited,
+    bool DrainWaitCompleted, int CleanupWaitMilliseconds,
+    CommandStreamObservation StandardOutput, CommandStreamObservation StandardError)
+{
+    // Observational data only; null until a creation-owned lifecycle actually supplies this proof.
+    public CommandOwnedTreeObservation? OwnedTree { get; init; }
+    public string? NativeFailure { get; init; }
+}
+public sealed record CommandOwnedTreeObservation(bool CreationOwned, bool SettlementObserved, int ActiveProcesses);
 
 public sealed record GateRequest(
     string GateId,

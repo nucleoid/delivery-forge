@@ -9,5 +9,11 @@
     <PackageReference Include="xunit.runner.visualstudio" />
     <ProjectReference Include="../DeliveryForge.Execution/DeliveryForge.Execution.csproj" />
     <ProjectReference Include="../../review/DeliveryForge.Review/DeliveryForge.Review.csproj" />
+    <ProjectReference Include="../../evidence/DeliveryForge.Evidence/DeliveryForge.Evidence.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Remove="Fixtures/BoundedGitPreparationHelper/**/*.cs" />
+    <None Remove="Fixtures/BoundedGitPreparationHelper/**/*" />
+    <None Include="Fixtures/BoundedGitPreparationHelper/**/*" Exclude="Fixtures/BoundedGitPreparationHelper/**/bin/**/*;Fixtures/BoundedGitPreparationHelper/**/obj/**/*" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 </Project>

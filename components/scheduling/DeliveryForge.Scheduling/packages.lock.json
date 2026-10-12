@@ -18,6 +18,7 @@
         "type": "Project",
         "dependencies": {
           "DeliveryForge.Contracts": "[1.0.0, )",
+          "DeliveryForge.Evidence": "[1.0.0, )",
           "DeliveryForge.Review": "[1.0.0, )"
         }
       },

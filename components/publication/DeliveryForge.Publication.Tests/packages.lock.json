@@ -153,6 +153,15 @@
         "type": "Project",
         "dependencies": {
           "DeliveryForge.Contracts": "[1.0.0, )",
+          "DeliveryForge.Evidence": "[1.0.0, )",
+          "DeliveryForge.Review": "[1.0.0, )"
+        }
+      },
+      "deliveryforge.publication": {
+        "type": "Project",
+        "dependencies": {
+          "DeliveryForge.Contracts": "[1.0.0, )",
+          "DeliveryForge.Execution": "[1.0.0, )",
           "DeliveryForge.Review": "[1.0.0, )"
         }
       },
@@ -161,14 +170,6 @@
         "dependencies": {
           "DeliveryForge.Contracts": "[1.0.0, )",
           "DeliveryForge.Evidence": "[1.0.0, )"
-        }
-      },
-      "deliveryforge.publication": {
-        "type": "Project",
-        "dependencies": {
-          "DeliveryForge.Execution": "[1.0.0, )",
-          "DeliveryForge.Contracts": "[1.0.0, )",
-          "DeliveryForge.Review": "[1.0.0, )"
         }
       }
     }
