@@ -408,7 +408,14 @@ public sealed class ExecutionCoordinator : IDisposable
                 ? ObservedProcessState.Unknown
                 : ObservedProcessState.Quiesced;
         AgentCheckpoint? checkpoint = null;
-        try
+        if (HasPendingControlOperations(runId))
+        {
+            quiescent = false;
+            // The original host task can still produce side effects. Optional fresh Git/fact
+            // observations cannot establish quiescence here and must not delay this refusal.
+            limitations.Add("Fresh checkpoint was not observed while the original host control remains unsettled; current bound cleanup is required after actual task settlement.");
+        }
+        else try
         {
             var worktree = await _worktrees.ObserveAsync(prepared.Request.Worktree, cancellationToken).ConfigureAwait(false);
             await _worktrees.EnsureDescendsFromAsync(prepared.Request.Worktree, prepared.Request.BaseCommit,
