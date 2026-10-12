@@ -60,10 +60,20 @@ internal static class SchedulingScenarioFixture
         var source = await File.ReadAllBytesAsync(Path.Combine(run.Root, "source.json"), cancellationToken);
         await run.WriteNewJsonAsync("scheduling-spec.json", new
         {
-            fixture = true, productionCertified = false, firstFullRealRunCertified = false, scenario,
+            fixture = true,
+            productionCertified = false,
+            firstFullRealRunCertified = false,
+            scenario,
             integratedBaseCommit = OwnedScenarioRun.InitialIntegratedBase,
-            sourceSha256 = Convert.ToHexStringLower(SHA256.HashData(source)), seed = 11017,
-            scenarioSeconds = 120, gitCommandSeconds = 15, childSeconds = 30, cpu = 2, memoryMiB = 4096, tokens = 1000, cost = 0,
+            sourceSha256 = Convert.ToHexStringLower(SHA256.HashData(source)),
+            seed = 11017,
+            scenarioSeconds = 120,
+            gitCommandSeconds = 15,
+            childSeconds = 30,
+            cpu = 2,
+            memoryMiB = 4096,
+            tokens = 1000,
+            cost = 0,
             limitation = "Fixture bookkeeping and actual Git/file/owned native sleep only; no model worker, quality PASS or production ownership."
         }, cancellationToken);
     }

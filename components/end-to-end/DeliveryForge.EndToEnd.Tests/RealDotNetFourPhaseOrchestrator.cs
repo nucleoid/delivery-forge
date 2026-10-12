@@ -107,8 +107,14 @@ internal static class RealDotNetFourPhaseOrchestrator
                 var invocation = new CommandInvocation(detection.Capability.ExecutablePath!, arguments.AsReadOnly(), repo, runtime.DotnetEnvironment);
                 var configBytes = CanonicalJson.Canonicalize(JsonSerializer.SerializeToUtf8Bytes(new
                 {
-                    fixture = true, phase = phase.ToString(), seed = 11017, budget = budget.Profile, invocation,
-                    protectedBase, sdkVersion = detection.Capability.Version, sdkExecutableIdentity = detection.Capability.ExecutableIdentity
+                    fixture = true,
+                    phase = phase.ToString(),
+                    seed = 11017,
+                    budget = budget.Profile,
+                    invocation,
+                    protectedBase,
+                    sdkVersion = detection.Capability.Version,
+                    sdkExecutableIdentity = detection.Capability.ExecutableIdentity
                 }));
                 var phaseRoot = Path.Combine(artifacts.Root, "actual-dotnet-" + phase); Directory.CreateDirectory(phaseRoot);
                 var configPath = Path.Combine(phaseRoot, "configuration.json"); await OwnedRealDotNetRuntime.WriteNewAsync(configPath, configBytes, cancellationToken);
@@ -127,19 +133,44 @@ internal static class RealDotNetFourPhaseOrchestrator
                 var provenance = Path.Combine(phaseRoot, "provenance.json");
                 await OwnedRealDotNetRuntime.WriteNewAsync(provenance, JsonSerializer.SerializeToUtf8Bytes(new
                 {
-                    fixture = true, productionCertified = false, firstFullRealRunCertified = false, phase = phase.ToString(), gateId,
-                    integratedBaseCommit = artifacts.IntegratedSource.Commit, implementationHead = artifacts.IntegratedSource.HeadCommit,
-                    budgetId = budget.Profile.Id, totalBudgetSeconds = budget.Profile.TotalSeconds, elapsedSeconds = budget.Elapsed.TotalSeconds,
-                    observedSdkVersion = detection.Capability.Version, versionStdoutPath = versionPath, helpStdoutPath = helpPath,
-                    helpExitCode = detection.HelpResult!.ExitCode, sdkExecutableSha256 = detection.Capability.ExecutableIdentity,
-                    configurationSha256 = OwnedRealDotNetRuntime.Hash(configBytes), configurationPath = configPath,
-                    protectedPolicySha256 = OwnedRealDotNetRuntime.Hash(policyBytes), protectedPolicyPath = Path.Combine(repo, ".forge", "evidence-policy.json"),
-                    protectedBaseCommit = protectedBase, observedHeadCommit = gate.Before.HeadCommit, observedTreeId = gate.Before.TreeId,
-                    initialRestoreExitCode = restore.ExitCode, initialRestoreOwnedQuiescent = restore.OwnedProcessQuiescent, initialRestoreMode = "locked",
-                    initialRestoreStdoutPath = restoreStdout, initialRestoreStderrPath = restoreStderr,
-                    assetsSha256 = OwnedRealDotNetRuntime.HashFile(assetsCopy), assetsPath = assetsCopy, lockSha256 = lockHash, lockPath,
-                    ownedBinAndObjRemoved = cold, generatedDllsBefore = dllsBefore, producedDllPath = immutableDll,
-                    dllHashBefore = dllBefore, dllHashAfter = OwnedRealDotNetRuntime.HashFile(immutableDll), coverageFilesBefore = coverageBefore, coverageFilesAfter = coverageAfter,
+                    fixture = true,
+                    productionCertified = false,
+                    firstFullRealRunCertified = false,
+                    phase = phase.ToString(),
+                    gateId,
+                    integratedBaseCommit = artifacts.IntegratedSource.Commit,
+                    implementationHead = artifacts.IntegratedSource.HeadCommit,
+                    budgetId = budget.Profile.Id,
+                    totalBudgetSeconds = budget.Profile.TotalSeconds,
+                    elapsedSeconds = budget.Elapsed.TotalSeconds,
+                    observedSdkVersion = detection.Capability.Version,
+                    versionStdoutPath = versionPath,
+                    helpStdoutPath = helpPath,
+                    helpExitCode = detection.HelpResult!.ExitCode,
+                    sdkExecutableSha256 = detection.Capability.ExecutableIdentity,
+                    configurationSha256 = OwnedRealDotNetRuntime.Hash(configBytes),
+                    configurationPath = configPath,
+                    protectedPolicySha256 = OwnedRealDotNetRuntime.Hash(policyBytes),
+                    protectedPolicyPath = Path.Combine(repo, ".forge", "evidence-policy.json"),
+                    protectedBaseCommit = protectedBase,
+                    observedHeadCommit = gate.Before.HeadCommit,
+                    observedTreeId = gate.Before.TreeId,
+                    initialRestoreExitCode = restore.ExitCode,
+                    initialRestoreOwnedQuiescent = restore.OwnedProcessQuiescent,
+                    initialRestoreMode = "locked",
+                    initialRestoreStdoutPath = restoreStdout,
+                    initialRestoreStderrPath = restoreStderr,
+                    assetsSha256 = OwnedRealDotNetRuntime.HashFile(assetsCopy),
+                    assetsPath = assetsCopy,
+                    lockSha256 = lockHash,
+                    lockPath,
+                    ownedBinAndObjRemoved = cold,
+                    generatedDllsBefore = dllsBefore,
+                    producedDllPath = immutableDll,
+                    dllHashBefore = dllBefore,
+                    dllHashAfter = OwnedRealDotNetRuntime.HashFile(immutableDll),
+                    coverageFilesBefore = coverageBefore,
+                    coverageFilesAfter = coverageAfter,
                     limitation = "Actual compiler/SDK/TRX only; current DotNet producer remains advisory/nonproduction. Outer fixture never certifies full model-worker/review/coverage/mutation profile."
                 }), cancellationToken);
                 phases.Add(phase, new(gate, trx, provenance));
@@ -151,9 +182,16 @@ internal static class RealDotNetFourPhaseOrchestrator
         {
             artifacts.RetainArtifacts("Owned actual-tool runtime retained: " + runtime.Root);
             using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(0.001, Math.Min(60, budget.Remaining.TotalSeconds))));
-            await artifacts.WriteNewJsonAsync("actual-dotnet-retained-runtime.json", new { fixture = true, productionCertified = false, runtime.Root,
-                runtime.AllCommandsQuiescent, elapsedSeconds = budget.Elapsed.TotalSeconds, retained = true,
-                limitation = "No recursive runtime cleanup is authorized by gate outcomes or file/hash evidence alone." }, cleanup.Token);
+            await artifacts.WriteNewJsonAsync("actual-dotnet-retained-runtime.json", new
+            {
+                fixture = true,
+                productionCertified = false,
+                runtime.Root,
+                runtime.AllCommandsQuiescent,
+                elapsedSeconds = budget.Elapsed.TotalSeconds,
+                retained = true,
+                limitation = "No recursive runtime cleanup is authorized by gate outcomes or file/hash evidence alone."
+            }, cleanup.Token);
         }
     }
     private static async Task CommitAsync(OwnedRealDotNetRuntime runtime, string message, CancellationToken token)

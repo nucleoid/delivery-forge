@@ -26,8 +26,17 @@ public sealed class ProtectedPolicyCaptureFailureTests
         var nonce = Guid.NewGuid().ToString("N");
         var mode = scenario == "settled-quota" ? "pressure" : "stall";
         await run.WriteNewJsonAsync("capture-diagnostic-setup.json", new
-        { fixture = true, scenario, nonce, mode, helper, originalCaptureSeconds = scenario == "settled-timeout" ? 1 : 5,
-            quotaBytesEach = 1024, helperSelfSeconds = 8, noGitFactsFromHelper = true }, wall.Token);
+        {
+            fixture = true,
+            scenario,
+            nonce,
+            mode,
+            helper,
+            originalCaptureSeconds = scenario == "settled-timeout" ? 1 : 5,
+            quotaBytesEach = 1024,
+            helperSelfSeconds = 8,
+            noGitFactsFromHelper = true
+        }, wall.Token);
         var metadataPath = Path.Combine(run.Checkout, ".git", "prepare-negative-fixture.json");
         await using (var writer = new FileStream(metadataPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
         {
@@ -70,10 +79,18 @@ public sealed class ProtectedPolicyCaptureFailureTests
         var actual = await operation;
         await run.WriteNewJsonAsync("capture-diagnostic-actual-result.json", new
         {
-            fixture = true, scenario, nonce, actual.Command, actual.CaptureBoundExceeded,
-            actual.RootExitObserved, actual.StandardOutputDrainCompleted, actual.StandardErrorDrainCompleted,
-            stdoutBytes = actual.StandardOutputBytes, stderrBytes = actual.StandardErrorBytes,
-            stdoutSha256 = Hash(actual.StandardOutputBytes), stderrSha256 = Hash(actual.StandardErrorBytes),
+            fixture = true,
+            scenario,
+            nonce,
+            actual.Command,
+            actual.CaptureBoundExceeded,
+            actual.RootExitObserved,
+            actual.StandardOutputDrainCompleted,
+            actual.StandardErrorDrainCompleted,
+            stdoutBytes = actual.StandardOutputBytes,
+            stderrBytes = actual.StandardErrorBytes,
+            stdoutSha256 = Hash(actual.StandardOutputBytes),
+            stderrSha256 = Hash(actual.StandardErrorBytes),
             limitation = "Actual data only; unproved closure is not a claim that a live orphan exists."
         }, wall.Token);
         if (scenario != "unobserved-launch")

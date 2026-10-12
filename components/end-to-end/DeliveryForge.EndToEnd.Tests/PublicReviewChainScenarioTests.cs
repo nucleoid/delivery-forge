@@ -151,9 +151,14 @@ public sealed class PublicReviewChainScenarioTests
         await new AppendOnlyContractStore(Path.Combine(artifacts.Root, "plan-contracts")).WriteImmutableAsync(plan.PlanContractBytes, token);
         var policyNode = new JsonObject
         {
-            ["schemaVersion"] = "1.0.0", ["kind"] = "evidence-policy", ["policyId"] = "issue11-public-review-fixture",
-            ["requiredGates"] = new JsonArray("test"), ["authorizedCeiling"] = "pr", ["requireIndependentReview"] = true,
-            ["allowedNotApplicable"] = new JsonArray(), ["createdAt"] = now.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture)
+            ["schemaVersion"] = "1.0.0",
+            ["kind"] = "evidence-policy",
+            ["policyId"] = "issue11-public-review-fixture",
+            ["requiredGates"] = new JsonArray("test"),
+            ["authorizedCeiling"] = "pr",
+            ["requireIndependentReview"] = true,
+            ["allowedNotApplicable"] = new JsonArray(),
+            ["createdAt"] = now.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture)
         };
         policyNode["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(policyNode.ToJsonString()));
         var policyBytes = CanonicalJson.Canonicalize(Encoding.UTF8.GetBytes(policyNode.ToJsonString()));
@@ -173,10 +178,23 @@ public sealed class PublicReviewChainScenarioTests
         var rawIndex = Hash(await File.ReadAllBytesAsync(Path.Combine(artifacts.Checkout, ".git", "index"), token));
         await artifacts.WriteNewJsonAsync("public-review-real-git-setup.json", new
         {
-            fixture = true, productionAccepted = false, firstFullRealRunCertified = false, seed = 11019,
-            integratedBaseCommit = artifacts.IntegratedSource.Commit, implementationHead = artifacts.IntegratedSource.HeadCommit,
-            baseCommit, protectedBaseTree = context.Tree, headCommit = context.HeadCommit, headTree = context.HeadTree, actualPatch, rawIndexSha256 = rawIndex,
-            wallSeconds = 120, ordinaryGitSeconds = 15, maximumCaptureBytes = 1024 * 1024, cpu = 2, memoryMiB = 4096,
+            fixture = true,
+            productionAccepted = false,
+            firstFullRealRunCertified = false,
+            seed = 11019,
+            integratedBaseCommit = artifacts.IntegratedSource.Commit,
+            implementationHead = artifacts.IntegratedSource.HeadCommit,
+            baseCommit,
+            protectedBaseTree = context.Tree,
+            headCommit = context.HeadCommit,
+            headTree = context.HeadTree,
+            actualPatch,
+            rawIndexSha256 = rawIndex,
+            wallSeconds = 120,
+            ordinaryGitSeconds = 15,
+            maximumCaptureBytes = 1024 * 1024,
+            cpu = 2,
+            memoryMiB = 4096,
             setupElapsedSeconds = Stopwatch.GetElapsedTime(started).TotalSeconds,
             limitation = "Pure fixture policy input only. Bounded owner preparation has its own proper RED/GREEN prerequisite before distinct chain RED. No synchronous unbounded fallback. Strong protected-policy composition remains required."
         }, token);

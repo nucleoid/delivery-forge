@@ -95,12 +95,27 @@ internal static class ProtectedReviewEdgesOrchestrator
             _ = Remaining();
             await setup.Run.WriteNewJsonAsync("review-all-edges-current-observation.json", new
             {
-                fixture = true, productionAccepted = false, firstFullRealRunCertified = false, scenario, seed = 11019,
-                setup.Patch, rootBinding = setup.Bootstrap.RootContext,
-                independentExpected = setup.IndependentContext.RequestIdentity, hostedExpected = setup.HostedContext.RequestIdentity,
-                before, after, secondaryOwn, secondaryAtOriginal, originalStillValid, immutable, currentHead,
-                publicationCalls = 0, modelCalls = 0, reviewerFixtureCalls = port.Calls.Count,
-                publicationAndCiPrerequisitesAreFixtureInputsOnly = true, publicationOwnerExecuted = false,
+                fixture = true,
+                productionAccepted = false,
+                firstFullRealRunCertified = false,
+                scenario,
+                seed = 11019,
+                setup.Patch,
+                rootBinding = setup.Bootstrap.RootContext,
+                independentExpected = setup.IndependentContext.RequestIdentity,
+                hostedExpected = setup.HostedContext.RequestIdentity,
+                before,
+                after,
+                secondaryOwn,
+                secondaryAtOriginal,
+                originalStillValid,
+                immutable,
+                currentHead,
+                publicationCalls = 0,
+                modelCalls = 0,
+                reviewerFixtureCalls = port.Calls.Count,
+                publicationAndCiPrerequisitesAreFixtureInputsOnly = true,
+                publicationOwnerExecuted = false,
                 limitation = "Five public protected review acceptance lookups only; actual #10 bridge/golden and genuine model/production profiles remain separate."
             }, token);
             _ = Remaining();

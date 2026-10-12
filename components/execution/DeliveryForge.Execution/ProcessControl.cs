@@ -85,7 +85,8 @@ public sealed class ProcessControl : IAsyncDisposable
             if ((!allowDisposedController && Volatile.Read(ref _disposed) != 0) ||
                 !_owned.TryGetValue(expected.ProcessId, out owned!) || owned.Identity != expected)
                 return new(ProcessControlOutcome.IdentityUnknown, "", "", 0, "registry-refusal",
-                    "PID is not registered with the exact start/executable/argv identity in this live executor lifetime.") { RequestedLaunchComplete = false };
+                    "PID is not registered with the exact start/executable/argv identity in this live executor lifetime.")
+                { RequestedLaunchComplete = false };
             _windows.TryGetValue(expected.ProcessId, out original);
             requested = _requestedLaunches[expected.ProcessId];
         }
@@ -93,7 +94,8 @@ public sealed class ProcessControl : IAsyncDisposable
         if (OperatingSystem.IsWindows())
         {
             observed = original?.Read() ?? new(ProcessControlOutcome.IdentityUnknown, requested.Length <= 4096 ? requested : requested[..4096], "", 0,
-                "windows-owned-handle-image", "Original privately captured process handle is unavailable.") { RequestedLaunchComplete = requested.Length <= 4096 };
+                "windows-owned-handle-image", "Original privately captured process handle is unavailable.")
+            { RequestedLaunchComplete = requested.Length <= 4096 };
         }
         else
         {
@@ -104,7 +106,7 @@ public sealed class ProcessControl : IAsyncDisposable
                 read.State == IdentityReadState.Live ? read.PlatformStartIdentity : 0, "linux-owned-image",
                 read.State == IdentityReadState.Exited ? "Owned child already exited." :
                 read.State == IdentityReadState.Unknown ? "Process identity could not be observed safely." : "Owned process image/start observation sampled.")
-                { RequestedLaunch = requested.Length <= 4096 ? requested : requested[..4096], RequestedLaunchComplete = requested.Length <= 4096 };
+            { RequestedLaunch = requested.Length <= 4096 ? requested : requested[..4096], RequestedLaunchComplete = requested.Length <= 4096 };
         }
         if (observed.Outcome != ProcessControlOutcome.LiveOwned) return observed;
         if (observed.PlatformStartIdentity != expected.PlatformStartIdentity)

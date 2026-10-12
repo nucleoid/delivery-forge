@@ -15,11 +15,20 @@ public sealed class CoordinationLeaseScenarioTests
         await run.WriteNewJsonAsync("lease-spec-" + Guid.NewGuid().ToString("N") + ".json",
             new
             {
-                fixture = true, productionCertified = false, firstFullRealRunCertified = false,
-                seed = 11017, sourceSha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(sourceBytes)).ToLowerInvariant(),
-                maximumScenarioSeconds = 120, maximumHostOperationSeconds = 2,
-                maximumOwnedChildSeconds = 30, cpuCores = 2, memoryMiB = 4096, tokens = 1000, cost = 0,
-                clockDomain = clock.DomainId, limitation = "Fixture deadline/transport only; real owned file/native observations."
+                fixture = true,
+                productionCertified = false,
+                firstFullRealRunCertified = false,
+                seed = 11017,
+                sourceSha256 = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(sourceBytes)).ToLowerInvariant(),
+                maximumScenarioSeconds = 120,
+                maximumHostOperationSeconds = 2,
+                maximumOwnedChildSeconds = 30,
+                cpuCores = 2,
+                memoryMiB = 4096,
+                tokens = 1000,
+                cost = 0,
+                clockDomain = clock.DomainId,
+                limitation = "Fixture deadline/transport only; real owned file/native observations."
             }, TestContext.Current.CancellationToken);
         return await CoordinationContractFixtureHost.CreateAsync(transport, new("fixture-parent", run.RunId),
             [new("fixture-e2e", "github:fixture/delivery-forge:issue:11")],

@@ -180,12 +180,22 @@ public sealed class ReviewAuthorityHost
             var executor = new ProcessCommandExecutor();
             var environment = new Dictionary<string, string>
             {
-                ["GIT_DIR"] = workerGitDirectory, ["GIT_WORK_TREE"] = sourceRoot, ["GIT_COMMON_DIR"] = workerGitDirectory,
-                ["GIT_OBJECT_DIRECTORY"] = workerObjects, ["GIT_INDEX_FILE"] = Path.Combine(workerGitDirectory, "index"),
-                ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "", ["GIT_CONFIG_COUNT"] = "0", ["GIT_CONFIG_PARAMETERS"] = "",
-                ["GIT_CONFIG"] = config, ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
-                ["GIT_CONFIG_SYSTEM"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null", ["GIT_NO_REPLACE_OBJECTS"] = "1",
-                ["GIT_NO_LAZY_FETCH"] = "1", ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_GRAFT_FILE"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null"
+                ["GIT_DIR"] = workerGitDirectory,
+                ["GIT_WORK_TREE"] = sourceRoot,
+                ["GIT_COMMON_DIR"] = workerGitDirectory,
+                ["GIT_OBJECT_DIRECTORY"] = workerObjects,
+                ["GIT_INDEX_FILE"] = Path.Combine(workerGitDirectory, "index"),
+                ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "",
+                ["GIT_CONFIG_COUNT"] = "0",
+                ["GIT_CONFIG_PARAMETERS"] = "",
+                ["GIT_CONFIG"] = config,
+                ["GIT_CONFIG_NOSYSTEM"] = "1",
+                ["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
+                ["GIT_CONFIG_SYSTEM"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
+                ["GIT_NO_REPLACE_OBJECTS"] = "1",
+                ["GIT_NO_LAZY_FETCH"] = "1",
+                ["GIT_TERMINAL_PROMPT"] = "0",
+                ["GIT_GRAFT_FILE"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null"
             };
             async Task<string?> Git(IReadOnlyList<string> args)
             {

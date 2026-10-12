@@ -25,12 +25,26 @@ public sealed class ColdRecoveryScenarioTests
         var initial = await runtime.Reader.ReadAsync(runtime.Repository, "refs/heads/main", cancellationToken);
         await artifacts.WriteNewJsonAsync("cold-slice-spec.json", new
         {
-            fixture = true, productionCertified = false, fullRealProfileCertified = false, scenario,
-            integratedBaseCommit = artifacts.IntegratedSource.Commit, implementationHead = artifacts.IntegratedSource.HeadCommit,
-            frozenBaseCommit = initial.Commit, frozenBaseTree = initial.Tree, seed = 11017,
-            wallSeconds = 120, originalDemandSeconds = 90, gitSeconds = 15, hostControlSeconds = 2,
-            childSeconds = 15, naturalExitBarrierSeconds = 5, cleanupReserveSeconds = 10,
-            cpu = 2, memoryMiB = 4096, tokens = 1000, cost = 0,
+            fixture = true,
+            productionCertified = false,
+            fullRealProfileCertified = false,
+            scenario,
+            integratedBaseCommit = artifacts.IntegratedSource.Commit,
+            implementationHead = artifacts.IntegratedSource.HeadCommit,
+            frozenBaseCommit = initial.Commit,
+            frozenBaseTree = initial.Tree,
+            seed = 11017,
+            wallSeconds = 120,
+            originalDemandSeconds = 90,
+            gitSeconds = 15,
+            hostControlSeconds = 2,
+            childSeconds = 15,
+            naturalExitBarrierSeconds = 5,
+            cleanupReserveSeconds = 10,
+            cpu = 2,
+            memoryMiB = 4096,
+            tokens = 1000,
+            cost = 0,
             limitation = "Actual Git/files/registered owned child; explicit external host-control fixture only. Lifetime replacement is not an OS parent crash."
         }, cancellationToken);
         var options = new ScenarioOptions(ScenarioProfile.LocalContract, [], new(TimeSpan.FromSeconds(120), 2, 4096, 1000, 0m), 11017);

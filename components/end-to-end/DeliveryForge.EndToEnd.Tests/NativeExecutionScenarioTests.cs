@@ -160,9 +160,15 @@ public sealed class NativeExecutionScenarioTests
     }
     private static Task Spec(OwnedScenarioRun artifacts, string name) => artifacts.WriteNewJsonAsync("native-slice-spec.json", new
     {
-        fixture = true, productionCertified = false, fullRealProfileCertified = false, name,
-        integratedBaseCommit = artifacts.IntegratedSource.Commit, implementationHead = artifacts.IntegratedSource.HeadCommit,
-        seed = Options.Seed, budget = Options.Budget, runtimeCleanup = "RED stub; initial live runtime archived and retained",
+        fixture = true,
+        productionCertified = false,
+        fullRealProfileCertified = false,
+        name,
+        integratedBaseCommit = artifacts.IntegratedSource.Commit,
+        implementationHead = artifacts.IntegratedSource.HeadCommit,
+        seed = Options.Seed,
+        budget = Options.Budget,
+        runtimeCleanup = "RED stub; initial live runtime archived and retained",
         limitation = "Actual Git/native boundaries plus explicitly fixture host metadata only; no model worker or quality certificate."
     }, TestContext.Current.CancellationToken);
 }

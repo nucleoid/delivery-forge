@@ -149,9 +149,18 @@ public sealed class ProtectedReviewFixtureBootstrapTests
         }
         await run.WriteNewJsonAsync("protected-bootstrap-observation.json", new
         {
-            fixture = true, scenario, setup.BaseCommit, setup.HeadCommit, setup.ProtectedPolicySha256, setup.WorkerPolicySha256,
-            bootstrap.RootContext, outcome = primary.Normalized.Outcome.ToString(), reason = primary.Normalized.Reason,
-            primary.Normalized.ProductionAccepted, actualModelCalls = 0, publicationCalls = 0,
+            fixture = true,
+            scenario,
+            setup.BaseCommit,
+            setup.HeadCommit,
+            setup.ProtectedPolicySha256,
+            setup.WorkerPolicySha256,
+            bootstrap.RootContext,
+            outcome = primary.Normalized.Outcome.ToString(),
+            reason = primary.Normalized.Reason,
+            primary.Normalized.ProductionAccepted,
+            actualModelCalls = 0,
+            publicationCalls = 0,
             limitation = "Real protected Git policy under original Test issuer; fixture reviewer only, no production/model certificate."
         }, token);
         Assert.True(Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(120));
@@ -189,9 +198,14 @@ public sealed class ProtectedReviewFixtureBootstrapTests
             new("additive", "none", "none", "none", "none", "none", "receipt", "revert", []), [], IntakePlanner.Assess(request, evidence)), "protected-review-fixture", now);
         var policyNode = new JsonObject
         {
-            ["schemaVersion"] = "1.0.0", ["kind"] = "evidence-policy", ["policyId"] = "protected-review-bootstrap-fixture",
-            ["requiredGates"] = new JsonArray("test"), ["authorizedCeiling"] = initialCeiling, ["requireIndependentReview"] = true,
-            ["allowedNotApplicable"] = new JsonArray(), ["createdAt"] = now.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture)
+            ["schemaVersion"] = "1.0.0",
+            ["kind"] = "evidence-policy",
+            ["policyId"] = "protected-review-bootstrap-fixture",
+            ["requiredGates"] = new JsonArray("test"),
+            ["authorizedCeiling"] = initialCeiling,
+            ["requireIndependentReview"] = true,
+            ["allowedNotApplicable"] = new JsonArray(),
+            ["createdAt"] = now.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture)
         };
         policyNode["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(policyNode.ToJsonString()));
         var policyBytes = CanonicalJson.Canonicalize(Encoding.UTF8.GetBytes(policyNode.ToJsonString()));

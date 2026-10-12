@@ -60,7 +60,9 @@ public sealed class NativeCleanupRegressionTests
             catch (WorktreeBoundaryException) { rejectedByFence = true; }
             await artifacts.WriteNewJsonAsync("archive-fence-observation.json", new
             {
-                fixture = true, rejectedByFence, acquiredCompetingWriter = competing is not null,
+                fixture = true,
+                rejectedByFence,
+                acquiredCompetingWriter = competing is not null,
                 limitation = "Actual public writer claim at archive entry; no simulated lock proof."
             }, cancellationToken);
         };

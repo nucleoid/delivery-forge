@@ -39,7 +39,11 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
         Store = new RunStore(Path.Combine(Root, "receipts"));
         _markerBytes = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            fixture = true, Root, RuntimeId, artifactRunId = artifacts.RunId, nonce = Guid.NewGuid().ToString("N"),
+            fixture = true,
+            Root,
+            RuntimeId,
+            artifactRunId = artifacts.RunId,
+            nonce = Guid.NewGuid().ToString("N"),
             integratedBaseCommit = artifacts.IntegratedSource.Commit
         });
     }
@@ -81,8 +85,14 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
         await runtime.GitAsync(cancellationToken, "-c", "user.name=EndToEndFixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "owned runtime base");
         await artifacts.WriteNewJsonAsync("ephemeral-runtime.json", new
         {
-            fixture = true, productionCertified = false, runtime.Root, runtime.RuntimeId, runtime.Repository, runtime.Worktree,
-            expectedMarkerSha256 = runtime.ExpectedMarkerSha256, integratedBaseCommit = artifacts.IntegratedSource.Commit,
+            fixture = true,
+            productionCertified = false,
+            runtime.Root,
+            runtime.RuntimeId,
+            runtime.Repository,
+            runtime.Worktree,
+            expectedMarkerSha256 = runtime.ExpectedMarkerSha256,
+            integratedBaseCommit = artifacts.IntegratedSource.Commit,
             limitation = "Owned platform Temp live runtime only; durable artifacts stay in source-owned ignored leaf. Cleanup needs fresh ownership/quiescence proof."
         }, cancellationToken);
         runtime.CaptureOwnedManifest();
@@ -96,12 +106,22 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
         Directory.CreateDirectory(Path.Combine(gitDirectory, "objects"));
         var environment = new Dictionary<string, string>
         {
-            ["GIT_DIR"] = gitDirectory, ["GIT_WORK_TREE"] = Repository, ["GIT_COMMON_DIR"] = gitDirectory,
-            ["GIT_OBJECT_DIRECTORY"] = Path.Combine(gitDirectory, "objects"), ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "",
-            ["GIT_INDEX_FILE"] = Path.Combine(gitDirectory, "index"), ["GIT_CONFIG"] = Path.Combine(gitDirectory, "config"),
-            ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_SYSTEM"] = nullDevice, ["GIT_CONFIG_GLOBAL"] = nullDevice,
-            ["GIT_CONFIG_PARAMETERS"] = "", ["GIT_CONFIG_COUNT"] = "0", ["GIT_NO_REPLACE_OBJECTS"] = "1",
-            ["GIT_GRAFT_FILE"] = nullDevice, ["GIT_NO_LAZY_FETCH"] = "1", ["GIT_TERMINAL_PROMPT"] = "0"
+            ["GIT_DIR"] = gitDirectory,
+            ["GIT_WORK_TREE"] = Repository,
+            ["GIT_COMMON_DIR"] = gitDirectory,
+            ["GIT_OBJECT_DIRECTORY"] = Path.Combine(gitDirectory, "objects"),
+            ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "",
+            ["GIT_INDEX_FILE"] = Path.Combine(gitDirectory, "index"),
+            ["GIT_CONFIG"] = Path.Combine(gitDirectory, "config"),
+            ["GIT_CONFIG_NOSYSTEM"] = "1",
+            ["GIT_CONFIG_SYSTEM"] = nullDevice,
+            ["GIT_CONFIG_GLOBAL"] = nullDevice,
+            ["GIT_CONFIG_PARAMETERS"] = "",
+            ["GIT_CONFIG_COUNT"] = "0",
+            ["GIT_NO_REPLACE_OBJECTS"] = "1",
+            ["GIT_GRAFT_FILE"] = nullDevice,
+            ["GIT_NO_LAZY_FETCH"] = "1",
+            ["GIT_TERMINAL_PROMPT"] = "0"
         };
         var result = await new ProcessCommandExecutor().ExecuteAsync(new(_git,
             ["-c", "core.hooksPath=" + nullDevice, "-c", "core.fsmonitor=false", .. arguments], Repository, environment),
@@ -304,9 +324,14 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
         if (schedulerClosed) _execution?.Dispose();
         await _artifacts.WriteNewJsonAsync("retained-runtime-" + Guid.NewGuid().ToString("N") + ".json", new
         {
-            fixture = true, Root, RuntimeId, observations, expectedMarkerSha256 = ExpectedMarkerSha256,
+            fixture = true,
+            Root,
+            RuntimeId,
+            observations,
+            expectedMarkerSha256 = ExpectedMarkerSha256,
             actualMarkerSha256 = HasPlainOwnedArchiveRoot() ? Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(MarkerPath, deadline.Token))) : null,
-            retained = true, limitation = "Unresolved or nonpassing live runtime retained; archived data does not grant cleanup authority."
+            retained = true,
+            limitation = "Unresolved or nonpassing live runtime retained; archived data does not grant cleanup authority."
         }, CancellationToken.None);
         await ArchiveAsync(deadline.Token);
     }
@@ -367,7 +392,10 @@ public sealed class OwnedEphemeralRuntime : IAsyncDisposable
         _artifacts.RetainArtifacts("Current writer namespace is unproved: " + observation.Reason);
         await _artifacts.WriteNewJsonAsync("writer-namespace-refused-" + Guid.NewGuid().ToString("N") + ".json", new
         {
-            fixture = true, productionCertified = false, observation, retained = true,
+            fixture = true,
+            productionCertified = false,
+            observation,
+            retained = true,
             limitation = "Fresh live-handle observation is non-authorizing data; no fallback to path/token/bytes or filesystem atomicity claim."
         }, cancellationToken);
         return false;

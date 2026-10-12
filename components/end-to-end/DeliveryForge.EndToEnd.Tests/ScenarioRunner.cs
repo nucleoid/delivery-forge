@@ -75,8 +75,10 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
             var execution = await run.ExecuteBoundedChildCommandAsync(TimeSpan.FromMilliseconds(200), deadline.Token);
             var record = await run.Store.AppendAsync(run.RunId, "scenario-command", new
             {
-                fixture = true, integratedBaseCommit = run.IntegratedSource.Commit,
-                implementationHead = run.IntegratedSource.HeadCommit, execution
+                fixture = true,
+                integratedBaseCommit = run.IntegratedSource.Commit,
+                implementationHead = run.IntegratedSource.HeadCommit,
+                execution
             }, deadline.Token);
             receiptIds.Add(record.Sha256);
             invariants["real-command-deadline-observed"] = execution.TimedOut && !execution.Cancelled;
@@ -134,11 +136,20 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
         var observed = new ReadOnlyDictionary<string, bool>(invariants);
         var recorded = await run.Store.AppendAsync(run.RunId, "scenario-result", new
         {
-            schemaVersion = "1.0.0", scenario = name, profile = captured.Profile.ToString(), fixture = true,
-            fullRealProfileCertified = false, integratedBaseCommit = run.IntegratedSource.Commit,
-            implementationHead = run.IntegratedSource.HeadCommit, seed = captured.Seed, budget = captured.Budget,
-            capabilityClaims = captured.Capabilities, outcome = outcome.ToString().ToUpperInvariant(), invariants = observed,
-            receiptIds = receiptIds.ToArray(), limitations
+            schemaVersion = "1.0.0",
+            scenario = name,
+            profile = captured.Profile.ToString(),
+            fixture = true,
+            fullRealProfileCertified = false,
+            integratedBaseCommit = run.IntegratedSource.Commit,
+            implementationHead = run.IntegratedSource.HeadCommit,
+            seed = captured.Seed,
+            budget = captured.Budget,
+            capabilityClaims = captured.Capabilities,
+            outcome = outcome.ToString().ToUpperInvariant(),
+            invariants = observed,
+            receiptIds = receiptIds.ToArray(),
+            limitations
         }, deadline.Token);
         receiptIds.Add(recorded.Sha256);
         var result = new ScenarioResult(outcome, captured.Profile, true, false, run.IntegratedSource.Commit,
@@ -208,15 +219,26 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
             normalized = NormalizedEvidence.Incomplete("Input-only no-regression/preview observations cannot certify an actual quality producer.");
         var record = await run.Store.AppendAsync(run.RunId, "scenario-quality-observation", new
         {
-            fixture = true, productionCertified = false, firstFullRealRunCertified = false, scenario = name,
-            protectedBaseCommit = context.Commit, protectedBaseTree = context.Tree,
-            observedHeadCommit = context.HeadCommit, observedHeadTree = context.HeadTree, context.Dirty,
-            policyIdentity = policy.PolicyIdentity, policySha256 = policyHash, policy.RequiredGates,
-            candidatePath, candidateSha256 = candidateHash,
+            fixture = true,
+            productionCertified = false,
+            firstFullRealRunCertified = false,
+            scenario = name,
+            protectedBaseCommit = context.Commit,
+            protectedBaseTree = context.Tree,
+            observedHeadCommit = context.HeadCommit,
+            observedHeadTree = context.HeadTree,
+            context.Dirty,
+            policyIdentity = policy.PolicyIdentity,
+            policySha256 = policyHash,
+            policy.RequiredGates,
+            candidatePath,
+            candidateSha256 = candidateHash,
             inputSha256 = Convert.ToHexStringLower(SHA256.HashData(inputBytes)),
-            ownerOutcome = normalized.Outcome.ToString(), ownerReason = normalized.Reason,
+            ownerOutcome = normalized.Outcome.ToString(),
+            ownerReason = normalized.Reason,
             ownerProductionCapable = normalized.ProductionCapable,
-            integratedBaseCommit = run.IntegratedSource.Commit, implementationHead = run.IntegratedSource.HeadCommit,
+            integratedBaseCommit = run.IntegratedSource.Commit,
+            implementationHead = run.IntegratedSource.HeadCommit,
             limitation = "Untrusted input/policy admission only; no tool execution or producer capability fabricated."
         }, cancellationToken);
         receiptIds.Add(record.Sha256);
@@ -287,9 +309,13 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
         catch (RunStoreCorruptionException) { rejected = true; }
         var diagnostic = await run.Store.AppendAsync(run.RunId, "scenario-corruption-observation", new
         {
-            fixture = true, corruptRunId, corruptRecordPath = original.Path,
-            expectedSha256 = original.Sha256, observedSha256 = observedHash,
-            typedCorruptionRejected = rejected, integratedBaseCommit = run.IntegratedSource.Commit,
+            fixture = true,
+            corruptRunId,
+            corruptRecordPath = original.Path,
+            expectedSha256 = original.Sha256,
+            observedSha256 = observedHash,
+            typedCorruptionRejected = rejected,
+            integratedBaseCommit = run.IntegratedSource.Commit,
             implementationHead = run.IntegratedSource.HeadCommit
         }, cancellationToken);
         receiptIds.Add(diagnostic.Sha256);

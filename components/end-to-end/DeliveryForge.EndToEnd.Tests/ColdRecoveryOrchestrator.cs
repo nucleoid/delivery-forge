@@ -192,7 +192,11 @@ internal static class ColdRecoveryOrchestrator
             {
                 await WriteDiagnosticAsync(artifacts, "cold-primary-failure.json", new
                 {
-                    fixture = true, scenario, type = exception.GetType().FullName, message = Bound(exception.Message), stack = Bound(exception.StackTrace),
+                    fixture = true,
+                    scenario,
+                    type = exception.GetType().FullName,
+                    message = Bound(exception.Message),
+                    stack = Bound(exception.StackTrace),
                     ownedObservations = runtime.Processes.GetAllOwnedIdentities().Select(identity => new { identity, observed = runtime.Processes.Observe(identity) }).ToArray(),
                     limitation = "Primary exception captured before cleanup; fresh public samples are data, never exit inference or repair."
                 });
@@ -204,32 +208,32 @@ internal static class ColdRecoveryOrchestrator
         {
             try
             {
-            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-            host.Foreign = false;
-            if (facts.Required.Count != 0 && !File.Exists(requiredPath))
-            {
-                RequirePlainOwnedResult(runtime, requiredPath);
-                await WriteCreateNewAsync(requiredPath, requiredBytes, cleanup.Token);
-                if (!SHA256.HashData(await File.ReadAllBytesAsync(requiredPath, cleanup.Token)).SequenceEqual(SHA256.HashData(requiredBytes)))
-                    throw new InvalidOperationException("Cleanup-only artifact restoration differs from original owned bytes.");
-                restoredForCleanup = true;
-            }
-            if (receiver is null && parent is not null &&
-                !await parent.StopAsync(cleanup.Token) && !await parent.ReconcileCleanupAsync(cleanup.Token))
-                throw new InvalidOperationException("Original in-progress cold setup still retains its live owner: " + parent.CleanupLimitation);
-            if (!originalDisposed) { original.Dispose(); originalDisposed = true; }
-            if (receiver is not null && !await receiver.StopAsync(cleanup.Token) && !await receiver.ReconcileCleanupAsync(cleanup.Token))
-                throw new InvalidOperationException("Actual cold receiver ownership remains retained: " + receiver.CleanupLimitation);
-            if (parent is not null && !await parent.StopAsync(cleanup.Token) && !await parent.ReconcileCleanupAsync(cleanup.Token))
-                throw new InvalidOperationException("Original cold parent ownership remains retained: " + parent.CleanupLimitation);
-            receiverExecution?.Dispose();
-            if (delayed)
-            {
-                using var ownedCleanup = new ExecutionCoordinator(new RunStore(runtime.Store.RootPath), runtime.Worktrees, runtime.Processes, host, facts);
-                var settled = await ownedCleanup.ReconcileStopAsync(worker.RunId, TimeSpan.FromSeconds(2), cleanup.Token);
-                if (!settled.Quiescent) throw new InvalidOperationException("Retained original controller did not prove fresh completion cleanup.");
-            }
-            if (freshController is not null) await freshController.DisposeAsync();
+                using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                host.Foreign = false;
+                if (facts.Required.Count != 0 && !File.Exists(requiredPath))
+                {
+                    RequirePlainOwnedResult(runtime, requiredPath);
+                    await WriteCreateNewAsync(requiredPath, requiredBytes, cleanup.Token);
+                    if (!SHA256.HashData(await File.ReadAllBytesAsync(requiredPath, cleanup.Token)).SequenceEqual(SHA256.HashData(requiredBytes)))
+                        throw new InvalidOperationException("Cleanup-only artifact restoration differs from original owned bytes.");
+                    restoredForCleanup = true;
+                }
+                if (receiver is null && parent is not null &&
+                    !await parent.StopAsync(cleanup.Token) && !await parent.ReconcileCleanupAsync(cleanup.Token))
+                    throw new InvalidOperationException("Original in-progress cold setup still retains its live owner: " + parent.CleanupLimitation);
+                if (!originalDisposed) { original.Dispose(); originalDisposed = true; }
+                if (receiver is not null && !await receiver.StopAsync(cleanup.Token) && !await receiver.ReconcileCleanupAsync(cleanup.Token))
+                    throw new InvalidOperationException("Actual cold receiver ownership remains retained: " + receiver.CleanupLimitation);
+                if (parent is not null && !await parent.StopAsync(cleanup.Token) && !await parent.ReconcileCleanupAsync(cleanup.Token))
+                    throw new InvalidOperationException("Original cold parent ownership remains retained: " + parent.CleanupLimitation);
+                receiverExecution?.Dispose();
+                if (delayed)
+                {
+                    using var ownedCleanup = new ExecutionCoordinator(new RunStore(runtime.Store.RootPath), runtime.Worktrees, runtime.Processes, host, facts);
+                    var settled = await ownedCleanup.ReconcileStopAsync(worker.RunId, TimeSpan.FromSeconds(2), cleanup.Token);
+                    if (!settled.Quiescent) throw new InvalidOperationException("Retained original controller did not prove fresh completion cleanup.");
+                }
+                if (freshController is not null) await freshController.DisposeAsync();
             }
             catch (Exception cleanupFailure)
             {
@@ -237,8 +241,12 @@ internal static class ColdRecoveryOrchestrator
                 {
                     await WriteDiagnosticAsync(artifacts, "cold-cleanup-failure.json", new
                     {
-                        fixture = true, scenario, type = cleanupFailure.GetType().FullName, message = Bound(cleanupFailure.Message),
-                        primaryType = primaryFailure?.GetType().FullName, primaryMessage = Bound(primaryFailure?.Message),
+                        fixture = true,
+                        scenario,
+                        type = cleanupFailure.GetType().FullName,
+                        message = Bound(cleanupFailure.Message),
+                        primaryType = primaryFailure?.GetType().FullName,
+                        primaryMessage = Bound(primaryFailure?.Message),
                         limitation = "Cleanup failure does not replace the saved primary failure or manufacture quiescence."
                     });
                 }
@@ -252,14 +260,27 @@ internal static class ColdRecoveryOrchestrator
         invariants["no-native-relaunch"] = history.Records.Count(item => item.Kind == "process-registered") == 1 && runtime.Processes.GetAllOwnedIdentities().Count == 1;
         var record = await artifacts.Store.AppendAsync(artifacts.RunId, "scenario-cold-observation", new
         {
-            fixture = true, productionCertified = false, actualOsParentCrash = false, scenario,
-            integratedBaseCommit = artifacts.IntegratedSource.Commit, implementationHead = artifacts.IntegratedSource.HeadCommit,
-            frozenBaseCommit = plan.BaseCommit, receiverObservedBaseCommit = observedBase, workerRunId = worker.RunId,
-            request.RequestIdentity, request.WriterToken, request.AuthorizationCeiling,
-            resumedRequestIdentity = resumedRequest?.RequestIdentity, resumedWriterToken = resumedRequest?.WriterToken,
-            resumedAuthorizationCeiling = resumedRequest?.AuthorizationCeiling, hostCallLedger = host.Ledger.ToArray(), resumeHostCalls = host.ResumeCalls,
-            journalHashes = history.Records.Select(item => item.Sha256).ToArray(), actualChildArtifactPath = childArtifact,
-            completionAfterDurableRegistration = completionAfterRegistration, freshControllerProcessOutcome = freshOutcome,
+            fixture = true,
+            productionCertified = false,
+            actualOsParentCrash = false,
+            scenario,
+            integratedBaseCommit = artifacts.IntegratedSource.Commit,
+            implementationHead = artifacts.IntegratedSource.HeadCommit,
+            frozenBaseCommit = plan.BaseCommit,
+            receiverObservedBaseCommit = observedBase,
+            workerRunId = worker.RunId,
+            request.RequestIdentity,
+            request.WriterToken,
+            request.AuthorizationCeiling,
+            resumedRequestIdentity = resumedRequest?.RequestIdentity,
+            resumedWriterToken = resumedRequest?.WriterToken,
+            resumedAuthorizationCeiling = resumedRequest?.AuthorizationCeiling,
+            hostCallLedger = host.Ledger.ToArray(),
+            resumeHostCalls = host.ResumeCalls,
+            journalHashes = history.Records.Select(item => item.Sha256).ToArray(),
+            actualChildArtifactPath = childArtifact,
+            completionAfterDurableRegistration = completionAfterRegistration,
+            freshControllerProcessOutcome = freshOutcome,
             cleanupOnlyOriginalArtifactRestored = restoredForCleanup,
             limitation = "Fresh store/coordinator lifetime and explicit external fixture control only; retained-controller proof is not PID adoption, OS crash, model-worker, quality or full-profile certification."
         }, cancellationToken);
@@ -343,8 +364,13 @@ internal static class ColdRecoveryOrchestrator
         {
             try
             {
-                await WriteDiagnosticAsync(artifacts, "cold-child-exit-poll.json", new { fixture = true, identity, observations,
-                    limitation = "Actual public original-controller observations; no native retry, ignored mismatch, PID adoption or cached-exit success." });
+                await WriteDiagnosticAsync(artifacts, "cold-child-exit-poll.json", new
+                {
+                    fixture = true,
+                    identity,
+                    observations,
+                    limitation = "Actual public original-controller observations; no native retry, ignored mismatch, PID adoption or cached-exit success."
+                });
             }
             catch (Exception diagnosticFailure)
             {

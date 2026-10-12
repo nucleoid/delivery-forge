@@ -36,8 +36,10 @@ public sealed class QualitySafetyScenarioTests
         var data = await PrepareProtectedPolicy(run);
         await File.WriteAllTextAsync(Path.Combine(run.Checkout, data.CandidatePath), JsonSerializer.Serialize(new
         {
-            baselineIdentity = "caller-rebased-debt", policyIdentity = data.PolicyIdentity,
-            sourceRevision = data.ProtectedBaseCommit, fixture = false,
+            baselineIdentity = "caller-rebased-debt",
+            policyIdentity = data.PolicyIdentity,
+            sourceRevision = data.ProtectedBaseCommit,
+            fixture = false,
             metrics = new Dictionary<string, decimal> { ["debt"] = 1000m },
             current = new Dictionary<string, decimal> { ["debt"] = 10m }
         }), TestContext.Current.CancellationToken);
@@ -135,8 +137,12 @@ public sealed class QualitySafetyScenarioTests
         var source = await File.ReadAllBytesAsync(Path.Combine(run.Root, "source.json"), TestContext.Current.CancellationToken);
         await run.WriteNewJsonAsync("quality-spec.json", new
         {
-            fixture = true, productionCertified = false, firstFullRealRunCertified = false,
-            sourceSha256 = Convert.ToHexStringLower(SHA256.HashData(source)), seed = 11017, budget = Options.Budget,
+            fixture = true,
+            productionCertified = false,
+            firstFullRealRunCertified = false,
+            sourceSha256 = Convert.ToHexStringLower(SHA256.HashData(source)),
+            seed = 11017,
+            budget = Options.Budget,
             limitation = "Untrusted input/policy admission only; no fake executor, synthetic compiler counts, installed producer or quality PASS."
         }, TestContext.Current.CancellationToken);
         return data;
@@ -156,10 +162,15 @@ public sealed class QualitySafetyScenarioTests
     {
         var node = new JsonObject
         {
-            ["schemaVersion"] = "1.0.0", ["kind"] = "evidence-policy", ["identity"] = "sha256:" + new string('0', 64),
-            ["policyId"] = "strict-e2e-fixture", ["requiredGates"] = JsonSerializer.SerializeToNode(required),
-            ["authorizedCeiling"] = "implement", ["requireIndependentReview"] = true,
-            ["allowedNotApplicable"] = JsonSerializer.SerializeToNode(exemptions), ["createdAt"] = "2026-10-11T00:00:01Z"
+            ["schemaVersion"] = "1.0.0",
+            ["kind"] = "evidence-policy",
+            ["identity"] = "sha256:" + new string('0', 64),
+            ["policyId"] = "strict-e2e-fixture",
+            ["requiredGates"] = JsonSerializer.SerializeToNode(required),
+            ["authorizedCeiling"] = "implement",
+            ["requireIndependentReview"] = true,
+            ["allowedNotApplicable"] = JsonSerializer.SerializeToNode(exemptions),
+            ["createdAt"] = "2026-10-11T00:00:01Z"
         };
         node["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(node.ToJsonString()));
         var bytes = Encoding.UTF8.GetBytes(node.ToJsonString());

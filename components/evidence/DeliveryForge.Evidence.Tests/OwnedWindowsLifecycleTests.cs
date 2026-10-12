@@ -166,15 +166,26 @@ public sealed class OwnedWindowsLifecycleTests
             var nonce = Guid.NewGuid().ToString("N");
             var environment = new Dictionary<string, string>
             {
-                ["DOTNET_ROOT"] = Path.GetDirectoryName(host)!, ["DOTNET_MULTILEVEL_LOOKUP"] = "0",
-                ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1",
-                ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000"
+                ["DOTNET_ROOT"] = Path.GetDirectoryName(host)!,
+                ["DOTNET_MULTILEVEL_LOOKUP"] = "0",
+                ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1",
+                ["MSBUILDDISABLENODEREUSE"] = "1",
+                ["DOTNET_PROCESSOR_COUNT"] = "2",
+                ["DOTNET_GCHeapHardLimit"] = "0x100000000"
             };
             var invocation = new CommandInvocation(host, [helper, mode, root, nonce], root, environment);
-            await WriteNew(root, "setup.json", new { fixture = true, productionCertified = false, nonce, invocation,
+            await WriteNew(root, "setup.json", new
+            {
+                fixture = true,
+                productionCertified = false,
+                nonce,
+                invocation,
                 helperSha256 = "sha256:" + Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(helper, token))),
                 hostSha256 = "sha256:" + Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(host, token))),
-                childNaturalLimitSeconds = 8, originalScenarioLimitSeconds = 120, retained = true }, token);
+                childNaturalLimitSeconds = 8,
+                originalScenarioLimitSeconds = 120,
+                retained = true
+            }, token);
             return new(root, nonce, invocation);
         }
         public async Task WaitEnteredAsync(TimeSpan limit, CancellationToken token)
@@ -194,8 +205,15 @@ public sealed class OwnedWindowsLifecycleTests
             }
         }
         public Task WriteObservationAsync(CommandResult result, TimeSpan elapsed, CancellationToken token) =>
-            WriteNew(root, "actual-result.json", new { fixture = true, productionCertified = false, result, elapsedSeconds = elapsed.TotalSeconds,
-                retained = true, limitation = "Child-entry bytes identify the scenario, never process ownership or quiescence authority." }, token);
+            WriteNew(root, "actual-result.json", new
+            {
+                fixture = true,
+                productionCertified = false,
+                result,
+                elapsedSeconds = elapsed.TotalSeconds,
+                retained = true,
+                limitation = "Child-entry bytes identify the scenario, never process ownership or quiescence authority."
+            }, token);
         private static async Task WriteNew(string directory, string name, object value, CancellationToken token)
         {
             await using var file = new FileStream(Path.Combine(directory, name), FileMode.CreateNew, FileAccess.Write, FileShare.None);

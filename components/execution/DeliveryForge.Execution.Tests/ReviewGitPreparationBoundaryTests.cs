@@ -152,12 +152,21 @@ public sealed class ReviewGitPreparationBoundaryTests
             var gitDirectory = Path.Combine(root, ".git");
             var environment = new Dictionary<string, string>
             {
-                ["GIT_DIR"] = gitDirectory, ["GIT_WORK_TREE"] = root, ["GIT_COMMON_DIR"] = gitDirectory,
-                ["GIT_OBJECT_DIRECTORY"] = Path.Combine(gitDirectory, "objects"), ["GIT_INDEX_FILE"] = Path.Combine(gitDirectory, "index"),
-                ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "", ["GIT_CONFIG_COUNT"] = "0", ["GIT_CONFIG_PARAMETERS"] = "",
-                ["GIT_CONFIG"] = Path.Combine(gitDirectory, "config"), ["GIT_CONFIG_NOSYSTEM"] = "1",
-                ["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null", ["GIT_CONFIG_SYSTEM"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
-                ["GIT_NO_REPLACE_OBJECTS"] = "1", ["GIT_NO_LAZY_FETCH"] = "1", ["GIT_TERMINAL_PROMPT"] = "0"
+                ["GIT_DIR"] = gitDirectory,
+                ["GIT_WORK_TREE"] = root,
+                ["GIT_COMMON_DIR"] = gitDirectory,
+                ["GIT_OBJECT_DIRECTORY"] = Path.Combine(gitDirectory, "objects"),
+                ["GIT_INDEX_FILE"] = Path.Combine(gitDirectory, "index"),
+                ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "",
+                ["GIT_CONFIG_COUNT"] = "0",
+                ["GIT_CONFIG_PARAMETERS"] = "",
+                ["GIT_CONFIG"] = Path.Combine(gitDirectory, "config"),
+                ["GIT_CONFIG_NOSYSTEM"] = "1",
+                ["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
+                ["GIT_CONFIG_SYSTEM"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
+                ["GIT_NO_REPLACE_OBJECTS"] = "1",
+                ["GIT_NO_LAZY_FETCH"] = "1",
+                ["GIT_TERMINAL_PROMPT"] = "0"
             };
             Directory.CreateDirectory(Path.Combine(gitDirectory, "objects"));
             async Task<string> Git(params string[] args)
@@ -193,10 +202,18 @@ public sealed class ReviewGitPreparationBoundaryTests
         public Task SaveCaptureAsync(BoundedCommandCaptureResult result, CancellationToken token) => WriteNew(
             Path.Combine(GitDirectory, "actual-bounded-capture-result.json"), JsonSerializer.SerializeToUtf8Bytes(new
             {
-                fixture = true, nonce = Nonce, result.Command, result.CaptureBoundExceeded,
-                result.RootExitObserved, result.StandardOutputDrainCompleted, result.StandardErrorDrainCompleted,
-                stdoutBytes = result.StandardOutputBytes, stderrBytes = result.StandardErrorBytes,
-                stdoutSha256 = Hash(result.StandardOutputBytes), stderrSha256 = Hash(result.StandardErrorBytes), retained = true
+                fixture = true,
+                nonce = Nonce,
+                result.Command,
+                result.CaptureBoundExceeded,
+                result.RootExitObserved,
+                result.StandardOutputDrainCompleted,
+                result.StandardErrorDrainCompleted,
+                stdoutBytes = result.StandardOutputBytes,
+                stderrBytes = result.StandardErrorBytes,
+                stdoutSha256 = Hash(result.StandardOutputBytes),
+                stderrSha256 = Hash(result.StandardErrorBytes),
+                retained = true
             }), token);
         public static string Hash(byte[] bytes) => "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes));
         private static async Task WriteNew(string path, byte[] bytes, CancellationToken token)

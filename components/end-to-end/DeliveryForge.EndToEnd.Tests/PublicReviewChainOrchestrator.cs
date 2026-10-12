@@ -153,13 +153,25 @@ internal static class PublicReviewChainOrchestrator
 
         Dictionary<string, object?> Common() => new()
         {
-            ["scenario"] = scenario, ["fixture"] = true, ["productionAccepted"] = false, ["firstFullRealRunCertified"] = false,
-            ["integratedBaseCommit"] = OwnedScenarioRun.InitialIntegratedBase, ["implementationHead"] = artifacts.IntegratedSource.HeadCommit,
-            ["baseCommit"] = setup.BaseCommit, ["headCommit"] = setup.HeadCommit, ["headTree"] = setup.HeadTree,
-            ["patchSha256"] = setup.ActualPatch.PatchSha256, ["gitVersion"] = setup.ActualPatch.GitVersion,
-            ["policyComposition"] = "pure-contract-fixture-policy", ["protectedPolicyCompositionStillRequired"] = true,
-            ["publicationCalls"] = 0, ["modelCalls"] = 0, ["seed"] = 11019,
-            ["rootBinding"] = rootBinding, ["initialPlanCeiling"] = "pr", ["initialEvidencePolicyCeiling"] = "pr"
+            ["scenario"] = scenario,
+            ["fixture"] = true,
+            ["productionAccepted"] = false,
+            ["firstFullRealRunCertified"] = false,
+            ["integratedBaseCommit"] = OwnedScenarioRun.InitialIntegratedBase,
+            ["implementationHead"] = artifacts.IntegratedSource.HeadCommit,
+            ["baseCommit"] = setup.BaseCommit,
+            ["headCommit"] = setup.HeadCommit,
+            ["headTree"] = setup.HeadTree,
+            ["patchSha256"] = setup.ActualPatch.PatchSha256,
+            ["gitVersion"] = setup.ActualPatch.GitVersion,
+            ["policyComposition"] = "pure-contract-fixture-policy",
+            ["protectedPolicyCompositionStillRequired"] = true,
+            ["publicationCalls"] = 0,
+            ["modelCalls"] = 0,
+            ["seed"] = 11019,
+            ["rootBinding"] = rootBinding,
+            ["initialPlanCeiling"] = "pr",
+            ["initialEvidencePolicyCeiling"] = "pr"
         };
         async Task<ChainResult> Chain(ReviewAuthorityHost issuer, ReviewAcceptanceContext context, ReviewTransitionReceiver receiver,
             string name, string family, PatchIdentity patch)

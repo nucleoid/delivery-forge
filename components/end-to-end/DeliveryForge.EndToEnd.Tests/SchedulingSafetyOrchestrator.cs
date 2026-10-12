@@ -9,12 +9,12 @@ internal static class SchedulingSafetyOrchestrator
 {
     public static Task ObserveAsync(OwnedScenarioRun run, string scenario, List<string> receipts,
         Dictionary<string, bool> invariants, CancellationToken cancellationToken) => scenario switch
-    {
-        "scheduling.unknown-map-contention" => UnknownMapAsync(run, receipts, invariants, cancellationToken),
-        "scheduling.real-integrated-prerequisite" => IntegratedAsync(run, receipts, invariants, cancellationToken),
-        "scheduling.stale-base-before-provision" => StaleBaseAsync(run, receipts, invariants, cancellationToken),
-        _ => throw new ArgumentOutOfRangeException(nameof(scenario))
-    };
+        {
+            "scheduling.unknown-map-contention" => UnknownMapAsync(run, receipts, invariants, cancellationToken),
+            "scheduling.real-integrated-prerequisite" => IntegratedAsync(run, receipts, invariants, cancellationToken),
+            "scheduling.stale-base-before-provision" => StaleBaseAsync(run, receipts, invariants, cancellationToken),
+            _ => throw new ArgumentOutOfRangeException(nameof(scenario))
+        };
 
     private static async Task UnknownMapAsync(OwnedScenarioRun run, List<string> receipts,
         Dictionary<string, bool> invariants, CancellationToken cancellationToken)
@@ -35,7 +35,10 @@ internal static class SchedulingSafetyOrchestrator
             var live = run.Processes.Observe(child.Identity);
             var native = await run.Store.AppendAsync(run.RunId, "scenario-native-observation", new
             {
-                fixture = true, child.Identity, observation = live, integratedBaseCommit = run.IntegratedSource.Commit,
+                fixture = true,
+                child.Identity,
+                observation = live,
+                integratedBaseCommit = run.IntegratedSource.Commit,
                 limitation = "Actual owned native sleep only, not a worker execution receipt."
             }, cancellationToken);
             receipts.Add(native.Sha256);
@@ -58,11 +61,19 @@ internal static class SchedulingSafetyOrchestrator
             var history = await run.Store.RecoverAsync(queueId, cancellationToken);
             var record = await run.Store.AppendAsync(run.RunId, "scenario-scheduling-observation", new
             {
-                fixture = true, productionCertified = false, firstFullRealRunCertified = false,
-                integratedBaseCommit = run.IntegratedSource.Commit, implementationHead = run.IntegratedSource.HeadCommit,
-                firstWaveCount = first.Count, blockedWaveCount = blocked.Count, afterQuiescenceWaveCount = after.Count,
-                childInitiallyLive = live.Outcome == ProcessControlOutcome.LiveOwned, childFinallyQuiescent = quiescent,
-                child.Identity, stopObservation = stopped, settledObservation = settled,
+                fixture = true,
+                productionCertified = false,
+                firstFullRealRunCertified = false,
+                integratedBaseCommit = run.IntegratedSource.Commit,
+                implementationHead = run.IntegratedSource.HeadCommit,
+                firstWaveCount = first.Count,
+                blockedWaveCount = blocked.Count,
+                afterQuiescenceWaveCount = after.Count,
+                childInitiallyLive = live.Outcome == ProcessControlOutcome.LiveOwned,
+                childFinallyQuiescent = quiescent,
+                child.Identity,
+                stopObservation = stopped,
+                settledObservation = settled,
                 journalHashes = history.Records.Select(item => item.Sha256).ToArray(),
                 limitation = "Fixture queue has no worker port. Quiescence supplied only from the actual owned child; no worker/quality PASS."
             }, cancellationToken);
@@ -86,8 +97,11 @@ internal static class SchedulingSafetyOrchestrator
         var openPlan = await SchedulingScenarioFixture.FreezeAsync(run, cancellationToken, "open-pr");
         var openWorker = SchedulingScenarioFixture.Worker(run, openPlan, "open-claim");
         var openDenied = false;
-        try { _ = LocalSingleScheduler.Create(openPlan, openWorker, SchedulingScenarioFixture.Demand,
-            SchedulingScenarioFixture.Budget(), run.Store, execution, worktrees, run.Reader); }
+        try
+        {
+            _ = LocalSingleScheduler.Create(openPlan, openWorker, SchedulingScenarioFixture.Demand,
+            SchedulingScenarioFixture.Budget(), run.Store, execution, worktrees, run.Reader);
+        }
         catch (SchedulingException exception) when (exception.Message.Contains("commit:<full-object-id>", StringComparison.Ordinal)) { openDenied = true; }
         var oldPlan = await SchedulingScenarioFixture.FreezeAsync(run, cancellationToken, "commit:" + candidate);
         var oldWorker = SchedulingScenarioFixture.Worker(run, oldPlan, "unmerged-commit");
@@ -120,11 +134,20 @@ internal static class SchedulingSafetyOrchestrator
         var journal = await run.Store.RecoverAsync(newWorker.RunId + "-scheduler", cancellationToken);
         var record = await run.Store.AppendAsync(run.RunId, "scenario-scheduling-observation", new
         {
-            fixture = true, productionCertified = false, firstFullRealRunCertified = false,
-            integratedBaseCommit = run.IntegratedSource.Commit, implementationHead = run.IntegratedSource.HeadCommit,
-            candidateCommit = candidate, candidateBeforeIntegrated = beforeIntegrated, candidateAfterIntegrated = afterIntegrated,
-            originalPinnedStillUnintegrated = originalStillUnintegrated, oldBaseCommit = oldPlan.BaseCommit, newBaseCommit = newPlan.BaseCommit,
-            oldPlanIdentity = oldPlan.Identity, newPlanIdentity = newPlan.Identity, workerWorktree = newWorker.Worktree,
+            fixture = true,
+            productionCertified = false,
+            firstFullRealRunCertified = false,
+            integratedBaseCommit = run.IntegratedSource.Commit,
+            implementationHead = run.IntegratedSource.HeadCommit,
+            candidateCommit = candidate,
+            candidateBeforeIntegrated = beforeIntegrated,
+            candidateAfterIntegrated = afterIntegrated,
+            originalPinnedStillUnintegrated = originalStillUnintegrated,
+            oldBaseCommit = oldPlan.BaseCommit,
+            newBaseCommit = newPlan.BaseCommit,
+            oldPlanIdentity = oldPlan.Identity,
+            newPlanIdentity = newPlan.Identity,
+            workerWorktree = newWorker.Worktree,
             journalHashes = journal.Records.Select(item => item.Sha256).ToArray(),
             limitation = "Open-PR-style condition is input data; actual Git merge/new plan permits reservation only, not worker provisioning or publication."
         }, cancellationToken);
@@ -160,10 +183,18 @@ internal static class SchedulingSafetyOrchestrator
         invariants["reservation-positively-closed"] = closed && journal.Latest?.Payload.GetProperty("phase").GetString() == "stopped";
         var record = await run.Store.AppendAsync(run.RunId, "scenario-scheduling-observation", new
         {
-            fixture = true, productionCertified = false, firstFullRealRunCertified = false,
-            integratedBaseCommit = run.IntegratedSource.Commit, implementationHead = run.IntegratedSource.HeadCommit,
-            frozenBaseCommit = plan.BaseCommit, observedHeadCommit = actual.HeadCommit, actual.HeadTree,
-            workerWorktree = worker.Worktree, workerRunId = worker.RunId, typedBaseDriftDenied = baseDenied, positivelyStopped = closed,
+            fixture = true,
+            productionCertified = false,
+            firstFullRealRunCertified = false,
+            integratedBaseCommit = run.IntegratedSource.Commit,
+            implementationHead = run.IntegratedSource.HeadCommit,
+            frozenBaseCommit = plan.BaseCommit,
+            observedHeadCommit = actual.HeadCommit,
+            actual.HeadTree,
+            workerWorktree = worker.Worktree,
+            workerRunId = worker.RunId,
+            typedBaseDriftDenied = baseDenied,
+            positivelyStopped = closed,
             journalHashes = journal.Records.Select(item => item.Sha256).ToArray(),
             limitation = "Fresh-base SchedulingException must precede provisioning; nested runtime placement is not claimed as a valid positive worktree destination."
         }, cancellationToken);

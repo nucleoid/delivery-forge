@@ -115,14 +115,25 @@ internal static class NativeExecutionOrchestrator
             var history = await runtime.Store.RecoverAsync(worker.RunId, cancellationToken);
             var record = await artifacts.Store.AppendAsync(artifacts.RunId, "scenario-execution-observation", new
             {
-                fixture = true, productionCertified = false, firstFullRealRunCertified = false,
-                integratedBaseCommit = artifacts.IntegratedSource.Commit, implementationHead = artifacts.IntegratedSource.HeadCommit,
-                frozenBaseCommit = plan.BaseCommit, preparedHeadCommit = observation.HeadCommit, prepared.RequestIdentity,
-                fixtureNativeTaskOnly = true, worktreeRegistered = registered.Replace('\\', '/').Contains(runtime.Worktree.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase),
-                childInitiallyLive, childFinallyQuiescent = childFinallyQuiet, pauseRecorded = paused,
-                processRegistrationsBefore = beforeCount, processRegistrationsAfter = afterCount,
-                localChildQuiescentWhileHostUnknown = localQuietUnknown, closedBeforeFreshHostObservation = closedBeforeFresh,
-                closedAfterFreshBoundHostObservation = closedAfterFresh, journalHashes = history.Records.Select(item => item.Sha256).ToArray(),
+                fixture = true,
+                productionCertified = false,
+                firstFullRealRunCertified = false,
+                integratedBaseCommit = artifacts.IntegratedSource.Commit,
+                implementationHead = artifacts.IntegratedSource.HeadCommit,
+                frozenBaseCommit = plan.BaseCommit,
+                preparedHeadCommit = observation.HeadCommit,
+                prepared.RequestIdentity,
+                fixtureNativeTaskOnly = true,
+                worktreeRegistered = registered.Replace('\\', '/').Contains(runtime.Worktree.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase),
+                childInitiallyLive,
+                childFinallyQuiescent = childFinallyQuiet,
+                pauseRecorded = paused,
+                processRegistrationsBefore = beforeCount,
+                processRegistrationsAfter = afterCount,
+                localChildQuiescentWhileHostUnknown = localQuietUnknown,
+                closedBeforeFreshHostObservation = closedBeforeFresh,
+                closedAfterFreshBoundHostObservation = closedAfterFresh,
+                journalHashes = history.Records.Select(item => item.Sha256).ToArray(),
                 limitation = "Exact public contract fixture/native task only; no host-invoked model worker, quality PASS or full-profile certification."
             }, cancellationToken);
             receipts.Add(record.Sha256);
@@ -173,10 +184,17 @@ internal static class NativeExecutionOrchestrator
         invariants["reparse-capability-honest"] = reparse || reparseReason != "not requested";
         var record = await artifacts.Store.AppendAsync(artifacts.RunId, "scenario-execution-observation", new
         {
-            fixture = true, productionCertified = false, integratedBaseCommit = artifacts.IntegratedSource.Commit,
-            implementationHead = artifacts.IntegratedSource.HeadCommit, outsideSentinel = sentinel, actualMarkerSha256 = markerHash,
-            expectedMarkerSha256 = runtime.ExpectedMarkerSha256, cleanupRefused = refused,
-            reparseCreated = reparse, reparseCapabilityOutcome = reparse ? "OBSERVED" : "INCOMPLETE", reparseCapabilityReason = reparseReason,
+            fixture = true,
+            productionCertified = false,
+            integratedBaseCommit = artifacts.IntegratedSource.Commit,
+            implementationHead = artifacts.IntegratedSource.HeadCommit,
+            outsideSentinel = sentinel,
+            actualMarkerSha256 = markerHash,
+            expectedMarkerSha256 = runtime.ExpectedMarkerSha256,
+            cleanupRefused = refused,
+            reparseCreated = reparse,
+            reparseCapabilityOutcome = reparse ? "OBSERVED" : "INCOMPLETE",
+            reparseCapabilityReason = reparseReason,
             limitation = "Outside sentinel and altered/foreign runtime retained, no cleanup authority from marker data."
         }, cancellationToken);
         receipts.Add(record.Sha256);

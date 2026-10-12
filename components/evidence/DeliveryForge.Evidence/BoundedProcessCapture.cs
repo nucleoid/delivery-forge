@@ -22,8 +22,12 @@ internal static class BoundedProcessCapture
         {
             var info = new ProcessStartInfo(invocation.FileName)
             {
-                WorkingDirectory = invocation.WorkingDirectory, UseShellExecute = false,
-                RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true, CreateNoWindow = true
+                WorkingDirectory = invocation.WorkingDirectory,
+                UseShellExecute = false,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
             };
             foreach (var argument in invocation.Arguments) info.ArgumentList.Add(argument);
             foreach (var pair in invocation.Environment ?? new Dictionary<string, string>()) info.Environment[pair.Key] = pair.Value;

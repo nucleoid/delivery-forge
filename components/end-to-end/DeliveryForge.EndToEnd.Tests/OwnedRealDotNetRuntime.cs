@@ -39,10 +39,14 @@ internal sealed class OwnedRealDotNetRuntime : ICommandExecutor
         _marker = JsonSerializer.SerializeToUtf8Bytes(new { fixture = true, Root, artifactRunId = artifacts.RunId, nonce = Guid.NewGuid().ToString("N") });
         DotnetEnvironment = new Dictionary<string, string>
         {
-            ["DOTNET_ROOT"] = Path.GetDirectoryName(Dotnet)!, ["DOTNET_MULTILEVEL_LOOKUP"] = "0",
-            ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1",
-            ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1", ["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1",
-            ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["NUGET_PACKAGES"] = PackageCache,
+            ["DOTNET_ROOT"] = Path.GetDirectoryName(Dotnet)!,
+            ["DOTNET_MULTILEVEL_LOOKUP"] = "0",
+            ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1",
+            ["MSBUILDDISABLENODEREUSE"] = "1",
+            ["DOTNET_CLI_TELEMETRY_OPTOUT"] = "1",
+            ["DOTNET_SKIP_FIRST_TIME_EXPERIENCE"] = "1",
+            ["DOTNET_GCHeapHardLimit"] = "0x100000000",
+            ["NUGET_PACKAGES"] = PackageCache,
             ["DOTNET_PROCESSOR_COUNT"] = "2"
         };
     }
@@ -85,8 +89,17 @@ internal sealed class OwnedRealDotNetRuntime : ICommandExecutor
                 await WriteNewAsync(destination, await File.ReadAllBytesAsync(entry, cancellationToken), cancellationToken);
             }
         }
-        await _artifacts.WriteNewJsonAsync("real-dotnet-runtime.json", new { fixture = true, productionCertified = false, Root, Repository, Dotnet, PackageCache,
-            markerSha256 = Hash(_marker), retained = true }, cancellationToken);
+        await _artifacts.WriteNewJsonAsync("real-dotnet-runtime.json", new
+        {
+            fixture = true,
+            productionCertified = false,
+            Root,
+            Repository,
+            Dotnet,
+            PackageCache,
+            markerSha256 = Hash(_marker),
+            retained = true
+        }, cancellationToken);
     }
     public async Task<CommandResult> ExecuteAsync(CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken)
     {
@@ -104,12 +117,22 @@ internal sealed class OwnedRealDotNetRuntime : ICommandExecutor
             var nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
             foreach (var pair in new Dictionary<string, string>
             {
-                ["GIT_DIR"] = directory, ["GIT_WORK_TREE"] = Repository, ["GIT_COMMON_DIR"] = directory,
-                ["GIT_OBJECT_DIRECTORY"] = Path.Combine(directory, "objects"), ["GIT_INDEX_FILE"] = Path.Combine(directory, "index"),
-                ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "", ["GIT_CONFIG"] = Path.Combine(directory, "config"),
-                ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_SYSTEM"] = nullDevice, ["GIT_CONFIG_GLOBAL"] = nullDevice,
-                ["GIT_CONFIG_PARAMETERS"] = "", ["GIT_CONFIG_COUNT"] = "0", ["GIT_NO_REPLACE_OBJECTS"] = "1",
-                ["GIT_GRAFT_FILE"] = nullDevice, ["GIT_NO_LAZY_FETCH"] = "1", ["GIT_TERMINAL_PROMPT"] = "0"
+                ["GIT_DIR"] = directory,
+                ["GIT_WORK_TREE"] = Repository,
+                ["GIT_COMMON_DIR"] = directory,
+                ["GIT_OBJECT_DIRECTORY"] = Path.Combine(directory, "objects"),
+                ["GIT_INDEX_FILE"] = Path.Combine(directory, "index"),
+                ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "",
+                ["GIT_CONFIG"] = Path.Combine(directory, "config"),
+                ["GIT_CONFIG_NOSYSTEM"] = "1",
+                ["GIT_CONFIG_SYSTEM"] = nullDevice,
+                ["GIT_CONFIG_GLOBAL"] = nullDevice,
+                ["GIT_CONFIG_PARAMETERS"] = "",
+                ["GIT_CONFIG_COUNT"] = "0",
+                ["GIT_NO_REPLACE_OBJECTS"] = "1",
+                ["GIT_GRAFT_FILE"] = nullDevice,
+                ["GIT_NO_LAZY_FETCH"] = "1",
+                ["GIT_TERMINAL_PROMPT"] = "0"
             }) environment[pair.Key] = pair.Value;
             invocation = new(_git, ["-c", "core.hooksPath=" + nullDevice, "-c", "core.fsmonitor=false", .. invocation.Arguments], Repository, environment);
         }

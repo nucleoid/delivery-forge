@@ -201,9 +201,19 @@ public sealed class CoordinationRestartScenarioTests
         var source = await File.ReadAllBytesAsync(Path.Combine(run.Root, "source.json"), TestContext.Current.CancellationToken);
         await run.WriteNewJsonAsync("restart-scenario-spec.json", new
         {
-            fixture = true, productionCertified = false, firstFullRealRunCertified = false, scenario,
-            sourceSha256 = Convert.ToHexStringLower(SHA256.HashData(source)), seed = 11017,
-            scenarioSeconds = 120, hostOperationSeconds = 2, childSeconds = 30, cpu = 2, memoryMiB = 4096, tokens = 1000, cost = 0,
+            fixture = true,
+            productionCertified = false,
+            firstFullRealRunCertified = false,
+            scenario,
+            sourceSha256 = Convert.ToHexStringLower(SHA256.HashData(source)),
+            seed = 11017,
+            scenarioSeconds = 120,
+            hostOperationSeconds = 2,
+            childSeconds = 30,
+            cpu = 2,
+            memoryMiB = 4096,
+            tokens = 1000,
+            cost = 0,
             limitation = "Actual file/native boundaries; explicit fixture-store lifetime replacement, no claimed OS parent crash or production authority."
         }, TestContext.Current.CancellationToken);
     }

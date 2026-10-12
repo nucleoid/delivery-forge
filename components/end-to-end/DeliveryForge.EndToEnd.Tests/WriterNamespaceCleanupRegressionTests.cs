@@ -40,8 +40,13 @@ public sealed class WriterNamespaceCleanupRegressionTests
             }
             await artifacts.WriteNewJsonAsync("writer-namespace-replacement.json", new
             {
-                fixture = true, productionCertified = false, entered, replace, lockPath,
-                sameRunTokenAndBytes = replace, integratedBaseCommit = artifacts.IntegratedSource.Commit,
+                fixture = true,
+                productionCertified = false,
+                entered,
+                replace,
+                lockPath,
+                sameRunTokenAndBytes = replace,
+                integratedBaseCommit = artifacts.IntegratedSource.Commit,
                 implementationHead = artifacts.IntegratedSource.HeadCommit,
                 limitation = "Actual live lease/pathname replacement; no arbitrary-filesystem atomicity or production claim."
             }, cancellationToken);

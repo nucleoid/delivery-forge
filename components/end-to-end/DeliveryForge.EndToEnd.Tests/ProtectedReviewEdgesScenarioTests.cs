@@ -55,13 +55,30 @@ public sealed class ProtectedReviewEdgesScenarioTests
         var merge = await Prerequisite(run, source, patch, "MERGED", token);
         await run.WriteNewJsonAsync("review-all-edges-public-setup.json", new
         {
-            fixture = true, scenario, seed = 11019, initialCeiling = ceiling, source.BaseCommit, source.HeadCommit, patch.HeadTree,
-            planIdentity = source.Plan.ContractIdentity, protectedPolicySha256 = bootstrap.Policy.ContentIdentity,
-            independentRequestIdentity = independent.RequestIdentity, hostedRequestIdentity = hosted.RequestIdentity,
-            publicationInputIdentity = publication.Identity, ciInputIdentity = ci.Identity, mergeInputIdentity = merge.Identity,
-            publicationAndCiArePrerequisiteInputsOnly = true, publicationOwnerExecuted = false, actualModelCalls = 0,
-            integratedBaseCommit = OwnedScenarioRun.InitialIntegratedBase, implementationHead = run.IntegratedSource.HeadCommit,
-            wallSeconds = 120, gitSeconds = 15, maximumCaptureBytes = 1024 * 1024, cpu = 2, memoryMiB = 4096,
+            fixture = true,
+            scenario,
+            seed = 11019,
+            initialCeiling = ceiling,
+            source.BaseCommit,
+            source.HeadCommit,
+            patch.HeadTree,
+            planIdentity = source.Plan.ContractIdentity,
+            protectedPolicySha256 = bootstrap.Policy.ContentIdentity,
+            independentRequestIdentity = independent.RequestIdentity,
+            hostedRequestIdentity = hosted.RequestIdentity,
+            publicationInputIdentity = publication.Identity,
+            ciInputIdentity = ci.Identity,
+            mergeInputIdentity = merge.Identity,
+            publicationAndCiArePrerequisiteInputsOnly = true,
+            publicationOwnerExecuted = false,
+            actualModelCalls = 0,
+            integratedBaseCommit = OwnedScenarioRun.InitialIntegratedBase,
+            implementationHead = run.IntegratedSource.HeadCommit,
+            wallSeconds = 120,
+            gitSeconds = 15,
+            maximumCaptureBytes = 1024 * 1024,
+            cpu = 2,
+            memoryMiB = 4096,
             limitation = "Public review lookup edges only; no #10 bridge/golden/production/real independent model certification."
         }, token);
         var actual = await ProtectedReviewEdgesOrchestrator.RunAsync(new(run, bootstrap, source, patch, independent, hosted, receiver,
@@ -113,8 +130,11 @@ public sealed class ProtectedReviewEdgesScenarioTests
         var now = DateTime.UtcNow.ToString("O", System.Globalization.CultureInfo.InvariantCulture);
         var node = new JsonObject
         {
-            ["schemaVersion"] = "1.0.0", ["kind"] = kind == "ci" ? "gate-receipt" : "publication-receipt",
-            ["baseCommit"] = patch.BaseCommit, ["headCommit"] = patch.HeadCommit, ["treeId"] = patch.HeadTree
+            ["schemaVersion"] = "1.0.0",
+            ["kind"] = kind == "ci" ? "gate-receipt" : "publication-receipt",
+            ["baseCommit"] = patch.BaseCommit,
+            ["headCommit"] = patch.HeadCommit,
+            ["treeId"] = patch.HeadTree
         };
         if (kind == "ci")
         {

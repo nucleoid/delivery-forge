@@ -68,8 +68,15 @@ public sealed class WriterNamespaceIdentityTests
                     FileMode.CreateNew, FileAccess.Write, FileShare.None);
                 await System.Text.Json.JsonSerializer.SerializeAsync(diagnostic, new
                 {
-                    fixture = true, productionCertified = false, repository = repository.Path, runtime = area.Path,
-                    worktree, retainedOriginal, linkCreated, capability, retained = true,
+                    fixture = true,
+                    productionCertified = false,
+                    repository = repository.Path,
+                    runtime = area.Path,
+                    worktree,
+                    retainedOriginal,
+                    linkCreated,
+                    capability,
+                    retained = true,
                     limitation = "No native-observer behavior or filesystem atomicity certification follows from fixture data."
                 }, cancellationToken: CancellationToken.None);
             }

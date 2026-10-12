@@ -24,8 +24,14 @@ internal sealed class ReviewFixturePort
         var completedAt = DateTimeOffset.UtcNow;
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            fixture = true, actualModelCall = false, oppositeFamilyCertification = false,
-            requestIdentity = registration.RequestIdentity, request, verdict = "ship", findings = Array.Empty<ReviewFinding>(), completedAt
+            fixture = true,
+            actualModelCall = false,
+            oppositeFamilyCertification = false,
+            requestIdentity = registration.RequestIdentity,
+            request,
+            verdict = "ship",
+            findings = Array.Empty<ReviewFinding>(),
+            completedAt
         });
         if (bytes.Length > 1024 * 1024) throw new IOException("Reviewer fixture raw bytes exceed1MiB.");
         await using (var writer = new FileStream(ownedRawPath, FileMode.CreateNew, FileAccess.Write, FileShare.None,

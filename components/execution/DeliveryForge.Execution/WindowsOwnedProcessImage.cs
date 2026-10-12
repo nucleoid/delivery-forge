@@ -68,7 +68,8 @@ internal sealed class WindowsOwnedProcessImage : IDisposable
                 if (final != 258 || !IsOriginalAssociation()) return Unknown("Original process liveness/association changed during observation.");
                 return image is null ? MetadataUnavailable("Original image exceeded its finite character bound.") :
                     new(ProcessControlOutcome.LiveOwned, _requested, image, ticks, "windows-owned-handle-image",
-                        "Executable image and UTC creation identity sampled through the original privately pinned process handle.") { RequestedLaunchComplete = _requestedComplete };
+                        "Executable image and UTC creation identity sampled through the original privately pinned process handle.")
+                    { RequestedLaunchComplete = _requestedComplete };
             }
             catch (Exception exception) when (exception is InvalidOperationException or ArgumentException or DllNotFoundException or EntryPointNotFoundException or PlatformNotSupportedException)
             {
@@ -90,7 +91,8 @@ internal sealed class WindowsOwnedProcessImage : IDisposable
             if (!IsOriginalAssociation()) return Unknown(preservedFailure + "; original association changed after exit sample.");
             if (waited == 0)
                 return new(ProcessControlOutcome.AlreadyExited, _requested, "", 0, "windows-owned-handle-image",
-                    preservedFailure + "; fresh original privately pinned handle is signaled.") { RequestedLaunchComplete = _requestedComplete };
+                    preservedFailure + "; fresh original privately pinned handle is signaled.")
+                { RequestedLaunchComplete = _requestedComplete };
             if (waited == 258) return Unknown(preservedFailure + "; fresh original handle remains nonsignaled.");
             return Unknown(preservedFailure + "; fresh exit sample unavailable, wait=" + waited + ", Win32=" + waitError);
         }

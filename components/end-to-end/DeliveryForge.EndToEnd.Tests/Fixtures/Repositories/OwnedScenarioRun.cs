@@ -71,13 +71,23 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
         var nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
         var environment = new Dictionary<string, string>
         {
-            ["GIT_DIR"] = gitDirectory, ["GIT_WORK_TREE"] = Checkout, ["GIT_COMMON_DIR"] = gitDirectory,
-            ["GIT_OBJECT_DIRECTORY"] = Path.Combine(gitDirectory, "objects"), ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "",
-            ["GIT_INDEX_FILE"] = Path.Combine(gitDirectory, "index"), ["GIT_CONFIG_COUNT"] = "0",
-            ["GIT_CONFIG_PARAMETERS"] = "", ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_SYSTEM"] = nullDevice,
-            ["GIT_CONFIG_GLOBAL"] = nullDevice, ["GIT_CONFIG"] = Path.Combine(gitDirectory, "config"),
-            ["GIT_NO_REPLACE_OBJECTS"] = "1", ["GIT_GRAFT_FILE"] = nullDevice,
-            ["GIT_NO_LAZY_FETCH"] = "1", ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_OPTIONAL_LOCKS"] = "0"
+            ["GIT_DIR"] = gitDirectory,
+            ["GIT_WORK_TREE"] = Checkout,
+            ["GIT_COMMON_DIR"] = gitDirectory,
+            ["GIT_OBJECT_DIRECTORY"] = Path.Combine(gitDirectory, "objects"),
+            ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "",
+            ["GIT_INDEX_FILE"] = Path.Combine(gitDirectory, "index"),
+            ["GIT_CONFIG_COUNT"] = "0",
+            ["GIT_CONFIG_PARAMETERS"] = "",
+            ["GIT_CONFIG_NOSYSTEM"] = "1",
+            ["GIT_CONFIG_SYSTEM"] = nullDevice,
+            ["GIT_CONFIG_GLOBAL"] = nullDevice,
+            ["GIT_CONFIG"] = Path.Combine(gitDirectory, "config"),
+            ["GIT_NO_REPLACE_OBJECTS"] = "1",
+            ["GIT_GRAFT_FILE"] = nullDevice,
+            ["GIT_NO_LAZY_FETCH"] = "1",
+            ["GIT_TERMINAL_PROMPT"] = "0",
+            ["GIT_OPTIONAL_LOCKS"] = "0"
         };
         CommandResult result;
         try

@@ -115,9 +115,18 @@ internal static class QualityInterruptionOrchestrator
                 var phaseRoot = Path.Combine(artifacts.Root, "quality-interruption-" + phase); Directory.CreateDirectory(phaseRoot);
                 var configBytes = CanonicalJson.Canonicalize(JsonSerializer.SerializeToUtf8Bytes(new
                 {
-                    fixture = true, phase = phase.ToString(), seed = 11018, nonce, invocation, protectedBase,
-                    budgetId = QualityInterruptionClock.ProfileId, totalSeconds = 720, commandSeconds = 75,
-                    selfLimitSeconds = 180, sdkVersion = detection.Capability.Version, sdkIdentity = detection.Capability.ExecutableIdentity
+                    fixture = true,
+                    phase = phase.ToString(),
+                    seed = 11018,
+                    nonce,
+                    invocation,
+                    protectedBase,
+                    budgetId = QualityInterruptionClock.ProfileId,
+                    totalSeconds = 720,
+                    commandSeconds = 75,
+                    selfLimitSeconds = 180,
+                    sdkVersion = detection.Capability.Version,
+                    sdkIdentity = detection.Capability.ExecutableIdentity
                 }));
                 var configPath = Path.Combine(phaseRoot, "configuration.json"); await WriteNew(configPath, configBytes, cancellationToken);
                 var policy = await new ProtectedGitPolicyResolver(runtime, repo, protectedBase).ResolveAsync(".forge/evidence-policy.json", cancellationToken);
@@ -231,34 +240,74 @@ internal static class QualityInterruptionOrchestrator
                 }
                 var proof = new
                 {
-                    fixture = true, productionCertified = false, firstFullRealRunCertified = false, phase = phase.ToString(),
-                    integratedBaseCommit = artifacts.IntegratedSource.Commit, implementationHead = artifacts.IntegratedSource.HeadCommit,
-                    budgetId = QualityInterruptionClock.ProfileId, totalBudgetSeconds = 720, elapsedSeconds = clock.Elapsed.TotalSeconds,
-                    observedSdkVersion = detection.Capability.Version, versionStdoutPath = versionPath, helpStdoutPath = helpPath,
-                    helpExitCode = detection.HelpResult!.ExitCode, sdkExecutableSha256 = detection.Capability.ExecutableIdentity,
-                    configurationSha256 = OwnedQualityInterruptionRuntime.Hash(configBytes), configurationPath = configPath,
+                    fixture = true,
+                    productionCertified = false,
+                    firstFullRealRunCertified = false,
+                    phase = phase.ToString(),
+                    integratedBaseCommit = artifacts.IntegratedSource.Commit,
+                    implementationHead = artifacts.IntegratedSource.HeadCommit,
+                    budgetId = QualityInterruptionClock.ProfileId,
+                    totalBudgetSeconds = 720,
+                    elapsedSeconds = clock.Elapsed.TotalSeconds,
+                    observedSdkVersion = detection.Capability.Version,
+                    versionStdoutPath = versionPath,
+                    helpStdoutPath = helpPath,
+                    helpExitCode = detection.HelpResult!.ExitCode,
+                    sdkExecutableSha256 = detection.Capability.ExecutableIdentity,
+                    configurationSha256 = OwnedQualityInterruptionRuntime.Hash(configBytes),
+                    configurationPath = configPath,
                     protectedPolicySha256 = OwnedQualityInterruptionRuntime.Hash(policyBytes),
-                    protectedBaseCommit = protectedBase, observedHeadCommit = gate.Before.HeadCommit, observedTreeId = gate.Before.TreeId,
-                    initialRestoreExitCode = restore.ExitCode, initialRestoreOwnedQuiescent = restore.OwnedProcessQuiescent, initialRestoreMode = "locked",
-                    initialRestoreStdoutPath = restoreOut, initialRestoreStderrPath = restoreErr,
-                    assetsSha256 = OwnedQualityInterruptionRuntime.HashFile(assets), lockSha256 = OwnedQualityInterruptionRuntime.HashFile(lockPath), barrierSourceSha256 = barrierSourceHash,
-                    nonce, enteredPath = entered, enteredAt, releasePath = release, releasedAfterEntered = File.Exists(release),
-                    ownedBinAndObjRemoved = cold, generatedDllsBefore = dllsBefore, producedDllPath = dllCopy, dllHashAfter = OwnedQualityInterruptionRuntime.HashFile(dllCopy),
-                    mutationAfterEntered = modifiedSource is not null, sourceDirtyThroughAfterRead = gate.SourceChanged && !gate.After.IsClean,
+                    protectedBaseCommit = protectedBase,
+                    observedHeadCommit = gate.Before.HeadCommit,
+                    observedTreeId = gate.Before.TreeId,
+                    initialRestoreExitCode = restore.ExitCode,
+                    initialRestoreOwnedQuiescent = restore.OwnedProcessQuiescent,
+                    initialRestoreMode = "locked",
+                    initialRestoreStdoutPath = restoreOut,
+                    initialRestoreStderrPath = restoreErr,
+                    assetsSha256 = OwnedQualityInterruptionRuntime.HashFile(assets),
+                    lockSha256 = OwnedQualityInterruptionRuntime.HashFile(lockPath),
+                    barrierSourceSha256 = barrierSourceHash,
+                    nonce,
+                    enteredPath = entered,
+                    enteredAt,
+                    releasePath = release,
+                    releasedAfterEntered = File.Exists(release),
+                    ownedBinAndObjRemoved = cold,
+                    generatedDllsBefore = dllsBefore,
+                    producedDllPath = dllCopy,
+                    dllHashAfter = OwnedQualityInterruptionRuntime.HashFile(dllCopy),
+                    mutationAfterEntered = modifiedSource is not null,
+                    sourceDirtyThroughAfterRead = gate.SourceChanged && !gate.After.IsClean,
                     restoredOnlyAfterRefusalPersisted = modifiedSource is not null && gate.Outcome == GateOutcome.Error && File.Exists(capturedReceipt),
-                    originalTrackedSourceSha256 = OwnedQualityInterruptionRuntime.Hash(originalSource), modifiedTrackedSourceSha256 = modifiedSource is null ? null : OwnedQualityInterruptionRuntime.Hash(modifiedSource),
-                    modifiedSourceArchivePath = modifiedArchive, restoredTrackedSourcePath = calculator, dirtyGitStatusPath = dirtyStatus,
-                    workloadSelfLimitSeconds = 180, requestedCommandDeadlineSeconds = 75, primaryReleaseWritten = File.Exists(release),
+                    originalTrackedSourceSha256 = OwnedQualityInterruptionRuntime.Hash(originalSource),
+                    modifiedTrackedSourceSha256 = modifiedSource is null ? null : OwnedQualityInterruptionRuntime.Hash(modifiedSource),
+                    modifiedSourceArchivePath = modifiedArchive,
+                    restoredTrackedSourcePath = calculator,
+                    dirtyGitStatusPath = dirtyStatus,
+                    workloadSelfLimitSeconds = 180,
+                    requestedCommandDeadlineSeconds = 75,
+                    primaryReleaseWritten = File.Exists(release),
                     callerCancelledAfterEntered = phase == QualityInterruptionPhase.CallerCancellation && caller.IsCancellationRequested,
                     resultAwaitedWithUncancelledOuterToken = !cancellationToken.IsCancellationRequested,
                     secondActualRepositoryReadBarrierReached = lateBarrier?.WasReached ?? false,
                     primaryQuiescentBeforeLateStart = late is not null && gate.Execution.OwnedProcessQuiescent && late.StartedAt >= gate.Execution.CompletedAt,
-                    lateExitCode = late?.ExitCode, lateOwnedProcessQuiescent = late?.OwnedProcessQuiescent, lateTimedOut = late?.TimedOut, lateCancelled = late?.Cancelled,
-                    lateStartedAt = late?.StartedAt, lateCompletedAt = late?.CompletedAt, lateTrxArchivePath = lateArchive,
-                    lateTrxSha256 = lateArchive is null ? null : OwnedQualityInterruptionRuntime.HashFile(lateArchive), lateLoggerRequestedPath = late is null ? null : trx,
-                    capturedArtifactHashesBeforeLate = hashesBeforeLate, capturedArtifactHashesAfterLate = hashesAfterLate,
-                    receiptSha256BeforeLateActivity = receiptBeforeActivity, receiptSha256AfterLateActivity = OwnedQualityInterruptionRuntime.HashFile(gate.ReceiptPath),
-                    outputReclaimDenied = reclaimDenied, outputReclaimSdkCommandCount = reclaimCommands, outputReclaimOutcome = reclaimOutcome,
+                    lateExitCode = late?.ExitCode,
+                    lateOwnedProcessQuiescent = late?.OwnedProcessQuiescent,
+                    lateTimedOut = late?.TimedOut,
+                    lateCancelled = late?.Cancelled,
+                    lateStartedAt = late?.StartedAt,
+                    lateCompletedAt = late?.CompletedAt,
+                    lateTrxArchivePath = lateArchive,
+                    lateTrxSha256 = lateArchive is null ? null : OwnedQualityInterruptionRuntime.HashFile(lateArchive),
+                    lateLoggerRequestedPath = late is null ? null : trx,
+                    capturedArtifactHashesBeforeLate = hashesBeforeLate,
+                    capturedArtifactHashesAfterLate = hashesAfterLate,
+                    receiptSha256BeforeLateActivity = receiptBeforeActivity,
+                    receiptSha256AfterLateActivity = OwnedQualityInterruptionRuntime.HashFile(gate.ReceiptPath),
+                    outputReclaimDenied = reclaimDenied,
+                    outputReclaimSdkCommandCount = reclaimCommands,
+                    outputReclaimOutcome = reclaimOutcome,
                     lateReportAttributedToPrimary = false,
                     limitation = "Actual compiled test/native SDK only. Distinct sequential late execution is not primary-process late completion; no model-worker or production certification."
                 };
@@ -277,9 +326,15 @@ internal static class QualityInterruptionOrchestrator
         {
             artifacts.RetainArtifacts("Actual interruption runtime retained: " + runtime.Root);
             using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(0.001, Math.Min(60, clock.Remaining.TotalSeconds))));
-            await artifacts.WriteNewJsonAsync("quality-interruption-retained-runtime.json", new { fixture = true, runtime.Root,
-                runtime.AllCommandsQuiescent, elapsedSeconds = clock.Elapsed.TotalSeconds, retained = true,
-                limitation = "No recursive deletion or production authority follows from gate/file observations." }, cleanup.Token);
+            await artifacts.WriteNewJsonAsync("quality-interruption-retained-runtime.json", new
+            {
+                fixture = true,
+                runtime.Root,
+                runtime.AllCommandsQuiescent,
+                elapsedSeconds = clock.Elapsed.TotalSeconds,
+                retained = true,
+                limitation = "No recursive deletion or production authority follows from gate/file observations."
+            }, cleanup.Token);
         }
     }
 
