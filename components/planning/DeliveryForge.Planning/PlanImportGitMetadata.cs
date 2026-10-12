@@ -65,13 +65,13 @@ internal sealed record PlanImportGitMetadata(string Root, string Metadata, strin
                     {
                         try { discovered = checked(discovered + 1); }
                         catch (OverflowException) { throw new PlanningException("Reference discovery observation overflow."); }
-                        // RECORD actual frontier before push; intentionally no quota repair
-                        // until Root has compiled this resource-contract RED.
-                        int queued;
-                        try { queued = checked(pending.Count + 1); }
-                        catch (OverflowException) { throw new PlanningException("Reference frontier observation overflow."); }
-                        life.Resources.Observe(discovered, queued, entries);
-                        pending.Push(path); continue;
+                        // The ONE rejected directory remains an actual encountered observation;
+                        // it never contributes a proposed push or consumes admitted capacity.
+                        life.Resources.Observe(discovered, pending.Count, entries);
+                        RichPlanImportCodec.Require(discovered <= 512, "Actual Git reference directory bound exceeded.");
+                        life.Check(); pending.Push(path);
+                        life.Resources.Observe(discovered, pending.Count, entries);
+                        continue;
                     }
                     RichPlanImportCodec.Require(++references <= 1024, "Actual Git reference file bound exceeded.");
                     var relative = Path.GetRelativePath(source, path).Replace(Path.DirectorySeparatorChar, '/');
