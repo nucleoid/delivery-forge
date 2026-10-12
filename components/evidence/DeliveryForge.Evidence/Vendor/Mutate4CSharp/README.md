@@ -1,0 +1,7 @@
+# Pinned mutate4csharp report data contract
+
+The report schema and MIT license are copied without alteration from mutate4csharp commit 866bed3bb18f51f5b32c0d4bc8b78692c3b3d9ea. Schema SHA256: abd9c9fdf9b0852b4685e8da17e2ea6b40ae4be30e9344cc2939629de059ae49.
+
+The local validator implements only this pinned schema's grammar, with no remote resolution or caller-provided schema. Semantic checks additionally reproduce ReportWriter's ledger, scope, ordered reducer reasons and conclusive suite identities, and the installed wrapper's functional incomplete/refusal branches. The initial named data-consumer limits are 8 MiB UTF8 bytes, depth64, one million aggregate values, 100000 elements per array, 16384 UTF16 units per general string and128 per property name. Published field-specific bounds remain stricter. These are consumer limits, not claims about every report the producer can emit.
+
+Decoded claims are internal data only. Neither these bytes nor suite-accounting booleans prove a current invocation, an installed payload, actual coverage bytes, private producer completion tokens or Forge policy/baseline approval. Report-only adapter normalization continues to return INCOMPLETE. Captured owner execution, before/after source-state bindings, default-state report/discovery/proven reconciliation and actual installed conformance remain separate required follow-up work. Original private producer reports are never distributed in this repository.
