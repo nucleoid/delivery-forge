@@ -16,23 +16,27 @@ internal sealed class PlanImportGitView : IDisposable
     private readonly List<Carrier> _carriers = [];
     private readonly string _directory;
     private readonly string _objects;
+    private readonly string _sourceObjects;
     private GitRepositoryContextReader? _reader;
     internal PlanImportGitMetadata Metadata { get; }
     internal PlanImportGitView(string root, string trustedGit, PlanImportLifetime life)
     {
         _life = life; life.Check(); Metadata = PlanImportGitMetadata.Read(root, life);
-        _objects = Path.Combine(Metadata.Common, "objects");
+        _sourceObjects = Path.Combine(Metadata.Common, "objects");
         _directory = Path.Combine(Path.GetTempPath(), "delivery-forge-plan-import-" + Guid.NewGuid().ToString("N"));
+        _objects = Path.Combine(_directory, "objects");
         try
         {
             _leases.Add(new PlanImportFilesystem.FileBinding(trustedGit));
             _leases.Add(new PlanImportFilesystem.DirectoryBinding(Metadata.Metadata));
             if (Metadata.Common != Metadata.Metadata) _leases.Add(new PlanImportFilesystem.DirectoryBinding(Metadata.Common));
-            _leases.Add(new PlanImportFilesystem.DirectoryBinding(_objects));
+            _leases.Add(new PlanImportFilesystem.DirectoryBinding(_sourceObjects));
             PlanImportFilesystem.Plain(_directory); life.Check();
             if (Path.Exists(_directory)) throw new PlanningException("Private import metadata collision.");
             Directory.CreateDirectory(_directory); Directory.CreateDirectory(Path.Combine(_directory, "refs")); Directory.CreateDirectory(Path.Combine(_directory, "objects"));
             _leases.Add(new PlanImportFilesystem.DirectoryBinding(_directory));
+            _leases.Add(new PlanImportFilesystem.DirectoryBinding(_objects));
+            FreezeObjects();
             foreach (var file in Metadata.Files)
             {
                 life.Check(); var path = Path.Combine(_directory, file.Key.Replace('/', Path.DirectorySeparatorChar));
@@ -56,6 +60,78 @@ internal sealed class PlanImportGitView : IDisposable
             Verify();
         }
         catch { foreach (var carrier in _carriers) carrier.Dispose(); foreach (var lease in _leases) lease.Dispose(); throw; }
+    }
+    // No Git process is started until this own immutable object namespace is complete.
+    // Full loose objects and complete pack+index pairs preserve Git's actual encodings.
+    // Acceleration/routing formats outside this finite profile are explicitly refused.
+    private void FreezeObjects()
+    {
+        const int maximumFiles = 4096, maximumDirectories = 259, maximumEntries = 8192;
+        const int maximumFileBytes = 64 * 1024 * 1024;
+        const long maximumTotalBytes = 256L * 1024 * 1024;
+        var files = 0; var directories = 1; var entries = 0; long bytes = 0;
+        var packs = new HashSet<string>(StringComparer.Ordinal);
+        var indexes = new HashSet<string>(StringComparer.Ordinal);
+        var packAuxiliaries = new HashSet<string>(StringComparer.Ordinal);
+        bool Hex(string value) => value.Length > 0 && value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+        void Entry(string path)
+        {
+            _life.Check();
+            if (++entries > maximumEntries) throw new PlanningException("Immutable object entry bound exceeded.");
+            PlanImportFilesystem.Plain(path);
+        }
+        void Capture(string source, string relative)
+        {
+            _life.Check();
+            if (++files > maximumFiles) throw new PlanningException("Immutable object file bound exceeded.");
+            var content = PlanImportFilesystem.Read(source, maximumFileBytes, _life);
+            if (content.LongLength > maximumTotalBytes - bytes) throw new PlanningException("Immutable object aggregate byte bound exceeded.");
+            bytes += content.LongLength;
+            var target = Path.Combine(_objects, relative.Replace('/', Path.DirectorySeparatorChar));
+            _carriers.Add(new Carrier(target, content, null)); _life.Check();
+        }
+        foreach (var directory in Directory.EnumerateFileSystemEntries(_sourceObjects))
+        {
+            Entry(directory);
+            var name = Path.GetFileName(directory);
+            if (!Directory.Exists(directory) || !(name is "pack" or "info" || name.Length == 2 && Hex(name)))
+                throw new PlanningException("Unsupported immutable object root shape.");
+            if (++directories > maximumDirectories) throw new PlanningException("Immutable object directory bound exceeded.");
+            _leases.Add(new PlanImportFilesystem.DirectoryBinding(directory));
+            var ownDirectory = Path.Combine(_objects, name);
+            Directory.CreateDirectory(ownDirectory); _life.Check();
+            _leases.Add(new PlanImportFilesystem.DirectoryBinding(ownDirectory));
+            foreach (var path in Directory.EnumerateFileSystemEntries(directory))
+            {
+                Entry(path);
+                var leaf = Path.GetFileName(path);
+                if (Directory.Exists(path)) throw new PlanningException("Nested object routing/acceleration directories are unsupported.");
+                if (name == "info")
+                {
+                    // Server-info lists are not local object authority. Do not copy them.
+                    // Alternates, HTTP alternates, grafts and commit-graph formats cannot route this view.
+                    if (leaf != "packs") throw new PlanningException("Unsupported external object routing or acceleration metadata.");
+                    _ = PlanImportFilesystem.Read(path, 1024 * 1024, _life); continue;
+                }
+                if (name == "pack")
+                {
+                    var extension = Path.GetExtension(leaf);
+                    var stem = Path.GetFileNameWithoutExtension(leaf);
+                    if (!stem.StartsWith("pack-", StringComparison.Ordinal) || stem.Length is not (45 or 69) || !Hex(stem[5..]) ||
+                        extension is not (".pack" or ".idx" or ".rev" or ".bitmap" or ".keep"))
+                        throw new PlanningException("Unsupported packed object encoding/routing; complete ordinary packs are required.");
+                    if (extension == ".pack") packs.Add(stem);
+                    if (extension == ".idx") indexes.Add(stem);
+                    if (extension is ".rev" or ".bitmap" or ".keep") packAuxiliaries.Add(stem);
+                }
+                else if (leaf.Length is not (38 or 62) || !Hex(leaf))
+                    throw new PlanningException("Unsupported loose object encoding or in-progress object file.");
+                Capture(path, name + "/" + leaf);
+            }
+        }
+        if (!packs.SetEquals(indexes)) throw new PlanningException("Immutable packed objects require matching pack/index pairs.");
+        if (!packAuxiliaries.IsSubsetOf(packs)) throw new PlanningException("Immutable pack auxiliary has no matching ordinary pack.");
+        _life.Check();
     }
     internal void Attach(GitRepositoryContextReader reader) => _reader = reader;
     internal void Apply(IDictionary<string, string?> environment)
