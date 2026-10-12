@@ -9,6 +9,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
     private readonly Func<Process, bool> _hasExited;
     private readonly Func<Task, TimeSpan, Task> _waitForDrain;
     private readonly TimeSpan _waitTimeout;
+    private readonly bool _creationOwnedWindows;
 
     public ProcessCommandExecutor()
         : this(
@@ -17,6 +18,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             waitForDrain: null,
             DefaultWaitTimeout)
     {
+        _creationOwnedWindows = true;
     }
 
     internal ProcessCommandExecutor(
@@ -32,11 +34,34 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         _waitTimeout = waitTimeout ?? DefaultWaitTimeout;
     }
 
+    /// <summary>Captures a finite byte prefix per stream within one entire owner lifetime budget.
+    /// Observations are data only; injected execution delegates cannot establish this owner proof.</summary>
+    public Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+        CommandInvocation invocation,
+        TimeSpan entireBudget,
+        int maximumBytesPerStream,
+        CancellationToken cancellationToken)
+    {
+        if (!_creationOwnedWindows)
+            throw new InvalidOperationException("Injected executor delegates cannot establish creation-owned byte capture.");
+        if (entireBudget <= TimeSpan.Zero || entireBudget > TimeSpan.FromMinutes(15))
+            throw new ArgumentOutOfRangeException(nameof(entireBudget));
+        if (maximumBytesPerStream <= 0 || maximumBytesPerStream > 16 * 1024 * 1024)
+            throw new ArgumentOutOfRangeException(nameof(maximumBytesPerStream));
+        if (OperatingSystem.IsWindows())
+            return WindowsCommandLifetime.ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken);
+        if (OperatingSystem.IsLinux())
+            return BoundedProcessCapture.ExecuteAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken);
+        throw new PlatformNotSupportedException("Creation-owned bounded capture supports Windows and Linux only.");
+    }
+
     public async Task<CommandResult> ExecuteAsync(
         CommandInvocation invocation,
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
+        if (_creationOwnedWindows && OperatingSystem.IsWindows())
+            return await WindowsCommandLifetime.ExecuteAsync(invocation, timeout, cancellationToken).ConfigureAwait(false);
         var startInfo = new ProcessStartInfo
         {
             FileName = invocation.FileName,
@@ -75,6 +100,10 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         var timedOut = false;
         var cancelled = false;
         var killSucceeded = true;
+        var killAttempted = false;
+        string? killExceptionType = null;
+        string? killExceptionDetail = null;
+        var killExceptionDetailTruncated = false;
         var exitWaitCompleted = true;
         try
         {
@@ -84,7 +113,8 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         {
             timedOut = timeoutSource.IsCancellationRequested && !cancellationToken.IsCancellationRequested;
             cancelled = !timedOut;
-            killSucceeded = TryKillTree(process);
+            killSucceeded = TryKillTree(process, out killAttempted, out killExceptionType,
+                out killExceptionDetail, out killExceptionDetailTruncated);
             try
             {
                 await process.WaitForExitAsync(CancellationToken.None)
@@ -121,23 +151,72 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             startedAt,
             DateTimeOffset.UtcNow,
             drainCompleted && processExited &&
-            (!timedOut && !cancelled || killSucceeded && exitWaitCompleted));
+            (!timedOut && !cancelled || killSucceeded && exitWaitCompleted))
+        {
+            LifecycleDiagnostics = new(killAttempted, killAttempted && killSucceeded, killExceptionType, killExceptionDetail,
+                killExceptionDetailTruncated, exitWaitCompleted, processExited, drainCompleted,
+                (int)Math.Clamp(_waitTimeout.TotalMilliseconds, 0, int.MaxValue),
+                ObserveStream(stdoutTask), ObserveStream(stderrTask))
+        };
     }
 
-    private bool TryKillTree(Process process)
+    private bool TryKillTree(Process process, out bool attempted, out string? exceptionType,
+        out string? exceptionDetail, out bool detailTruncated)
     {
+        attempted = false; exceptionType = null; exceptionDetail = null; detailTruncated = false;
         try
         {
             if (_hasExited(process))
                 return false;
 
+            attempted = true;
             _killTree(process);
             return true;
         }
         catch (Exception exception) when (exception is InvalidOperationException or System.ComponentModel.Win32Exception or AggregateException)
         {
+            exceptionType = exception.GetType().FullName;
+            (exceptionDetail, detailTruncated) = BoundedExceptionDetail(exception);
             return false;
         }
+    }
+
+    private static CommandStreamObservation ObserveStream(Task<string> task)
+    {
+        _ = task.ContinueWith(static late => { _ = late.Exception; }, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        var status = task.Status;
+        var complete = status == TaskStatus.RanToCompletion;
+        var faulted = status == TaskStatus.Faulted;
+        var cancelled = status == TaskStatus.Canceled;
+        return new(complete, faulted, cancelled, complete ? task.Result : null);
+    }
+
+    private static (string Detail, bool Truncated) BoundedExceptionDetail(Exception exception)
+    {
+        const int limit = 2048;
+        var builder = new System.Text.StringBuilder();
+        var pending = new Stack<Exception>(); pending.Push(exception);
+        var count = 0; var truncated = false;
+        while (pending.TryPop(out var current))
+        {
+            if (++count > 8 || builder.Length >= limit) { truncated = true; break; }
+            var type = current.GetType().FullName ?? current.GetType().Name;
+            var message = current is AggregateException ? "aggregate kill failure" : current.Message;
+            var text = type + ": " + message +
+                (current is System.ComponentModel.Win32Exception native ? " (Win32=" + native.NativeErrorCode + ")" : "") + "\n";
+            var length = Math.Min(limit - builder.Length, text.Length);
+            builder.Append(text.AsSpan(0, length));
+            truncated |= length != text.Length;
+            if (current is AggregateException aggregate)
+            {
+                var take = Math.Min(8, aggregate.InnerExceptions.Count);
+                truncated |= take != aggregate.InnerExceptions.Count;
+                for (var index = take - 1; index >= 0; index--) pending.Push(aggregate.InnerExceptions[index]);
+            }
+            else if (current.InnerException is not null) pending.Push(current.InnerException);
+        }
+        return (builder.ToString(), truncated);
     }
 
     private bool ObserveHasExited(Process process)

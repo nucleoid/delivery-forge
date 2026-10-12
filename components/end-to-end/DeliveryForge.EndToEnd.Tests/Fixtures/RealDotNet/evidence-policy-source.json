@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "1.0.0",
+  "kind": "evidence-policy",
+  "policyId": "issue11-real-dotnet-fixture",
+  "requiredGates": ["test", "coverage"],
+  "authorizedCeiling": "implement",
+  "requireIndependentReview": true,
+  "allowedNotApplicable": [],
+  "createdAt": "2026-10-11T00:00:00Z"
+}

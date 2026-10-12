@@ -6,5 +6,6 @@
   <ItemGroup>
     <ProjectReference Include="../../contracts/DeliveryForge.Contracts/DeliveryForge.Contracts.csproj" />
     <ProjectReference Include="../../review/DeliveryForge.Review/DeliveryForge.Review.csproj" />
+    <ProjectReference Include="../../evidence/DeliveryForge.Evidence/DeliveryForge.Evidence.csproj" />
   </ItemGroup>
 </Project>

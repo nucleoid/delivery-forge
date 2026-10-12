@@ -336,11 +336,13 @@ public sealed class LocalSingleScheduler
     public async Task<AgentRequest> ResumeAsync(LocalDispatchReservation reservation, CancellationToken cancellationToken = default)
     {
         await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var enteredValidResume = false;
         try
         {
             if (_relinquished || _uncertain || Volatile.Read(ref _stopped) != 0 || Volatile.Read(ref _paused) == 0 || !_prepared ||
                 !ReferenceEquals(reservation, _ticket) || !_laneHeld || _resources is null)
                 throw new SchedulingException("Resume requires this live parent's paused ticket; checkpoint data cannot recreate it.");
+            enteredValidResume = true;
             var controlGeneration = Interlocked.Read(ref _controlGeneration);
             using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             deadline.CancelAfter(Remaining());
@@ -365,7 +367,7 @@ public sealed class LocalSingleScheduler
             EnsureResumeGeneration(controlGeneration);
             return prepared.Request;
         }
-        catch { _uncertain = true; throw; }
+        catch { if (enteredValidResume) _uncertain = true; throw; }
         finally { _serial.Release(); }
     }
 
