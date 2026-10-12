@@ -208,8 +208,18 @@ internal static class RealDotNetFourPhaseOrchestrator
 // Constructed before shared initialization, so source/artifact/Git setup consumes the same540s.
 internal sealed class RealDotNetFixtureClock : IDisposable
 {
-    private readonly long _started = Stopwatch.GetTimestamp();
-    private readonly CancellationTokenSource _wall = new(TimeSpan.FromSeconds(540));
+    private readonly long _started;
+    private readonly CancellationTokenSource _wall;
+    internal long Started => _started;
+    public RealDotNetFixtureClock() : this(Stopwatch.GetTimestamp()) { }
+    internal RealDotNetFixtureClock(long originalStarted)
+    {
+        _started = originalStarted;
+        var remaining = TimeSpan.FromSeconds(540) - Stopwatch.GetElapsedTime(_started);
+        if (remaining <= TimeSpan.Zero || remaining > TimeSpan.FromSeconds(540))
+            throw new ArgumentException("Actual real-tool fixture must retain its original finite clock.");
+        _wall = new(remaining);
+    }
     public RealDotNetFixtureBudget Profile => RealDotNetFixtureBudget.ParentApproved;
     public CancellationToken WallToken => _wall.Token;
     public TimeSpan Elapsed => Stopwatch.GetElapsedTime(_started);

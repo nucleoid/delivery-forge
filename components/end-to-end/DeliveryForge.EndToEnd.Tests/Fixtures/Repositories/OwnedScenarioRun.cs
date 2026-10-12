@@ -15,6 +15,8 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
     private bool _commandsQuiescent = true;
     private bool _assertionsPassed;
     private string? _retentionReason;
+    private MiddleCrashLifetime? _middle;
+    internal MiddleCrashLifetime MiddleLifetime => _middle ?? throw new InvalidOperationException("Original middle lifetime is missing.");
 
     private OwnedScenarioRun(string sourceRoot, string git)
     {
@@ -38,30 +40,52 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
     public GitRepositoryContextReader Reader => new(_git);
 
     public static async Task<OwnedScenarioRun> CreateAsync(CancellationToken cancellationToken)
+        => await CreateCoreAsync(null, cancellationToken);
+
+    internal static async Task<OwnedScenarioRun> CreateMiddleAsync(long originalStarted, int total, CancellationToken cancellationToken)
+    {
+        var lifetime = new MiddleCrashLifetime(originalStarted, total);
+        return await lifetime.WorkAsync(current => CreateCoreAsync(lifetime, current), cancellationToken);
+    }
+
+    private static async Task<OwnedScenarioRun> CreateCoreAsync(MiddleCrashLifetime? lifetime, CancellationToken cancellationToken)
     {
         var sourceRoot = FindSourceRoot();
         var run = new OwnedScenarioRun(sourceRoot, FindExecutable(OperatingSystem.IsWindows() ? "git.exe" : "git"));
-        RequirePlainAncestors(run.Root);
-        if (Directory.Exists(run.Root) || File.Exists(run.Root)) throw new IOException("Owned run leaf already exists.");
-        Directory.CreateDirectory(run.Checkout);
-        await run.WriteNewJsonAsync("owner.json", new { run.RunId, run.Root, token = run._ownershipToken }, cancellationToken);
-        // Read the real integrated object and current implementation HEAD through the public exact Git reader.
-        run.IntegratedSource = await run.Reader.ReadAsync(sourceRoot, InitialIntegratedBase, cancellationToken);
-        await run.WriteNewJsonAsync("source.json", new
+        run._middle = lifetime;
+        lifetime?.Retain(run);
+        lifetime?.Retain(run.Processes);
+        try
         {
-            integratedBaseCommit = run.IntegratedSource.Commit,
-            integratedBaseTree = run.IntegratedSource.Tree,
-            implementationHead = run.IntegratedSource.HeadCommit,
-            implementationTree = run.IntegratedSource.HeadTree,
-            fixture = true,
-            productionCertified = false
-        }, cancellationToken);
-        await run.GitAsync(cancellationToken, "init", "-q", "-b", "main");
-        await File.WriteAllTextAsync(Path.Combine(run.Checkout, "subject.txt"), "committed fixture\n", cancellationToken);
-        await run.GitAsync(cancellationToken, "add", "--", "subject.txt");
-        await run.GitAsync(cancellationToken, "-c", "user.name=EndToEndFixture", "-c", "user.email=fixture@example.invalid",
-            "commit", "-q", "-m", "initial fixture");
-        return run;
+            RequirePlainAncestors(run.Root);
+            if (Directory.Exists(run.Root) || File.Exists(run.Root)) throw new IOException("Owned run leaf already exists.");
+            Directory.CreateDirectory(run.Checkout);
+            await run.WriteNewJsonAsync("owner.json", new { run.RunId, run.Root, token = run._ownershipToken }, cancellationToken);
+            // Read the real integrated object and current implementation HEAD through the public exact Git reader.
+            run.IntegratedSource = await run.Reader.ReadAsync(sourceRoot, InitialIntegratedBase, cancellationToken);
+            await run.WriteNewJsonAsync("source.json", new
+            {
+                integratedBaseCommit = run.IntegratedSource.Commit,
+                integratedBaseTree = run.IntegratedSource.Tree,
+                implementationHead = run.IntegratedSource.HeadCommit,
+                implementationTree = run.IntegratedSource.HeadTree,
+                fixture = true,
+                productionCertified = false
+            }, cancellationToken);
+            await run.GitAsync(cancellationToken, "init", "-q", "-b", "main");
+            await File.WriteAllTextAsync(Path.Combine(run.Checkout, "subject.txt"), "committed fixture\n", cancellationToken);
+            await run.GitAsync(cancellationToken, "add", "--", "subject.txt");
+            await run.GitAsync(cancellationToken, "-c", "user.name=EndToEndFixture", "-c", "user.email=fixture@example.invalid",
+                "commit", "-q", "-m", "initial fixture");
+            return run;
+        }
+        catch (Exception primary) when (lifetime is not null)
+        {
+            lifetime.PrimaryFailure(primary);
+            try { await run.DisposeMiddleAsync(); }
+            catch (Exception secondary) { lifetime.Retain(secondary); primary.Data["MiddleSetupCleanupFailure"] = secondary; }
+            throw;
+        }
     }
 
     public async Task<string> GitAsync(CancellationToken cancellationToken, params string[] arguments)
@@ -92,9 +116,16 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
         CommandResult result;
         try
         {
-            result = await new ProcessCommandExecutor().ExecuteAsync(new(_git,
+            var executor = new ProcessCommandExecutor();
+            _middle?.Retain(executor);
+            var timeout = TimeSpan.FromSeconds(15);
+            if (_middle is not null) { var left = _middle.Remaining(_middle.Cleaning); if (left < timeout) timeout = left; }
+            var actual = executor.ExecuteAsync(new(_git,
                 ["-c", "core.hooksPath=" + nullDevice, "-c", "core.fsmonitor=false", .. arguments], Checkout, environment),
-                TimeSpan.FromSeconds(15), cancellationToken);
+                timeout, cancellationToken);
+            _middle?.Track(actual);
+            result = _middle is null ? await actual : await actual.WaitAsync(timeout, cancellationToken);
+            if (_middle is not null) _ = _middle.Remaining(_middle.Cleaning);
         }
         catch { _commandsQuiescent = false; throw; }
         _commandsQuiescent &= result.OwnedProcessQuiescent;
@@ -144,12 +175,31 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
     public async Task WriteNewJsonAsync<T>(string name, T value, CancellationToken cancellationToken)
     {
         if (Path.GetFileName(name) != name) throw new ArgumentException("Artifact names must be a single owned path segment.", nameof(name));
+        if (_middle is not null)
+        {
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
+            if (bytes.Length > 1024 * 1024) throw new IOException("Middle diagnostic exceeds one MiB.");
+            var left = _middle.Remaining(_middle.Cleaning);
+            using var bound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken); bound.CancelAfter(left);
+            var middleStream = new FileStream(Path.Combine(Root, name), FileMode.CreateNew, FileAccess.Write, FileShare.None);
+            _middle.Retain(middleStream);
+            var actual = WriteMiddleAsync(middleStream, bytes, bound.Token); _middle.Track(actual);
+            await actual.WaitAsync(left, bound.Token);
+            _ = _middle.Remaining(_middle.Cleaning);
+            return;
+        }
         await using var stream = new FileStream(Path.Combine(Root, name), FileMode.CreateNew, FileAccess.Write, FileShare.None);
         await JsonSerializer.SerializeAsync(stream, value, cancellationToken: cancellationToken);
     }
 
+    private static async Task WriteMiddleAsync(FileStream stream, byte[] bytes, CancellationToken token)
+    {
+        await using (stream) { await stream.WriteAsync(bytes, token); await stream.FlushAsync(token); }
+    }
+
     public async ValueTask DisposeAsync()
     {
+        if (_middle is not null) { await DisposeMiddleAsync(); return; }
         var quiescent = _commandsQuiescent;
         var cleanupObservations = new List<object>();
         foreach (var identity in Processes.GetOwnedIdentities(RunId))
@@ -187,6 +237,90 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
                 new { assertionsPassed = _assertionsPassed, quiescent, fixture = true, cleanupObservations, reason = _retentionReason ?? "Failure, timeout or ambiguous cleanup retains owned artifacts." }, CancellationToken.None);
         if (_assertionsPassed && (!quiescent || !owned))
             throw new InvalidOperationException("Cleanup was not positively owned and quiescent; retained run: " + Root);
+    }
+
+    private async Task DisposeMiddleAsync()
+    {
+        var lifetime = MiddleLifetime;
+        lifetime.BeginCleanup();
+        var failures = new List<Exception>();
+        var observations = new List<object>();
+        var known = _commandsQuiescent;
+        // Only original controller members. Never adopt a journal identity or an imported PID.
+        foreach (var identity in Processes.GetAllOwnedIdentities())
+        {
+            var stages = await lifetime.StagesAsync(("original-native:" + identity.ProcessId, Processes, async current =>
+            {
+                var first = Processes.Observe(identity);
+                ProcessControlResult? controlled = null;
+                if (first.Outcome == ProcessControlOutcome.LiveOwned)
+                {
+                    var remaining = lifetime.Remaining(true);
+                    // Public quiescence includes its own five-second force-exit bound.
+                    if (remaining <= TimeSpan.FromSeconds(7)) throw new TimeoutException("Original reserve cannot contain public native quiescence.");
+                    controlled = await Processes.QuiesceAsync(identity, TimeSpan.FromSeconds(2), current);
+                }
+                var fresh = Processes.Observe(identity);
+                observations.Add(new { identity, first, controlled, fresh });
+                if (fresh.Outcome != ProcessControlOutcome.AlreadyExited) throw new InvalidOperationException("Original middle handle remains unknown.");
+            }
+            ));
+            failures.AddRange(stages.Where(stage => stage.Failure is not null).Select(stage => stage.Failure!));
+        }
+        known &= failures.Count == 0;
+        // A failed stage must not prevent independent observations of the other original members.
+        foreach (var identity in Processes.GetAllOwnedIdentities())
+        {
+            try { known &= Processes.Observe(identity).Outcome == ProcessControlOutcome.AlreadyExited; }
+            catch (Exception failure) { known = false; failures.Add(failure); lifetime.Retain(failure); }
+        }
+        known &= !lifetime.HasPendingTasks;
+        if (known)
+        {
+            var stages = await lifetime.StagesAsync(("original-controller-dispose", Processes,
+                _ => Processes.DisposeAsync().AsTask()));
+            failures.AddRange(stages.Where(stage => stage.Failure is not null).Select(stage => stage.Failure!));
+            known &= failures.Count == 0;
+        }
+        var owned = OwnsPlainLeaf();
+        if (Directory.Exists(Root) && owned)
+        {
+            var stages = await lifetime.StagesAsync(("retained-middle-diagnostics", this,
+                current => WriteNewJsonAsync("retained-middle-" + Guid.NewGuid().ToString("N") + ".json", new
+                {
+                    fixture = true,
+                    productionCertified = false,
+                    assertionsPassed = _assertionsPassed,
+                    quiescent = known,
+                    originalStarted = lifetime.Started,
+                    originalTotalSeconds = lifetime.Total,
+                    sharedCleanupSeconds = 20,
+                    observations,
+                    primaryType = lifetime.Primary?.GetType().FullName,
+                    primaryMessage = lifetime.Primary?.Message,
+                    secondary = failures.Select(failure => new { type = failure.GetType().FullName, failure.Message }).ToArray(),
+                    reason = _retentionReason
+                }, current)));
+            failures.AddRange(stages.Where(stage => stage.Failure is not null).Select(stage => stage.Failure!));
+        }
+        if (known && owned && failures.Count == 0)
+        {
+            try { lifetime.ReleaseKnownClosed(this); }
+            catch (Exception failure) { failures.Add(failure); lifetime.Retain(failure); }
+        }
+        else lifetime.Retain(this);
+        if (failures.Count != 0)
+        {
+            if (lifetime.Primary is not null) lifetime.Primary.Data["MiddleFixtureSecondaryFailures"] = failures.ToArray();
+            else throw new AggregateException("Original middle cleanup/diagnostics did not complete within its shared lifetime.", failures);
+        }
+        if (!known || !owned)
+        {
+            var failure = new InvalidOperationException("Original middle owners remain rooted; no later lane readiness is inferred.");
+            lifetime.Retain(failure);
+            if (lifetime.Primary is not null) lifetime.Primary.Data["MiddleFixtureUnknownOwners"] = failure;
+            else throw failure;
+        }
     }
 
     private bool OwnsPlainLeaf()
