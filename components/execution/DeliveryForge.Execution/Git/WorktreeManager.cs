@@ -144,6 +144,7 @@ public sealed class WorktreeManager
             // Ordinary writer recovery stays FileShare.None. This separate low-level
             // handle permits unlink mechanics but gives no path/deletion authority.
             stream = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Delete);
+            LinuxCleanupWriterFence.RequireExclusive(stream.SafeFileHandle);
             if (stream.Length > 8192) throw new WorktreeBoundaryException("Cleanup writer identity exceeds the finite diagnostic bound.");
             using var reader = new StreamReader(stream, leaveOpen: true);
             if (reader.ReadLine() != runId || reader.ReadLine() != writerToken || reader.ReadLine() is not null)
