@@ -30,6 +30,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    env:
+      DOTNET_PROCESSOR_COUNT: "2"
+      DOTNET_GCHeapHardLimit: "0x100000000"
+      DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER: "1"
+      MSBUILDDISABLENODEREUSE: "1"
+      UseSharedCompilation: "false"
+      BuildInParallel: "false"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -67,5 +74,5 @@ jobs:
           $driverDll = Join-Path $driverOutput 'DeliveryForge.EndToEnd.CrashDriver.dll'
           if (-not (Test-Path -LiteralPath $driverDll)) { throw 'Actual parent crash driver build output is missing' }
           "DELIVERY_FORGE_ACTUAL_CRASH_DRIVER_DLL=$driverDll" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - run: dotnet test DeliveryForge.slnx --no-restore --configuration Release
+      - run: dotnet test DeliveryForge.slnx --no-restore --configuration Release --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false
       - run: dotnet format DeliveryForge.slnx --no-restore --verify-no-changes
