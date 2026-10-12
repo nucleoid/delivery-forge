@@ -58,5 +58,14 @@ jobs:
           $reviewAppHost = Join-Path $reviewHelperOutput $(if ($IsWindows) { 'BoundedGitPreparationHelper.exe' } else { 'BoundedGitPreparationHelper' })
           if (-not (Test-Path -LiteralPath $reviewAppHost -PathType Leaf)) { throw 'Actual review helper apphost is missing' }
           "DELIVERY_FORGE_REVIEW_GIT_NEGATIVE_HELPER=$reviewAppHost" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Build actual parent crash driver
+        shell: pwsh
+        run: |
+          $driverOutput = Join-Path $env:RUNNER_TEMP ('delivery-forge-crash-driver-' + [guid]::NewGuid().ToString('N'))
+          dotnet build components/end-to-end/DeliveryForge.EndToEnd.CrashDriver/DeliveryForge.EndToEnd.CrashDriver.csproj --configuration Release --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false -o $driverOutput
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $driverDll = Join-Path $driverOutput 'DeliveryForge.EndToEnd.CrashDriver.dll'
+          if (-not (Test-Path -LiteralPath $driverDll)) { throw 'Actual parent crash driver build output is missing' }
+          "DELIVERY_FORGE_ACTUAL_CRASH_DRIVER_DLL=$driverDll" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - run: dotnet test DeliveryForge.slnx --no-restore --configuration Release
       - run: dotnet format DeliveryForge.slnx --no-restore --verify-no-changes
