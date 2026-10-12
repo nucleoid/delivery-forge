@@ -34,6 +34,9 @@ internal static class ActualMiddleCrashPrerequisiteFixture
         using var setup = CancellationTokenSource.CreateLinkedTokenSource(token); setup.CancelAfter(remaining);
         token = setup.Token;
         var runtime = await OwnedEphemeralRuntime.CreateAsync(artifacts, token);
+        artifacts.MiddleLifetime.Retain(runtime);
+        artifacts.MiddleLifetime.Retain(runtime.Store);
+        artifacts.MiddleLifetime.Retain(runtime.Processes);
         var context = await runtime.Reader.ReadAsync(runtime.Repository, "refs/heads/main", token);
         var plan = await Freeze(artifacts, context, runtime.Reader, "subject.txt", nonce, token);
         string? result = null; string? receipt = null; object? ownerProof = null;
@@ -130,6 +133,7 @@ internal static class ActualMiddleCrashPrerequisiteFixture
         long originalStarted, RealDotNetFixtureClock clock, CancellationToken token)
     {
         var runtime = new OwnedRealDotNetRuntime(artifacts, clock, token);
+        artifacts.MiddleLifetime.Retain(runtime);
         runtime.BeginStage(clock.WorkBudget(30));
         var template = Path.Combine(AppContext.BaseDirectory, "Fixtures", "RealDotNet");
         await runtime.InitializeAsync(template, token); // Real source copy, no binaries/counts/receipt synthesis.

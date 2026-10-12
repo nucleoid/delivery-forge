@@ -210,6 +210,7 @@ internal sealed class RealDotNetFixtureClock : IDisposable
 {
     private readonly long _started;
     private readonly CancellationTokenSource _wall;
+    internal long Started => _started;
     public RealDotNetFixtureClock() : this(Stopwatch.GetTimestamp()) { }
     internal RealDotNetFixtureClock(long originalStarted)
     {

@@ -8,7 +8,11 @@ internal static class Program
     {
         var originalStarted = System.Diagnostics.Stopwatch.GetTimestamp();
         var input = DriverInput.Parse(args);
-        using var lifetime = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+        var limit = input.OriginalCaseStarted is long original
+            ? TimeSpan.FromSeconds(input.Stage == "gate-receipt-written" ? 540 : 120) - System.Diagnostics.Stopwatch.GetElapsedTime(original)
+            : TimeSpan.FromSeconds(90);
+        if (limit <= TimeSpan.Zero) throw new TimeoutException("Original driver case clock already expired.");
+        using var lifetime = new CancellationTokenSource(limit);
         if (input.Mode == "child") { await EarlyDriverComposition.ChildAsync(input, originalStarted, lifetime.Token); return; }
         // This is genuine repository evidence only; it does not import a FrozenPlan/worker/ticket from bytes.
         var observed = await new GitRepositoryContextReader().ReadAsync(Path.Combine(input.RuntimeRoot, "repository"), "refs/heads/main", lifetime.Token);
@@ -16,11 +20,12 @@ internal static class Program
         await EarlyDriverComposition.WriteJson(Path.Combine(input.ArtifactRoot, "driver-" + input.Mode + "-preflight.json"), new
         { fixture = true, input.Stage, input.Nonce, observed.Commit, observed.Tree, observed.HeadCommit, mode = input.Mode,
             processIdDiagnosticOnly = Environment.ProcessId, limitation = "Driver stdout/stderr inherit outer SDK capture; this file is owned diagnostic data only." }, lifetime.Token);
-        await EarlyDriverComposition.RunAsync(input, observed, lifetime.Token);
+        if (MiddleDriverComposition.Supports(input.Stage)) await MiddleDriverComposition.RunAsync(input, observed, lifetime.Token);
+        else await EarlyDriverComposition.RunAsync(input, observed, lifetime.Token);
     }
 }
 internal sealed record DriverInput(string Mode, string Stage, string RuntimeRoot, string ArtifactRoot,
-    string Nonce, string RuntimeBaseCommit, string IntegratedBaseCommit, int Seed)
+    string Nonce, string RuntimeBaseCommit, string IntegratedBaseCommit, int Seed, long? OriginalCaseStarted = null)
 {
     internal static readonly IReadOnlyList<string> AllBoundaries = Array.AsReadOnly(new[]
     {
@@ -30,7 +35,7 @@ internal sealed record DriverInput(string Mode, string Stage, string RuntimeRoot
     });
     internal static DriverInput Parse(string[] args)
     {
-        if (args.Length != 8 || args[0] is not ("barrier" or "recover" or "release-control" or "child") || !AllBoundaries.Contains(args[1]) ||
+        if (args.Length is not (8 or 10) || args[0] is not ("barrier" or "recover" or "release-control" or "child") || !AllBoundaries.Contains(args[1]) ||
             !Path.IsPathFullyQualified(args[2]) || !Path.IsPathFullyQualified(args[3]) || !Guid.TryParseExact(args[4], "N", out _) ||
             !IsCommit(args[5]) || !IsCommit(args[6]) || !int.TryParse(args[7], out var seed) || seed != 11019)
             throw new ArgumentException("Strict crash-fixture protocol requires mode/stage/absolute roots/nonce/exact bases/fixed seed.");
@@ -43,7 +48,18 @@ internal sealed record DriverInput(string Mode, string Stage, string RuntimeRoot
             for (DirectoryInfo? ancestor = new(path); ancestor is not null; ancestor = ancestor.Parent)
                 if (!ancestor.Exists || (ancestor.Attributes & FileAttributes.ReparsePoint) != 0)
                     throw new IOException("Driver root/ancestor is absent or redirected.");
-        return new(args[0], args[1], runtime, artifact, args[4], args[5], args[6], seed);
+        long? started = null;
+        if (args.Length == 10)
+        {
+            if (!MiddleDriverComposition.Supports(args[1]) || !long.TryParse(args[8], out var captured) ||
+                !long.TryParse(args[9], out var frequency) || frequency != System.Diagnostics.Stopwatch.Frequency ||
+                captured <= 0 || captured > System.Diagnostics.Stopwatch.GetTimestamp())
+                throw new ArgumentException("Middle fixture requires the same original monotonic case clock.");
+            started = captured;
+        }
+        else if (MiddleDriverComposition.Supports(args[1]) && args[0] != "child")
+            throw new ArgumentException("Middle driver cannot restart a case clock from old diagnostic bytes.");
+        return new(args[0], args[1], runtime, artifact, args[4], args[5], args[6], seed, started);
     }
     private static bool IsCommit(string value) => value.Length == 40 && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 }
