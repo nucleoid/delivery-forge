@@ -25,125 +25,125 @@ public sealed class RichPlanImportTests
         await using var repository = new ImportRepositoryFixture(TestContext.Current.CancellationToken);
         try
         {
-        await repository.InitializeAsync();
-        var token = repository.WorkToken;
-        var reader = new GitRepositoryContextReader(repository.Git);
-        var context = await repository.Wait(reader.ReadAsync(repository.Root, "refs/heads/main", token));
-        var file = await repository.Wait(reader.ReadFileAsync(context, "tracked.txt", token));
-        var now = new DateTimeOffset(2026, 10, 12, 0, 0, 0, TimeSpan.Zero);
-        EvidenceItem[] evidence = [EvidenceItem.FromRepositoryFile(file, now, [], EvidenceRequirement.Required)];
-        var request = new PlanningRequest("fixture/import", "#4", "implement", "Import complete portable planning material",
-            ["tracked.txt"], ["production"], ["Current owner revalidates exact material and source"], "implement");
-        var draft = new PlanDraft(request, context, evidence, [new("tracked.txt", "content", "update")],
-            [new("base", [], "current source"), new("dependent", ["base"], "base accepted")],
-            [new("test", new("dotnet", [PlanCommandArgument.Literal("test")]), "PASS")],
-            new("additive", "none", "none", "none", "none", "none", "receipt", "revert", ["inspect diagnostics"]),
-            [], IntakePlanner.Assess(request, evidence));
-        var original = PlanFreezer.Freeze(draft, "original-import", now);
-        Assert.True(original.DownstreamReady);
-        Assert.True(original.ReconcileBase(context).DownstreamReady);
-        Assert.Equal(original.Identity, CanonicalJson.ComputeIdentity(original.CanonicalBytes));
-        Assert.DoesNotContain(repository.Root, Encoding.UTF8.GetString(original.CanonicalBytes), StringComparison.Ordinal);
-        var source = new PlanImportSource(repository.Root, "refs/heads/main", repository.Git);
-        var expectations = new PlanImportExpectations(original.Identity, original.ContractIdentity, request.Repository,
-            request.WorkItem, repository.Root, "refs/heads/main", request.RequestedCeiling);
-        var bytes = original.CanonicalBytes;
-        if (scenario == "coherent-gate-tamper")
-        {
-            var altered = PlanFreezer.Freeze(draft with
-            { Gates = [new("test", new("dotnet", [PlanCommandArgument.Literal("test"), PlanCommandArgument.Literal("--no-build")]), "PASS")] },
-                "changed-import", now);
-            Assert.True(altered.DownstreamReady);
-            Assert.Equal(altered.Identity, CanonicalJson.ComputeIdentity(altered.CanonicalBytes));
-            Assert.NotEqual(original.Identity, altered.Identity); Assert.NotEqual(original.ContentDigest, altered.ContentDigest);
-            bytes = altered.CanonicalBytes; // Coherent owner-produced data, denied against ORIGINAL independent expectations.
-        }
-        if (scenario == "same-tree-base-advance")
-        {
-            await repository.Command(repository.Root, "commit", "--allow-empty", "-q", "-m", "same tree new base");
-            var advanced = await repository.Wait(reader.ReadAsync(repository.Root, "refs/heads/main", token));
-            Assert.NotEqual(context.Commit, advanced.Commit); Assert.Equal(context.Tree, advanced.Tree);
-            Assert.False(original.ReconcileBase(advanced).DownstreamReady);
-        }
-        if (scenario == "raw-index-flags")
-        {
-            var index = Path.Combine(repository.Root, ".git", "index");
-            var before = SHA256.HashData(await File.ReadAllBytesAsync(index, token));
-            await repository.Command(repository.Root, "update-index", "--assume-unchanged", "tracked.txt");
-            var after = SHA256.HashData(await File.ReadAllBytesAsync(index, token));
-            Assert.False(before.SequenceEqual(after));
-            Assert.StartsWith("h ", await repository.Command(repository.Root, "ls-files", "-v", "--", "tracked.txt"), StringComparison.Ordinal);
-            var current = await repository.Wait(reader.ReadAsync(repository.Root, "refs/heads/main", token));
-            Assert.Equal(context.Commit, current.Commit); Assert.Equal(context.Tree, current.Tree); Assert.False(current.Dirty);
-            Assert.Equal(file.Bytes, (await repository.Wait(reader.ReadFileAsync(current, "tracked.txt", token))).Bytes);
-        }
-        if (scenario == "same-objects-other-root")
-        {
-            var second = await repository.Clone();
-            var other = await repository.Wait(reader.ReadAsync(second, "refs/heads/main", token));
-            Assert.Equal(context.Commit, other.Commit); Assert.Equal(context.Tree, other.Tree);
-            Assert.False(original.ReconcileBase(other).DownstreamReady);
-            source = source with { RepositoryRoot = second }; // Trusted expectations still independently select original root.
-        }
-        if (scenario == "required-context-unavailable")
-        {
-            const string privateSummary = "Private fixture caller relationship is not exported";
-            var imported = new ImportedContextEnvelope("1.0.0",
-                [new("memory", "/private/import-fixture", privateSummary, null, now,
-                    Requirement: EvidenceRequirement.Required, DistilledMeaning: ImportedMeaningCode.CallerRelationship)], [], []);
-            var intake = IntakePlanner.Assess(request, evidence, imported, EvidenceRequirement.Required);
-            Assert.True(intake.Ready); Assert.True(intake.ImportedContextAvailable);
-            original = PlanFreezer.Freeze(draft with { Intake = intake }, "required-import", now);
+            await repository.InitializeAsync();
+            var token = repository.WorkToken;
+            var reader = new GitRepositoryContextReader(repository.Git);
+            var context = await repository.Wait(reader.ReadAsync(repository.Root, "refs/heads/main", token));
+            var file = await repository.Wait(reader.ReadFileAsync(context, "tracked.txt", token));
+            var now = new DateTimeOffset(2026, 10, 12, 0, 0, 0, TimeSpan.Zero);
+            EvidenceItem[] evidence = [EvidenceItem.FromRepositoryFile(file, now, [], EvidenceRequirement.Required)];
+            var request = new PlanningRequest("fixture/import", "#4", "implement", "Import complete portable planning material",
+                ["tracked.txt"], ["production"], ["Current owner revalidates exact material and source"], "implement");
+            var draft = new PlanDraft(request, context, evidence, [new("tracked.txt", "content", "update")],
+                [new("base", [], "current source"), new("dependent", ["base"], "base accepted")],
+                [new("test", new("dotnet", [PlanCommandArgument.Literal("test")]), "PASS")],
+                new("additive", "none", "none", "none", "none", "none", "receipt", "revert", ["inspect diagnostics"]),
+                [], IntakePlanner.Assess(request, evidence));
+            var original = PlanFreezer.Freeze(draft, "original-import", now);
             Assert.True(original.DownstreamReady);
-            using var document = JsonDocument.Parse(original.CanonicalBytes);
-            Assert.True(document.RootElement.GetProperty("plan").GetProperty("intake").GetProperty("importedContextAvailable").GetBoolean());
-            Assert.DoesNotContain(privateSummary, Encoding.UTF8.GetString(original.CanonicalBytes), StringComparison.Ordinal);
-            expectations = expectations with { BundleIdentity = original.Identity, ContractIdentity = original.ContractIdentity };
-            bytes = original.CanonicalBytes; // Fresh required private context is deliberately NOT provided to importer.
-        }
-        if (scenario == "contract-projection-only") bytes = original.PlanContractBytes;
-        var budget = repository.WorkRemaining();
-        if (scenario == "precancelled")
-        {
-            using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(token); cancelled.Cancel();
-            source = source with { TrustedGitExecutable = Path.Combine(repository.Root, "never-start-nonexistent-git") };
-            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PlanImporter.ImportAndReconcileAsync(bytes, source, expectations,
-                budget, cancellationToken: cancelled.Token));
-            return;
-        }
-        if (scenario == "no-original-budget")
-        {
-            await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => PlanImporter.ImportAndReconcileAsync(bytes, source, expectations,
-                TimeSpan.Zero, cancellationToken: token));
-            return;
-        }
-        if (scenario is "coherent-gate-tamper" or "contract-projection-only")
-        {
-            var error = await Assert.ThrowsAsync<PlanningException>(() => PlanImporter.ImportAndReconcileAsync(bytes, source, expectations,
-                budget, cancellationToken: token));
-            Assert.Contains(scenario == "contract-projection-only" ? "bundle" : "identity", error.Message, StringComparison.OrdinalIgnoreCase);
-            return;
-        }
-        var result = await PlanImporter.ImportAndReconcileAsync(bytes, source, expectations, budget, cancellationToken: token);
-        if (scenario != "ready-roundtrip")
-        {
-            Assert.False(result.DownstreamReady); Assert.Null(result.Plan); Assert.NotEmpty(result.Diagnostics);
-            var requiredDiagnostic = scenario switch
+            Assert.True(original.ReconcileBase(context).DownstreamReady);
+            Assert.Equal(original.Identity, CanonicalJson.ComputeIdentity(original.CanonicalBytes));
+            Assert.DoesNotContain(repository.Root, Encoding.UTF8.GetString(original.CanonicalBytes), StringComparison.Ordinal);
+            var source = new PlanImportSource(repository.Root, "refs/heads/main", repository.Git);
+            var expectations = new PlanImportExpectations(original.Identity, original.ContractIdentity, request.Repository,
+                request.WorkItem, repository.Root, "refs/heads/main", request.RequestedCeiling);
+            var bytes = original.CanonicalBytes;
+            if (scenario == "coherent-gate-tamper")
             {
-                "same-tree-base-advance" => "base",
-                "raw-index-flags" => "index",
-                "same-objects-other-root" => "root",
-                "required-context-unavailable" => "required",
-                _ => throw new InvalidOperationException("Unknown import specification.")
-            };
-            Assert.Contains(result.Diagnostics, value => value.Contains(requiredDiagnostic, StringComparison.OrdinalIgnoreCase));
-            return;
-        }
-        Assert.True(result.DownstreamReady); var actual = Assert.IsType<FrozenPlan>(result.Plan);
-        Assert.Equal(original.CanonicalBytes, actual.CanonicalBytes); Assert.Equal(original.PlanContractBytes, actual.PlanContractBytes);
-        Assert.Equal(original.Identity, actual.Identity); Assert.Equal(original.ContractIdentity, actual.ContractIdentity);
-        Assert.Equal(original.ContentDigest, actual.ContentDigest); Assert.Equal(original.PlanRevision, actual.PlanRevision);
-        Assert.True(actual.ReconcileBase(await repository.Wait(reader.ReadAsync(repository.Root, "refs/heads/main", token))).DownstreamReady);
+                var altered = PlanFreezer.Freeze(draft with
+                { Gates = [new("test", new("dotnet", [PlanCommandArgument.Literal("test"), PlanCommandArgument.Literal("--no-build")]), "PASS")] },
+                    "changed-import", now);
+                Assert.True(altered.DownstreamReady);
+                Assert.Equal(altered.Identity, CanonicalJson.ComputeIdentity(altered.CanonicalBytes));
+                Assert.NotEqual(original.Identity, altered.Identity); Assert.NotEqual(original.ContentDigest, altered.ContentDigest);
+                bytes = altered.CanonicalBytes; // Coherent owner-produced data, denied against ORIGINAL independent expectations.
+            }
+            if (scenario == "same-tree-base-advance")
+            {
+                await repository.Command(repository.Root, "commit", "--allow-empty", "-q", "-m", "same tree new base");
+                var advanced = await repository.Wait(reader.ReadAsync(repository.Root, "refs/heads/main", token));
+                Assert.NotEqual(context.Commit, advanced.Commit); Assert.Equal(context.Tree, advanced.Tree);
+                Assert.False(original.ReconcileBase(advanced).DownstreamReady);
+            }
+            if (scenario == "raw-index-flags")
+            {
+                var index = Path.Combine(repository.Root, ".git", "index");
+                var before = SHA256.HashData(await File.ReadAllBytesAsync(index, token));
+                await repository.Command(repository.Root, "update-index", "--assume-unchanged", "tracked.txt");
+                var after = SHA256.HashData(await File.ReadAllBytesAsync(index, token));
+                Assert.False(before.SequenceEqual(after));
+                Assert.StartsWith("h ", await repository.Command(repository.Root, "ls-files", "-v", "--", "tracked.txt"), StringComparison.Ordinal);
+                var current = await repository.Wait(reader.ReadAsync(repository.Root, "refs/heads/main", token));
+                Assert.Equal(context.Commit, current.Commit); Assert.Equal(context.Tree, current.Tree); Assert.False(current.Dirty);
+                Assert.Equal(file.Bytes, (await repository.Wait(reader.ReadFileAsync(current, "tracked.txt", token))).Bytes);
+            }
+            if (scenario == "same-objects-other-root")
+            {
+                var second = await repository.Clone();
+                var other = await repository.Wait(reader.ReadAsync(second, "refs/heads/main", token));
+                Assert.Equal(context.Commit, other.Commit); Assert.Equal(context.Tree, other.Tree);
+                Assert.False(original.ReconcileBase(other).DownstreamReady);
+                source = source with { RepositoryRoot = second }; // Trusted expectations still independently select original root.
+            }
+            if (scenario == "required-context-unavailable")
+            {
+                const string privateSummary = "Private fixture caller relationship is not exported";
+                var imported = new ImportedContextEnvelope("1.0.0",
+                    [new("memory", "/private/import-fixture", privateSummary, null, now,
+                    Requirement: EvidenceRequirement.Required, DistilledMeaning: ImportedMeaningCode.CallerRelationship)], [], []);
+                var intake = IntakePlanner.Assess(request, evidence, imported, EvidenceRequirement.Required);
+                Assert.True(intake.Ready); Assert.True(intake.ImportedContextAvailable);
+                original = PlanFreezer.Freeze(draft with { Intake = intake }, "required-import", now);
+                Assert.True(original.DownstreamReady);
+                using var document = JsonDocument.Parse(original.CanonicalBytes);
+                Assert.True(document.RootElement.GetProperty("plan").GetProperty("intake").GetProperty("importedContextAvailable").GetBoolean());
+                Assert.DoesNotContain(privateSummary, Encoding.UTF8.GetString(original.CanonicalBytes), StringComparison.Ordinal);
+                expectations = expectations with { BundleIdentity = original.Identity, ContractIdentity = original.ContractIdentity };
+                bytes = original.CanonicalBytes; // Fresh required private context is deliberately NOT provided to importer.
+            }
+            if (scenario == "contract-projection-only") bytes = original.PlanContractBytes;
+            var budget = repository.WorkRemaining();
+            if (scenario == "precancelled")
+            {
+                using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(token); cancelled.Cancel();
+                source = source with { TrustedGitExecutable = Path.Combine(repository.Root, "never-start-nonexistent-git") };
+                await Assert.ThrowsAnyAsync<OperationCanceledException>(() => PlanImporter.ImportAndReconcileAsync(bytes, source, expectations,
+                    budget, cancellationToken: cancelled.Token));
+                return;
+            }
+            if (scenario == "no-original-budget")
+            {
+                await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() => PlanImporter.ImportAndReconcileAsync(bytes, source, expectations,
+                    TimeSpan.Zero, cancellationToken: token));
+                return;
+            }
+            if (scenario is "coherent-gate-tamper" or "contract-projection-only")
+            {
+                var error = await Assert.ThrowsAsync<PlanningException>(() => PlanImporter.ImportAndReconcileAsync(bytes, source, expectations,
+                    budget, cancellationToken: token));
+                Assert.Contains(scenario == "contract-projection-only" ? "bundle" : "identity", error.Message, StringComparison.OrdinalIgnoreCase);
+                return;
+            }
+            var result = await PlanImporter.ImportAndReconcileAsync(bytes, source, expectations, budget, cancellationToken: token);
+            if (scenario != "ready-roundtrip")
+            {
+                Assert.False(result.DownstreamReady); Assert.Null(result.Plan); Assert.NotEmpty(result.Diagnostics);
+                var requiredDiagnostic = scenario switch
+                {
+                    "same-tree-base-advance" => "base",
+                    "raw-index-flags" => "index",
+                    "same-objects-other-root" => "root",
+                    "required-context-unavailable" => "required",
+                    _ => throw new InvalidOperationException("Unknown import specification.")
+                };
+                Assert.Contains(result.Diagnostics, value => value.Contains(requiredDiagnostic, StringComparison.OrdinalIgnoreCase));
+                return;
+            }
+            Assert.True(result.DownstreamReady); var actual = Assert.IsType<FrozenPlan>(result.Plan);
+            Assert.Equal(original.CanonicalBytes, actual.CanonicalBytes); Assert.Equal(original.PlanContractBytes, actual.PlanContractBytes);
+            Assert.Equal(original.Identity, actual.Identity); Assert.Equal(original.ContractIdentity, actual.ContractIdentity);
+            Assert.Equal(original.ContentDigest, actual.ContentDigest); Assert.Equal(original.PlanRevision, actual.PlanRevision);
+            Assert.True(actual.ReconcileBase(await repository.Wait(reader.ReadAsync(repository.Root, "refs/heads/main", token))).DownstreamReady);
         }
         catch (Exception failure) { repository.Primary = failure; throw; }
     }
@@ -231,8 +231,14 @@ internal sealed class ImportRepositoryFixture : IAsyncDisposable
     {
         _ = WorkRemaining();
         var info = new ProcessStartInfo(Git)
-        { WorkingDirectory = cwd, UseShellExecute = false, CreateNoWindow = true,
-            RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+        {
+            WorkingDirectory = cwd,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
         foreach (var key in info.Environment.Keys.Where(key => key.StartsWith("GIT_", StringComparison.OrdinalIgnoreCase)).ToArray()) info.Environment.Remove(key);
         info.Environment["GIT_CONFIG_NOSYSTEM"] = "1";
         info.Environment["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
@@ -278,8 +284,11 @@ internal sealed class ImportRepositoryFixture : IAsyncDisposable
                 await Attempt(() => { _ = CleanupRemaining(); owner.Process.Dispose(); owner.Closed = true; return Task.CompletedTask; }, failures);
                 continue;
             }
-            await Attempt(() => { _ = CleanupRemaining(); if (!owner.Process.HasExited) owner.Process.Kill(entireProcessTree: false);
-                return Task.CompletedTask; }, failures); // ORIGINAL created Git object, never imported PID.
+            await Attempt(() =>
+            {
+                _ = CleanupRemaining(); if (!owner.Process.HasExited) owner.Process.Kill(entireProcessTree: false);
+                return Task.CompletedTask;
+            }, failures); // ORIGINAL created Git object, never imported PID.
             await Attempt(async () =>
             {
                 _ = CleanupRemaining();
@@ -299,8 +308,11 @@ internal sealed class ImportRepositoryFixture : IAsyncDisposable
         }
         foreach (var task in _tasks.Where(task => !task.IsCompleted))
         {
-            try { await Task.WhenAny(task, Task.Delay(CleanupRemaining(), CancellationToken.None)); _ = CleanupRemaining();
-                if (!task.IsCompleted) throw new TimeoutException("Actual source/reader task remains unknown."); }
+            try
+            {
+                await Task.WhenAny(task, Task.Delay(CleanupRemaining(), CancellationToken.None)); _ = CleanupRemaining();
+                if (!task.IsCompleted) throw new TimeoutException("Actual source/reader task remains unknown.");
+            }
             catch (Exception failure) { failures.Add(failure); }
         }
         // Files are retained, not recursively deleted. No timeout/task completion is native authority.

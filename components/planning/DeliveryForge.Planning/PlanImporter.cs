@@ -109,11 +109,15 @@ public static class PlanImporter
         if (count is < 0 or > 256) throw new PlanningException("Fresh imported context exceeds256 entries.");
         var characters = 0;
         string? Capture(string? value)
-        { if (value is null) return null; characters += value.Length;
-            if (value.Length > 4096 || characters > 256 * 1024) throw new PlanningException("Fresh context exceeds bounded advisory material."); return value; }
+        {
+            if (value is null) return null; characters += value.Length;
+            if (value.Length > 4096 || characters > 256 * 1024) throw new PlanningException("Fresh context exceeds bounded advisory material."); return value;
+        }
         string[] CaptureList(IReadOnlyList<string> values)
-        { var length = values.Count; if (length is < 0 or > 256) throw new PlanningException("Fresh context advisory list exceeds256.");
-            var copy = new string[length]; for (var i = 0; i < length; i++) copy[i] = Capture(values[i]) ?? throw new PlanningException("Null advisory item."); return copy; }
+        {
+            var length = values.Count; if (length is < 0 or > 256) throw new PlanningException("Fresh context advisory list exceeds256.");
+            var copy = new string[length]; for (var i = 0; i < length; i++) copy[i] = Capture(values[i]) ?? throw new PlanningException("Null advisory item."); return copy;
+        }
         var entries = new ImportedContextEntry[count];
         for (var i = 0; i < count; i++)
         {
@@ -124,12 +128,25 @@ public static class PlanImporter
         var conflicts = CaptureList(input.Conflicts); var limitations = CaptureList(input.Limitations);
         // Roundtrip the public closed envelope: private verification bindings/claimed flags are discarded.
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new
-        { schemaVersion = Capture(input.SchemaVersion), entries = entries.Select(entry => new
-            { kind = entry.Kind, locator = entry.Locator, summary = entry.Summary, digest = entry.Digest,
-                checkoutDigest = entry.CheckoutDigest, observedAt = entry.ObservedAt.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture),
-                stale = entry.Stale, truncated = entry.Truncated, heuristic = entry.Heuristic,
-                requirement = entry.Requirement.ToString(), distilledMeaning = entry.DistilledMeaning?.ToString() }).ToArray(),
-            conflicts, limitations });
+        {
+            schemaVersion = Capture(input.SchemaVersion),
+            entries = entries.Select(entry => new
+            {
+                kind = entry.Kind,
+                locator = entry.Locator,
+                summary = entry.Summary,
+                digest = entry.Digest,
+                checkoutDigest = entry.CheckoutDigest,
+                observedAt = entry.ObservedAt.UtcDateTime.ToString("O", System.Globalization.CultureInfo.InvariantCulture),
+                stale = entry.Stale,
+                truncated = entry.Truncated,
+                heuristic = entry.Heuristic,
+                requirement = entry.Requirement.ToString(),
+                distilledMeaning = entry.DistilledMeaning?.ToString()
+            }).ToArray(),
+            conflicts,
+            limitations
+        });
         return ImportedContextEnvelope.Parse(bytes);
     }
 }

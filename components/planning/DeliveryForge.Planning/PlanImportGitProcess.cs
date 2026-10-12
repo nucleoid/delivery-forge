@@ -48,9 +48,12 @@ public sealed partial class GitRepositoryContextReader
                 // outer original allowance still governs the observer's return.
                 try { if (!original.HasExited) original.Kill(entireProcessTree: true); }
                 catch (Exception cleanup) when (cleanup is InvalidOperationException or System.ComponentModel.Win32Exception or NotSupportedException) { errors.Add(cleanup); }
-                try { cleanupExit = original.WaitForExitAsync(CancellationToken.None);
+                try
+                {
+                    cleanupExit = original.WaitForExitAsync(CancellationToken.None);
                     var left = _importLifetime!.Remaining();
-                    await cleanupExit.WaitAsync(left < GitTerminationTimeout ? left : GitTerminationTimeout).ConfigureAwait(false); }
+                    await cleanupExit.WaitAsync(left < GitTerminationTimeout ? left : GitTerminationTimeout).ConfigureAwait(false);
+                }
                 catch (Exception cleanup) when (cleanup is TimeoutException or OperationCanceledException or InvalidOperationException or System.ComponentModel.Win32Exception) { errors.Add(cleanup); }
             }
             if (caller.IsCancellationRequested) throw new OperationCanceledException(caller);

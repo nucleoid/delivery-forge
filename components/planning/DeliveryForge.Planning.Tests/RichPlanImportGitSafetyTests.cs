@@ -22,7 +22,9 @@ public sealed class RichPlanImportGitSafetyTests
             var setup = await Prepare(repository, race: false);
             var configured = scenario switch
             {
-                "null" => null!, "blank" => "", "whitespace" => " \t",
+                "null" => null!,
+                "blank" => "",
+                "whitespace" => " \t",
                 "relative" => "never-start-relative-git",
                 "missing" => Path.Combine(setup.HelperRoot, "never-start-missing-git"),
                 _ => throw new InvalidOperationException("Unknown mandatory executable specification.")
@@ -123,7 +125,9 @@ public sealed class RichPlanImportGitSafetyTests
                 try { _ = await repository.ObserveCleanup(() => actual!); }
                 catch (Exception failure) { if (!ReferenceEquals(failure, primary)) cleanup.Add(failure); }
             if (before is not null && configPath is not null)
-                try { _ = await repository.ObserveCleanup(async () =>
+                try
+                {
+                    _ = await repository.ObserveCleanup(async () =>
                     {
                         // Teardown deliberately ignores the canceled WORK token;
                         // ObserveCleanup clips/retains this actual task under the
@@ -132,7 +136,8 @@ public sealed class RichPlanImportGitSafetyTests
                         await File.WriteAllBytesAsync(configPath, before, CancellationToken.None);
 #pragma warning restore xUnit1051
                         return true;
-                    }); }
+                    });
+                }
                 catch (Exception failure) { cleanup.Add(failure); }
             if (cleanup.Count > 0)
             {

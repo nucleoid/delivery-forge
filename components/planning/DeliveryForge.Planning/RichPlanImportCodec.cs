@@ -151,8 +151,12 @@ internal sealed class RichPlanImportCodec : IDisposable
         {
             Object(item, "kind", "value"); var text = Text(item, "value"); Require(text.Length <= 4096, "Command argument exceeds4096.");
             return Text(item, "kind") switch
-            { "literal" => PlanCommandArgument.Literal(text), "placeholder" => PlanCommandArgument.Placeholder(text),
-                "secret-reference" => PlanCommandArgument.SecretReference(text), _ => throw new PlanningException("Unknown command argument kind.") };
+            {
+                "literal" => PlanCommandArgument.Literal(text),
+                "placeholder" => PlanCommandArgument.Placeholder(text),
+                "secret-reference" => PlanCommandArgument.SecretReference(text),
+                _ => throw new PlanningException("Unknown command argument kind.")
+            };
         }).ToArray();
         var result = new PlanCommand(Text(value, "executable"), args); CommandRenderer.Validate(result); return result;
     }
@@ -193,8 +197,10 @@ internal sealed class RichPlanImportCodec : IDisposable
     private static IntakeDepth Depth(string value) => value switch { "minimal" => IntakeDepth.Minimal, "deep" => IntakeDepth.Deep, _ => throw new PlanningException("Unknown intake depth.") };
     private static EvidenceRequirement Requirement(string value) => value switch { "optional" => EvidenceRequirement.Optional, "required" => EvidenceRequirement.Required, _ => throw new PlanningException("Unknown evidence requirement.") };
     private static DateTimeOffset Date(string value)
-    { Require(DateTimeOffset.TryParseExact(value, ["yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'"], CultureInfo.InvariantCulture,
-        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var result), "Rich time must be exact UTC."); return result; }
+    {
+        Require(DateTimeOffset.TryParseExact(value, ["yyyy-MM-dd'T'HH:mm:ss'Z'", "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'"], CultureInfo.InvariantCulture,
+        DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var result), "Rich time must be exact UTC."); return result;
+    }
     private static void Path(string value)
     { Require(!value.Contains('\\') && !value.Contains('\0') && !PortableMaterial.IsAbsolutePath(value) && !value.Split('/').Any(part => part is "" or "." or ".."), "Rich repository path is unsafe."); }
     private static void ValidateEscapedScalars(ReadOnlySpan<byte> owned)
@@ -223,8 +229,15 @@ internal sealed class RichPlanImportCodec : IDisposable
     {
         Require(start + 4 <= bytes.Length, "Incomplete Unicode escape."); var value = 0;
         for (var i = start; i < start + 4; i++)
-        { var digit = bytes[i] switch { >= (byte)'0' and <= (byte)'9' => bytes[i] - '0', >= (byte)'a' and <= (byte)'f' => bytes[i] - 'a' + 10,
-            >= (byte)'A' and <= (byte)'F' => bytes[i] - 'A' + 10, _ => -1 }; Require(digit >= 0, "Invalid Unicode escape."); value = value * 16 + digit; }
+        {
+            var digit = bytes[i] switch
+            {
+                >= (byte)'0' and <= (byte)'9' => bytes[i] - '0',
+                >= (byte)'a' and <= (byte)'f' => bytes[i] - 'a' + 10,
+                >= (byte)'A' and <= (byte)'F' => bytes[i] - 'A' + 10,
+                _ => -1
+            }; Require(digit >= 0, "Invalid Unicode escape."); value = value * 16 + digit;
+        }
         return value;
     }
     private static void Digest(string value) => Require(value.Length == 71 && value.StartsWith("sha256:", StringComparison.Ordinal) && value[7..].All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f'), "Malformed rich digest.");

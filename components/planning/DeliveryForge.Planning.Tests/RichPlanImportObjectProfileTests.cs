@@ -26,8 +26,14 @@ public sealed class RichPlanImportObjectProfileTests
             var before = await Ledger(repository, setup);
             await Ready(repository, setup);
             var after = await Ledger(repository, setup);
-            await Observation(repository, setup, new { scenario = "actual-packed-roundtrip", packs = packs.Select(Path.GetFileName).ToArray(),
-                auxiliaries = auxiliaries.Select(Path.GetFileName).ToArray(), before, after });
+            await Observation(repository, setup, new
+            {
+                scenario = "actual-packed-roundtrip",
+                packs = packs.Select(Path.GetFileName).ToArray(),
+                auxiliaries = auxiliaries.Select(Path.GetFileName).ToArray(),
+                before,
+                after
+            });
             Assert.True(after.Count > before.Count); // Actual selected helper dispatch, not bare output claims.
         }
         catch (Exception failure) { repository.Primary = failure; throw; }

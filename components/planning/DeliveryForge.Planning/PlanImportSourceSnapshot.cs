@@ -65,8 +65,13 @@ internal sealed record PlanImportSourceSnapshot(string MetadataHash, string Inde
             var separator = line.IndexOf('='); if (separator <= 0) throw new PlanningException("Unsupported import Git configuration syntax.");
             var key = line[..separator].Trim().ToLowerInvariant(); var value = line[(separator + 1)..].Trim();
             var safe = section switch
-            { "core" => key is "repositoryformatversion" or "filemode" or "bare" or "logallrefupdates" or "ignorecase" or "symlinks" or "autocrlf" or "safecrlf" or "precomposeunicode",
-                "user" => key is "name" or "email", "remote" => key is "url" or "fetch" or "pushurl", "branch" => key is "remote" or "merge", _ => false };
+            {
+                "core" => key is "repositoryformatversion" or "filemode" or "bare" or "logallrefupdates" or "ignorecase" or "symlinks" or "autocrlf" or "safecrlf" or "precomposeunicode",
+                "user" => key is "name" or "email",
+                "remote" => key is "url" or "fetch" or "pushurl",
+                "branch" => key is "remote" or "merge",
+                _ => false
+            };
             if (!safe || key == "repositoryformatversion" && value != "0" || key == "bare" && !value.Equals("false", StringComparison.OrdinalIgnoreCase))
                 throw new PlanningException("Unsafe import Git configuration key: " + key);
         }

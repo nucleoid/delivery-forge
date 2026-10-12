@@ -96,8 +96,14 @@ public sealed class RichPlanImportObjectAndResourceTests
             }, CancellationToken.None));
             var configuration = JsonSerializer.SerializeToUtf8Bytes(new
             {
-                Git = repository.Git, Repository = repository.Root, Nonce = setup.Nonce, Race = false,
-                Alternate = alternate, BlobId = blob, ObjectDirectory = externalRoot, StoredSha256 = storedHash
+                Git = repository.Git,
+                Repository = repository.Root,
+                Nonce = setup.Nonce,
+                Race = false,
+                Alternate = alternate,
+                BlobId = blob,
+                ObjectDirectory = externalRoot,
+                StoredSha256 = storedHash
             });
             _ = await repository.Wait(File.WriteAllBytesAsync(Path.Combine(setup.HelperRoot, "git-helper.json"), configuration,
                 repository.WorkToken).ContinueWith(done => { done.GetAwaiter().GetResult(); return true; },

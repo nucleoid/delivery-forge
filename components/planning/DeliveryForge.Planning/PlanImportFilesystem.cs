@@ -12,8 +12,10 @@ internal static class PlanImportFilesystem
         private readonly SafeFileHandle _handle;
         private readonly Identity _identity;
         internal FileBinding(string path)
-        { _path = path; Plain(path); _handle = Open(path, false);
-            try { _identity = Held(_handle, false); Verify(); } catch { _handle.Dispose(); throw; } }
+        {
+            _path = path; Plain(path); _handle = Open(path, false);
+            try { _identity = Held(_handle, false); Verify(); } catch { _handle.Dispose(); throw; }
+        }
         internal void Verify()
         { Plain(_path); using var current = Open(_path, false); if (Held(current, false) != _identity || Held(_handle, false) != _identity) throw new PlanningException("Original explicit Git file namespace changed."); }
         public void Dispose() => _handle.Dispose();
@@ -24,8 +26,10 @@ internal static class PlanImportFilesystem
         private readonly SafeFileHandle _handle;
         private readonly Identity _identity;
         internal DirectoryBinding(string path)
-        { _path = path; Plain(path); _handle = Open(path, directory: true);
-            try { _identity = Held(_handle, true); Verify(); } catch { _handle.Dispose(); throw; } }
+        {
+            _path = path; Plain(path); _handle = Open(path, directory: true);
+            try { _identity = Held(_handle, true); Verify(); } catch { _handle.Dispose(); throw; }
+        }
         internal void Verify()
         { Plain(_path); using var current = Open(_path, true); if (Held(current, true) != _identity || Held(_handle, true) != _identity) throw new PlanningException("Original import root namespace changed."); }
         public void Dispose() => _handle.Dispose();
@@ -78,8 +82,11 @@ internal static class PlanImportFilesystem
         if (OperatingSystem.IsLinux())
         {
             var pinned = false;
-            try { original.DangerousAddRef(ref pinned); var fd = original.DangerousGetHandle().ToInt64();
-                if (fd is < 0 or > int.MaxValue) throw new PlanningException("Original import descriptor unavailable."); return Linux((int)fd, "", 0x1000, directory); }
+            try
+            {
+                original.DangerousAddRef(ref pinned); var fd = original.DangerousGetHandle().ToInt64();
+                if (fd is < 0 or > int.MaxValue) throw new PlanningException("Original import descriptor unavailable."); return Linux((int)fd, "", 0x1000, directory);
+            }
             finally { if (pinned) original.DangerousRelease(); }
         }
         if (GetFileType(original) != 1 || !Attributes(original, 9, out var attributes, 8) ||
@@ -107,7 +114,8 @@ internal static class PlanImportFilesystem
         else throw new PlanningException("This identity verifier is Windows-only.");
     }
     private sealed record Identity(ulong Device, ulong Low, ulong High);
-    [StructLayout(LayoutKind.Explicit, Size = 256)] private struct LinuxInfo
+    [StructLayout(LayoutKind.Explicit, Size = 256)]
+    private struct LinuxInfo
     { [FieldOffset(0)] public uint Mask; [FieldOffset(28)] public ushort Mode; [FieldOffset(32)] public ulong Inode; [FieldOffset(136)] public uint Major; [FieldOffset(140)] public uint Minor; }
     [StructLayout(LayoutKind.Sequential, Size = 24)] private struct WindowsInfo { public ulong Volume, Low, High; }
     [StructLayout(LayoutKind.Sequential, Size = 8)] private struct WindowsAttributes { public uint Attributes, Tag; }
@@ -115,6 +123,6 @@ internal static class PlanImportFilesystem
     [DllImport("libc", EntryPoint = "statx", SetLastError = true)] private static extern int Statx(int fd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out LinuxInfo info);
     [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)] private static extern SafeFileHandle WindowsOpen(string path, uint access, FileShare share, IntPtr security, FileMode mode, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern uint GetFileType(SafeFileHandle handle);
-    [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool Attributes(SafeFileHandle handle, int kind, out WindowsAttributes info, uint size);
-    [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool FileId(SafeFileHandle handle, int kind, out WindowsInfo info, uint size);
+    [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)][return: MarshalAs(UnmanagedType.Bool)] private static extern bool Attributes(SafeFileHandle handle, int kind, out WindowsAttributes info, uint size);
+    [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)][return: MarshalAs(UnmanagedType.Bool)] private static extern bool FileId(SafeFileHandle handle, int kind, out WindowsInfo info, uint size);
 }

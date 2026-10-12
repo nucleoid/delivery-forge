@@ -110,8 +110,17 @@ try
         var left = Remaining();
         var phaseCap = left < TimeSpan.FromSeconds(10) ? left : TimeSpan.FromSeconds(10);
         var phaseDeadlineTicks = checked(phaseStartedTicks + (long)(phaseCap.TotalSeconds * Stopwatch.Frequency));
-        NewJson(Path.Combine(home, "alternate-entered.json"), new { config.Nonce, arguments = args, originalBlobSha,
-            phaseProtocol = "alternate-cat-file-v1", invocationId = id, phaseStartedTicks, phaseDeadlineTicks, frequency = Stopwatch.Frequency });
+        NewJson(Path.Combine(home, "alternate-entered.json"), new
+        {
+            config.Nonce,
+            arguments = args,
+            originalBlobSha,
+            phaseProtocol = "alternate-cat-file-v1",
+            invocationId = id,
+            phaseStartedTicks,
+            phaseDeadlineTicks,
+            frequency = Stopwatch.Frequency
+        });
         while (true)
         {
             _ = Remaining(); if (Stopwatch.GetTimestamp() >= phaseDeadlineTicks) throw new TimeoutException("Alternate barrier expired.");
@@ -135,8 +144,12 @@ try
     if (config.Race && args.Contains("status", StringComparer.Ordinal) && !File.Exists(Path.Combine(home, "race-entered.json")))
     {
         originalConfig = await File.ReadAllBytesAsync(originalConfigPath, deadline.Token);
-        NewJson(Path.Combine(home, "race-entered.json"), new { config.Nonce, arguments = args,
-            configSha256 = Convert.ToHexStringLower(SHA256.HashData(originalConfig)) });
+        NewJson(Path.Combine(home, "race-entered.json"), new
+        {
+            config.Nonce,
+            arguments = args,
+            configSha256 = Convert.ToHexStringLower(SHA256.HashData(originalConfig))
+        });
         var barrierLeft = Remaining();
         var barrierEnd = Stopwatch.GetElapsedTime(started) + (barrierLeft < TimeSpan.FromSeconds(10) ? barrierLeft : TimeSpan.FromSeconds(10));
         while (true)
@@ -163,8 +176,14 @@ try
         await File.WriteAllBytesAsync(tracked, actual, deadline.Token);
         File.SetLastWriteTimeUtc(tracked, DateTime.UtcNow.AddSeconds(2)); _ = Remaining();
     }
-    var info = new ProcessStartInfo(config.Git) { WorkingDirectory = config.Repository, UseShellExecute = false,
-        CreateNoWindow = true, RedirectStandardOutput = true, RedirectStandardError = true };
+    var info = new ProcessStartInfo(config.Git)
+    {
+        WorkingDirectory = config.Repository,
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true
+    };
     foreach (var argument in args) info.ArgumentList.Add(argument);
     original = new Process { StartInfo = info }; // Original object registered before Start.
     _ = Remaining(); if (!original.Start()) throw new IOException("Actual selected Git failed to start.");
@@ -182,9 +201,17 @@ try
         var actualObjects = Environment.GetEnvironmentVariable("GIT_OBJECT_DIRECTORY");
         externalRoutingConsumed = actualObjects == Path.Combine(config.Repository, ".git", "objects") &&
             !File.Exists(originalBlob) && File.Exists(externalBlob) && childExit == 0;
-        NewJson(Path.Combine(home, "alternate-observed.json"), new { config.Nonce, childExit, actualObjects,
-            externalRoutingConsumed, stdoutLength = stdoutBytes.LongLength, stdoutSha256 = Convert.ToHexStringLower(SHA256.HashData(stdoutBytes)),
-            originalBlobSha, externalBlobSha = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(externalBlob!, deadline.Token))) });
+        NewJson(Path.Combine(home, "alternate-observed.json"), new
+        {
+            config.Nonce,
+            childExit,
+            actualObjects,
+            externalRoutingConsumed,
+            stdoutLength = stdoutBytes.LongLength,
+            stdoutSha256 = Convert.ToHexStringLower(SHA256.HashData(stdoutBytes)),
+            originalBlobSha,
+            externalBlobSha = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(externalBlob!, deadline.Token)))
+        });
     }
     await Console.OpenStandardOutput().WriteAsync(stdoutBytes, deadline.Token);
     await Console.OpenStandardError().WriteAsync(stderrBytes, deadline.Token); _ = Remaining();
@@ -216,7 +243,8 @@ finally
                 Path.Exists(originalBlob)) throw new IOException("Owned loose object changed; no replacement restoration.");
             File.Move(externalBlob, originalBlob, overwrite: false);
             if (Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(originalBlob, CancellationToken.None))) != originalBlobSha)
-                throw new IOException("Original owned blob restoration differs."); blobMoved = false; });
+                throw new IOException("Original owned blob restoration differs."); blobMoved = false;
+        });
     if (alternateCreated && alternateFile is not null)
         await Attempt(async () =>
         {
@@ -235,15 +263,23 @@ finally
     }
     try
     {
-        NewJson(Path.Combine(home, "invocation-" + id + "-result.json"), new { config.Nonce, arguments = args, childExit,
+        NewJson(Path.Combine(home, "invocation-" + id + "-result.json"), new
+        {
+            config.Nonce,
+            arguments = args,
+            childExit,
             originalExit = original is not null && exit?.IsCompletedSuccessfully == true && original.HasExited,
-            stdoutCompleted = stdout?.IsCompletedSuccessfully == true, stderrCompleted = stderr?.IsCompletedSuccessfully == true,
+            stdoutCompleted = stdout?.IsCompletedSuccessfully == true,
+            stderrCompleted = stderr?.IsCompletedSuccessfully == true,
             cleanupTasksSettled = cleanupTasks.All(task => task.IsCompleted),
-            stdoutLength = stdoutBytes?.LongLength, stderrLength = stderrBytes?.LongLength,
+            stdoutLength = stdoutBytes?.LongLength,
+            stderrLength = stderrBytes?.LongLength,
             stdoutSha256 = stdoutBytes is null ? null : Convert.ToHexStringLower(SHA256.HashData(stdoutBytes)),
             stderrSha256 = stderrBytes is null ? null : Convert.ToHexStringLower(SHA256.HashData(stderrBytes)),
             elapsedSeconds = Stopwatch.GetElapsedTime(started).TotalSeconds,
-            primary = primary?.ToString(), secondary = secondary.Select(error => error.ToString()).ToArray() }, cleanup: true);
+            primary = primary?.ToString(),
+            secondary = secondary.Select(error => error.ToString()).ToArray()
+        }, cleanup: true);
     }
     catch (Exception failure) { secondary.Add(failure); }
     if (original is not null && exit?.IsCompletedSuccessfully == true && stdout?.IsCompletedSuccessfully == true && stderr?.IsCompletedSuccessfully == true)
