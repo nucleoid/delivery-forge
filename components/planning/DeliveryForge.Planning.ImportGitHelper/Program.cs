@@ -106,17 +106,21 @@ try
         if (new FileInfo(originalBlob).Length > 8 * 1024 * 1024) throw new IOException("Actual loose blob exceeds8MiB.");
         originalBlobSha = Convert.ToHexStringLower(SHA256.HashData(await File.ReadAllBytesAsync(originalBlob, deadline.Token)));
         if (originalBlobSha != config.StoredSha256) throw new IOException("Actual original loose blob bytes differ.");
-        NewJson(Path.Combine(home, "alternate-entered.json"), new { config.Nonce, arguments = args, originalBlobSha });
-        var left = Remaining(); var barrierEnd = Stopwatch.GetElapsedTime(started) + (left < TimeSpan.FromSeconds(10) ? left : TimeSpan.FromSeconds(10));
+        var phaseStartedTicks = Stopwatch.GetTimestamp();
+        var left = Remaining();
+        var phaseCap = left < TimeSpan.FromSeconds(10) ? left : TimeSpan.FromSeconds(10);
+        var phaseDeadlineTicks = checked(phaseStartedTicks + (long)(phaseCap.TotalSeconds * Stopwatch.Frequency));
+        NewJson(Path.Combine(home, "alternate-entered.json"), new { config.Nonce, arguments = args, originalBlobSha,
+            phaseProtocol = "alternate-cat-file-v1", invocationId = id, phaseStartedTicks, phaseDeadlineTicks, frequency = Stopwatch.Frequency });
         while (true)
         {
-            _ = Remaining(); if (Stopwatch.GetElapsedTime(started) >= barrierEnd) throw new TimeoutException("Alternate barrier expired.");
+            _ = Remaining(); if (Stopwatch.GetTimestamp() >= phaseDeadlineTicks) throw new TimeoutException("Alternate barrier expired.");
             var released = File.Exists(Path.Combine(home, "alternate-release.json"));
-            _ = Remaining(); if (Stopwatch.GetElapsedTime(started) >= barrierEnd) throw new TimeoutException("Late alternate release refused.");
+            _ = Remaining(); if (Stopwatch.GetTimestamp() >= phaseDeadlineTicks) throw new TimeoutException("Late alternate release refused.");
             if (released) break; await Task.Delay(20, deadline.Token);
         }
         using var release = JsonDocument.Parse(await File.ReadAllBytesAsync(Path.Combine(home, "alternate-release.json"), deadline.Token));
-        _ = Remaining(); if (Stopwatch.GetElapsedTime(started) >= barrierEnd || release.RootElement.GetProperty("nonce").GetString() != config.Nonce)
+        _ = Remaining(); if (Stopwatch.GetTimestamp() >= phaseDeadlineTicks || release.RootElement.GetProperty("nonce").GetString() != config.Nonce)
             throw new IOException("Alternate release window/nonce differs.");
         Directory.CreateDirectory(Path.GetDirectoryName(externalBlob)!);
         _ = Remaining(); File.Move(originalBlob, externalBlob, overwrite: false); blobMoved = true; _ = Remaining();
