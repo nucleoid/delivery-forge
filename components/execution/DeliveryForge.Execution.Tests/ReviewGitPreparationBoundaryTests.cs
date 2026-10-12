@@ -119,7 +119,10 @@ public sealed class ReviewGitPreparationBoundaryTests
         Assert.Null(result.Context);
         var diagnosticBytes = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            mode, cancelAfterEntry, expected, fixture.Nonce,
+            mode,
+            cancelAfterEntry,
+            expected,
+            fixture.Nonce,
             elapsedSeconds = Stopwatch.GetElapsedTime(started).TotalSeconds,
             result.Observation
         });
