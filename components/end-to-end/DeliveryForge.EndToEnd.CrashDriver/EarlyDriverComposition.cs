@@ -176,6 +176,13 @@ internal static class EarlyDriverComposition
     internal static async Task ChildAsync(DriverInput input, long originalStarted, CancellationToken token)
     {
         await WriteNew(Path.Combine(input.ArtifactRoot, "child-entered-" + input.Nonce), Encoding.UTF8.GetBytes(input.Nonce), token);
+        if (input.Stage == "command-completed")
+        {
+            // Necessary actual prerequisite fixture: natural completion, not the missing crash orchestration.
+            await WriteJson(Path.Combine(input.ArtifactRoot, "child-result-" + input.Nonce + ".json"),
+                new { fixture = true, input.Nonce, input.Stage, actualNativeResult = "completed", productionCertified = false }, token);
+            return;
+        }
         while (Stopwatch.GetElapsedTime(originalStarted) < TimeSpan.FromSeconds(15)) await Task.Delay(20, token);
     }
     private static AgentAcceptedReceipt Accepted(AgentRequest request, DriverInput input) => new(WorkerEnvelope.SchemaVersion,
