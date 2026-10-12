@@ -32,18 +32,24 @@ public sealed class RichPlanImportObjectAndResourceTests
             {
                 Assert.False(result.DownstreamReady); Assert.Null(result.Plan);
                 Assert.Contains(result.Diagnostics, item => item.Contains("reference directory bound", StringComparison.OrdinalIgnoreCase));
+                // Include the ONE encountered candidate proving exhaustion, without admitting it.
+                // Stop immediately: visiting every600 would contradict bounded discovery refusal.
+                Assert.Equal(513, result.Resources.MaximumDiscoveredReferenceDirectories);
+                // At most1024 allowed ref files plus512 yielded directory candidates;
+                // the traversal root is a directory observation, not an enumerated entry.
+                Assert.InRange(result.Resources.MaximumEnumeratedReferenceEntries, 1, 1536);
             }
             else
             {
                 Assert.True(result.DownstreamReady, string.Join("; ", result.Diagnostics)); Assert.NotNull(result.Plan);
                 Assert.Equal(setup.Plan.CanonicalBytes, result.Plan.CanonicalBytes);
                 Assert.True(result.Resources.MaximumDiscoveredReferenceDirectories >= directories);
+                Assert.InRange(result.Resources.MaximumDiscoveredReferenceDirectories, 1, 512);
+                Assert.True(result.Resources.MaximumEnumeratedReferenceEntries >= directories);
             }
             // Owner records ACTUAL discoveries/frontier before push, including on typed refusal.
             // The old eventual pop bound is insufficient and still runs unchanged in this RED.
-            Assert.InRange(result.Resources.MaximumDiscoveredReferenceDirectories, 1, 512);
             Assert.InRange(result.Resources.MaximumQueuedReferenceDirectories, 1, 512);
-            Assert.True(result.Resources.MaximumEnumeratedReferenceEntries >= directories);
         }
         catch (Exception failure) { repository.Primary = failure; throw; }
     }
