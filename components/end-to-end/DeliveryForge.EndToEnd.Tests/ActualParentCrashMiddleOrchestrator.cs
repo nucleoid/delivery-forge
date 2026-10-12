@@ -144,9 +144,9 @@ internal static class ActualParentCrashMiddleOrchestrator
         {
             var setupLimit = tool ? Budget(540) : TimeSpan.FromSeconds(75) - Stopwatch.GetElapsedTime(originalStarted);
             if (setupLimit <= TimeSpan.Zero) throw new TimeoutException("Same original middle setup allowance expired.");
-            await Published(Path.Combine(directory, "setup-complete-" + runNonce + ".json"), directory, owner, setupLimit, token);
+            await Published(Path.Combine(directory, "setup-complete-" + runNonce + ".json"), directory, owner, setupLimit, lifetime, token);
             var path = Path.Combine(directory, "ready-" + stage + "-" + runNonce + ".json");
-            await Published(path, directory, owner, Budget(5), token); return path;
+            await Published(path, directory, owner, Budget(5), lifetime, token); return path;
         }
         async Task Release(string directory, string runNonce)
         {
@@ -172,7 +172,7 @@ internal static class ActualParentCrashMiddleOrchestrator
     }
     private static string Existing(string name)
     { var path = Environment.GetEnvironmentVariable(name); if (path is null || !Path.IsPathFullyQualified(path) || !File.Exists(path)) throw new PlatformNotSupportedException("Actual middle input unavailable: " + name); Plain(path); return Path.GetFullPath(path); }
-    private static async Task Published(string path, string root, OwnedProcess owner, TimeSpan limit, CancellationToken token)
+    private static async Task Published(string path, string root, OwnedProcess owner, TimeSpan limit, MiddleCrashLifetime lifetime, CancellationToken token)
     {
         var begun = Stopwatch.GetTimestamp();
         while (true)
@@ -181,7 +181,23 @@ internal static class ActualParentCrashMiddleOrchestrator
             if (owner.Process.HasExited) throw new InvalidOperationException("Actual middle driver exited before ready; code=" + owner.Process.ExitCode);
             if (File.Exists(path))
             {
-                try { using var parsed = JsonDocument.Parse(await Read(path, root, token)); return; }
+                try
+                {
+                    var localRemaining = limit - Stopwatch.GetElapsedTime(begun);
+                    var originalRemaining = lifetime.Remaining();
+                    var allowed = localRemaining < originalRemaining ? localRemaining : originalRemaining;
+                    if (allowed <= TimeSpan.Zero) throw new TimeoutException("Original local publication allowance expired.");
+                    using var bound = CancellationTokenSource.CreateLinkedTokenSource(token); bound.CancelAfter(allowed);
+                    var actual = Read(path, root, bound.Token); lifetime.Track(actual);
+                    byte[] bytes;
+                    try { bytes = await actual.WaitAsync(allowed, bound.Token); }
+                    finally { if (!actual.IsCompleted) bound.Cancel(); }
+                    using var parsed = JsonDocument.Parse(bytes);
+                    bound.Token.ThrowIfCancellationRequested(); token.ThrowIfCancellationRequested();
+                    _ = lifetime.Remaining();
+                    if (Stopwatch.GetElapsedTime(begun) >= limit) throw new TimeoutException("Actual publication read/parse arrived after its original local allowance.");
+                    return;
+                }
                 catch (IOException) { }
             }
             await Task.Delay(10, token);

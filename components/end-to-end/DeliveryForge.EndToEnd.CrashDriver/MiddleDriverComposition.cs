@@ -101,7 +101,7 @@ internal static class MiddleDriverComposition
             {
                 var actual = await RunActualGate(input, token);
                 boundary = actual.ReceiptPath; gateOutcome = actual.Outcome.ToString();
-                var gateDirectory = Path.GetDirectoryName(actual.ReceiptPath)!;
+                var gateDirectory = GateArtifactDirectory(actual.ReceiptPath, input);
                 var trx = Path.Combine(gateDirectory, actual.ArtifactHashes.Keys.Single(path => path.EndsWith(".trx", StringComparison.OrdinalIgnoreCase)));
                 (trxPassed, trxFailed) = Counts(trx);
                 if (actual.Outcome != GateOutcome.Incomplete || actual.Execution.ExitCode != 0 || trxPassed != 1 || trxFailed != 0 ||
@@ -361,9 +361,11 @@ internal static class MiddleDriverComposition
         }
         else if (input.Stage == "gate-receipt-written")
         {
-            var receipt = ContractValidator.ParseAndValidate(await Read(root.GetProperty("boundaryArtifactPath").GetString()!, input, token));
-            if (receipt.SchemaName != "gate-receipt" || gateOutcome != "Incomplete" || root.GetProperty("actualTrxPassed").GetInt32() != 1 ||
-                root.GetProperty("actualTrxFailed").GetInt32() != 0) throw new InvalidOperationException("Actual incomplete gate/TRX boundary differs.");
+            var verified = await VerifyRequiredGateRefusal(input, root.GetProperty("boundaryArtifactPath").GetString()!, token);
+            gateOutcome = verified.Outcome;
+            if (root.GetProperty("actualGateOutcome").GetString() != gateOutcome ||
+                root.GetProperty("actualTrxPassed").GetInt32() != verified.Passed || root.GetProperty("actualTrxFailed").GetInt32() != verified.Failed)
+                throw new IOException("Ready diagnostic gate fields differ from freshly verified canonical/raw bytes.");
             refusal = "stored-gate-receipt-is-not-required-pass";
         }
         else
@@ -416,6 +418,99 @@ internal static class MiddleDriverComposition
             independentlyReopenedDurableFiles = reopened, hostCallLedger = host.Ledger,
             limitation = "No old PID adoption, SDK/reviewer rerun, publication or original runtime deletion. New source-view Dispose is not old-runtime cleanup."
         }, token);
+    }
+
+    private static string GateArtifactDirectory(string receiptPath, DriverInput input)
+    {
+        Within(receiptPath, input);
+        var receiptDirectory = Path.GetDirectoryName(receiptPath)!;
+        if (Path.GetFileName(receiptDirectory) != "receipts") throw new IOException("Public gate receipt directory differs.");
+        var gateDirectory = Path.GetDirectoryName(receiptDirectory) ?? throw new IOException("Public gate artifact directory is missing.");
+        Within(gateDirectory, input);
+        return gateDirectory; // GateRunner stores raw artifacts beside its receipts subdirectory.
+    }
+
+    private static async Task<(string Outcome, int Passed, int Failed)> VerifyRequiredGateRefusal(
+        DriverInput input, string receiptPath, CancellationToken token)
+    {
+        var bytes = await Read(receiptPath, input, token);
+        var receipt = ContractValidator.ParseAndValidate(bytes);
+        if (receipt.SchemaName != "gate-receipt") throw new IOException("Actual boundary is not a canonical gate receipt.");
+        using var document = JsonDocument.Parse(receipt.CanonicalBytes);
+        var gate = document.RootElement;
+        var artifactDirectory = GateArtifactDirectory(receiptPath, input);
+        var source = Path.Combine(input.RuntimeRoot, "repository");
+        var host = Environment.ProcessPath ?? throw new PlatformNotSupportedException("Original SDK host is unavailable.");
+        Plain(host);
+        var cache = Environment.GetEnvironmentVariable("NUGET_PACKAGES") ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".nuget", "packages");
+        // Only fresh read-only Git owner operations here: no SDK probe/test producer rerun.
+        var executor = new ActualExecutor(input, source, host, cache);
+        var policy = await new ProtectedGitPolicyResolver(executor, source, input.RuntimeBaseCommit).ResolveAsync(".forge/evidence-policy.json", token);
+        var actualRepository = await new GitRepositoryIdentityReader(executor, source, input.RuntimeBaseCommit).ReadAsync(token);
+        var repositoryReader = new GitRepositoryContextReader();
+        var repository = await repositoryReader.ReadAsync(source, input.RuntimeBaseCommit, token);
+        var policyBytes = (await repositoryReader.ReadFileAsync(repository, ".forge/evidence-policy.json", token)).Bytes;
+        var policyContract = ContractValidator.ParseAndValidate(policyBytes);
+        using var sdk = JsonDocument.Parse((await repositoryReader.ReadFileAsync(repository, "global.json", token)).Bytes);
+        using var command = JsonDocument.Parse(gate.GetProperty("command").GetString()!);
+        var capture = command.RootElement;
+        var expectedClone = Path.Combine(input.RuntimeRoot, "actual-gate-barrier-" + input.Nonce);
+        Plain(expectedClone);
+        var configuration = await Read(Path.Combine(input.ArtifactRoot, "actual-driver-gate-configuration.json"), input, token);
+        if (!actualRepository.IsClean || repository.Dirty || actualRepository.BaseCommit != input.RuntimeBaseCommit ||
+            actualRepository.HeadCommit != repository.HeadCommit || actualRepository.TreeId != repository.HeadTree ||
+            gate.GetProperty("baseCommit").GetString() != actualRepository.BaseCommit ||
+            gate.GetProperty("headCommit").GetString() != actualRepository.HeadCommit ||
+            gate.GetProperty("treeId").GetString() != actualRepository.TreeId ||
+            gate.GetProperty("outcome").GetString() != "INCOMPLETE" || gate.GetProperty("exitCode").GetInt32() != 0 ||
+            gate.GetProperty("sourceChanged").GetBoolean() || gate.GetProperty("gateId").GetString() != "test" ||
+            policyContract.Identity != policy.PolicyIdentity || gate.GetProperty("policyIdentity").GetString() != policy.PolicyIdentity ||
+            capture.GetProperty("policySourceRevision").GetString() != input.RuntimeBaseCommit ||
+            capture.GetProperty("policyContentIdentity").GetString() != policy.ContentIdentity || policy.ContentIdentity != Hash(policyBytes) ||
+            !policy.RequiredGates.Contains("test", StringComparer.Ordinal) ||
+            capture.GetProperty("configurationIdentity").GetString() != Hash(configuration) ||
+            capture.GetProperty("fileName").GetString() != host || capture.GetProperty("capabilityExecutable").GetString() != host ||
+            capture.GetProperty("executableIdentity").GetString() != HashFile(host) ||
+            capture.GetProperty("capabilityTool").GetString() != "dotnet" || capture.GetProperty("capabilityFormat").GetString() != "trx-v1" ||
+            !capture.GetProperty("capabilityFixture").GetBoolean() || capture.GetProperty("capabilityVersion").GetString() != "10.0.401" ||
+            sdk.RootElement.GetProperty("sdk").GetProperty("version").GetString() != "10.0.401" ||
+            capture.GetProperty("scope").GetString() != "actual-middle-driver" ||
+            !string.Equals(capture.GetProperty("workingDirectory").GetString(), expectedClone, PathComparison()) ||
+            !string.Equals(capture.GetProperty("capabilityProbeWorkingDirectory").GetString(), expectedClone, PathComparison()))
+            throw new IOException("Canonical gate own outcome/source/policy/tool/configuration binding differs from fresh owner observations.");
+        var rawFiles = new List<object>();
+        foreach (var artifact in gate.GetProperty("artifactHashes").EnumerateObject())
+        {
+            if (Path.GetFileName(artifact.Name) != artifact.Name) throw new IOException("Gate artifact name escaped its public artifact root.");
+            var path = Path.Combine(artifactDirectory, artifact.Name);
+            var actual = Hash(await Read(path, input, token));
+            if (actual != artifact.Value.GetString()) throw new IOException("Canonical gate raw artifact hash differs.");
+            rawFiles.Add(new { path, sha256 = actual });
+        }
+        foreach (var requiredArtifact in new[] { "stdout.txt", "stderr.txt", "evidence.trx" })
+            if (!gate.GetProperty("artifactHashes").TryGetProperty(requiredArtifact, out _)) throw new IOException("Genuine gate raw artifact is missing.");
+        var counts = Counts(Path.Combine(artifactDirectory, "evidence.trx"));
+        if (counts.Passed != 1 || counts.Failed != 0) throw new IOException("Canonical gate raw TRX does not contain the genuine passing test.");
+        string? denial = null;
+        try
+        {
+            WorkflowTransition.EnsureAllowed(WorkflowState.Evaluating, WorkflowState.IndependentReview,
+                new(AuthorizationCeiling.Implement, actualRepository.BaseCommit, actualRepository.HeadCommit, actualRepository.TreeId,
+                    policyContract, GateReceipts: [receipt]));
+        }
+        catch (InvalidWorkflowTransitionException refused) { denial = refused.Message; }
+        if (denial is null) throw new InvalidOperationException("Public required-gate owner accepted the persisted advisory INCOMPLETE receipt.");
+        var after = await new GitRepositoryIdentityReader(executor, source, input.RuntimeBaseCommit).ReadAsync(token);
+        if (after != actualRepository) throw new IOException("Fresh source changed during required-gate reconciliation.");
+        _ = Remaining(input, 1);
+        await Write(Path.Combine(input.ArtifactRoot, "actual-fresh-required-gate-denial.json"), new
+        {
+            fixture = true, productionCertified = false, receipt.Identity, canonicalOutcome = gate.GetProperty("outcome").GetString(),
+            freshSource = actualRepository, freshPolicy = policy, currentToolSha256 = HashFile(host), rawFiles,
+            actualRequiredGateTransition = "Evaluating -> IndependentReview", denial,
+            freshReadOnlyGitCalls = executor.Calls, newGateProducerExecutions = 0
+        }, token);
+        return ("Incomplete", counts.Passed, counts.Failed);
     }
 
     private static async Task CopyColdRepository(DriverInput input, string source, string destination, CancellationToken token)
