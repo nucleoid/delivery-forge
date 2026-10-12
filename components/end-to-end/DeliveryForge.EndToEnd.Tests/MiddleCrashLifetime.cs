@@ -1,6 +1,7 @@
 using System.Diagnostics;
 
 namespace DeliveryForge.EndToEnd.Tests;
+
 internal sealed record MiddleCleanupStage(string Name, Exception? Failure);
 
 // Trusted MIDDLE fixture lifetime only. No JSON/PID adoption or production authority.

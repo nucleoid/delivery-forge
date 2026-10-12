@@ -263,7 +263,8 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
                 var fresh = Processes.Observe(identity);
                 observations.Add(new { identity, first, controlled, fresh });
                 if (fresh.Outcome != ProcessControlOutcome.AlreadyExited) throw new InvalidOperationException("Original middle handle remains unknown.");
-            }));
+            }
+            ));
             failures.AddRange(stages.Where(stage => stage.Failure is not null).Select(stage => stage.Failure!));
         }
         known &= failures.Count == 0;
@@ -287,10 +288,16 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
             var stages = await lifetime.StagesAsync(("retained-middle-diagnostics", this,
                 current => WriteNewJsonAsync("retained-middle-" + Guid.NewGuid().ToString("N") + ".json", new
                 {
-                    fixture = true, productionCertified = false, assertionsPassed = _assertionsPassed,
-                    quiescent = known, originalStarted = lifetime.Started, originalTotalSeconds = lifetime.Total,
-                    sharedCleanupSeconds = 20, observations,
-                    primaryType = lifetime.Primary?.GetType().FullName, primaryMessage = lifetime.Primary?.Message,
+                    fixture = true,
+                    productionCertified = false,
+                    assertionsPassed = _assertionsPassed,
+                    quiescent = known,
+                    originalStarted = lifetime.Started,
+                    originalTotalSeconds = lifetime.Total,
+                    sharedCleanupSeconds = 20,
+                    observations,
+                    primaryType = lifetime.Primary?.GetType().FullName,
+                    primaryMessage = lifetime.Primary?.Message,
                     secondary = failures.Select(failure => new { type = failure.GetType().FullName, failure.Message }).ToArray(),
                     reason = _retentionReason
                 }, current)));

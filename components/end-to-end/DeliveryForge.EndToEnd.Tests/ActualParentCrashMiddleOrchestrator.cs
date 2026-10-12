@@ -46,9 +46,16 @@ internal static class ActualParentCrashMiddleOrchestrator
             if (!calibration.RootElement.GetProperty("actualReadyReached").GetBoolean() || !calibration.RootElement.GetProperty("normalReleaseInsteadOfKill").GetBoolean())
                 throw new InvalidOperationException("Actual selected boundary was not reached in calibration.");
             var controlReport = Path.Combine(artifacts.Root, "actual-middle-release-control.json");
-            await Write(controlReport, JsonSerializer.SerializeToUtf8Bytes(new { fixture = true, stage,
-                actualReadyReached = true, normalReleaseInsteadOfKill = true, driverExitCode = control.Process.ExitCode,
-                originalControllerExitObserved = artifacts.Processes.Observe(control.Identity), rawDriverResult = Path.Combine(controlRoot, "normal-release-result.json") }), token);
+            await Write(controlReport, JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                fixture = true,
+                stage,
+                actualReadyReached = true,
+                normalReleaseInsteadOfKill = true,
+                driverExitCode = control.Process.ExitCode,
+                originalControllerExitObserved = artifacts.Processes.Observe(control.Identity),
+                rawDriverResult = Path.Combine(controlRoot, "normal-release-result.json")
+            }), token);
             var originalRoot = Path.Combine(artifacts.Root, "middle-original-" + nonce); Directory.CreateDirectory(originalRoot);
             var original = Start("barrier", originalRoot, nonce);
             var readyPath = await Ready(original, originalRoot, nonce);
@@ -84,16 +91,34 @@ internal static class ActualParentCrashMiddleOrchestrator
             var parent = Path.Combine(artifacts.Root, "actual-middle-parent-observation.json");
             await Write(parent, JsonSerializer.SerializeToUtf8Bytes(new
             {
-                fixture = true, productionCertified = false, firstFullRealRunCertified = false, stage, nonce, actualOsParentCrash = true,
-                originalBeforeKillOutcome = beforeKill.Outcome.ToString(), originalAfterKillOutcome = afterKill.Outcome.ToString(),
-                terminationMode = "owned-original-handle-Kill(false)", readySha256BeforeKill = Hash(readyBytes),
-                originalTotalSeconds = total, originalCaseStarted = originalStarted, cleanupReserveSeconds = 20,
+                fixture = true,
+                productionCertified = false,
+                firstFullRealRunCertified = false,
+                stage,
+                nonce,
+                actualOsParentCrash = true,
+                originalBeforeKillOutcome = beforeKill.Outcome.ToString(),
+                originalAfterKillOutcome = afterKill.Outcome.ToString(),
+                terminationMode = "owned-original-handle-Kill(false)",
+                readySha256BeforeKill = Hash(readyBytes),
+                originalTotalSeconds = total,
+                originalCaseStarted = originalStarted,
+                cleanupReserveSeconds = 20,
                 freshRecoveryProcessStartedAfterOriginalExit = afterKill.Outcome == ProcessControlOutcome.AlreadyExited && freshStartedAt > originalExitObservedAt,
-                originalDriverStartUtcTicks = startTicks[original], recoveryDriverStartUtcTicks = startTicks[fresh],
-                original.Identity, originalExitCode = original.Process.ExitCode, recoveryIdentity = fresh.Identity,
-                recoveryExitCode = fresh.Process.ExitCode, driver, driverHash, host, hostHash,
-                originalLaunch = Launch("barrier", originalRoot, nonce), recoveryLaunch = Launch("recover", originalRoot, nonce),
-                artifacts.IntegratedSource, elapsedSeconds = Stopwatch.GetElapsedTime(originalStarted).TotalSeconds,
+                originalDriverStartUtcTicks = startTicks[original],
+                recoveryDriverStartUtcTicks = startTicks[fresh],
+                original.Identity,
+                originalExitCode = original.Process.ExitCode,
+                recoveryIdentity = fresh.Identity,
+                recoveryExitCode = fresh.Process.ExitCode,
+                driver,
+                driverHash,
+                host,
+                hostHash,
+                originalLaunch = Launch("barrier", originalRoot, nonce),
+                recoveryLaunch = Launch("recover", originalRoot, nonce),
+                artifacts.IntegratedSource,
+                elapsedSeconds = Stopwatch.GetElapsedTime(originalStarted).TotalSeconds,
                 limitation = "Actual owned original handle termination and SECOND process; no imported PID/root receipts as control authority, no source/runtime deletion."
             }), token);
             _ = Budget(1);
@@ -114,7 +139,8 @@ internal static class ActualParentCrashMiddleOrchestrator
                         var current = artifacts.Processes.Observe(owner.Identity);
                         if (current.Outcome == ProcessControlOutcome.LiveOwned) { owner.Process.Kill(entireProcessTree: false); await PositiveExit(owner, remaining < TimeSpan.FromSeconds(5) ? remaining : TimeSpan.FromSeconds(5), cleanupToken); }
                         else if (current.Outcome != ProcessControlOutcome.AlreadyExited) throw new InvalidOperationException("Original middle driver identity remains unknown; no imported PID cleanup.");
-                    }));
+                    }
+                    ));
                     cleanupErrors.AddRange(stages.Where(item => item.Failure is not null).Select(item => item.Failure!));
                 }
                 catch (Exception secondary) { cleanupErrors.Add(secondary); lifetime.Retain(owner); lifetime.Retain(secondary); artifacts.RetainArtifacts("Actual original driver cleanup remains unknown: " + secondary); }

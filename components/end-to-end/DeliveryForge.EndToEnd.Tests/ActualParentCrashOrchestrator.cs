@@ -30,10 +30,17 @@ internal static class ActualParentCrashOrchestrator
         if (!controlResult.RootElement.GetProperty("actualReadyReached").GetBoolean() || !controlResult.RootElement.GetProperty("normalReleaseInsteadOfKill").GetBoolean())
             throw new InvalidOperationException("Normal calibration did not reach and release the selected real owner boundary.");
         var controlReport = Path.Combine(artifacts.Root, "actual-crash-release-control.json");
-        await WriteNew(controlReport, JsonSerializer.SerializeToUtf8Bytes(new { fixture = true, stage, actualReadyReached = true,
-            normalReleaseInsteadOfKill = true, driverExitCode = control.Process.ExitCode,
+        await WriteNew(controlReport, JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            fixture = true,
+            stage,
+            actualReadyReached = true,
+            normalReleaseInsteadOfKill = true,
+            driverExitCode = control.Process.ExitCode,
             positiveOriginalControllerExitObserved = artifacts.Processes.Observe(control.Identity).Outcome == ProcessControlOutcome.AlreadyExited,
-            control.Identity, rawDriverResultPath = Path.Combine(controlRoot, "normal-release-result.json") }), token);
+            control.Identity,
+            rawDriverResultPath = Path.Combine(controlRoot, "normal-release-result.json")
+        }), token);
         var driverRoot = Path.Combine(artifacts.Root, "crash-original-" + nonce); Directory.CreateDirectory(driverRoot);
         var original = artifacts.Processes.StartOwned(Launch("barrier", driverRoot, nonce), "crash-driver-original:" + nonce);
         var originalUtcStart = original.Process.StartTime.ToUniversalTime().Ticks;
@@ -70,18 +77,33 @@ internal static class ActualParentCrashOrchestrator
         var observation = Path.Combine(artifacts.Root, "actual-parent-termination-observation.json");
         await WriteNew(observation, JsonSerializer.SerializeToUtf8Bytes(new
         {
-            fixture = true, productionCertified = false, actualOsParentCrash = true, firstFullRealRunCertified = false, stage, nonce,
-            originalBeforeKillOutcome = beforeKill.Outcome.ToString(), originalAfterKillOutcome = afterKill.Outcome.ToString(),
-            terminationMode = "owned-original-handle-Kill(false)", readySha256BeforeKill = Hash(readyBytes),
-            originalDriverIdentity = original.Identity, recoveryDriverIdentity = recovery.Identity,
-            originalDriverStartUtcTicks = originalUtcStart, recoveryDriverStartUtcTicks = recoveryUtcStart,
+            fixture = true,
+            productionCertified = false,
+            actualOsParentCrash = true,
+            firstFullRealRunCertified = false,
+            stage,
+            nonce,
+            originalBeforeKillOutcome = beforeKill.Outcome.ToString(),
+            originalAfterKillOutcome = afterKill.Outcome.ToString(),
+            terminationMode = "owned-original-handle-Kill(false)",
+            readySha256BeforeKill = Hash(readyBytes),
+            originalDriverIdentity = original.Identity,
+            recoveryDriverIdentity = recovery.Identity,
+            originalDriverStartUtcTicks = originalUtcStart,
+            recoveryDriverStartUtcTicks = recoveryUtcStart,
             freshRecoveryProcessStartedAfterOriginalExit = afterKill.Outcome == ProcessControlOutcome.AlreadyExited && recoveryUtcStart > originalUtcStart,
-            originalExitCode = original.Process.ExitCode, recoveryExitCode = recovery.Process.ExitCode,
-            actualDriverDll = driver, driverSha256 = Hash(await File.ReadAllBytesAsync(driver, token)),
-            sdkExecutable = host, sdkExecutableSha256 = Hash(await File.ReadAllBytesAsync(host, token)),
-            originalLaunch = Launch("barrier", driverRoot, nonce), freshRecoveryLaunch = Launch("recover", driverRoot, nonce),
-            integratedBaseCommit = artifacts.IntegratedSource.Commit, implementationHead = artifacts.IntegratedSource.HeadCommit,
-            elapsedSeconds = Stopwatch.GetElapsedTime(originalStarted).TotalSeconds, retention = "No old native child adoption or destructive cleanup; all experiment files retained."
+            originalExitCode = original.Process.ExitCode,
+            recoveryExitCode = recovery.Process.ExitCode,
+            actualDriverDll = driver,
+            driverSha256 = Hash(await File.ReadAllBytesAsync(driver, token)),
+            sdkExecutable = host,
+            sdkExecutableSha256 = Hash(await File.ReadAllBytesAsync(host, token)),
+            originalLaunch = Launch("barrier", driverRoot, nonce),
+            freshRecoveryLaunch = Launch("recover", driverRoot, nonce),
+            integratedBaseCommit = artifacts.IntegratedSource.Commit,
+            implementationHead = artifacts.IntegratedSource.HeadCommit,
+            elapsedSeconds = Stopwatch.GetElapsedTime(originalStarted).TotalSeconds,
+            retention = "No old native child adoption or destructive cleanup; all experiment files retained."
         }), token);
         return new(readyPath, capturedReady, recoveryReport, controlReport, root.GetProperty("planContractPath").GetString()!, observation);
 

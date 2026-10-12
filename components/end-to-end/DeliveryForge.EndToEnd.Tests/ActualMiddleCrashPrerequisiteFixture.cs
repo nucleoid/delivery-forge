@@ -103,8 +103,16 @@ internal static class ActualMiddleCrashPrerequisiteFixture
                     WorkflowState.IndependentReview, WorkflowState.PrAuthorized, input, receiver));
             }
             Assert.Equal(stage == "review-registration" ? 0 : 1, port.Calls.Count);
-            ownerProof = new { root, registered.RequestIdentity, source.BaseCommit, source.HeadCommit, reviewerFixtureCalls = port.Calls,
-                productionCertified = false, opaqueMembershipNotSerialized = true };
+            ownerProof = new
+            {
+                root,
+                registered.RequestIdentity,
+                source.BaseCommit,
+                source.HeadCommit,
+                reviewerFixtureCalls = port.Calls,
+                productionCertified = false,
+                opaqueMembershipNotSerialized = true
+            };
             // The actual prerequisite issuer above is a separate positive control. Prepare ALL
             // driver policy/source inputs before freezing its distinct immutable plan/base.
             var protectedContext = await artifacts.Reader.ReadAsync(artifacts.Checkout, source.BaseCommit, token);
@@ -122,10 +130,22 @@ internal static class ActualMiddleCrashPrerequisiteFixture
         }
         else throw new ArgumentException("Unknown middle prerequisite.");
         var observation = "middle-" + stage + "-actual-prerequisite.json";
-        await artifacts.WriteNewJsonAsync(observation, new { fixture = true, productionCertified = false, stage, nonce,
-            originalStarted, ordinaryTotalSeconds = 120, originalSetupSeconds = 75, runtime.Root,
-            frozenBaseCommit = context.Commit, plan, ownerProof, actualParentTerminationNotYetPerformed = true,
-            remainingBoundaries = new[] { "scheduler-checkpoint", "resuming", "publication-intent", "publication-readback", "cleanup-receipt" } }, token);
+        await artifacts.WriteNewJsonAsync(observation, new
+        {
+            fixture = true,
+            productionCertified = false,
+            stage,
+            nonce,
+            originalStarted,
+            ordinaryTotalSeconds = 120,
+            originalSetupSeconds = 75,
+            runtime.Root,
+            frozenBaseCommit = context.Commit,
+            plan,
+            ownerProof,
+            actualParentTerminationNotYetPerformed = true,
+            remainingBoundaries = new[] { "scheduler-checkpoint", "resuming", "publication-intent", "publication-readback", "cleanup-receipt" }
+        }, token);
         return new(runtime.Root, context.Commit, plan, result, null, null, receipt, Path.Combine(artifacts.Root, observation));
     }
 
@@ -189,11 +209,25 @@ internal static class ActualMiddleCrashPrerequisiteFixture
         }
         var actualContext = await artifacts.Reader.ReadAsync(repository, protectedBase, token);
         var plan = await Freeze(artifacts, actualContext, artifacts.Reader, "Subject/Calculator.cs", nonce, token);
-        await artifacts.WriteNewJsonAsync("middle-gate-actual-prerequisite.json", new { fixture = true, productionCertified = false,
-            originalStarted, originalTotalSeconds = 540, clock.Elapsed, runtime.Root, protectedBase, plan, detected,
-            restored, gate, trxPath = trx, actualTrxSha256 = Hash(await File.ReadAllBytesAsync(trx, token)),
-            rawHashes = gate.ArtifactHashes, actualParentTerminationNotYetPerformed = true,
-            limitation = "Genuine SDK/locked restore/cold test1of1/TRX/canonical advisory receipt prerequisite only; driver boundary/calibration must run their own distinct gates on the SAME remaining clock." }, token);
+        await artifacts.WriteNewJsonAsync("middle-gate-actual-prerequisite.json", new
+        {
+            fixture = true,
+            productionCertified = false,
+            originalStarted,
+            originalTotalSeconds = 540,
+            clock.Elapsed,
+            runtime.Root,
+            protectedBase,
+            plan,
+            detected,
+            restored,
+            gate,
+            trxPath = trx,
+            actualTrxSha256 = Hash(await File.ReadAllBytesAsync(trx, token)),
+            rawHashes = gate.ArtifactHashes,
+            actualParentTerminationNotYetPerformed = true,
+            limitation = "Genuine SDK/locked restore/cold test1of1/TRX/canonical advisory receipt prerequisite only; driver boundary/calibration must run their own distinct gates on the SAME remaining clock."
+        }, token);
         return new(runtime.Root, protectedBase, plan, null, gate.ReceiptPath, trx, null, Path.Combine(artifacts.Root, "middle-gate-actual-prerequisite.json"));
     }
 
