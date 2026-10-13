@@ -10,6 +10,9 @@ that direct coding-agent adapters are forbidden, that OpenClaw is the canonical 
 OpenClaw discovery is package acceptance. Historical comments and evidence remain useful history,
 but those statements are not operative acceptance criteria.
 
+Implementation remains paused under [issue #17](https://github.com/nucleoid/delivery-forge/issues/17).
+Optional Switchyard integration is deferred under [issue #30](https://github.com/nucleoid/delivery-forge/issues/30) and does not replace the direct/local, agent-neutral path.
+
 ## Contract through the remaining slices
 
 - **#5 execution:** freezes adapter id/version and required capabilities; binds request, acceptance,

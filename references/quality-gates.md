@@ -33,13 +33,13 @@ parent-frozen repository base/root and records policy provenance in the receipt.
 resolver remains non-authoritative. No parent-approved baseline promotion source exists yet, so
 no-regression results remain advisory.
 
-## Capability matrix at this issue head
+## Capability matrix checked 2026-10-13
 
 | Tool | Observed contract | Production acceptance |
 | --- | --- | --- |
 | .NET SDK | Pinned 10.0.401; the detector probes from the gate working root; GateRunner derives counts from the bound TRX, SDK version from detector-issued capability, compiler evidence from bound invocation/output, and rejects warm `--no-build`; the real fixture uses real Git identities through runner → producer → adapter for RED/GREEN/warm receipts | Advisory until an approved policy binds the complete required project/coverage set; no production PASS is claimed |
 | Crap4CSharp | Public result schema 1.x is parsed by version and tool identity; honest pass/fail/incomplete/error fixtures are marked fixture:true | Installed one-command acceptance is not yet certified; fixture results cannot authorize production |
-| Mutate4CSharp | Current preview is recognized only as uncertified evidence | nucleoid/mutate4csharp#5 remains open; ENUMERATION_NOT_IMPLEMENTED and caller-asserted PASS remain INCOMPLETE |
+| Mutate4CSharp | The v2 report schema and complete-ledger decoder are pinned; external installed-outcome certification closed in [mutate4csharp#5](https://github.com/nucleoid/mutate4csharp/issues/5) and the bounded data decoder landed in [Delivery Forge PR #25](https://github.com/nucleoid/delivery-forge/pull/25) | Forge still lacks current invocation/source-state ownership and approved production policy; report-only normalization remains INCOMPLETE |
 
 Executable discovery is separate from OpenClaw skill discovery. The detector accepts a protected
 explicit executable, PATH, or a repository-local .NET tool manifest contained by the repository root,
