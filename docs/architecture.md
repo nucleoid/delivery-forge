@@ -5,31 +5,13 @@
 The generic coding-agent adapter direction and issue #5–#12 plan overrides are operative in
 [Operative coding-agent architecture](operative-agent-architecture.md).
 
+The current implementation boundary and issue evidence are tracked in [Issue and implementation status](status.md). Implementation is paused under [issue #17](https://github.com/nucleoid/delivery-forge/issues/17); this architecture does not authorize resumption or imply production readiness.
+
 Delivery Forge is a harness around existing agents and engineering tools, not another autonomous agent runtime.
 
-```text
-User intent / issue / approved mode
-                 |
-                 v
-       Parent orchestrator
-   ┌─────────────┼──────────────┐
-   v             v              v
-Planner      Scheduler      State/receipts
-   |             |              |
-   v             v              v
-Code + memory  One writer    Local durable
-adapters       per issue     authority
-                 |
-                 v
-           Worker contract
-                 |
-                 v
-   RED/GREEN -> affected -> required full/build
-       -> complexity/coverage -> mutation -> review
-                 |
-                 v
-      authorized PR / merge / delivery
-```
+[![Delivery Forge architecture: layered intent, optional context, execution, evidence, independent review, publication, and recovery](diagrams/delivery-forge-architecture.png)](diagrams/delivery-forge-architecture.svg)
+
+Teal identifies integrated repository cores, violet identifies target or proposed behavior, and amber identifies external or readiness-gated capability. Continuum is optional memory context and Engram is optional code intelligence; both inform parent-owned planning and readiness without becoming execution authority. The future leased-lock service is a distinct external prerequisite. Switchyard can become an optional typed capability transport only after [issue #30](https://github.com/nucleoid/delivery-forge/issues/30) readiness is proven; it does not replace the orchestrator, authorization checks, or direct/local path. [Open the editable SVG.](diagrams/delivery-forge-architecture.svg)
 
 ## State machine
 
@@ -62,7 +44,7 @@ Skill-authoring discipline governs the package itself: keep the entry point thin
 
 ## Coordination adapter
 
-The planned coordination adapter assumes an atomic leased-lock service with `acquire_lock`, `renew_lock`, `release_lock`, and `inspect_lock` operations.
+The integrated fail-closed coordination core in [issue #6](https://github.com/nucleoid/delivery-forge/issues/6) models an atomic leased-lock service with acquire, renew, release, and inspect operations. Production construction remains unavailable because no external deployed capability has been proven.
 
 - Default lease TTL: 300 seconds.
 - Deterministic renewal target: approximately every 100 seconds, using fresh idempotency keys and conservative local deadlines.
@@ -74,7 +56,7 @@ The planned coordination adapter assumes an atomic leased-lock service with `acq
 
 A lock does not terminate stale processes or make Git/hosted-service/filesystem writes atomic. External targets must validate fencing for fencing to be meaningful, and many do not. Remote publication therefore remains parent-only with exact-head checks and a documented residual check-to-action race.
 
-The lock contract is an integration prerequisite, not functionality supplied by this planning repository.
+The external lock service is an integration prerequisite, not functionality supplied by this repository. Merged contract fixtures and reducers are not a production fallback.
 
 ## Memory adapter
 
@@ -92,4 +74,4 @@ Adapters report detected versions, supported operations, configuration, and limi
 
 ## Security and portability
 
-No OpenClaw fork or runtime patch is required. Secrets remain outside plans, receipts, logs, repository content, and lock resource keys. Adapters are replaceable and vendor-neutral. Rollout plans explicitly cover compatibility, configuration, secrets, migrations, reauthentication, backfill, rollback, and operator verification where applicable.
+No OpenClaw fork or runtime patch is required. Codex, Claude Code, and Pi are generic product targets; OpenClaw is an optional adapter host. Secrets remain outside plans, receipts, logs, repository content, and lock resource keys. Adapters are replaceable and vendor-neutral. Optional Switchyard access remains deferred under [issue #30](https://github.com/nucleoid/delivery-forge/issues/30) until a minimum capability/security profile is implemented and proven. Rollout plans explicitly cover compatibility, configuration, secrets, migrations, reauthentication, backfill, rollback, and operator verification where applicable.

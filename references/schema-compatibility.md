@@ -1,6 +1,6 @@
 # Schema compatibility report
 
-Report date: 2026-10-07
+Checked: 2026-10-13 against `main` at `d34280b`. Contract version support remains unchanged.
 
 | Contract kind | Bundled version | Read | Write | Fixture | Unknown fields |
 |---|---:|---:|---:|---:|---|

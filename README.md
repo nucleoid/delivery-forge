@@ -2,13 +2,15 @@
 
 **An evidence-driven harness for AI-assisted software delivery.**
 
-Delivery Forge is a planned, portable development harness that turns an approved software-delivery intent into a traceable plan, bounded execution, evidence-backed evaluation, independent review, and an explicitly authorized delivery action.
+Delivery Forge is an in-development portable harness that turns an approved software-delivery intent into a traceable plan, bounded execution, evidence-backed evaluation, independent review, and an explicitly authorized delivery action.
 
-The design packages a thin skill entry point with progressively loaded references, deterministic helpers where automation is justified, schemas, tests, and replaceable adapters. It does **not** rewrite its own runtime procedure, infer authorization from installed tools, or treat agent confidence as evidence.
+The target design packages a thin skill entry point with progressively loaded references, deterministic helpers where automation is justified, schemas, tests, and replaceable adapters. It does **not** rewrite its own runtime procedure, infer authorization from installed tools, or treat agent confidence as evidence.
 
 ## Status
 
-Planning bootstrap only. The contracts and roadmap in this repository describe the intended system; they are not claims that the integrations or quality gates already exist.
+**Implementation is paused.** As of 2026-10-13, `main` contains reviewed deterministic cores for contracts, planning, generic execution, fail-closed coordination, advisory evidence, review, local scheduling, fixture publication, and recovery/acceptance scenarios. The latest main CI is green on Ubuntu and Windows.
+
+That is not a production-readiness claim. Production coordination is unavailable, quality enforcement lacks an approved policy/baseline, live reviewer and publication profiles are not certified, the full real end-to-end profile is incomplete, and `/delivery_forge` is not packaged or installed. [Issue #17](https://github.com/nucleoid/delivery-forge/issues/17) keeps all implementation paused until explicit owner resumption. See the maintained [issue and implementation status](docs/status.md) for evidence and blockers.
 
 ## Operating model
 
@@ -25,6 +27,16 @@ Delivery Forge separates five authorization modes:
 - `merge`: merge only the exact reviewed head after required checks and branch protections pass.
 - `resume`: reconcile durable local state, Git, live processes, and remote state before choosing a next action.
 
+## Architecture and workflow
+
+[![Delivery Forge architecture: layered intent, context, execution, evidence, review, publication, and recovery](docs/diagrams/delivery-forge-architecture.png)](docs/diagrams/delivery-forge-architecture.svg)
+
+The architecture separates the integrated repository core from target behavior and external/readiness-gated capability. Continuum supplies optional memory context, Engram supplies optional code intelligence, and neither replaces local execution authority or a future atomic leased-lock service. Switchyard is an optional typed capability transport—not an orchestrator or authority substitute—and remains deferred under [issue #30](https://github.com/nucleoid/delivery-forge/issues/30). [Open the editable architecture SVG.](docs/diagrams/delivery-forge-architecture.svg)
+
+[![Delivery Forge workflow: plan, freeze, readiness, isolated implementation, evidence, review, pull request, CI, and separately authorized merge](docs/diagrams/delivery-forge-workflow.png)](docs/diagrams/delivery-forge-workflow.svg)
+
+The workflow makes review invalidation, fail-closed uncertainty, and separate PR/merge authority explicit. Release and deployment are excluded, and [issue #17](https://github.com/nucleoid/delivery-forge/issues/17) continues to pause implementation. [Open the editable workflow SVG.](docs/diagrams/delivery-forge-workflow.svg)
+
 The normal intake is a minimal interview. Delivery Forge asks one plain conversational question—with a recommendation—only when a genuine intent, risk, or product decision belongs to the user. Engineering questions are resolved from repository evidence when possible. A deep interview is available by explicit opt-in.
 
 ## Core principles
@@ -38,7 +50,7 @@ The normal intake is a minimal interview. Delivery Forge asks one plain conversa
 - Unsupported tools, timeouts, missing coverage, and incomplete mutation enumeration cannot become a pass.
 - PR, CI, merge, release, and deployment are distinct states and authorizations.
 
-## Planned package shape
+## Target package shape
 
 ```text
 delivery-forge/
@@ -56,7 +68,7 @@ delivery-forge/
 └── tests/
 ```
 
-This skeleton is planned, not yet implemented or installed.
+The repository currently implements component libraries under `components/`; the root skill, helper CLI, installation flow, and package-owned uninstall proof remain [issue #12](https://github.com/nucleoid/delivery-forge/issues/12) work and do not exist yet.
 
 ## Documents
 
@@ -66,10 +78,11 @@ This skeleton is planned, not yet implemented or installed.
 - [Quality gates and evidence receipts](docs/quality-gates.md)
 - [Recovery and publication](docs/recovery-publication.md)
 - [Roadmap](docs/roadmap.md)
+- [Issue and implementation status](docs/status.md)
 
 ## Integration boundary
 
-The design can integrate with a scoped memory system, code intelligence, an atomic leased-lock service, Git hosting, and language-specific evidence tools. Every adapter must detect actual capabilities. An installed CLI is not proof that every planned command, output shape, or guarantee is available.
+The design can integrate with a scoped memory system, code intelligence, an atomic leased-lock service, Git hosting, and language-specific evidence tools. Codex, Claude Code, and Pi are generic product targets; OpenClaw is optional. Every adapter must detect actual capabilities. An installed CLI, fixture, merged parser, or planning document is not proof that every command, output shape, or production guarantee is available. Optional Switchyard integration is deferred and readiness-gated in [issue #30](https://github.com/nucleoid/delivery-forge/issues/30).
 
 ## Non-goals
 

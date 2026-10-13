@@ -1,6 +1,6 @@
 # Publication and uncertain-result recovery
 
-Issue #10 implements a single-run fixture publication core and a separately configured GitHub CLI transport. The integrated candidate still awaits final validation/review. No live GitHub operation is configured or authorized by this source change. General production publication remains unavailable because the actual immutable-source preparer, ownership profile and live review integration are not configured.
+[Issue #10](https://github.com/nucleoid/delivery-forge/issues/10) has an integrated single-run fixture publication core and separately configured GitHub CLI transport via [PR #24](https://github.com/nucleoid/delivery-forge/pull/24). Repository validation and CI passed for that merged core, but no live disposable GitHub mutation or production authority profile is certified. General production publication remains unavailable because the complete immutable-source, ownership, policy, live-review, and operator-authorization profile is not configured.
 
 The parent owns publication. A worker's mode, validated receipt bytes, journal import or caller observation never constructs production authority. The run token has an opaque issuer, immutable ceiling/revision, exact patch inputs and independently pinned review receiver. A later explicit higher grant creates a new reconciled revision referencing prior evidence and repeats current head/policy checks; it cannot edit the old ceiling. Resume does not escalate.
 

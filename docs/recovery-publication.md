@@ -1,5 +1,11 @@
 # Recovery and publication
 
+## End-to-end control flow
+
+[![Delivery Forge workflow from planning through a separately authorized protected merge, including review invalidation and fail-closed reconciliation](diagrams/delivery-forge-workflow.png)](diagrams/delivery-forge-workflow.svg)
+
+The normal path is plan → freeze → dependency/capability/ownership readiness → isolated RED/GREEN → affected/full/build/quality evidence → independent exact-head review → explicitly authorized PR → CI → separately authorized protected normal merge. Findings or any head change invalidate stale review and loop back. Pause, uncertainty, drift, or incomplete evidence fails closed into reconciliation. Release and deployment are excluded; implementation remains paused under [issue #17](https://github.com/nucleoid/delivery-forge/issues/17), and optional Switchyard transport remains gated by [issue #30](https://github.com/nucleoid/delivery-forge/issues/30). [Open the editable SVG.](diagrams/delivery-forge-workflow.svg)
+
 ## Durable local authority
 
 A run manifest and append-only receipts are the execution source of truth. They identify run/repository/plan/base/head/tree, authorization ceiling, ownership generation, worktree, workers/processes, gate receipts, remote state, and next reconciliation requirements. Memory receives distilled outcomes and decisions; it does not replace manifests, leases, Git, process inspection, or remote state.

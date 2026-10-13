@@ -1,5 +1,7 @@
 # Cross-slice development scenarios
 
+Current project-level status is maintained in [`docs/status.md`](../../docs/status.md). The chronology below is retained as historical evidence for its named commits and does not override the owner pause in issue #17 or claim a complete real profile.
+
 This component consumes the integrated public contracts and adapters. After the parent-owned compiled RED (nine missing-behavior failures and three passing boundary controls), its initial runner supports narrow profile refusal and real torn-pointer recovery receipts. Three harness controls use actual Git objects, durable files and an identity-bound native child. They do not invoke a model worker, reviewer, installed quality profile or remote repository.
 
 `scenario-matrix.json` records the explicit acceptance queue, seed, finite budgets and profile limits. Entries marked planned or awaiting integration have no passing claim. Root validated the initial slices 3–8 scenarios, then normally merged actual accepted scheduling #9 while preserving history and both component registrations. Root then integrated actual accepted #10; new receipts pin `8c2db2b2041f458de92f1f39b31aa1c244ad1083`. Historical 43-test success at #9 base8ad does not validate this newer source. CI checks out full history for these exact immutable-base reads. Publication/review-chain prerequisites are now integrated, but those scenarios and the remaining audit still need implementation and validation; no owner source was copied from unmerged branches.
