@@ -26,4 +26,23 @@ public sealed class BoundedCommandCaptureResult
     public bool RootExitObserved { get; }
     public bool StandardOutputDrainCompleted { get; }
     public bool StandardErrorDrainCompleted { get; }
+
+    private BoundedCommandCaptureResult(BoundedCommandCaptureResult actual, CommandResult command)
+    {
+        Command = command;
+        // Internal immutable storage is never returned directly; public byte getters still clone.
+        _standardOutput = actual._standardOutput; _standardError = actual._standardError;
+        CaptureBoundExceeded = actual.CaptureBoundExceeded; RootExitObserved = actual.RootExitObserved;
+        StandardOutputDrainCompleted = actual.StandardOutputDrainCompleted;
+        StandardErrorDrainCompleted = actual.StandardErrorDrainCompleted;
+    }
+
+    internal BoundedCommandCaptureResult RefuseLateCompletion() => new(this, Command with
+    {
+        OwnedProcessQuiescent = false,
+        LifecycleDiagnostics = Command.LifecycleDiagnostics is null ? null : Command.LifecycleDiagnostics with
+        {
+            NativeFailure = Command.LifecycleDiagnostics.NativeFailure ?? "Complete capture DATA exceeded the original lifetime allowance."
+        }
+    });
 }
