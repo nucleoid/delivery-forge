@@ -11,14 +11,31 @@ public sealed partial class GitRepositoryContextReader
     private static readonly TimeSpan GitTerminationTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan SymlinkResolutionTimeout = TimeSpan.FromSeconds(10);
     private readonly string _gitExecutable;
+    private readonly bool _importProfile;
+    private PlanImportLifetime? _importLifetime;
+    private PlanImportGitView? _importView;
+    internal string ImportMetadataDigest => _importView?.Metadata.Digest ?? throw new PlanningException("Private immutable import metadata unavailable.");
 
     public GitRepositoryContextReader(string? gitExecutablePath = null)
+        : this(gitExecutablePath, false) { }
+
+    private GitRepositoryContextReader(string? gitExecutablePath, bool importProfile)
     {
+        _importProfile = importProfile;
         _gitExecutable = ResolveGitExecutable(
             gitExecutablePath,
             Environment.GetEnvironmentVariable("PATH"),
             OperatingSystem.IsWindows());
     }
+
+    internal static GitRepositoryContextReader ForImport(string trustedGit, PlanImportLifetime life, PlanImportGitView view)
+    {
+        if (string.IsNullOrWhiteSpace(trustedGit) || !Path.IsPathFullyQualified(trustedGit)) throw new PlanningException("An explicit absolute trusted Git executable is required for import.");
+        var reader = new GitRepositoryContextReader(trustedGit, true) { _importLifetime = life, _importView = view };
+        view.Attach(reader); return reader;
+    }
+    internal async Task<byte[]> ImportGitBytes(string root, CancellationToken token, params string[] arguments) =>
+        (await RunGitAsync(root, token, false, arguments)).StandardOutput;
 
     internal static string ResolveGitExecutable(
         string? configuredPath,
@@ -545,6 +562,20 @@ public sealed partial class GitRepositoryContextReader
         startInfo.Environment["GIT_NO_LAZY_FETCH"] = "1";
         startInfo.Environment["GIT_TERMINAL_PROMPT"] = "0";
         startInfo.Environment["GIT_OPTIONAL_LOCKS"] = "0";
+        if (_importProfile)
+        {
+            foreach (var key in startInfo.Environment.Keys.Where(key => key.StartsWith("GIT_", StringComparison.OrdinalIgnoreCase)).ToArray()) startInfo.Environment.Remove(key);
+            var nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+            startInfo.Environment["GIT_CONFIG_NOSYSTEM"] = "1";
+            startInfo.Environment["GIT_CONFIG_SYSTEM"] = nullDevice; startInfo.Environment["GIT_CONFIG_GLOBAL"] = nullDevice;
+            startInfo.Environment["GIT_NO_REPLACE_OBJECTS"] = "1"; startInfo.Environment["GIT_GRAFT_FILE"] = nullDevice;
+            startInfo.Environment["GIT_NO_LAZY_FETCH"] = "1"; startInfo.Environment["GIT_TERMINAL_PROMPT"] = "0";
+            startInfo.Environment["GIT_OPTIONAL_LOCKS"] = "0"; startInfo.Environment["GIT_LITERAL_PATHSPECS"] = "1";
+            startInfo.Environment["GIT_ATTR_NOSYSTEM"] = "1";
+            _importView!.Apply(startInfo.Environment);
+            foreach (var setting in new[] { "core.hooksPath=" + nullDevice, "core.attributesFile=" + nullDevice, "core.untrackedCache=false" })
+            { startInfo.ArgumentList.Add("-c"); startInfo.ArgumentList.Add(setting); }
+        }
         startInfo.ArgumentList.Add("-c");
         startInfo.ArgumentList.Add("core.fsmonitor=false");
         startInfo.ArgumentList.Add("-c");
@@ -555,6 +586,8 @@ public sealed partial class GitRepositoryContextReader
             startInfo.ArgumentList.Add($"protocol.{protocol}.allow=never");
         }
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
+
+        if (_importProfile) return await RunImportProcess(startInfo, cancellationToken, allowFailure);
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(GitOperationTimeout);

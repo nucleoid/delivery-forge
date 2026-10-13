@@ -65,6 +65,15 @@ jobs:
           $reviewAppHost = Join-Path $reviewHelperOutput $(if ($IsWindows) { 'BoundedGitPreparationHelper.exe' } else { 'BoundedGitPreparationHelper' })
           if (-not (Test-Path -LiteralPath $reviewAppHost -PathType Leaf)) { throw 'Actual review helper apphost is missing' }
           "DELIVERY_FORGE_REVIEW_GIT_NEGATIVE_HELPER=$reviewAppHost" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Build actual selected importer Git helper
+        shell: pwsh
+        run: |
+          $importHelperOutput = Join-Path $env:RUNNER_TEMP ('delivery-forge-import-helper-' + [guid]::NewGuid().ToString('N'))
+          dotnet build components/planning/DeliveryForge.Planning.ImportGitHelper/DeliveryForge.Planning.ImportGitHelper.csproj --no-restore --configuration Release --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false -o $importHelperOutput
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $importAppHost = Join-Path $importHelperOutput $(if ($IsWindows) { 'DeliveryForge.Planning.ImportGitHelper.exe' } else { 'DeliveryForge.Planning.ImportGitHelper' })
+          if (-not (Test-Path -LiteralPath $importAppHost -PathType Leaf)) { throw 'Actual importer helper apphost is missing' }
+          "DELIVERY_FORGE_IMPORT_GIT_HELPER=$importAppHost" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
       - name: Build actual parent crash driver
         shell: pwsh
         run: |
