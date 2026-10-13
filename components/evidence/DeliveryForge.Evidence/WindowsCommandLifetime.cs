@@ -152,6 +152,7 @@ internal sealed class WindowsCommandLifetime : IDisposable
         var timedOut = false; var cancelled = false; var known = true; var rootExited = false;
         uint active = uint.MaxValue;
         var killAttempted = false; var killSucceeded = false;
+        var cleanupWaitMilliseconds = 0;
         string? failure = null, killType = null;
         string? startupFailureStage = null;
         var retention = new BoundedCaptureRetention();
@@ -185,16 +186,47 @@ internal sealed class WindowsCommandLifetime : IDisposable
                 {
                     killAttempted = true;
                     killSucceeded = owner._assigned ? TerminateJobObject(owner._job, unchecked((uint)-1)) : TerminateProcess(owner._process, unchecked((uint)-1));
-                    if (!killSucceeded) { var native = Native("terminate-owned-byte-capture"); killType = native.GetType().FullName; failure ??= Bounded(native); }
+                    if (!killSucceeded) { var native = Native("terminate-owned-byte-capture"); retention.Add(native); killType = native.GetType().FullName; failure ??= Bounded(native); }
                 }
-                // Cleanup consumes the original remaining allowance. No appended five-second tail.
-                while (BoundedCaptureStream.Within(started, entireBudget))
+                // Wait on the SAME birth-bound handle; no scheduler polling or appended tail.
+                // This diagnostic is the actual remainder at cleanup admission, not a new grant.
+                cleanupWaitMilliseconds = (int)Math.Clamp(Math.Floor(
+                    (entireBudget - Stopwatch.GetElapsedTime(started)).TotalMilliseconds), 0, int.MaxValue);
+                if (!rootExited && cleanupWaitMilliseconds > 0)
+                {
+                    var waited = WaitForSingleObject(owner._process, (uint)cleanupWaitMilliseconds);
+                    if (waited is not (Signalled or WaitTimeout))
+                    {
+                        var native = Native("wait-original-byte-capture-root");
+                        retention.Add(native); known = false; failure ??= Bounded(native);
+                    }
+                }
+                // Each original reader is independently observed under the SAME shrinking
+                // allowance. A completed fault or late wait never establishes EOF/closure.
+                foreach (var drain in new[] { output, error })
+                {
+                    if (drain is null) continue;
+                    var remaining = entireBudget - Stopwatch.GetElapsedTime(started);
+                    if (remaining <= TimeSpan.Zero) continue;
+                    try
+                    {
+                        var originalWait = drain.WaitAsync(remaining, CancellationToken.None);
+                        retention.Add(originalWait); _ = BoundedCaptureStream.Observe(originalWait);
+                        await originalWait.ConfigureAwait(false);
+                    }
+                    catch (Exception drainFailure)
+                    { retention.Add(drainFailure); known = false; failure ??= Bounded(drainFailure); }
+                }
+                // Root signal and pipe EOF do not substitute for current Job emptiness.
+                // Descendant accounting may settle later, still only inside the original total.
+                while (known && BoundedCaptureStream.Within(started, entireBudget))
                 {
                     if (!owner.Observe(out rootExited, out active, out var observationFailure))
                     { known = false; failure ??= observationFailure; break; }
-                    if (rootExited && active == 0 &&
-                        (output is null || BoundedCaptureStream.Eof(output)) && (error is null || BoundedCaptureStream.Eof(error))) break;
-                    await Task.Delay(5).ConfigureAwait(false);
+                    if (!rootExited || active == 0) break;
+                    var remaining = entireBudget - Stopwatch.GetElapsedTime(started);
+                    if (remaining <= TimeSpan.Zero) break;
+                    await Task.Delay(remaining < TimeSpan.FromMilliseconds(5) ? remaining : TimeSpan.FromMilliseconds(5)).ConfigureAwait(false);
                 }
                 var finalKnown = owner.Observe(out rootExited, out active, out var finalFailure);
                 known &= finalKnown; failure ??= finalFailure;
@@ -223,7 +255,7 @@ internal sealed class WindowsCommandLifetime : IDisposable
                 cancelled, began, DateTimeOffset.UtcNow, quiescent)
             {
                 LifecycleDiagnostics = new(killAttempted, killSucceeded, killType, failure, false,
-                    settled, rootExited, outEof && errEof, 0,
+                    settled, rootExited, outEof && errEof, cleanupWaitMilliseconds,
                     new(outEof, outputStatus == TaskStatus.Faulted, outputStatus == TaskStatus.Canceled, outEof ? Encoding.UTF8.GetString(outBytes) : null),
                     new(errEof, errorStatus == TaskStatus.Faulted, errorStatus == TaskStatus.Canceled, errEof ? Encoding.UTF8.GetString(errBytes) : null))
                 {
