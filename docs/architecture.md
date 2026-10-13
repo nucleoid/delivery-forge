@@ -9,29 +9,9 @@ The current implementation boundary and issue evidence are tracked in [Issue and
 
 Delivery Forge is a harness around existing agents and engineering tools, not another autonomous agent runtime.
 
-```text
-User intent / issue / approved mode
-                 |
-                 v
-       Parent orchestrator
-   ┌─────────────┼──────────────┐
-   v             v              v
-Planner      Scheduler      State/receipts
-   |             |              |
-   v             v              v
-Code + memory  One writer    Local durable
-adapters       per issue     authority
-                 |
-                 v
-           Worker contract
-                 |
-                 v
-   RED/GREEN -> affected -> required full/build
-       -> complexity/coverage -> mutation -> review
-                 |
-                 v
-      authorized PR / merge / delivery
-```
+[![Delivery Forge architecture: layered intent, optional context, execution, evidence, independent review, publication, and recovery](diagrams/delivery-forge-architecture.png)](diagrams/delivery-forge-architecture.svg)
+
+Teal identifies integrated repository cores, violet identifies target or proposed behavior, and amber identifies external or readiness-gated capability. Continuum is optional memory context and Engram is optional code intelligence; both inform parent-owned planning and readiness without becoming execution authority. The future leased-lock service is a distinct external prerequisite. Switchyard can become an optional typed capability transport only after [issue #30](https://github.com/nucleoid/delivery-forge/issues/30) readiness is proven; it does not replace the orchestrator, authorization checks, or direct/local path. [Open the editable SVG.](diagrams/delivery-forge-architecture.svg)
 
 ## State machine
 

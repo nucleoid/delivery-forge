@@ -27,6 +27,16 @@ Delivery Forge separates five authorization modes:
 - `merge`: merge only the exact reviewed head after required checks and branch protections pass.
 - `resume`: reconcile durable local state, Git, live processes, and remote state before choosing a next action.
 
+## Architecture and workflow
+
+[![Delivery Forge architecture: layered intent, context, execution, evidence, review, publication, and recovery](docs/diagrams/delivery-forge-architecture.png)](docs/diagrams/delivery-forge-architecture.svg)
+
+The architecture separates the integrated repository core from target behavior and external/readiness-gated capability. Continuum supplies optional memory context, Engram supplies optional code intelligence, and neither replaces local execution authority or a future atomic leased-lock service. Switchyard is an optional typed capability transport—not an orchestrator or authority substitute—and remains deferred under [issue #30](https://github.com/nucleoid/delivery-forge/issues/30). [Open the editable architecture SVG.](docs/diagrams/delivery-forge-architecture.svg)
+
+[![Delivery Forge workflow: plan, freeze, readiness, isolated implementation, evidence, review, pull request, CI, and separately authorized merge](docs/diagrams/delivery-forge-workflow.png)](docs/diagrams/delivery-forge-workflow.svg)
+
+The workflow makes review invalidation, fail-closed uncertainty, and separate PR/merge authority explicit. Release and deployment are excluded, and [issue #17](https://github.com/nucleoid/delivery-forge/issues/17) continues to pause implementation. [Open the editable workflow SVG.](docs/diagrams/delivery-forge-workflow.svg)
+
 The normal intake is a minimal interview. Delivery Forge asks one plain conversational question—with a recommendation—only when a genuine intent, risk, or product decision belongs to the user. Engineering questions are resolved from repository evidence when possible. A deep interview is available by explicit opt-in.
 
 ## Core principles
