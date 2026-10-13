@@ -159,7 +159,7 @@ public sealed class ReviewAuthorityHost
             last?.Command.OwnedProcessQuiescent == true, last?.RootExitObserved == true,
             last?.StandardOutputDrainCompleted == true, last?.StandardErrorDrainCompleted == true,
             last?.Command.StandardOutput ?? "", last?.Command.StandardError ?? "", reason.Length > 1024 ? reason[..1024] : reason)
-            { LastCapture = ReviewGitPreparationCaptureData.FromCapture(last) });
+        { LastCapture = ReviewGitPreparationCaptureData.FromCapture(last) });
         try
         {
             _ = Remaining();
@@ -253,7 +253,7 @@ public sealed class ReviewAuthorityHost
                 () => FixtureDirectoryCleanup.Delete(controlled), beforeFinalRecheck);
             return new(context, new(ReviewGitPreparationOutcome.Prepared, true, true, true, true,
                 last!.Command.StandardOutput, last.Command.StandardError, "Bounded fixture preparation; no production authority.")
-                { LastCapture = ReviewGitPreparationCaptureData.FromCapture(last) });
+            { LastCapture = ReviewGitPreparationCaptureData.FromCapture(last) });
         }
         catch (OperationCanceledException)
         { return Refusal(cancellationToken.IsCancellationRequested ? ReviewGitPreparationOutcome.Cancelled : ReviewGitPreparationOutcome.TimedOut, "Original preparation cancellation/deadline observed; partial fixture files retained."); }

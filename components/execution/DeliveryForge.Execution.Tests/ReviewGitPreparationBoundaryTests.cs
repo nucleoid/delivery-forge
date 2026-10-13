@@ -289,11 +289,22 @@ public sealed class ReviewGitPreparationBoundaryTests
             var sourceBytes = await File.ReadAllBytesAsync(Path.Combine(Root, "subject.txt"), token);
             await WriteNew(Path.Combine(GitDirectory, "actual-startup-inputs.json"), JsonSerializer.SerializeToUtf8Bytes(new
             {
-                fixture = true, productionCertified = false, Nonce, Head, Version, IndexSha256, SpecSha256,
-                invocation = new CommandInvocation(Helper!, [], Root), helperSha256 = Hash(helperBytes),
-                helperLength = helperBytes.Length, sourceSha256 = Hash(sourceBytes),
-                originalCaptureTicks = actualBudget.Ticks, originalFixtureSeconds = 30, helperSelfSeconds = 8,
-                perStreamMaximumBytes = 1024, retained = true
+                fixture = true,
+                productionCertified = false,
+                Nonce,
+                Head,
+                Version,
+                IndexSha256,
+                SpecSha256,
+                invocation = new CommandInvocation(Helper!, [], Root),
+                helperSha256 = Hash(helperBytes),
+                helperLength = helperBytes.Length,
+                sourceSha256 = Hash(sourceBytes),
+                originalCaptureTicks = actualBudget.Ticks,
+                originalFixtureSeconds = 30,
+                helperSelfSeconds = 8,
+                perStreamMaximumBytes = 1024,
+                retained = true
             }), token);
         }
         public Task SaveCaptureAsync(BoundedCommandCaptureResult result, CancellationToken token) => WriteNew(
