@@ -3,8 +3,9 @@ using DeliveryForge.Evidence.Adapters;
 
 namespace DeliveryForge.Evidence.Tests;
 
-// Genuine future process tests, never satisfied by the report-format fixtures. Root separately
-// prepares clean exact-head consumers and reviewed installs. These tests are UNEXECUTED.
+// Genuine process scenarios require separately reviewed Root-prepared exact-head consumers
+// and installs; report-format fixtures cannot substitute. Acceptance depends on actual run
+// evidence. The post-provider verification-reader repair requires fresh validation.
 public sealed class RealInstalledQualityToolTests
 {
     [Theory]
@@ -39,10 +40,13 @@ public sealed class RealInstalledQualityToolTests
         Assert.Equal(item.GetProperty("exit").GetInt32(), result.Execution.ExitCode);
         Assert.True(result.Fixture); Assert.False(result.ProductionCapable);
         var gateDirectory = Path.GetDirectoryName(Path.GetDirectoryName(result.ReceiptPath))!;
+        // This independent assertion phase starts after the provider has returned; it does not
+        // renew the provider original or the initial manifest reader.
+        var artifactIo = new InstalledToolFiles(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         Assert.All(result.ArtifactHashes, row =>
         {
             var retained = Path.Combine(gateDirectory, row.Key); Assert.True(File.Exists(retained));
-            Assert.Equal(row.Value, InstalledToolFiles.Identity(io.Read(retained, 128 * 1024 * 1024)));
+            Assert.Equal(row.Value, InstalledToolFiles.Identity(artifactIo.Read(retained, 128 * 1024 * 1024)));
         });
         var report = File.ReadAllBytes(Path.Combine(gateDirectory, "producer-report.json"));
         var capability = new ToolCapability(profile.Tool, profile.Version, profile.Data.Format, true, true);
