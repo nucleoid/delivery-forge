@@ -33,8 +33,8 @@ public sealed class CodexJsonlProtocolTests
     [Fact] public async Task Malformed_UTF8_actual_bytes_refuse() { using var life = new ToolLifetime(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken); using var input = new MemoryStream(); using var output = new MemoryStream(new byte[] { 0xff, 10 }); var codec = new CodexJsonlProtocol(input, output, life); await Assert.ThrowsAnyAsync<Exception>(async () => { using var doc = await codec.ReadAsync(TestContext.Current.CancellationToken); }); }
     sealed class HeldWriter : MemoryStream
     {
-        public readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously), Release = new(TaskCreationOptions.RunContinuationsAsynchronously); public int ActualWrites;
-        public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken token) { Interlocked.Increment(ref ActualWrites); Entered.TrySetResult(); await Release.Task; await base.WriteAsync(buffer, offset, count, token); }
+        public readonly TaskCompletionSource Entered = new(TaskCreationOptions.RunContinuationsAsynchronously), Release = new(TaskCreationOptions.RunContinuationsAsynchronously), SecondEntered = new(TaskCreationOptions.RunContinuationsAsynchronously); public int ActualWrites;
+        public override async Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken token) { if (Interlocked.Increment(ref ActualWrites) == 2) SecondEntered.TrySetResult(); Entered.TrySetResult(); await Release.Task; await base.WriteAsync(buffer, offset, count, token); }
     }
     [Fact]
     public async Task Actual_writer_timeout_does_not_release_an_unacquired_permit_or_enter_second_write()
@@ -58,9 +58,10 @@ public sealed class CodexJsonlProtocolTests
                 var timer = new ControlledTimer(callback, state); timers.Add(timer); return timer;
             }
         }
-        public int FirePending()
+        public int FirePending(int skip = 0)
         {
-            ControlledTimer[] actual; lock (timers) actual = timers.ToArray();
+            if (skip < 0 || skip > 8) throw new ArgumentOutOfRangeException(nameof(skip));
+            ControlledTimer[] actual; lock (timers) actual = timers.Skip(skip).ToArray();
             var fired = 0; foreach (var timer in actual) if (timer.Fire()) fired++; return fired;
         }
         sealed class ControlledTimer(TimerCallback callback, object? state) : ITimer
@@ -91,10 +92,10 @@ public sealed class CodexJsonlProtocolTests
         try
         {
             Assert.False(second.IsCompleted);
-            // The old outer waiter installs a real timer callback here. The repaired
-            // self-timed semaphore path installs none. Only that observer may fire;
-            // neither real semaphore timeout nor ToolLifetime clock is modified.
-            var fired = observer.FirePending();
+            // The first timer observes the held stream write. Skip that IO timer:
+            // this regression targets only a possible second semaphore observer.
+            // The real semaphore timeout and ToolLifetime clock remain unchanged.
+            var fired = observer.FirePending(skip: 1);
             if (fired != 0)
             {
                 try { await second.WaitAsync(life.Remaining, TestContext.Current.CancellationToken); }
@@ -115,6 +116,56 @@ public sealed class CodexJsonlProtocolTests
             Assert.Equal(2, input.ActualWrites);
             Assert.Empty(errors);
             Assert.False(codec.Unknown); Assert.False(life.HasRetainedUnknown);
+        }
+        finally
+        {
+            input.Release.TrySetResult();
+            foreach (var actual in new[] { first, second }.Concat(codec.EnteredTasks))
+            {
+                try { await actual.WaitAsync(life.CleanupRemaining, TestContext.Current.CancellationToken); }
+                catch (Exception) { /* Preserve actual failures; no retry, reset or UNKNOWN clearing. */ }
+            }
+        }
+    }
+
+    [Fact]
+    public async Task Sticky_unknown_from_actual_writer_observation_refuses_queued_and_future_io()
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        using var input = new HeldWriter(); using var output = new MemoryStream();
+        var observer = new ControlledOuterWaitTimeProvider();
+        var codec = new CodexJsonlProtocol(input, output, life, observer);
+        var first = codec.WriteAsync(new { id = 1, method = "first" }, TestContext.Current.CancellationToken);
+        await input.Entered.Task.WaitAsync(life.Remaining, TestContext.Current.CancellationToken);
+        var second = codec.WriteAsync(new { id = 2, method = "second" }, TestContext.Current.CancellationToken);
+        var errors = new List<Exception>();
+        try
+        {
+            Assert.False(second.IsCompleted);
+            // Fire the actual first stream-write WaitAsync observer in BOTH old and
+            // repaired bodies. The real write remains held and semaphore is real.
+            Assert.Equal(1, observer.FirePending());
+            try { await first.WaitAsync(life.Remaining, TestContext.Current.CancellationToken); }
+            catch (Exception error) { errors.Add(error); }
+            Assert.True(codec.Unknown); Assert.True(life.HasRetainedUnknown);
+            // Old admission enters a second real held write; repaired admission
+            // completes second with failure. Either event is finite and observed.
+            await Task.WhenAny(second, input.SecondEntered.Task).WaitAsync(life.Remaining, TestContext.Current.CancellationToken);
+            input.Release.TrySetResult();
+            try { await second.WaitAsync(life.Remaining, TestContext.Current.CancellationToken); }
+            catch (Exception error) { errors.Add(error); }
+            foreach (var actual in codec.EnteredTasks)
+                await actual.WaitAsync(life.Remaining, TestContext.Current.CancellationToken);
+            Assert.Equal(1, input.ActualWrites);
+            Assert.Equal(1, codec.AvailableWritePermits);
+            Assert.Equal(2, errors.Count);
+            Assert.True(codec.Unknown); Assert.True(life.HasRetainedUnknown);
+            var entered = codec.EnteredTasks.Count;
+            await Assert.ThrowsAsync<IOException>(() => codec.WriteAsync(new { id = 3, method = "after-unknown" }, TestContext.Current.CancellationToken));
+            await Assert.ThrowsAsync<IOException>(async () => { using var ignored = await codec.ReadAsync(TestContext.Current.CancellationToken); });
+            Assert.Equal(entered, codec.EnteredTasks.Count);
+            Assert.Equal(1, input.ActualWrites); Assert.Equal(1, codec.AvailableWritePermits);
+            Assert.DoesNotContain(errors.SelectMany(x => x is AggregateException aggregate ? (IEnumerable<Exception>)aggregate.Flatten().InnerExceptions : new[] { x }), x => x is SemaphoreFullException);
         }
         finally
         {

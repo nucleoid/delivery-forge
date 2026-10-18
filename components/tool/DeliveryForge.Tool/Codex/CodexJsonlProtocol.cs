@@ -16,27 +16,27 @@ public sealed class CodexJsonlProtocol(Stream input, Stream output, ToolLifetime
         this.outerWaitTimeProvider = outerWaitTimeProvider ?? throw new ArgumentNullException(nameof(outerWaitTimeProvider));
     }
     readonly SemaphoreSlim writer = new(1, 1); readonly byte[] readBuffer = new byte[4096]; readonly List<byte> pending = [];
-    readonly List<Task> operations = []; readonly List<byte[]> originals = []; int offset, available; long readBytes, writtenBytes; int messages; bool eof, poisoned;
+    readonly List<Task> operations = []; readonly List<byte[]> originals = []; int offset, available; long readBytes, writtenBytes; int messages; bool eof; volatile bool poisoned;
     const int MaximumLine = 65536, MaximumMessages = 4096; const long MaximumRead = 16L * 1024 * 1024, MaximumWrite = 8L * 1024 * 1024;
     public IReadOnlyList<Task> EnteredTasks { get { lock (operations) return operations.ToArray(); } }
     public bool Unknown => poisoned || EnteredTasks.Any(x => !x.IsCompleted);
     public bool Eof => eof;
     public int AvailableWritePermits => writer.CurrentCount; // managed observation only.
-    void Admit() { original.Check(); lock (operations) { if (operations.Count >= 16384) throw new IOException("Finite protocol IO ledger exhausted before invocation."); } }
+    void Admit() { original.Check(); lock (operations) { if (poisoned) throw new IOException("Codex protocol retained UNKNOWN; no new IO may enter."); if (operations.Count >= 16384) throw new IOException("Finite protocol IO ledger exhausted before invocation."); } }
     // Only the exact SemaphoreSlim.WaitAsync(timeout, token) acquisition owns its
     // original timed wait. A second outer timer could abandon it just before a
     // successful acquisition and skip the sole permit release in WriteAsync.
     async Task<T> Enter<T>(Func<Task<T>> invoke, bool semaphoreOwnsTimeout = false)
     {
         Admit(); Task<T>? actual = null; T value = default!; Exception? primary = null; Exception? post = null;
-        try { actual = invoke(); if (actual is null) throw new IOException("Protocol operation returned no Task."); lock (operations) operations.Add(actual); value = semaphoreOwnsTimeout ? await actual.ConfigureAwait(false) : await actual.WaitAsync(original.Remaining, outerWaitTimeProvider).ConfigureAwait(false); } catch (Exception error) { primary = error; if (actual is null || !actual.IsCompleted) { poisoned = true; original.RetainUnknown(); } }
+        try { lock (operations) { Admit(); actual = invoke(); if (actual is null) throw new IOException("Protocol operation returned no Task."); operations.Add(actual); } value = semaphoreOwnsTimeout ? await actual.ConfigureAwait(false) : await actual.WaitAsync(original.Remaining, outerWaitTimeProvider).ConfigureAwait(false); } catch (Exception error) { primary = error; if (actual is null || !actual.IsCompleted) { lock (operations) { poisoned = true; original.RetainUnknown(); } } }
         try { original.Check(); } catch (Exception error) { post = error; }
         if (primary is not null && post is not null) throw new AggregateException("Protocol IO and independent original post.", primary, post); if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw(); return value;
     }
     async Task Enter(Func<Task> invoke)
     {
         Admit(); Task? actual = null; Exception? primary = null; Exception? post = null;
-        try { actual = invoke(); if (actual is null) throw new IOException("Protocol operation returned no Task."); lock (operations) operations.Add(actual); await actual.WaitAsync(original.Remaining).ConfigureAwait(false); } catch (Exception e) { primary = e; if (actual is null || !actual.IsCompleted) { poisoned = true; original.RetainUnknown(); } }
+        try { lock (operations) { Admit(); actual = invoke(); if (actual is null) throw new IOException("Protocol operation returned no Task."); operations.Add(actual); } await actual.WaitAsync(original.Remaining, outerWaitTimeProvider).ConfigureAwait(false); } catch (Exception e) { primary = e; if (actual is null || !actual.IsCompleted) { lock (operations) { poisoned = true; original.RetainUnknown(); } } }
         try { original.Check(); } catch (Exception e) { post = e; }
         if (primary is not null && post is not null) throw new AggregateException("Protocol IO and independent post.", primary, post); if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
     }
@@ -49,16 +49,16 @@ public sealed class CodexJsonlProtocol(Stream input, Stream output, ToolLifetime
     }
     public async Task WriteAsync(object message, CancellationToken token = default)
     {
-        original.Check(); token.ThrowIfCancellationRequested(); byte[] bytes; using (var buffer = new FrameBuffer()) { using (var json = new Utf8JsonWriter(buffer)) { JsonSerializer.Serialize(json, message, message.GetType(), new JsonSerializerOptions { MaxDepth = 32 }); json.Flush(); } bytes = buffer.ToArray(); }
+        Admit(); token.ThrowIfCancellationRequested(); byte[] bytes; using (var buffer = new FrameBuffer()) { using (var json = new Utf8JsonWriter(buffer)) { JsonSerializer.Serialize(json, message, message.GetType(), new JsonSerializerOptions { MaxDepth = 32 }); json.Flush(); } bytes = buffer.ToArray(); }
         if (bytes.Length == 0 || bytes.Length > MaximumLine - 1) throw new IOException("Codex outgoing JSONL finite profile exceeded.");
         var raw = new byte[bytes.Length + 1]; bytes.CopyTo(raw, 0); raw[^1] = 10; original.Check();
         Task<bool>? acquisition = null;
-        try { var acquired = await Enter(() => acquisition = writer.WaitAsync(original.Remaining, token), semaphoreOwnsTimeout: true).ConfigureAwait(false); if (!acquired) throw new TimeoutException("Original protocol writer admission timed out without acquiring permit."); original.Check(); if (writtenBytes > MaximumWrite - raw.Length) throw new IOException("Codex cumulative write bound exceeded."); lock (originals) originals.Add(raw); writtenBytes += raw.Length; await Enter(() => input.WriteAsync(raw, 0, raw.Length, token)).ConfigureAwait(false); await Enter(() => input.FlushAsync(token)).ConfigureAwait(false); }
+        try { var acquired = await Enter(() => acquisition = writer.WaitAsync(original.Remaining, token), semaphoreOwnsTimeout: true).ConfigureAwait(false); if (!acquired) throw new TimeoutException("Original protocol writer admission timed out without acquiring permit."); Admit(); if (writtenBytes > MaximumWrite - raw.Length) throw new IOException("Codex cumulative write bound exceeded."); lock (originals) originals.Add(raw); writtenBytes += raw.Length; await Enter(() => input.WriteAsync(raw, 0, raw.Length, token)).ConfigureAwait(false); await Enter(() => input.FlushAsync(token)).ConfigureAwait(false); }
         finally { if (acquisition is { IsCompletedSuccessfully: true } && acquisition.Result) writer.Release(); }
     }
     public async Task<JsonDocument?> ReadAsync(CancellationToken token = default)
     {
-        original.Check(); token.ThrowIfCancellationRequested(); if (eof) return null;
+        Admit(); token.ThrowIfCancellationRequested(); if (eof) return null;
         while (true)
         {
             if (offset == available) { available = await Enter(() => output.ReadAsync(readBuffer, 0, readBuffer.Length, token)).ConfigureAwait(false); offset = 0; if (available == 0) { eof = true; if (pending.Count != 0) throw new IOException("Truncated app-server JSONL frame."); return null; } readBytes += available; if (readBytes > MaximumRead) throw new IOException("Codex complete incoming byte profile exceeded."); }
