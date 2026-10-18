@@ -4,18 +4,21 @@ using System.Text;
 
 namespace DeliveryForge.Evidence;
 
-// Linux ordinary process ownership: root plus successful original tree termination and pipe EOF.
-// This does not claim Windows Job accounting or containment of deliberately escaped descendants.
-internal static class BoundedProcessCapture
+// Compatibility observation only: legacy root/pipe EOF is NOT Linux group
+// quiescence authority. Actual original consumers require the selected shared
+// creation-owned scope route and its private kernel-empty proof.
+internal static partial class BoundedProcessCapture
 {
-    internal static async Task<BoundedCommandCaptureResult> ExecuteAsync(CommandInvocation invocation, TimeSpan budget, int quota, CancellationToken caller)
+    internal static async Task<BoundedCommandCaptureResult> ExecuteAsync(CommandInvocation invocation, TimeSpan budget, int quota, CancellationToken caller, IOwnedDuplexBudget? enclosing = null)
     {
         var began = DateTimeOffset.UtcNow; var started = Stopwatch.GetTimestamp();
         var work = BoundedCaptureStream.WorkBudget(budget);
+        long? cleanupStarted = null;
         var stdout = new BoundedCaptureStream(quota); var stderr = new BoundedCaptureStream(quota);
         var process = new Process();
         var retention = new BoundedCaptureRetention();
         retention.Add(process); retention.Add(stdout); retention.Add(stderr);
+        var restrictive = new RestrictiveCaptureBudget(started, budget, work, enclosing, retention);
         Task? output = null, error = null;
         StreamWriter? originalInput = null;
         StreamReader? originalOutput = null, originalError = null;
@@ -35,9 +38,10 @@ internal static class BoundedProcessCapture
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+            CommandEnvironment.Complete(info,invocation);
             foreach (var argument in invocation.Arguments) info.ArgumentList.Add(argument);
             foreach (var pair in invocation.Environment ?? new Dictionary<string, string>()) info.Environment[pair.Key] = pair.Value;
-            if (caller.IsCancellationRequested || !BoundedCaptureStream.Within(started, work))
+            if (caller.IsCancellationRequested || !restrictive.WorkAvailable)
             { cancelled = caller.IsCancellationRequested; timedOut = !cancelled; }
             else
             {
@@ -61,7 +65,7 @@ internal static class BoundedProcessCapture
                 {
                     if (caller.IsCancellationRequested) { cancelled = true; break; }
                     if (stdout.Exceeded || stderr.Exceeded) break;
-                    if (!BoundedCaptureStream.Within(started, work)) { timedOut = true; break; }
+                    if (!restrictive.WorkAvailable) { timedOut = true; break; }
                     rootExited = process.HasExited;
                     if (output.IsFaulted || error.IsFaulted) { known = false; failure = "Owned pipe drain failed."; break; }
                     if (rootExited && BoundedCaptureStream.Eof(output) && BoundedCaptureStream.Eof(error)) break;
@@ -71,26 +75,29 @@ internal static class BoundedProcessCapture
         }
         catch (Exception exception) when (exception is Win32Exception or IOException or InvalidOperationException or ArgumentException)
         { known = false; failure = Bounded(exception); failureStage = stage; retention.Add(exception); }
+        if(failure is not null||timedOut||cancelled||stdout.Exceeded||stderr.Exceeded||output?.IsFaulted==true||error?.IsFaulted==true)restrictive.BeginFailureCleanup();
+        restrictive.BeginCleanup(); cleanupStarted = restrictive.CleanupStarted;
         if (created)
         {
             // If the root already exited while descendants keep pipes, tree enumeration cannot prove their ownership.
             // Retain nonquiescence rather than adopting PIDs or inferring exit from disposal.
             try
             {
+                if (!restrictive.CleanupAvailable) throw new InvalidOperationException("Original cleanup expired before exit query.");
                 rootExited = process.HasExited;
-                if (!rootExited)
+                if (!rootExited && restrictive.CleanupAvailable)
                 {
                     killAttempted = true; process.Kill(entireProcessTree: true); killSucceeded = true;
                 }
                 else if (!BoundedCaptureStream.Eof(output) || !BoundedCaptureStream.Eof(error))
                 { known = false; failure ??= "Exited Linux root with unresolved inherited pipes; descendant settlement unavailable."; }
-                while (BoundedCaptureStream.Within(started, budget))
+                while (restrictive.CleanupAvailable)
                 {
                     rootExited = process.HasExited;
                     if (rootExited && BoundedCaptureStream.Eof(output) && BoundedCaptureStream.Eof(error)) break;
                     await Task.Delay(5).ConfigureAwait(false);
                 }
-                rootExited = process.HasExited;
+                if (restrictive.CleanupAvailable) rootExited = process.HasExited;
             }
             catch (Exception exception) when (exception is Win32Exception or IOException or InvalidOperationException)
             { known = false; killType = exception.GetType().FullName; failure ??= Bounded(exception); retention.Add(exception); }
@@ -98,10 +105,10 @@ internal static class BoundedProcessCapture
         var outputStatus = output?.Status; var errorStatus = error?.Status;
         var outEof = outputStatus == TaskStatus.RanToCompletion; var errEof = errorStatus == TaskStatus.RanToCompletion;
         var quiescent = created && known && rootExited && outEof && errEof && (!killAttempted || killSucceeded) &&
-            BoundedCaptureStream.Within(started, budget);
-        int? exit = rootExited ? process.ExitCode : null;
+            restrictive.CleanupAvailable;
+        int? exit = rootExited && restrictive.CleanupAvailable ? process.ExitCode : null;
         var outBytes = stdout.Snapshot(); var errBytes = stderr.Snapshot();
-        if (((!creationAttempted && output is null && error is null) || quiescent) && BoundedCaptureStream.Within(started, budget))
+        if (((!creationAttempted && output is null && error is null) || quiescent) && restrictive.CleanupAvailable)
         {
             var dispositionKnown = true;
             var dispositionErrors = new List<Exception>(); retention.Add(dispositionErrors);
@@ -110,10 +117,10 @@ internal static class BoundedProcessCapture
             foreach (var original in new IDisposable?[] { originalInput, originalOutput, originalError, process })
             {
                 if (original is null) continue;
-                if (!BoundedCaptureStream.Within(started, budget)) { dispositionKnown = false; continue; }
+                if (!restrictive.CleanupAvailable) { dispositionKnown = false; continue; }
                 try { original.Dispose(); }
                 catch (Exception disposal) { dispositionErrors.Add(disposal); dispositionKnown = false; }
-                if (!BoundedCaptureStream.Within(started, budget)) dispositionKnown = false;
+                if (!restrictive.CleanupAvailable) dispositionKnown = false;
             }
             if (dispositionKnown) retention.ReleaseKnown();
             else { quiescent = false; failure ??= "EACH original reader/process disposition was not timely and complete."; }
@@ -138,9 +145,10 @@ internal static class BoundedProcessCapture
             }
         };
         // Unknown original process/readers/tasks remain rooted, never disposed as exit proof.
-        var completed = new BoundedCommandCaptureResult(command, outBytes, errBytes, stdout.Exceeded || stderr.Exceeded, rootExited, outEof, errEof);
+        var completed = new BoundedCommandCaptureResult(command, outBytes, errBytes, stdout.Exceeded || stderr.Exceeded, rootExited, outEof, errEof,
+            new(started, cleanupStarted, Stopwatch.Frequency));
         // Includes actual snapshot/UTF8/DTO construction; physical exit/EOF DATA stays honest.
-        return BoundedCaptureStream.Within(started, budget) ? completed : completed.RefuseLateCompletion();
+        return restrictive.CleanupAvailable ? completed : completed.RefuseLateCompletion();
     }
     private static string Bounded(Exception exception)
     {

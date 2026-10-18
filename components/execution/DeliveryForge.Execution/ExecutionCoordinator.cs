@@ -1,3 +1,4 @@
+using DeliveryForge.Coordination;
 using System.Collections.Concurrent;
 using DeliveryForge.Contracts.Models;
 using DeliveryForge.Contracts.State;
@@ -30,6 +31,22 @@ public sealed class ExecutionCoordinator : IDisposable
     private readonly ConcurrentDictionary<string, WriterLease> _writers = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<Task, string> _pendingControls = new();
     private bool _disposed;
+    private ICoordinatedEffectAdmission? _coordinationAdmission;
+    public void BindCoordinationAdmission(ICoordinatedEffectAdmission admission)
+    {
+        ArgumentNullException.ThrowIfNull(admission);
+        lock (_writers)
+        {
+            ThrowIfDisposed();
+            if (_coordinationAdmission is not null || !_writers.IsEmpty || !_pendingControls.IsEmpty)
+                throw new WorkerEnvelopeException("Coordination must bind the original idle coordinator exactly once.");
+            _coordinationAdmission = admission;
+        }
+    }
+    // Actual same-owner objects only. This does not adopt registrations or quiescence from stored JSON.
+    public bool ObserveOriginalProcessesSettled(string runId) => !_disposed && !HasPendingControlOperations(runId) &&
+        _processes.GetOwnedIdentities(runId).Count == 0;
+
 
     public ExecutionCoordinator(
         RunStore store,
@@ -138,11 +155,14 @@ public sealed class ExecutionCoordinator : IDisposable
     private async Task<OwnedProcess> StartTaskProcessCoreAsync(
         string runId, ProcessLaunch launch, CancellationToken cancellationToken)
     {
+        if (_coordinationAdmission is not null && !_processes.OwnsDescendantGroups)
+            throw new WorkerEnvelopeException("Coordinated auxiliary process birth is unsupported: the actual controller owns roots, not descendant groups.");
         ThrowIfDisposed();
         var recovery = await _store.RecoverAsync(runId, cancellationToken).ConfigureAwait(false);
         EnsureState(recovery, WorkflowState.Executing, "start a task process");
         EnsureWriterOwnership(GetPrepared(recovery).Request);
-        var owned = _processes.StartOwned(launch, runId);
+        var owned = _coordinationAdmission is null ? _processes.StartOwned(launch, runId) :
+            await _coordinationAdmission.EnterAsync(runId, () => Task.FromResult(_processes.StartOwned(launch, runId))).ConfigureAwait(false);
         try
         {
             await _store.AppendAsync(runId, "process-registered",
@@ -417,9 +437,12 @@ public sealed class ExecutionCoordinator : IDisposable
         }
         else try
             {
-                var worktree = await _worktrees.ObserveAsync(prepared.Request.Worktree, cancellationToken).ConfigureAwait(false);
-                await _worktrees.EnsureDescendsFromAsync(prepared.Request.Worktree, prepared.Request.BaseCommit,
-                    worktree.HeadCommit, cancellationToken).ConfigureAwait(false);
+                var worktree = await (requestedState==WorkflowState.Stopped
+                    ? _worktrees.ObserveOwnedCleanupAsync(prepared.Request.Worktree,cancellationToken)
+                    : _worktrees.ObserveAsync(prepared.Request.Worktree,cancellationToken)).ConfigureAwait(false);
+                if(requestedState==WorkflowState.Stopped)
+                    await _worktrees.EnsureDescendsFromOwnedCleanupAsync(prepared.Request.Worktree,prepared.Request.BaseCommit,worktree.HeadCommit,cancellationToken).ConfigureAwait(false);
+                else await _worktrees.EnsureDescendsFromAsync(prepared.Request.Worktree,prepared.Request.BaseCommit,worktree.HeadCommit,cancellationToken).ConfigureAwait(false);
                 var facts = await ObserveOwnedFactsAsync(prepared.Request, worktree, true, cancellationToken).ConfigureAwait(false);
                 limitations.Add("External dependency, lease, and authorization-revocation facts belong to later adapters and are not claimed by the issue #5 core.");
                 checkpoint = new AgentCheckpoint(prepared.Request.RequestIdentity, worktree.HeadCommit, worktree.TreeId,

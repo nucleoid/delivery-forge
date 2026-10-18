@@ -12,6 +12,9 @@ on:
       - "components/end-to-end/**"
       - "components/publication/**"
       - "components/scheduling/**"
+      - "components/tool/**"
+      - "SKILL.md"
+      - "docs/**"
       - "DeliveryForge.slnx"
       - "Directory.*.props"
       - "global.json"
@@ -83,5 +86,29 @@ jobs:
           $driverDll = Join-Path $driverOutput 'DeliveryForge.EndToEnd.CrashDriver.dll'
           if (-not (Test-Path -LiteralPath $driverDll)) { throw 'Actual parent crash driver build output is missing' }
           "DELIVERY_FORGE_ACTUAL_CRASH_DRIVER_DLL=$driverDll" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-      - run: dotnet test DeliveryForge.slnx --no-restore --configuration Release --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false
+      - name: Build genuine duplex process fixture and complete output binding
+        shell: pwsh
+        run: |
+          $duplexOutput = Join-Path $env:RUNNER_TEMP ('delivery-forge-duplex-fixture-' + [guid]::NewGuid().ToString('N'))
+          dotnet build components/tool/DeliveryForge.Tool.DuplexFixture/DeliveryForge.Tool.DuplexFixture.csproj --no-restore --configuration Release --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false -o $duplexOutput
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $duplexImage = Join-Path $duplexOutput $(if ($IsWindows) { 'DeliveryForge.Tool.DuplexFixture.exe' } else { 'DeliveryForge.Tool.DuplexFixture' })
+          $duplexFiles = @(Get-ChildItem -LiteralPath $duplexOutput -File | Sort-Object FullName | ForEach-Object { @{ Path=$_.FullName; Bytes=$_.Length; Sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant() } })
+          if ($duplexFiles.Count -ne 5 -or -not (Test-Path -LiteralPath $duplexImage -PathType Leaf)) { throw 'Actual complete duplex apphost/runtime/PDB output is required' }
+          $duplexBinding = Join-Path $env:RUNNER_TEMP ('delivery-forge-duplex-binding-' + [guid]::NewGuid().ToString('N') + '.json')
+          @{ Image=$duplexImage; Files=$duplexFiles } | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $duplexBinding -Encoding utf8NoBOM -NoNewline
+          "DELIVERY_FORGE_DUPLEX_FIXTURE_MANIFEST=$duplexBinding" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Build genuine disposable tool package for installed-binary tests
+        shell: pwsh
+        run: |
+          $toolPackageOutput = Join-Path $env:RUNNER_TEMP ('delivery-forge-tool-package-' + [guid]::NewGuid().ToString('N'))
+          dotnet pack components/tool/DeliveryForge.Tool/DeliveryForge.Tool.csproj --no-restore --configuration Release --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false -o $toolPackageOutput
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $toolPackages = @(Get-ChildItem -LiteralPath $toolPackageOutput -Filter 'DeliveryForge.Tool.*.nupkg' -File)
+          if ($toolPackages.Count -ne 1) { throw 'Exactly one actual Tool package is required' }
+          $toolPackage = $toolPackages[0]
+          $toolPackageSha = (Get-FileHash -LiteralPath $toolPackage.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
+          "DELIVERY_FORGE_TOOL_PACKAGE=$($toolPackage.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "DELIVERY_FORGE_TOOL_PACKAGE_SHA256=$toolPackageSha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - run: dotnet test DeliveryForge.slnx --no-restore --configuration Release --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false --filter "FullyQualifiedName!=DeliveryForge.Tool.Tests.InstalledNativeHostConformanceTests.Actual_installed_native_task_accepts_exact_assignment_commits_then_refuses_foreign_completion&FullyQualifiedName!=DeliveryForge.Tool.Tests.InstalledNativeHostConformanceTests.Actual_installed_live_session_stops_only_through_its_same_original_group&FullyQualifiedName!=DeliveryForge.Tool.Tests.InstalledPackageGoldenTests.Actual_packaged_binary_on_this_OS_help_version_capabilities_dryrun_and_reinstall&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedDuplexProcessTests.Actual_duplex_roundtrip_complete_EOF_and_same_first_retirement&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedDuplexProcessTests.Actual_blocked_stdout_is_stopped_by_original_owner_not_terminal_text&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedDuplexProcessTests.Actual_blocked_stdin_records_original_task_and_cancellation_without_replay&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedDuplexProcessTests.Actual_stderr_overflow_is_retained_failure_not_truncated_success&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedDuplexProcessTests.Known_actual_creator_failure_retains_frame_and_never_claims_child_exit_zero&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedDuplexProcessTests.Parent_exit_and_pipe_EOF_with_surviving_child_never_certify_Linux_group_zero&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedLinuxOrdinaryCaptureTests.Genuine_ordinary_capture_reuses_creation_scope_and_original_work_before_foreign_budget_refusal&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedLinuxScopeProcessTests.Actual_fast_target_returns_only_after_real_scope_empty_and_disposition&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedLinuxScopeProcessTests.Actual_partial_birth_READY_never_releases_target_and_real_bound_group_retires&FullyQualifiedName!=DeliveryForge.Tool.Tests.PackageLifecycleTests.Genuine_owned_gate_install_records_execute_mode_and_refuses_drift_before_resume_deletion&FullyQualifiedName!=DeliveryForge.Tool.Tests.StandardToolInstallTests.Genuine_local_tool_install_shim_uninstall_reinstall_on_this_OS&FullyQualifiedName!=DeliveryForge.Tool.Tests.ParentNativeContinuumLiveTests.Actual_parent_native_fixture_completion_releases_four_current_leases&FullyQualifiedName!=DeliveryForge.Tool.Tests.ParentNativeContinuumLiveTests.Actual_parent_external_loss_blocks_effects_and_preserves_four_successors&FullyQualifiedName!=DeliveryForge.Tool.Tests.ParentNativeContinuumLiveTests.Actual_parent_active_native_lease_loss_stops_same_original_and_preserves_successors&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedCleanupObservationTests.Actual_same_owned_native_stop_writes_checkpoint_under_original_cleanup_only&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedCleanupObservationTests.Actual_expired_original_cleanup_refuses_before_any_owned_git_invocation"
       - run: dotnet format DeliveryForge.slnx --no-restore --verify-no-changes

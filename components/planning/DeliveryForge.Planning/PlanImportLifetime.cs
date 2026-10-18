@@ -1,3 +1,4 @@
+using DeliveryForge.Evidence;
 using System.Collections.Concurrent;
 using System.Diagnostics;
 
@@ -10,13 +11,14 @@ internal sealed class PlanImportLifetime : IDisposable
     internal PlanImportResourceCollector Resources { get; } = new();
     private readonly long _started = Stopwatch.GetTimestamp();
     private readonly TimeSpan _total;
+    private readonly IOwnedDuplexBudget? _enclosing;
     private readonly CancellationTokenSource _wall;
     private readonly CancellationToken _token;
-    internal PlanImportLifetime(TimeSpan total, CancellationToken token)
-    { _total = total; _wall = CancellationTokenSource.CreateLinkedTokenSource(token); _token = _wall.Token; _wall.CancelAfter(Remaining()); }
+    internal PlanImportLifetime(TimeSpan total, CancellationToken token,IOwnedDuplexBudget? enclosing=null)
+    { _enclosing=enclosing;_total = total; _wall = CancellationTokenSource.CreateLinkedTokenSource(token); _token = _wall.Token; _wall.CancelAfter(Remaining()); }
     internal CancellationToken Token => _token;
     internal TimeSpan Remaining()
-    { Token.ThrowIfCancellationRequested(); var left = _total - Stopwatch.GetElapsedTime(_started); if (left <= TimeSpan.Zero) throw new TimeoutException("Original plan import allowance expired."); return left; }
+    { _enclosing?.CheckWork();Token.ThrowIfCancellationRequested(); var left = _total - Stopwatch.GetElapsedTime(_started);if(_enclosing is not null){var parent=_enclosing.WorkLimit-Stopwatch.GetElapsedTime(_enclosing.OriginalStarted);if(parent<left)left=parent;} if (left <= TimeSpan.Zero) throw new TimeoutException("Original plan import allowance expired."); return left; }
     internal void Check() => _ = Remaining();
     internal async Task<T> Wait<T>(Task<T> actual)
     {

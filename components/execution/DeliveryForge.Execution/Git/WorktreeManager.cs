@@ -1,3 +1,4 @@
+using DeliveryForge.Evidence;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -16,6 +17,12 @@ public sealed record WorktreeObservation(
 public sealed class WorktreeManager
 {
     private readonly string _gitExecutable;
+    private readonly ProcessCommandExecutor? _originalExecutor;
+    private readonly IOwnedDuplexBudget? _originalBudget;
+    public WorktreeManager(string gitExecutablePath,ProcessCommandExecutor actualExecutor,IOwnedDuplexBudget actualOriginal) : this(gitExecutablePath) {
+        ArgumentNullException.ThrowIfNull(actualExecutor);ArgumentNullException.ThrowIfNull(actualOriginal);
+        actualOriginal.CheckWork();_originalExecutor=actualExecutor;_originalBudget=actualOriginal;
+    }
     public WorktreeManager(string? gitExecutablePath = null)
     {
         if (gitExecutablePath is not null)
@@ -29,6 +36,19 @@ public sealed class WorktreeManager
             .Where(Path.IsPathFullyQualified).Select(path => Path.Combine(path, name)).FirstOrDefault(File.Exists)
             ?? throw new WorktreeBoundaryException("No absolute Git executable was discovered on the trusted parent PATH.");
     }
+    sealed class InvocationCounter {internal long Value;}
+    InvocationCounter actualOwnedGitInvocations=new();
+    public long ActualOwnedGitInvocations=>Interlocked.Read(ref actualOwnedGitInvocations.Value);
+    // Read-only same-original stopped-checkpoint path; never provisioning,
+    // writer acquisition, completion or writable Git under cleanup.
+    WorktreeManager OwnedCleanupObservationView()
+    {
+        if(_originalBudget is null||_originalExecutor is null)return this; // Existing legacy fixture realm only.
+        var view=new WorktreeManager(_gitExecutable,_originalExecutor,new OwnedCleanupPhaseBudget(_originalBudget));view.actualOwnedGitInvocations=actualOwnedGitInvocations;return view;
+    }
+    public Task<WorktreeObservation> ObserveOwnedCleanupAsync(string worktree,CancellationToken token=default)=>OwnedCleanupObservationView().ObserveAsync(worktree,token);
+    public Task EnsureDescendsFromOwnedCleanupAsync(string worktree,string baseCommit,string head,CancellationToken token=default)=>OwnedCleanupObservationView().EnsureDescendsFromAsync(worktree,baseCommit,head,token);
+
     internal bool IsSameDirectory(string left, string right) =>
         string.Equals(CanonicalPath(left), CanonicalPath(right), PathComparison());
 
@@ -287,6 +307,16 @@ public sealed class WorktreeManager
             }
         }
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        if (_originalExecutor is not null) {
+            _originalBudget!.CheckWork();
+            var env=start.Environment.ToDictionary(x=>x.Key,x=>x.Value??"",OperatingSystem.IsWindows()?StringComparer.OrdinalIgnoreCase:StringComparer.Ordinal);
+            Interlocked.Increment(ref actualOwnedGitInvocations.Value);
+            var actual=await _originalExecutor.ExecuteBoundedCaptureAsync(new(_gitExecutable,start.ArgumentList.ToArray(),cwd,env){EnvironmentIsComplete=true},TimeSpan.FromSeconds(30),16*1024*1024,cancellationToken,new OwnedWorkPhaseBudget(_originalBudget)).ConfigureAwait(false);
+            _originalBudget.CheckWork();var command=actual.Command;var facts=command.LifecycleDiagnostics;
+            if(actual.CaptureBoundExceeded||command.TimedOut||command.Cancelled||!command.OwnedProcessQuiescent||!actual.RootExitObserved||!actual.StandardOutputDrainCompleted||!actual.StandardErrorDrainCompleted||facts?.NativeFailure is not null||facts?.OwnedTree is not {CreationOwned:true,SettlementObserved:true,ActiveProcesses:0}||OperatingSystem.IsLinux()&&actual.OwnershipKind!=BoundedCaptureOwnershipKind.LinuxCreationOwnedScope||command.ExitCode is null)
+                throw new WorktreeBoundaryException("Actual original Git capture/group/stream closure is incomplete or failed.");
+            return(command.ExitCode.Value,Encoding.UTF8.GetString(actual.StandardOutputBytes),Encoding.UTF8.GetString(actual.StandardErrorBytes));
+        }
         using var process = Process.Start(start) ?? throw new WorktreeBoundaryException("Could not start Git.");
         var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var stderr = process.StandardError.ReadToEndAsync(cancellationToken);

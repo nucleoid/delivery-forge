@@ -1,3 +1,4 @@
+using DeliveryForge.Coordination;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
@@ -19,18 +20,20 @@ public sealed class PublicationService
     private readonly IGitHostAdapter adapter;
     private readonly IPublicationJournal journal;
     private readonly PublicationLimits limits;
+    private readonly ICoordinatedEffectAdmission? coordinationAdmission;
 
     public PublicationService(
         PublicationAuthorityHost authority,
         IPublicationFactSource facts,
         IGitHostAdapter adapter,
         IPublicationJournal journal,
-        PublicationLimits? limits = null)
+        PublicationLimits? limits = null, ICoordinatedEffectAdmission? coordinationAdmission = null)
     {
         ArgumentNullException.ThrowIfNull(authority);
         ArgumentNullException.ThrowIfNull(facts);
         ArgumentNullException.ThrowIfNull(adapter);
         ArgumentNullException.ThrowIfNull(journal);
+        this.coordinationAdmission = coordinationAdmission;
         this.authority = authority;
         this.facts = facts;
         this.adapter = adapter;
@@ -38,6 +41,8 @@ public sealed class PublicationService
         this.limits = limits ?? PublicationLimits.FixtureDefault;
         this.limits.Validate();
     }
+
+    public bool UsesCoordinationAdmission(ICoordinatedEffectAdmission actual) => ReferenceEquals(coordinationAdmission, actual);
 
     public async Task<PublicationResult> ExecuteAsync(
         PublicationRun run,
@@ -115,9 +120,11 @@ public sealed class PublicationService
             using var actionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             actionCancellation.CancelAfter(limits.ActionTimeout);
             var mutation = new GitHostMutation(intent, remote.TargetHead);
-            actionTask = action == PublicationAction.MergeNormal
+            Task<GitHostMutationResult> InvokeMutation() => action == PublicationAction.MergeNormal
                 ? adapter.MergeNormalAsync(mutation, actionCancellation.Token)
                 : adapter.CreateOrUpdatePrAsync(mutation, actionCancellation.Token);
+            actionTask = coordinationAdmission is null ? InvokeMutation() :
+                coordinationAdmission.EnterAsync(run.Definition.RunIdentity, InvokeMutation);
             GitHostMutationResult result;
             try { result = await actionTask.WaitAsync(limits.ActionTimeout, cancellationToken).ConfigureAwait(false); }
             catch
@@ -186,6 +193,7 @@ public sealed class PublicationService
 
     private async Task MarkUncertain(PublicationIntent intent)
     {
+        coordinationAdmission?.RetainUncertain(intent.RunIdentity,"Publication intent remains unresolved; no resend or lease release authority.");
         try { await Append(intent with { State = PublicationIntentState.Uncertain }, CancellationToken.None).ConfigureAwait(false); }
         catch (Exception) { /* The earlier durable Sent intent remains unresolved; no retry is authorized. */ }
     }

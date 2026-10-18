@@ -1,3 +1,4 @@
+using DeliveryForge.Evidence;
 using System.Diagnostics;
 using System.Text;
 
@@ -12,6 +13,12 @@ public sealed partial class GitRepositoryContextReader
     private static readonly TimeSpan SymlinkResolutionTimeout = TimeSpan.FromSeconds(10);
     private readonly string _gitExecutable;
     private readonly bool _importProfile;
+    private ProcessCommandExecutor? _actualExecutor;
+    private IOwnedDuplexBudget? _actualOriginal;
+    private bool _ownedGitUnknown;
+    public GitRepositoryContextReader(string trustedGit,ProcessCommandExecutor actualExecutor,IOwnedDuplexBudget actualOriginal) : this(trustedGit,false) {
+        ArgumentNullException.ThrowIfNull(actualExecutor);ArgumentNullException.ThrowIfNull(actualOriginal);actualOriginal.CheckWork();_actualExecutor=actualExecutor;_actualOriginal=actualOriginal;
+    }
     private PlanImportLifetime? _importLifetime;
     private PlanImportGitView? _importView;
     internal string ImportMetadataDigest => _importView?.Metadata.Digest ?? throw new PlanningException("Private immutable import metadata unavailable.");
@@ -28,10 +35,10 @@ public sealed partial class GitRepositoryContextReader
             OperatingSystem.IsWindows());
     }
 
-    internal static GitRepositoryContextReader ForImport(string trustedGit, PlanImportLifetime life, PlanImportGitView view)
+    internal static GitRepositoryContextReader ForImport(string trustedGit, PlanImportLifetime life, PlanImportGitView view,ProcessCommandExecutor? actualExecutor=null,IOwnedDuplexBudget? actualOriginal=null)
     {
         if (string.IsNullOrWhiteSpace(trustedGit) || !Path.IsPathFullyQualified(trustedGit)) throw new PlanningException("An explicit absolute trusted Git executable is required for import.");
-        var reader = new GitRepositoryContextReader(trustedGit, true) { _importLifetime = life, _importView = view };
+        var reader = new GitRepositoryContextReader(trustedGit, true) { _importLifetime = life, _importView = view, _actualExecutor=actualExecutor, _actualOriginal=actualOriginal };
         view.Attach(reader); return reader;
     }
     internal async Task<byte[]> ImportGitBytes(string root, CancellationToken token, params string[] arguments) =>
@@ -587,6 +594,7 @@ public sealed partial class GitRepositoryContextReader
         }
         foreach (var argument in arguments) startInfo.ArgumentList.Add(argument);
 
+        if (_actualExecutor is not null) return await RunOriginalGit(startInfo,cancellationToken,allowFailure).ConfigureAwait(false);
         if (_importProfile) return await RunImportProcess(startInfo, cancellationToken, allowFailure);
 
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);

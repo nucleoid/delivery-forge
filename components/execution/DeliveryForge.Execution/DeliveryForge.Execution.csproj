@@ -8,4 +8,7 @@
     <ProjectReference Include="../../review/DeliveryForge.Review/DeliveryForge.Review.csproj" />
     <ProjectReference Include="../../evidence/DeliveryForge.Evidence/DeliveryForge.Evidence.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../coordination/DeliveryForge.Coordination/DeliveryForge.Coordination.csproj" />
+  </ItemGroup>
 </Project>

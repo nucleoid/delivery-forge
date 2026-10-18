@@ -5,6 +5,9 @@
       "deliveryforge.contracts": {
         "type": "Project"
       },
+      "deliveryforge.coordination": {
+        "type": "Project"
+      },
       "deliveryforge.evidence": {
         "type": "Project",
         "dependencies": {

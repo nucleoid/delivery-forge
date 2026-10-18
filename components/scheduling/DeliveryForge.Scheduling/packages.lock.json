@@ -18,6 +18,7 @@
         "type": "Project",
         "dependencies": {
           "DeliveryForge.Contracts": "[1.0.0, )",
+          "DeliveryForge.Coordination": "[1.0.0, )",
           "DeliveryForge.Evidence": "[1.0.0, )",
           "DeliveryForge.Review": "[1.0.0, )"
         }
@@ -25,7 +26,8 @@
       "deliveryforge.planning": {
         "type": "Project",
         "dependencies": {
-          "DeliveryForge.Contracts": "[1.0.0, )"
+          "DeliveryForge.Contracts": "[1.0.0, )",
+          "DeliveryForge.Evidence": "[1.0.0, )"
         }
       },
       "deliveryforge.review": {

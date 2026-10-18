@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><PackAsTool>true</PackAsTool><ToolCommandName>delivery-forge</ToolCommandName><PackageId>DeliveryForge.Tool</PackageId><Version>0.1.0</Version><Description>Host-neutral Delivery Forge deterministic package entrypoint.</Description><Authors>Delivery Forge contributors</Authors><PackageLicenseExpression>MIT</PackageLicenseExpression><RepositoryUrl>https://github.com/nucleoid/delivery-forge</RepositoryUrl><PackageReadmeFile>README.md</PackageReadmeFile></PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../contracts/DeliveryForge.Contracts/DeliveryForge.Contracts.csproj" />
+    <ProjectReference Include="../../planning/DeliveryForge.Planning/DeliveryForge.Planning.csproj" />
+    <ProjectReference Include="../../execution/DeliveryForge.Execution/DeliveryForge.Execution.csproj" />
+    <ProjectReference Include="../../evidence/DeliveryForge.Evidence/DeliveryForge.Evidence.csproj" />
+    <ProjectReference Include="../../publication/DeliveryForge.Publication/DeliveryForge.Publication.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="../../../README.md" Pack="true" PackagePath="/" />
+    <None Include="../../../SKILL.md" Link="content/SKILL.md" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="tools/net10.0/any/content/" />
+    <None Include="../../../references/*.md" Link="content/references/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="tools/net10.0/any/content/references/" />
+    <None Include="../../../docs/*.md" Link="content/docs/%(Filename)%(Extension)" CopyToOutputDirectory="PreserveNewest" Pack="true" PackagePath="tools/net10.0/any/content/docs/" />
+  </ItemGroup>
+  <Import Project="LinuxBirthGate.Package.targets" />
+  <ItemGroup>
+    <ProjectReference Include="../../coordination/DeliveryForge.Coordination/DeliveryForge.Coordination.csproj" />
+  </ItemGroup>
+</Project>

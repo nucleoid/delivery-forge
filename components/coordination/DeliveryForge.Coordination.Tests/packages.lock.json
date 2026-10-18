@@ -142,6 +142,12 @@
       },
       "deliveryforge.coordination": {
         "type": "Project"
+      },
+      "deliveryforge.coordination.livecontrols": {
+        "type": "Project",
+        "dependencies": {
+          "DeliveryForge.Coordination": "[1.0.0, )"
+        }
       }
     }
   }

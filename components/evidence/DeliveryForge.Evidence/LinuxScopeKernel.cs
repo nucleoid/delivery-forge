@@ -1,0 +1,141 @@
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Text;
+namespace DeliveryForge.Evidence;
+
+// Internal kernel half of the creation-owned scope. Not constructible from public
+// DTOs/PIDs. The systemd birth owner must first bind its actual process, unit,
+// invocation and ControlGroup before calling Open. No namespace/config mutation.
+[SupportedOSPlatform("linux")]
+internal sealed class LinuxScopeKernel {
+    const int DirectoryFlag=0x10000,NoFollow=0x20000,CloseOnExec=0x80000;
+    const long Cgroup2Magic=0x63677270;
+    readonly IOwnedDuplexBudget original;readonly object gate=new();readonly List<Call> calls=[];readonly List<OwnedFd> descriptors=[];
+    OwnedFd? group,procDescriptors;Identity identity;string? originalPath;long readBytes;bool bound,stopEntered,closeEntered;
+    internal sealed class Call {internal required string Kind;internal bool Entered,Returned;internal long Result;internal int Error;internal byte[]? OriginalBuffer;internal Exception? Primary,Post;}
+    sealed class OwnedFd(int actual){internal readonly int Actual=actual;internal bool CloseEntered,CloseReturned,Closed;internal Exception? Failure;}
+    readonly record struct Identity(ulong Inode,uint Major,uint Minor,ulong Mount);
+    internal IReadOnlyList<Call> ActualCalls {get {lock(gate)return calls.ToArray();}}
+    internal bool Unknown {get {lock(gate)return calls.Any(x=>x.Entered&&!x.Returned)||descriptors.Any(x=>!x.Closed&&(x.CloseEntered||(!ReferenceEquals(x,group)&&!ReferenceEquals(x,procDescriptors))));}}
+    LinuxScopeKernel(IOwnedDuplexBudget original){this.original=original;}
+    void Check(bool cleanup){if(cleanup)_=original.CleanupRemaining;else original.CheckWork();}
+    long Native(string kind,Func<long> invoke,bool cleanup,byte[]? buffer=null) {
+        Check(cleanup);Call row;lock(gate){if(calls.Count>=16384)throw new IOException("Finite original Linux scope syscall ledger exhausted before invocation.");row=new(){Kind=kind,OriginalBuffer=buffer};calls.Add(row);}row.Entered=true;long result=0;Exception? primary=null,post=null;
+        try{result=invoke();row.Result=result;row.Error=result<0?Marshal.GetLastPInvokeError():0;row.Returned=true;if(result<0)throw new Win32Exception(row.Error,"Actual original scope syscall refused: "+kind);}
+        catch(Exception error){primary=error;row.Primary=error;}
+        try{Check(cleanup);}catch(Exception error){post=error;row.Post=error;}
+        if(primary is not null&&post is not null)throw new AggregateException("Original scope syscall and independent endpoint post.",primary,post);if(primary is not null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();if(post is not null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();return result;
+    }
+    OwnedFd OpenFd(string path,int flags,bool cleanup,OwnedFd? parent=null) {
+        OwnedFd? actual=null;
+        // Save the actual returned descriptor BEFORE the independent endpoint post.
+        Native("open:"+path,()=>{var value=parent is null?open(path,flags):openat(parent.Actual,path,flags);if(value>=0){actual=new(value);lock(gate)descriptors.Add(actual);}return value;},cleanup);
+        return actual??throw new IOException("Original open returned no retained descriptor.");
+    }
+    void Close(OwnedFd actual,bool cleanup) {
+        Check(cleanup);lock(gate){if(actual.CloseEntered)throw new IOException("Original scope descriptor first-close already entered; no retry.");actual.CloseEntered=true;}
+        try{Native("close-original-descriptor",()=>{var result=close(actual.Actual);actual.CloseReturned=true;actual.Closed=result==0;return result;},cleanup);}catch(Exception failure){actual.Failure=failure;throw;}
+    }
+    static void Relative(string path) {if(path.Length is 0 or >4096||path.Contains('\0')||path.Contains('\\')||path.Split('/').Any(x=>x is "" or "." or ".."||x.Any(char.IsControl)))throw new IOException("Closed original cgroup path required.");}
+    internal static LinuxScopeKernel Open(string actualControlGroup,string actualUnit,IOwnedDuplexBudget original) {
+        original.CheckWork();if(!OperatingSystem.IsLinux()||RuntimeInformation.ProcessArchitecture!=Architecture.X64)throw new PlatformNotSupportedException("The source-owned scope ABI profile is Linux x64 only.");
+        if(!System.Text.RegularExpressions.Regex.IsMatch(actualUnit,"^delivery-forge-[a-f0-9]{32}\\.scope$",System.Text.RegularExpressions.RegexOptions.CultureInvariant,TimeSpan.FromMilliseconds(100)))throw new IOException("Private fresh fixed unit syntax required.");
+        if(!actualControlGroup.StartsWith('/')||actualControlGroup=="/"||!actualControlGroup.EndsWith('/'+actualUnit,StringComparison.Ordinal)||!actualUnit.StartsWith("delivery-forge-",StringComparison.Ordinal)||!actualUnit.EndsWith(".scope",StringComparison.Ordinal))throw new IOException("Actual privately created scope path mismatch.");
+        var relative=actualControlGroup[1..];Relative(relative);var owner=new LinuxScopeKernel(original);
+        try {
+            var current=owner.OpenFd("/sys/fs/cgroup",DirectoryFlag|NoFollow|CloseOnExec,false);
+            foreach(var component in relative.Split('/')) {original.CheckWork();var next=owner.OpenFd(component,DirectoryFlag|NoFollow|CloseOnExec,false,current);owner.Close(current,false);current=next;}
+            owner.group=current;owner.originalPath="/sys/fs/cgroup"+actualControlGroup;owner.identity=owner.ObserveIdentity(false);owner.bound=true;
+            owner.procDescriptors=owner.OpenFd("/proc/self/fd",DirectoryFlag|NoFollow|CloseOnExec,false);
+            StatFs procFs=default;owner.Native("fstatfs-original-proc-fd-directory",()=>fstatfs(owner.procDescriptors.Actual,out procFs),false);if(procFs.Type!=0x9fa0)throw new IOException("Actual original fd observation requires procfs.");
+            if(owner.DescriptorPath(false)!=owner.originalPath)throw new IOException("Original cgroup fd link differs before populated binding.");
+            var events=owner.Read("cgroup.events",false,1024);if(!ParsePopulated(events))throw new IOException("Actual original process was not observed in a populated created scope.");
+            return owner;
+        }catch{ // Retain partially entered descriptors; do not re-open/retry/adopt.
+            lock(FailedCreations)FailedCreations.Add(owner);throw;
+        }
+    }
+    static readonly List<LinuxScopeKernel> FailedCreations=[];
+    Identity ObserveIdentity(bool cleanup) {
+        if(group is null||group.CloseEntered)throw new IOException("Original cgroup descriptor unavailable or closing.");
+        StatFs fs=default;Native("fstatfs-original-cgroup",()=>fstatfs(group.Actual,out fs),cleanup);if(fs.Type!=Cgroup2Magic)throw new IOException("Actual original filesystem is not cgroup-v2.");
+        Statx observed=default;Native("statx-original-cgroup",()=>statx(group.Actual,"",0x1800,0x17ff,out observed),cleanup);
+        if((observed.Mask&0x1103)!=0x1103||(observed.Mode&0xf000)!=0x4000)throw new IOException("Actual original cgroup directory identity unavailable.");return new(observed.Inode,observed.Major,observed.Minor,observed.Mount);
+    }
+    void Same(bool cleanup){if(!bound||ObserveIdentity(cleanup)!=identity)throw new IOException("Original cgroup kernel identity differs; no path adoption.");}
+    byte[] Read(string name,bool cleanup,int maximum) {
+        Check(cleanup);if(name is not ("cgroup.events" or "memory.max" or "memory.swap.max" or "cpuset.cpus.effective" or "cpu.max" or "pids.max"))throw new IOException("Unlisted original cgroup observation.");
+        if(readBytes>16L*1024*1024-(maximum+1))throw new IOException("Complete cgroup observation byte quota exceeded before allocation.");readBytes+=maximum+1;var data=new byte[maximum+1];var fd=OpenFd(name,NoFollow|CloseOnExec,cleanup,group);var count=0;Exception? primary=null,post=null;
+        try{while(count<data.Length){Check(cleanup);var chunk=new byte[data.Length-count];var n=(int)Native("read:"+name,()=>read(fd.Actual,chunk,(nuint)chunk.Length),cleanup,chunk);if(n==0)break;Buffer.BlockCopy(chunk,0,data,count,n);count+=n;}if(count>maximum)throw new IOException("Complete cgroup file exceeded its finite profile.");}
+        catch(Exception error){primary=error;}
+        try{Close(fd,cleanup);Check(cleanup);}catch(Exception error){post=error;}
+        if(primary is not null&&post is not null)throw new AggregateException("Actual original cgroup read/first-close.",primary,post);if(primary is not null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();if(post is not null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();return data.AsSpan(0,count).ToArray();
+    }
+    static readonly UTF8Encoding Utf8=new(false,true);
+    internal static bool ParsePopulated(byte[] complete) {
+        var text=Utf8.GetString(complete);var seen=new HashSet<string>(StringComparer.Ordinal);bool? populated=null;
+        foreach(var line in text.Split('\n',StringSplitOptions.RemoveEmptyEntries)){var row=line.Split(' ');if(row.Length!=2||row[0] is not ("populated" or "frozen")||row[1] is not ("0" or "1")||!seen.Add(row[0]))throw new IOException("Malformed complete cgroup.events observation.");if(row[0]=="populated")populated=row[1]=="1";}
+        return populated??throw new IOException("Actual populated value missing.");
+    }
+    string DescriptorPath(bool cleanup) {
+        Check(cleanup);if(group is null||group.CloseEntered||procDescriptors is null||procDescriptors.CloseEntered)throw new IOException("Actual retained cgroup/proc descriptors required.");
+        var bytes=new byte[8193];var count=(int)Native("readlinkat-original-cgroup-descriptor",()=>readlinkat(procDescriptors.Actual,group.Actual.ToString(System.Globalization.CultureInfo.InvariantCulture),bytes,(nuint)bytes.Length),cleanup,bytes);
+        if(count<=0||count>8192)throw new IOException("Complete original descriptor link exceeded finite profile.");var text=Utf8.GetString(bytes,0,count);Check(cleanup);return text;
+    }
+    bool DeletedOriginal(bool cleanup) {
+        Same(cleanup);var link=DescriptorPath(cleanup);Same(cleanup);
+        if(link==originalPath)return false;
+        // This is the actual retained fd's procfs link, never a caller path or
+        // ENOENT/adopted replacement. Names cannot themselves end in this suffix:
+        // the privately minted unit is strictly delivery-forge-<hex>.scope.
+        if(link==originalPath+" (deleted)")return true;
+        throw new IOException("Original cgroup descriptor was renamed or substituted; retain UNKNOWN.");
+    }
+    internal bool Empty(bool cleanup) {
+        lock(gate) {
+            if(DeletedOriginal(cleanup))return true;
+            var raw=Read("cgroup.events",cleanup,1024);var populated=ParsePopulated(raw);Same(cleanup);return !populated;
+        }
+        // A missing NAME, manager inactive state or root EOF never proves zero.
+        // Exact retained-kernel-fd unlink is a distinct supported-kernel proof:
+        // cgroup_destroy_locked rejects populated/live children before disabling
+        // migration and removing kernfs (Linuxv6.8 cgroup.c5536..5568).
+    }
+    internal void RequireLimits(string expectedCpus,bool cleanup){lock(gate)RequireLimitsCore(expectedCpus,cleanup);}
+    void RequireLimitsCore(string expectedCpus,bool cleanup) {
+        Same(cleanup);
+        string Text(string name)=>Utf8.GetString(Read(name,cleanup,256)).TrimEnd('\n');
+        if(Text("memory.max")!="4294967296"||Text("memory.swap.max")!="0"||Text("cpuset.cpus.effective")!=expectedCpus||Text("pids.max")!="128")throw new IOException("Actual scope limits differ from fixed twoCPU/4GiB/128task profile.");
+        var cpu=Text("cpu.max").Split(' ');if(cpu.Length!=2||!ulong.TryParse(cpu[0],out var quota)||!ulong.TryParse(cpu[1],out var period)||period==0||quota/period>2||quota%period!=0||quota/period!=2)throw new IOException("Actual cgroup CPU quota is not exactly two CPUs.");Same(cleanup);
+    }
+    internal void Kill(bool cleanup){lock(gate)KillCore(cleanup);}
+    void KillCore(bool cleanup) {
+        Same(cleanup);lock(gate){if(stopEntered)throw new IOException("Actual original cgroup kill already entered; no retry.");stopEntered=true;}
+        var fd=OpenFd("cgroup.kill",1|NoFollow|CloseOnExec,cleanup,group);var data=new byte[]{(byte)'1'};Exception? primary=null,post=null;
+        try{if(Native("write-original-cgroup.kill",()=>write(fd.Actual,data,1),cleanup,data)!=1)throw new IOException("Original cgroup kill did not accept exactly one byte.");}catch(Exception failure){primary=failure;}
+        try{Close(fd,cleanup);Same(cleanup);}catch(Exception failure){post=failure;}
+        if(primary is not null&&post is not null)throw new AggregateException("Actual scope kill/independent post.",primary,post);if(primary is not null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();if(post is not null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+    }
+    internal void CloseEmpty(bool cleanup){lock(gate)CloseEmptyCore(cleanup);}
+    internal bool KnownDisposed {get {lock(gate)return group is {Closed:true}&&procDescriptors is {Closed:true}&&descriptors.All(x=>x.Closed)&&calls.All(x=>!x.Entered||x.Returned);}}
+    void CloseEmptyCore(bool cleanup) {
+        if(!Empty(cleanup)||Unknown)throw new IOException("Actual original cgroup is not known empty/settled; retain.");if(closeEntered)throw new IOException("Scope first disposition already entered.");closeEntered=true;
+        Exception? primary=null,post=null;try{Close(group!,cleanup);}catch(Exception error){primary=error;}
+        // Close proc observer independently only after the actual dependent group
+        // fd returned closed; a failed post does not erase that physical fact.
+        if(group is {Closed:true}&&procDescriptors is not null){try{Close(procDescriptors,cleanup||primary is not null);}catch(Exception error){post=error;}}
+        if(primary is not null&&post is not null)throw new AggregateException(primary,post);if(primary is not null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();if(post is not null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+    }
+    [StructLayout(LayoutKind.Explicit,Size=256)]struct StatFs{[FieldOffset(0)]public long Type;}
+    [StructLayout(LayoutKind.Explicit,Size=256)]struct Statx{[FieldOffset(0)]public uint Mask;[FieldOffset(28)]public ushort Mode;[FieldOffset(32)]public ulong Inode;[FieldOffset(136)]public uint Major;[FieldOffset(140)]public uint Minor;[FieldOffset(144)]public ulong Mount;}
+    [DllImport("libc",SetLastError=true)]static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)]string path,int flags);
+    [DllImport("libc",SetLastError=true)]static extern int openat(int fd,[MarshalAs(UnmanagedType.LPUTF8Str)]string path,int flags);
+    [DllImport("libc",SetLastError=true)]static extern int close(int fd);
+    [DllImport("libc",SetLastError=true)]static extern nint read(int fd,[Out]byte[] buffer,nuint count);
+    [DllImport("libc",SetLastError=true)]static extern nint write(int fd,byte[] buffer,nuint count);
+    [DllImport("libc",SetLastError=true)]static extern nint readlinkat(int fd,[MarshalAs(UnmanagedType.LPUTF8Str)]string name,[Out]byte[] buffer,nuint maximum);
+    [DllImport("libc",SetLastError=true)]static extern int fstatfs(int fd,out StatFs value);
+    [DllImport("libc",SetLastError=true)]static extern int statx(int fd,[MarshalAs(UnmanagedType.LPUTF8Str)]string path,int flags,uint mask,out Statx value);
+}

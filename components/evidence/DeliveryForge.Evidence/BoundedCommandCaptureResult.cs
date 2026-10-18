@@ -1,5 +1,10 @@
 namespace DeliveryForge.Evidence;
 
+// Observational scalars only; they cannot authorize an adopted process or a new lifetime.
+public enum BoundedCaptureOwnershipKind { LegacyObservation, LinuxCreationOwnedScope }
+
+public sealed record BoundedCaptureTimingObservation(long OriginalStartedTimestamp, long? CleanupStartedTimestamp, long StopwatchFrequency);
+
 /// <summary>Immutable observational data, without process handles or signaling authority.
 /// Quotas and prefixes count raw bytes, including partial UTF8 sequences, rather than UTF16 characters.</summary>
 public sealed class BoundedCommandCaptureResult
@@ -8,9 +13,10 @@ public sealed class BoundedCommandCaptureResult
     private readonly byte[] _standardError;
 
     internal BoundedCommandCaptureResult(CommandResult command, byte[] standardOutput, byte[] standardError,
-        bool captureBoundExceeded, bool rootExitObserved, bool standardOutputDrainCompleted, bool standardErrorDrainCompleted)
+        bool captureBoundExceeded, bool rootExitObserved, bool standardOutputDrainCompleted, bool standardErrorDrainCompleted,
+        BoundedCaptureTimingObservation? timing = null, BoundedCaptureOwnershipKind ownershipKind = BoundedCaptureOwnershipKind.LegacyObservation)
     {
-        Command = command;
+        Command = command; Timing = timing; OwnershipKind = ownershipKind;
         _standardOutput = (byte[])standardOutput.Clone();
         _standardError = (byte[])standardError.Clone();
         CaptureBoundExceeded = captureBoundExceeded;
@@ -20,6 +26,8 @@ public sealed class BoundedCommandCaptureResult
     }
 
     public CommandResult Command { get; }
+    public BoundedCaptureOwnershipKind OwnershipKind { get; }
+    public BoundedCaptureTimingObservation? Timing { get; }
     public byte[] StandardOutputBytes => (byte[])_standardOutput.Clone();
     public byte[] StandardErrorBytes => (byte[])_standardError.Clone();
     public bool CaptureBoundExceeded { get; }
@@ -29,7 +37,7 @@ public sealed class BoundedCommandCaptureResult
 
     private BoundedCommandCaptureResult(BoundedCommandCaptureResult actual, CommandResult command)
     {
-        Command = command;
+        Command = command; Timing = actual.Timing; OwnershipKind = actual.OwnershipKind;
         // Internal immutable storage is never returned directly; public byte getters still clone.
         _standardOutput = actual._standardOutput; _standardError = actual._standardError;
         CaptureBoundExceeded = actual.CaptureBoundExceeded; RootExitObserved = actual.RootExitObserved;

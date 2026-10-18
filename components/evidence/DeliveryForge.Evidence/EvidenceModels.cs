@@ -103,7 +103,13 @@ public sealed record CommandInvocation(
     string FileName,
     IReadOnlyList<string> Arguments,
     string WorkingDirectory,
-    IReadOnlyDictionary<string, string>? Environment = null);
+    IReadOnlyDictionary<string, string>? Environment = null)
+{
+    // Explicit finite complete environment snapshot from the actual containing
+    // owner (e.g. Git's already-sanitized ProcessStartInfo). Default inheritance
+    // is unchanged; this DATA flag grants no native or configuration authority.
+    public bool EnvironmentIsComplete { get; init; }
+}
 
 public sealed record CommandResult(
     int? ExitCode,
