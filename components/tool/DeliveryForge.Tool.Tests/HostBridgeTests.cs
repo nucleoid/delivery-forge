@@ -87,4 +87,88 @@ public sealed class HostBridgeTests
         adapter.MarkOwnerCompleted(binding); Assert.False(adapter.HasUnknownCalls(request.RunId));
     }
 
+
+    static ExecutionCoordinator IdleCoordinator(ProcessControl processes) => new(
+        new RunStore(Path.Combine(Path.GetTempPath(), "forge-bridge-retention-" + Guid.NewGuid().ToString("N"))),
+        new DeliveryForge.Execution.Git.WorktreeManager(), processes);
+
+    [Fact]
+    public async Task Genuine_file_constructor_unknown_survives_locally_settled_bridge_close()
+    {
+        await using var processes = new ProcessControl();
+        using var coordinator = IdleCoordinator(processes);
+        var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var token = life.Token;
+        var missingParent = Path.Combine(Path.GetTempPath(), "forge-missing-parent-" + Guid.NewGuid().ToString("N"));
+        Assert.False(Directory.Exists(missingParent));
+        Assert.Throws<DirectoryNotFoundException>(() => BoundedFiles.WriteNew(Path.Combine(missingParent, "actual.bin"), new byte[] { 1 }, life));
+        Assert.True(life.HasRetainedUnknown);
+        var frame = new HostBridgeFrame("settled-file-failure", life, coordinator, () => false, true);
+        Assert.False(frame.Unknown);
+        life.Dispose();
+
+        Assert.True(frame.CloseWhenSettled());
+
+        Assert.True(life.HasRetainedUnknown);
+        Assert.Equal(token, life.Token);
+        // The actual entered constructor did not return a FileStream. Its
+        // existing conservative UNKNOWN and original are retained, not retried
+        // or cleared by a locally unrelated settled bridge frame.
+    }
+
+    [Fact]
+    public async Task Second_original_frame_obligation_survives_first_frame_settlement()
+    {
+        await using var processes = new ProcessControl();
+        using var coordinator = IdleCoordinator(processes);
+        var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var token = life.Token;
+        var first = new HostBridgeFrame("first-obligation", life, coordinator, () => false, false);
+        var second = new HostBridgeFrame("second-obligation", life, coordinator, () => false, false);
+        var firstPending = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondPending = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var firstActual = first.Enter(() => firstPending.Task);
+        var secondActual = second.Enter(() => secondPending.Task);
+        Assert.False(first.CloseWhenSettled());
+        Assert.False(second.CloseWhenSettled());
+        life.Dispose();
+
+        firstPending.SetResult(1);
+        Assert.Equal(1, await firstActual.WaitAsync(life.Remaining, TestContext.Current.CancellationToken));
+        Assert.True(first.CloseWhenSettled());
+
+        Assert.True(life.HasRetainedUnknown);
+        Assert.Equal(token, life.Token);
+        Assert.False(secondPending.Task.IsCompleted);
+        Assert.Same(secondPending.Task, Assert.Single(second.EnteredTasks));
+        secondPending.SetResult(2);
+        Assert.Equal(2, await secondActual.WaitAsync(life.Remaining, TestContext.Current.CancellationToken));
+        Assert.True(second.CloseWhenSettled());
+        Assert.False(life.HasRetainedUnknown);
+        Assert.Throws<ObjectDisposedException>(life.CheckWork);
+        Assert.Throws<ObjectDisposedException>(second.EnterRoute);
+    }
+
+    [Fact]
+    public async Task Bridge_only_original_task_settlement_releases_its_token_and_pending_disposal()
+    {
+        await using var processes = new ProcessControl();
+        using var coordinator = IdleCoordinator(processes);
+        var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var frame = new HostBridgeFrame("bridge-only-obligation", life, coordinator, () => false, false);
+        var pending = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var actual = frame.Enter(() => pending.Task);
+        Assert.Same(pending.Task, Assert.Single(frame.EnteredTasks));
+        Assert.False(frame.CloseWhenSettled());
+        Assert.True(life.HasRetainedUnknown);
+        life.Dispose();
+
+        pending.SetResult(7);
+        Assert.Equal(7, await actual.WaitAsync(life.Remaining, TestContext.Current.CancellationToken));
+        Assert.True(frame.CloseWhenSettled());
+
+        Assert.False(frame.Unknown);
+        Assert.False(life.HasRetainedUnknown);
+        Assert.Throws<ObjectDisposedException>(life.CheckWork);
+    }
 }

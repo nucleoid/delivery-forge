@@ -9,6 +9,7 @@ public sealed class ToolLifetime : IDisposable, DeliveryForge.Evidence.IOwnedDup
 {
     readonly long started = Stopwatch.GetTimestamp(); TimeSpan total, work; readonly CancellationTokenSource linked;
     readonly object gate = new(); long cleanup; bool disposed, retainedUnknown, disposeRequested; ToolFailureAttention? attention;
+    readonly HashSet<HostBridgeFrame> retainedBridgeFrames = new(ReferenceEqualityComparer.Instance);
     public ToolLifetime(TimeSpan total, CancellationToken token = default)
     {
         if (total <= TimeSpan.Zero || total > TimeSpan.FromSeconds(1200)) throw new ArgumentOutOfRangeException(nameof(total)); this.total = total;
@@ -24,14 +25,36 @@ public sealed class ToolLifetime : IDisposable, DeliveryForge.Evidence.IOwnedDup
     public TimeSpan Remaining { get { Check(); return work - Stopwatch.GetElapsedTime(started); } }
     public void Check() { lock (gate) { ObjectDisposedException.ThrowIf(disposed, this); linked.Token.ThrowIfCancellationRequested(); if (cleanup != 0 || Stopwatch.GetElapsedTime(started) >= work) throw new TimeoutException("Original tool WORK endpoint expired."); } }
     public TimeSpan CleanupRemaining { get { lock (gate) { ObjectDisposedException.ThrowIf(disposed, this); if (cleanup == 0) cleanup = Stopwatch.GetTimestamp(); var whole = total - Stopwatch.GetElapsedTime(started); var once = TimeSpan.FromSeconds(60) - Stopwatch.GetElapsedTime(cleanup); var left = whole < once ? whole : once; if (left <= TimeSpan.Zero) throw new TimeoutException("SAME original whole/earliest once60 endpoint expired."); return left; } } }
-    internal bool HasRetainedUnknown { get { lock (gate) return retainedUnknown; } }
+    internal bool HasRetainedUnknown { get { lock (gate) return retainedUnknown || retainedBridgeFrames.Count != 0; } }
     internal void BindAttention(ToolFailureAttention actual) { lock (gate) { if (attention is not null) throw new IOException("Original failure attention already bound."); attention = actual; } }
     internal void BeginFailureCleanup() { _ = CleanupRemaining; attention?.EmitOnce(); }
     void DeliveryForge.Evidence.IOwnedFailureCleanup.BeginFailureCleanup() => BeginFailureCleanup();
     void DeliveryForge.Evidence.IOwnedBudgetUnknownRetention.PreserveUnknown() => RetainUnknown();
     internal void RetainUnknown() { lock (gate) retainedUnknown = true; }
-    internal void ReleaseSettled() { lock (gate) { retainedUnknown = false; if (disposeRequested && !disposed) { linked.Dispose(); disposed = true; } } }
-    public void Dispose() { lock (gate) { disposeRequested = true; if (disposed || retainedUnknown) return; linked.Dispose(); disposed = true; } }
+    internal void RetainBridgeUnknown(HostBridgeFrame frame)
+    {
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (!ReferenceEquals(frame.Lifetime, this)) throw new ArgumentException("Bridge obligation belongs to a different original.", nameof(frame));
+            if (!retainedBridgeFrames.Contains(frame) && retainedBridgeFrames.Count >= 128) throw new IOException("Finite original bridge obligations exhausted before operation entry.");
+            retainedBridgeFrames.Add(frame);
+        }
+    }
+    internal void ReleaseSettledBridge(HostBridgeFrame frame)
+    {
+        lock (gate)
+        {
+            if (!ReferenceEquals(frame.Lifetime, this)) throw new ArgumentException("Bridge settlement belongs to a different original.", nameof(frame));
+            retainedBridgeFrames.Remove(frame);
+            DisposeWhenKnown();
+        }
+    }
+    void DisposeWhenKnown()
+    {
+        if (disposeRequested && !disposed && !retainedUnknown && retainedBridgeFrames.Count == 0) { linked.Dispose(); disposed = true; }
+    }
+    public void Dispose() { lock (gate) { disposeRequested = true; DisposeWhenKnown(); } }
 }
 public static class BoundedFiles
 {

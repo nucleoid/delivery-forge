@@ -60,9 +60,20 @@ public static partial class PackageLifecycle
                 if ((attributes & FileAttributes.Directory) != 0) { if (!actualDirs.Add(relative)) throw new IOException("Removal directory case collision before any resumed deletion."); stack.Push(path); } else if (!actualFiles.Add(relative)) throw new IOException("Removal file case collision before any resumed deletion.");
             }
             if (!actualFiles.SetEquals(expectedFiles) || !actualDirs.SetEquals(expectedDirs)) throw new IOException("Remaining removal topology changed.");
-            // New bound executable metadata is checked for EVERY remaining
-            // owned role before the first resumed deletion, not just at its row.
-            foreach (var row in plan.Manifest.Files.Where(row => !removed.Contains("file:" + row.Path))) RequireOwnedMode(Inside(prefix, row.Path), row, life);
+            // Revalidate every remaining original's content and executable mode
+            // before publishing any resumed intent or deleting an earlier file.
+            foreach (var row in plan.Manifest.Files.Where(row => !removed.Contains("file:" + row.Path)))
+            {
+                var target = Inside(prefix, row.Path);
+                RequireOwnedMode(target, row, life);
+                var actual = BoundedFiles.Read(target, life);
+                if (actual.LongLength != row.Bytes || BoundedFiles.Sha(actual) != row.Sha256) throw new IOException("Owned removal input changed before any resumed deletion.");
+            }
+            if (!removed.Contains("file:" + ManifestName))
+            {
+                var actual = BoundedFiles.Read(Inside(prefix, ManifestName), life, 1048576);
+                if (BoundedFiles.Sha(actual) != receipt.Installation.ManifestSha256) throw new IOException("Install manifest changed before any resumed deletion.");
+            }
         }
         else if (Directory.Exists(receipt.Installation.Prefix) || File.Exists(receipt.Installation.Prefix)) throw new IOException("Removed prefix was recreated; never adopt it.");
         for (var i = completed; i < plan.Steps.Count; i++)

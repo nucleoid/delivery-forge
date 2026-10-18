@@ -45,6 +45,34 @@ public sealed class PackageLifecycleTests
         Assert.Throws<IOException>(() => PackageLifecycle.Uninstall(installed, life)); Assert.True(File.Exists(Path.Combine(f.Prefix, ".delivery-forge-install.json"))); Assert.True(File.Exists(target));
     }
     [Fact]
+    public void Actual_post_BeginRemoval_later_file_drift_refuses_before_any_resumed_delete()
+    {
+        using var f = new Fixture();
+        f.Package();
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var installed = PackageLifecycle.Install(f.Archive, f.Prefix, f.Host(), life);
+        var removal = PackageLifecycle.BeginRemoval(installed, life);
+        var plan = BoundedFiles.ReadJson<RemovalPlan>(Path.Combine(removal.JournalDirectory, "plan.json"), life);
+        const string laterRelative = "payload/content/SKILL.md";
+        var laterStep = "file:" + laterRelative;
+        var firstStep = plan.Steps.First(step => step.StartsWith("file:", StringComparison.Ordinal));
+        Assert.NotEqual(firstStep, laterStep);
+        Assert.True(plan.Steps.ToList().IndexOf(firstStep) < plan.Steps.ToList().IndexOf(laterStep));
+        var earlierPath = Path.Combine(f.Prefix, firstStep["file:".Length..]);
+        var earlierBytes = File.ReadAllBytes(earlierPath);
+        var changedPath = Path.Combine(f.Prefix, laterRelative);
+        File.AppendAllText(changedPath, " changed after BeginRemoval");
+        var expected = Directory.GetFiles(f.Prefix, "*", SearchOption.AllDirectories).ToDictionary(path => path, File.ReadAllBytes, StringComparer.Ordinal);
+
+        Assert.Throws<IOException>(() => PackageLifecycle.ContinueRemoval(removal, life));
+
+        Assert.Equal(earlierBytes, File.ReadAllBytes(earlierPath));
+        Assert.Equal(expected.Keys.Order(StringComparer.Ordinal), Directory.GetFiles(f.Prefix, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal));
+        foreach (var row in expected) Assert.Equal(row.Value, File.ReadAllBytes(row.Key));
+        Assert.Empty(Directory.GetFiles(removal.JournalDirectory, "*.entered.json"));
+        Assert.Empty(Directory.GetFiles(removal.JournalDirectory, "*.returned.json"));
+    }
+    [Fact]
     public void Unknown_file_or_empty_directory_refuses_preserving_user_data()
     {
         using var f = new Fixture(); f.Package(); using var life = new ToolLifetime(TimeSpan.FromSeconds(30)); var installed = PackageLifecycle.Install(f.Archive, f.Prefix, f.Host(), life); var added = Path.Combine(f.Prefix, "foreign.txt"); File.WriteAllText(added, "user");

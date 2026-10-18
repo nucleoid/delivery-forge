@@ -145,10 +145,10 @@ public sealed class HostBridgeFrame
     readonly List<Operation> operations = []; readonly object operationGate = new(); int activeRoutes;
     public IReadOnlyList<Task> EnteredTasks { get { lock (operationGate) return operations.Where(x => x.Task is not null).Select(x => x.Task!).ToArray(); } }
     public bool InvocationUnknown { get { lock (operationGate) return operations.Any(x => x.Entered && (!x.Returned || x.Task is null)); } }
-    internal void EnterRoute() { lock (operationGate) activeRoutes++; }
+    internal void EnterRoute() { lock (operationGate) { Lifetime.RetainBridgeUnknown(this); activeRoutes++; } }
     internal void LeaveRoute() { lock (operationGate) activeRoutes--; }
     bool RouteActive { get { lock (operationGate) return activeRoutes != 0; } }
-    Operation AdmitOperation() { lock (operationGate) { if (operations.Count >= 1024) throw new IOException("Finite original operation ledger exhausted."); var row = new Operation { Entered = true }; operations.Add(row); return row; } }
+    Operation AdmitOperation() { lock (operationGate) { if (operations.Count >= 1024) throw new IOException("Finite original operation ledger exhausted."); Lifetime.RetainBridgeUnknown(this); var row = new Operation { Entered = true }; operations.Add(row); return row; } }
     public Exception? Primary { get; internal set; }
     public Exception? Post { get; internal set; }
     public AgentRequest? Request { get; internal set; }
@@ -178,7 +178,7 @@ public sealed class HostBridgeFrame
         if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
         if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw(); return value;
     }
-    public bool CloseWhenSettled() { if (Unknown) { Lifetime.RetainUnknown(); return false; } Lifetime.ReleaseSettled(); if (OwnsOriginal) Lifetime.Dispose(); return true; }
+    public bool CloseWhenSettled() { lock (operationGate) { if (Unknown) { Lifetime.RetainBridgeUnknown(this); return false; } Lifetime.ReleaseSettledBridge(this); if (OwnsOriginal) Lifetime.Dispose(); return true; } }
 }
 public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostAdapter adapter, bool requireCoordination = false)
 {
