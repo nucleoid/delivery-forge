@@ -70,7 +70,28 @@ public sealed class OwnedDuplexProcessTests
     public async Task Actual_blocked_stdin_records_original_task_and_cancellation_without_replay()
     {
         using var affinity = new Affinity(); await using var run = new Run("input-block"); await run.Ready(); using var cancel = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken); var data = new byte[65536]; Task? originalWrite = null; for (var index = 0; index < 128; index++) { run.Original.Check(); originalWrite = run.Session.Input.WriteAsync(data, 0, data.Length, cancel.Token); if (!originalWrite.IsCompleted) break; await originalWrite; }
-        Assert.NotNull(originalWrite); Assert.False(originalWrite.IsCompleted); Assert.True(run.Session.HasUnknownIo); cancel.Cancel(); var retirement = run.Session.RetireAsync(true); try { await originalWrite; } catch (OperationCanceledException) { } catch (IOException) { }
+        Assert.NotNull(originalWrite); Assert.False(originalWrite.IsCompleted); Assert.True(run.Session.HasUnknownIo);
+        var pendingWrite = Assert.Single(run.Session.ActualIo.Where(x => x.Kind == "stdin-write" && x.Unknown));
+        Assert.NotNull(pendingWrite.ActualTask);
+        cancel.Cancel(); var retirement = run.Session.RetireAsync(true);
+        // Retirement latches cleanup synchronously. Preserve the cancelled actual
+        // write and its independent WORK post-check rather than dropping either.
+        var failure = await Record.ExceptionAsync(async () => await originalWrite);
+        Assert.NotNull(failure); Assert.True(cancel.IsCancellationRequested);
+        Assert.True(pendingWrite.Primary is OperationCanceledException or IOException);
+        if (failure is AggregateException combined)
+        {
+            Assert.Equal(2, combined.InnerExceptions.Count);
+            Assert.Same(pendingWrite.Primary, combined.InnerExceptions[0]);
+            Assert.Same(pendingWrite.Post, combined.InnerExceptions[1]);
+            Assert.IsType<TimeoutException>(pendingWrite.Post);
+        }
+        else
+        {
+            Assert.Same(pendingWrite.Primary, failure);
+            Assert.Null(pendingWrite.Post);
+        }
+        Assert.True(pendingWrite.ActualTask.IsCompleted); Assert.False(pendingWrite.Unknown);
         var closed = await retirement; Assert.True(closed.RootExited); Assert.Contains(run.Session.ActualIo, x => x.Kind == "stdin-write" && x.ActualTask is not null); Assert.Same(run.Session.RetireAsync(true), run.Session.RetireAsync(true)); if (closed.KnownClosed) Assert.True(closed.InputCloseReturned && closed.DispositionReturned); else Assert.True(run.Session.HasRetainedOriginalOwner); run.Preserve(closed);
     }
     [Fact(Timeout = 90000)]
