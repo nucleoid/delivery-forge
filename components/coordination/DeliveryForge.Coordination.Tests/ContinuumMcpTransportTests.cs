@@ -223,9 +223,10 @@ public sealed class ContinuumMcpTransportTests
         Directory.CreateDirectory(root);
         using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
         var cancelOnce = true;
+        string? flushedPath = null;
         var store = new FileCoordinationCheckpointStore(root, beforeReadbackForContractTests: path =>
         {
-            if (cancelOnce && path.EndsWith("-record.json", StringComparison.Ordinal)) { cancelOnce = false; cancelled.Cancel(); }
+            if (cancelOnce && path.EndsWith("-record.json", StringComparison.Ordinal)) { flushedPath = path; cancelOnce = false; cancelled.Cancel(); }
         }, firstCloseForContractTests: null, exclusiveCreatedForContractTests: null);
         try
         {
@@ -233,7 +234,12 @@ public sealed class ContinuumMcpTransportTests
             var claim = await store.ClaimWriterAsync(lifecycle, Guid.NewGuid().ToString("D"), null, TestContext.Current.CancellationToken);
             var first = new CoordinationCheckpointRecord(1, 1, 1, CoordinationIntentKind.Acquire, claim.WriterEpoch, 1, null, null);
             await Assert.ThrowsAsync<AggregateException>(() => store.AppendAsync(claim, 1, first, cancelled.Token));
-            Assert.True(File.Exists(Path.Combine(root, lifecycle, "000000000001-record.json")));
+            Assert.NotNull(flushedPath);
+            var originalBytes = JsonSerializer.SerializeToUtf8Bytes(first);
+            var expectedName = $"000000000001-sha256-{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(originalBytes))}-record.json";
+            Assert.Equal(Path.Combine(root, lifecycle, expectedName), flushedPath);
+            Assert.True(File.Exists(flushedPath));
+            Assert.Equal(originalBytes, await File.ReadAllBytesAsync(flushedPath, TestContext.Current.CancellationToken));
             await Assert.ThrowsAsync<CoordinationUncertainException>(() => store.AppendAsync(claim, 1, first, TestContext.Current.CancellationToken));
             var rows = await store.ReadLifecycleAsync(lifecycle, TestContext.Current.CancellationToken);
             Assert.Equal(first, Assert.Single(rows));

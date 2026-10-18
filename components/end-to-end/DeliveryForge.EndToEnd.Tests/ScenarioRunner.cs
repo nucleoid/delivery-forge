@@ -210,7 +210,7 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
         {
             normalized = new Mutate4CSharpAdapter().Normalize(candidate,
                 ToolCapability.Unsupported("mutate4csharp", "No installed-outcome certification supplied by this fixture input."));
-            invariants["mutation-certification-unavailable"] = normalized.Outcome == GateOutcome.Incomplete && !normalized.ProductionCapable;
+            invariants["mutation-certification-unavailable"] = normalized.Outcome == GateOutcome.Error && !normalized.ProductionCapable;
             invariants["preview-success-not-authority"] = normalized.Outcome != GateOutcome.Pass && !normalized.ProductionCapable;
         }
         if (!invariants["protected-policy-retained"])

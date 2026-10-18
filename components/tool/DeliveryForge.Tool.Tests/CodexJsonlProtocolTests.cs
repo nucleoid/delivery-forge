@@ -40,8 +40,90 @@ public sealed class CodexJsonlProtocolTests
     public async Task Actual_writer_timeout_does_not_release_an_unacquired_permit_or_enter_second_write()
     {
         using var life = new ToolLifetime(TimeSpan.FromMilliseconds(400), TestContext.Current.CancellationToken); using var input = new HeldWriter(); using var output = new MemoryStream(); var codec = new CodexJsonlProtocol(input, output, life); var first = codec.WriteAsync(new { id = 1, method = "first" }, TestContext.Current.CancellationToken); await input.Entered.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken); var second = codec.WriteAsync(new { id = 2, method = "second" }, TestContext.Current.CancellationToken); var errors = new List<Exception>();
-        try { foreach (var actual in new[] { first, second }) { try { await actual; } catch (Exception error) { errors.Add(error); } } Assert.Equal(1, input.ActualWrites); Assert.Equal(1, codec.AvailableWritePermits); Assert.Equal(2, errors.Count); Assert.DoesNotContain(errors.SelectMany(x => x is AggregateException aggregate ? (IEnumerable<Exception>)aggregate.Flatten().InnerExceptions : new[] { x }), x => x is SemaphoreFullException); }
+        try { foreach (var actual in new[] { first, second }) { try { await actual; } catch (Exception error) { errors.Add(error); } } Assert.Equal(1, input.ActualWrites); Assert.Equal(1, codec.AvailableWritePermits); Assert.Equal(2, errors.Count); Assert.True(codec.Unknown); Assert.True(life.HasRetainedUnknown); Assert.DoesNotContain(errors.SelectMany(x => x is AggregateException aggregate ? (IEnumerable<Exception>)aggregate.Flatten().InnerExceptions : new[] { x }), x => x is SemaphoreFullException); }
         finally { input.Release.TrySetResult(); foreach (var actual in codec.EnteredTasks) { try { await actual.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken); } catch (OperationCanceledException) { } } }
+        Assert.Equal(1, codec.AvailableWritePermits); Assert.True(codec.Unknown); Assert.True(life.HasRetainedUnknown);
     }
 
+
+    sealed class ControlledOuterWaitTimeProvider : TimeProvider
+    {
+        readonly List<ControlledTimer> timers = [];
+        public override ITimer CreateTimer(TimerCallback callback, object? state, TimeSpan dueTime, TimeSpan period)
+        {
+            if (period != Timeout.InfiniteTimeSpan || dueTime <= TimeSpan.Zero || dueTime > TimeSpan.FromSeconds(20)) throw new InvalidOperationException("Only finite original one-shot outer observations are admitted.");
+            lock (timers)
+            {
+                if (timers.Count >= 8) throw new InvalidOperationException("Finite observer timer profile exceeded.");
+                var timer = new ControlledTimer(callback, state); timers.Add(timer); return timer;
+            }
+        }
+        public int FirePending()
+        {
+            ControlledTimer[] actual; lock (timers) actual = timers.ToArray();
+            var fired = 0; foreach (var timer in actual) if (timer.Fire()) fired++; return fired;
+        }
+        sealed class ControlledTimer(TimerCallback callback, object? state) : ITimer
+        {
+            int disposed, fired;
+            internal bool Fire()
+            {
+                if (Volatile.Read(ref disposed) != 0 || Interlocked.Exchange(ref fired, 1) != 0) return false;
+                callback(state); return true;
+            }
+            public bool Change(TimeSpan dueTime, TimeSpan period) => throw new InvalidOperationException("Observer timer cannot be renewed.");
+            public void Dispose() => Interlocked.Exchange(ref disposed, 1);
+            public ValueTask DisposeAsync() { Dispose(); return ValueTask.CompletedTask; }
+        }
+    }
+
+    [Fact]
+    public async Task Actual_semaphore_acquisition_cannot_outlive_outer_observation_and_orphan_its_permit()
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        using var input = new HeldWriter(); using var output = new MemoryStream();
+        var observer = new ControlledOuterWaitTimeProvider();
+        var codec = new CodexJsonlProtocol(input, output, life, observer);
+        var first = codec.WriteAsync(new { id = 1, method = "first" }, TestContext.Current.CancellationToken);
+        await input.Entered.Task.WaitAsync(life.Remaining, TestContext.Current.CancellationToken);
+        var second = codec.WriteAsync(new { id = 2, method = "second" }, TestContext.Current.CancellationToken);
+        var errors = new List<Exception>();
+        try
+        {
+            Assert.False(second.IsCompleted);
+            // The old outer waiter installs a real timer callback here. The repaired
+            // self-timed semaphore path installs none. Only that observer may fire;
+            // neither real semaphore timeout nor ToolLifetime clock is modified.
+            var fired = observer.FirePending();
+            if (fired != 0)
+            {
+                try { await second.WaitAsync(life.Remaining, TestContext.Current.CancellationToken); }
+                catch (Exception error) { errors.Add(error); }
+                Assert.Equal(1, input.ActualWrites);
+            }
+            input.Release.TrySetResult();
+            foreach (var actual in new[] { first, second })
+            {
+                try { await actual.WaitAsync(life.Remaining, TestContext.Current.CancellationToken); }
+                catch (Exception error) { if (!errors.Contains(error)) errors.Add(error); }
+            }
+            // Settle every real captured acquisition/IO task before asserting permit
+            // accounting; a descriptive timeout result never becomes permit authority.
+            foreach (var actual in codec.EnteredTasks)
+                await actual.WaitAsync(life.Remaining, TestContext.Current.CancellationToken);
+            Assert.Equal(1, codec.AvailableWritePermits);
+            Assert.Equal(2, input.ActualWrites);
+            Assert.Empty(errors);
+            Assert.False(codec.Unknown); Assert.False(life.HasRetainedUnknown);
+        }
+        finally
+        {
+            input.Release.TrySetResult();
+            foreach (var actual in new[] { first, second }.Concat(codec.EnteredTasks))
+            {
+                try { await actual.WaitAsync(life.CleanupRemaining, TestContext.Current.CancellationToken); }
+                catch (Exception) { /* Preserve actual failures; no retry, reset or UNKNOWN clearing. */ }
+            }
+        }
+    }
 }
