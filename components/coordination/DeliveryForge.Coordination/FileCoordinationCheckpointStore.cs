@@ -15,7 +15,7 @@ public sealed class FileCoordinationCheckpointStore : ICoordinationCheckpointSto
     private readonly FileStream _exclusive;
     private readonly WriterAcquisition _originalWriter = new();
     private static readonly List<WriterAcquisition> OriginalWriters = [];
-    private sealed class WriterAcquisition { internal bool Entered, Returned, CloseEntered, Closed;internal FileStream? Resource;internal Task? CloseTask;internal Exception? Failure; }
+    private sealed class WriterAcquisition { internal bool Entered, Returned, CloseEntered, Closed; internal FileStream? Resource; internal Task? CloseTask; internal Exception? Failure; }
     private readonly SemaphoreSlim _serial = new(1, 1);
     private readonly Dictionary<string, CoordinationWriterClaim> _claims = [];
     private readonly List<IoFrame> _io = [];
@@ -43,16 +43,18 @@ public sealed class FileCoordinationCheckpointStore : ICoordinationCheckpointSto
         Plain(_root);
         if (!Directory.Exists(_root) || Directory.EnumerateFileSystemEntries(_root).Any())
             throw new CoordinationProtocolException("Root must supply an existing empty fresh control directory.");
-        lock(OriginalWriters) { if(OriginalWriters.Count>=64)throw new CoordinationUncertainException("Finite retained writer acquisition bound.");OriginalWriters.Add(_originalWriter); }
-        try {
-            _originalWriter.Entered=true;
+        lock (OriginalWriters) { if (OriginalWriters.Count >= 64) throw new CoordinationUncertainException("Finite retained writer acquisition bound."); OriginalWriters.Add(_originalWriter); }
+        try
+        {
+            _originalWriter.Entered = true;
             _exclusive = new(Path.Combine(_root, "parent-writer.lock"), FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
-            _originalWriter.Resource=_exclusive;_originalWriter.Returned=true;
+            _originalWriter.Resource = _exclusive; _originalWriter.Returned = true;
             exclusiveCreatedForContractTests?.Invoke(_exclusive);
-        } catch(Exception error) { _originalWriter.Failure=error;throw; }
+        }
+        catch (Exception error) { _originalWriter.Failure = error; throw; }
     }
 
-    internal static bool RetainsOriginalWriterForContractTests(FileStream original) {lock(OriginalWriters)return OriginalWriters.Any(row=>ReferenceEquals(row.Resource,original)&&row.Returned&&!row.Closed);}
+    internal static bool RetainsOriginalWriterForContractTests(FileStream original) { lock (OriginalWriters) return OriginalWriters.Any(row => ReferenceEquals(row.Resource, original) && row.Returned && !row.Closed); }
 
     private async Task EnsureManifest(CancellationToken cancellationToken)
     {
@@ -83,7 +85,7 @@ public sealed class FileCoordinationCheckpointStore : ICoordinationCheckpointSto
         if (!await _serial.WaitAsync(0, cancellationToken)) throw new CoordinationUncertainException("Original parent provenance writer busy.");
         try
         {
-            Available();if (_parentBindingEntered) throw new CoordinationUncertainException("Original parent provenance write already entered; no replay.");
+            Available(); if (_parentBindingEntered) throw new CoordinationUncertainException("Original parent provenance write already entered; no replay.");
             _parentBindingEntered = true;
             await EnsureManifest(cancellationToken);
             var bytes = JsonSerializer.SerializeToUtf8Bytes(binding);
@@ -178,7 +180,7 @@ public sealed class FileCoordinationCheckpointStore : ICoordinationCheckpointSto
                     if (!physical[i].AsSpan().SequenceEqual(known[i])) throw new CoordinationProtocolException("Whole previously acknowledged checkpoint bytes changed.");
                 if (_pending.TryGetValue(lifecycleId, out var pending))
                 {
-                    if (pending.Write is not { DurableFlushReturned:true, Closed:true })
+                    if (pending.Write is not { DurableFlushReturned: true, Closed: true })
                         throw new CoordinationUncertainException("Original durable flush/first close did not return; visible bytes cannot certify durability.");
                     if (rows.Count != pending.Sequence || active.NextRecordSequence != pending.Sequence ||
                         !physical[^1].AsSpan().SequenceEqual(pending.Bytes))
@@ -199,19 +201,19 @@ public sealed class FileCoordinationCheckpointStore : ICoordinationCheckpointSto
     private async Task WriteNew(string path, byte[] bytes, CancellationToken cancellationToken, Action<IoFrame>? enrolled = null)
     {
         Plain(path);
-        var frame = Frame();frame.IsWrite=true;enrolled?.Invoke(frame);
+        var frame = Frame(); frame.IsWrite = true; enrolled?.Invoke(frame);
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
             frame.Entered = true;
             frame.Stream = new(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous | FileOptions.WriteThrough);
             frame.Returned = true;
-            frame.WriteTask=frame.Stream.WriteAsync(bytes, cancellationToken).AsTask();
-            await frame.WriteTask;frame.WriteReturned=true;
-            frame.FlushTask=frame.Stream.FlushAsync(cancellationToken);
-            await frame.FlushTask;frame.FlushReturned=true;
+            frame.WriteTask = frame.Stream.WriteAsync(bytes, cancellationToken).AsTask();
+            await frame.WriteTask; frame.WriteReturned = true;
+            frame.FlushTask = frame.Stream.FlushAsync(cancellationToken);
+            await frame.FlushTask; frame.FlushReturned = true;
             _beforeDurableFlushForContractTests?.Invoke(path);
-            frame.Stream.Flush(true);frame.DurableFlushReturned=true;
+            frame.Stream.Flush(true); frame.DurableFlushReturned = true;
         }
         catch (Exception error) { frame.Primary = error; }
         await Close(frame, cancellationToken);
@@ -307,7 +309,7 @@ public sealed class FileCoordinationCheckpointStore : ICoordinationCheckpointSto
                 _disposeFailure = new CoordinationUncertainException("Checkpoint lifetime has unsettled actual IO; exclusive writer retained.");
                 throw _disposeFailure;
             }
-            try { _originalWriter.CloseEntered=true;_originalWriter.CloseTask=_exclusive.DisposeAsync().AsTask();await _originalWriter.CloseTask;_originalWriter.Closed=true;_disposed = true;lock(OriginalWriters)OriginalWriters.Remove(_originalWriter); }
+            try { _originalWriter.CloseEntered = true; _originalWriter.CloseTask = _exclusive.DisposeAsync().AsTask(); await _originalWriter.CloseTask; _originalWriter.Closed = true; _disposed = true; lock (OriginalWriters) OriginalWriters.Remove(_originalWriter); }
             catch (Exception error) { _disposeFailure = error; }
             if (_disposeFailure is not null)
                 throw new CoordinationUncertainException("Checkpoint lifetime has failed or unsettled actual disposition.");
@@ -319,7 +321,7 @@ public sealed class FileCoordinationCheckpointStore : ICoordinationCheckpointSto
 
     private sealed class IoFrame
     {
-internal bool Entered, Returned, CloseEntered, Closed, IsWrite, WriteReturned, FlushReturned, DurableFlushReturned;
+        internal bool Entered, Returned, CloseEntered, Closed, IsWrite, WriteReturned, FlushReturned, DurableFlushReturned;
         internal Task? WriteTask, FlushTask;
         internal FileStream? Stream;
         internal Exception? Primary, CloseFailure, Post;

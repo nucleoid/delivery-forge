@@ -38,7 +38,7 @@ internal static partial class BoundedProcessCapture
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
-            CommandEnvironment.Complete(info,invocation);
+            CommandEnvironment.Complete(info, invocation);
             foreach (var argument in invocation.Arguments) info.ArgumentList.Add(argument);
             foreach (var pair in invocation.Environment ?? new Dictionary<string, string>()) info.Environment[pair.Key] = pair.Value;
             if (caller.IsCancellationRequested || !restrictive.WorkAvailable)
@@ -75,7 +75,7 @@ internal static partial class BoundedProcessCapture
         }
         catch (Exception exception) when (exception is Win32Exception or IOException or InvalidOperationException or ArgumentException)
         { known = false; failure = Bounded(exception); failureStage = stage; retention.Add(exception); }
-        if(failure is not null||timedOut||cancelled||stdout.Exceeded||stderr.Exceeded||output?.IsFaulted==true||error?.IsFaulted==true)restrictive.BeginFailureCleanup();
+        if (failure is not null || timedOut || cancelled || stdout.Exceeded || stderr.Exceeded || output?.IsFaulted == true || error?.IsFaulted == true) restrictive.BeginFailureCleanup();
         restrictive.BeginCleanup(); cleanupStarted = restrictive.CleanupStarted;
         if (created)
         {

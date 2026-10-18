@@ -37,7 +37,7 @@ public sealed class ParentCoordinationHost : ICoordinatedEffectAdmission, IOwned
     ReleaseContinuation? releaseContinuation;
     ToolResult? fixtureStopResult;
     Task<RenewalResult>? fixtureRenewalTask;
-    IReadOnlyList<LeaseEvidence> fixtureRenewalInputs=Array.Empty<LeaseEvidence>();
+    IReadOnlyList<LeaseEvidence> fixtureRenewalInputs = Array.Empty<LeaseEvidence>();
     Task? renewal, lossStop, transportClose, checkpointClose;
     bool bound, acquiring, opened, closed, revoked, disposeEntered, disposed;
     Exception? failure, dispositionFailure;
@@ -50,7 +50,7 @@ public sealed class ParentCoordinationHost : ICoordinatedEffectAdmission, IOwned
         ContinuumMcpTransport actualTransport, FileCoordinationCheckpointStore actualStore)
     {
         selected = settings; original = life; transport = actualTransport; checkpoints = actualStore;
-        effects = new(gate, runId => { original.Check();return opened && !closed && !revoked && parentRunId == runId && authority is not null && reducer is not null && reducer.MayDispatch(authority); }, Revoke);
+        effects = new(gate, runId => { original.Check(); return opened && !closed && !revoked && parentRunId == runId && authority is not null && reducer is not null && reducer.MayDispatch(authority); }, Revoke);
         renewalStop = CancellationTokenSource.CreateLinkedTokenSource(life.Token);
         cancelled = life.Token.Register(() => Revoke(new OperationCanceledException("Original parent cancellation revoked admission.")));
     }
@@ -61,34 +61,34 @@ public sealed class ParentCoordinationHost : ICoordinatedEffectAdmission, IOwned
         if (!settings.Endpoint.IsAbsoluteUri || settings.Endpoint.Scheme != "https" || !string.IsNullOrEmpty(settings.Endpoint.UserInfo))
             throw new ToolUsageException("Explicit authenticated HTTPS Continuum endpoint required.");
         BoundedFiles.Plain(settings.PrivateKeyPath);
-        var root = Path.GetFullPath(settings.CheckpointRoot);BoundedFiles.Plain(root, true);
+        var root = Path.GetFullPath(settings.CheckpointRoot); BoundedFiles.Plain(root, true);
         var evidence = new PinnedOperatorEvidence(settings.DeploymentEvidence, life);
         var observed = await evidence.ObserveAsync(life.Token).ConfigureAwait(false);
         if (observed.Endpoint != settings.Endpoint || observed.Project != settings.Project || observed.PrincipalId != settings.PrincipalId)
             throw new ToolUsageException("Pinned operator evidence differs from parent endpoint/project/principal selection.");
-        var creation = new CreationFrame();lock (Creations) { if (Creations.Count >= 16) throw new ToolUsageException("Finite retained parent creation bound.");Creations.Add(creation); }
+        var creation = new CreationFrame(); lock (Creations) { if (Creations.Count >= 16) throw new ToolUsageException("Finite retained parent creation bound."); Creations.Add(creation); }
         try
         {
-        creation.StoreEntered = true;
-        var store = new FileCoordinationCheckpointStore(root);creation.Store = store;creation.StoreReturned = true;
-        creation.TransportEntered = true;
-        var wire = new ContinuumMcpTransport(settings.Endpoint, settings.Project, settings.PrincipalId,
-            new ContinuumApiKeyFile(settings.PrivateKeyPath), evidence, TimeSpan.FromSeconds(10));
-        creation.Transport = wire;creation.TransportReturned = true;
-        var host = new ParentCoordinationHost(settings, life, wire, store);creation.Host = host;host.creation = creation;
-        // Enroll the actual owner before any awaited network operation; failure keeps all originals reachable.
-        Retain(host);
-        try
-        {
-            var task = ContinuumCoordinationAdapter.CreateProductionAsync(wire,
-                new(host, host, store, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10)), life.Token);
-            host.coordinationTasks.Add(task);
-            host.reducer = await task.WaitAsync(life.Remaining).ConfigureAwait(false);life.Check();
-            return host;
+            creation.StoreEntered = true;
+            var store = new FileCoordinationCheckpointStore(root); creation.Store = store; creation.StoreReturned = true;
+            creation.TransportEntered = true;
+            var wire = new ContinuumMcpTransport(settings.Endpoint, settings.Project, settings.PrincipalId,
+                new ContinuumApiKeyFile(settings.PrivateKeyPath), evidence, TimeSpan.FromSeconds(10));
+            creation.Transport = wire; creation.TransportReturned = true;
+            var host = new ParentCoordinationHost(settings, life, wire, store); creation.Host = host; host.creation = creation;
+            // Enroll the actual owner before any awaited network operation; failure keeps all originals reachable.
+            Retain(host);
+            try
+            {
+                var task = ContinuumCoordinationAdapter.CreateProductionAsync(wire,
+                    new(host, host, store, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10)), life.Token);
+                host.coordinationTasks.Add(task);
+                host.reducer = await task.WaitAsync(life.Remaining).ConfigureAwait(false); life.Check();
+                return host;
+            }
+            catch (Exception error) { host.failure = error; host.Revoke(error); life.RetainUnknown(); throw; }
         }
-        catch (Exception error) { host.failure = error; host.Revoke(error); life.RetainUnknown(); throw; }
-        }
-        catch (Exception error) { creation.Failure = error;life.RetainUnknown();throw; }
+        catch (Exception error) { creation.Failure = error; life.RetainUnknown(); throw; }
     }
 
     sealed class CreationFrame { internal bool StoreEntered, StoreReturned, TransportEntered, TransportReturned; internal FileCoordinationCheckpointStore? Store; internal ContinuumMcpTransport? Transport; internal ParentCoordinationHost? Host; internal Exception? Failure; }
@@ -164,11 +164,11 @@ public sealed class ParentCoordinationHost : ICoordinatedEffectAdmission, IOwned
         }
         try
         {
-            var binding = checkpoints.BindParentAsync(parentBinding!, original.Token);lock (gate) coordinationTasks.Add(binding);
-            await binding.WaitAsync(original.Remaining).ConfigureAwait(false);original.Check();
+            var binding = checkpoints.BindParentAsync(parentBinding!, original.Token); lock (gate) coordinationTasks.Add(binding);
+            await binding.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
             var task = reducer!.AcquireAllAsync(resources!, owner!, ContinuumCoordinationAdapter.DefaultTtl, original.Token);
             lock (gate) coordinationTasks.Add(task);
-            var result = await task.WaitAsync(original.Remaining).ConfigureAwait(false);original.Check();
+            var result = await task.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
             lock (gate)
             {
                 releaseContinuation = result.ReleaseContinuation;
@@ -184,14 +184,15 @@ public sealed class ParentCoordinationHost : ICoordinatedEffectAdmission, IOwned
     // DispatchAuthority, private owner reconstruction or a production API.
     internal (string RunId, IReadOnlyList<LeaseEvidence> Leases, bool Revoked, Task<RenewalResult>? RenewalTask, IReadOnlyList<LeaseEvidence> RenewalInputs, Task? StopTask, ToolResult? StopResult, IReadOnlyList<ContinuumMcpTransport.ActualRenewalData> WireRenewals) ObserveContractFixtureData()
     {
-        lock(gate) {
-            if(bridge?.AdapterProfile.AdapterId != ParentNativeContractPort.AdapterId || bridge.Realm != HostObservationRealm.ContractFixture || parentRunId is null)
+        lock (gate)
+        {
+            if (bridge?.AdapterProfile.AdapterId != ParentNativeContractPort.AdapterId || bridge.Realm != HostObservationRealm.ContractFixture || parentRunId is null)
                 throw new ToolUsageException("Closed native contract fixture owner required.");
-            return (parentRunId, Array.AsReadOnly(fixtureObservedLeases.ToArray()), revoked,fixtureRenewalTask,Array.AsReadOnly(fixtureRenewalInputs.ToArray()),lossStop,fixtureStopResult,transport.ReadActualRenewalData());
+            return (parentRunId, Array.AsReadOnly(fixtureObservedLeases.ToArray()), revoked, fixtureRenewalTask, Array.AsReadOnly(fixtureRenewalInputs.ToArray()), lossStop, fixtureStopResult, transport.ReadActualRenewalData());
         }
     }
 
-    public void RetainUncertain(string runId, string reason) { lock(gate) { if(parentRunId!=runId)throw new CoordinationUncertainException("Foreign effect uncertainty cannot bind this parent.");effects.RetainUncertain(runId,reason); } }
+    public void RetainUncertain(string runId, string reason) { lock (gate) { if (parentRunId != runId) throw new CoordinationUncertainException("Foreign effect uncertainty cannot bind this parent."); effects.RetainUncertain(runId, reason); } }
     public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke) => effects.EnterAsync(runId, invoke);
 
     async Task RenewLoop()
@@ -202,11 +203,11 @@ public sealed class ParentCoordinationHost : ICoordinatedEffectAdmission, IOwned
             for (var iteration = 0; iteration < 20; iteration++)
             {
                 await Task.Delay(TimeSpan.FromSeconds(60), renewalStop.Token).ConfigureAwait(false);
-                original.Check();DispatchAuthority actual;
-                lock (gate) { if (closed || revoked || authority is null) return;actual = authority; }
-                lock(gate)fixtureRenewalInputs=fixtureObservedLeases.ToArray();
-                var task = reducer!.RenewAllAsync(actual, renewalStop.Token);lock (gate) {coordinationTasks.Add(task);fixtureRenewalTask=task;}
-                var result = await task.WaitAsync(original.Remaining).ConfigureAwait(false);original.Check();
+                original.Check(); DispatchAuthority actual;
+                lock (gate) { if (closed || revoked || authority is null) return; actual = authority; }
+                lock (gate) fixtureRenewalInputs = fixtureObservedLeases.ToArray();
+                var task = reducer!.RenewAllAsync(actual, renewalStop.Token); lock (gate) { coordinationTasks.Add(task); fixtureRenewalTask = task; }
+                var result = await task.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
                 lock (gate)
                 {
                     releaseContinuation = result.ReleaseContinuation;
@@ -224,7 +225,7 @@ public sealed class ParentCoordinationHost : ICoordinatedEffectAdmission, IOwned
     {
         lock (gate)
         {
-            failure ??= error;revoked = true;
+            failure ??= error; revoked = true;
             // Admission closes before any stop task can run. Never discard an entered uncertain original.
             if (opened && !closed && bridge is not null && owner is not null && lossStop is null)
                 lossStop = StopOwnedAfterRevocation(bridge, parentRunId!);
@@ -232,8 +233,8 @@ public sealed class ParentCoordinationHost : ICoordinatedEffectAdmission, IOwned
     }
     async Task StopOwnedAfterRevocation(OwnerHostBridge actualBridge, string runId)
     {
-        try { var result = await actualBridge.StopRetainedAsync(runId).ConfigureAwait(false);lock(gate)fixtureStopResult=result; }
-        catch (Exception error) { lock (gate) failure ??= error;original.RetainUnknown(); }
+        try { var result = await actualBridge.StopRetainedAsync(runId).ConfigureAwait(false); lock (gate) fixtureStopResult = result; }
+        catch (Exception error) { lock (gate) failure ??= error; original.RetainUnknown(); }
     }
 
     public Task<QuiescenceEvidence> ObserveAsync(LeaseOwner requested, CancellationToken cancellationToken = default)
@@ -256,8 +257,8 @@ public sealed class ParentCoordinationHost : ICoordinatedEffectAdmission, IOwned
     {
         lock (gate)
         {
-            if (disposeEntered) { if (!disposed || dispositionFailure is not null) throw new CoordinationUncertainException("Original parent disposition remains nonpass; no repeat.");return; }
-            disposeEntered = true;closed = true;renewalStop.Cancel();
+            if (disposeEntered) { if (!disposed || dispositionFailure is not null) throw new CoordinationUncertainException("Original parent disposition remains nonpass; no repeat."); return; }
+            disposeEntered = true; closed = true; renewalStop.Cancel();
         }
         try
         {
@@ -285,11 +286,11 @@ public sealed class ParentCoordinationHost : ICoordinatedEffectAdmission, IOwned
             checkpointClose = checkpoints.DisposeAsync().AsTask();
             await checkpointClose.WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
             _ = original.CleanupRemaining;
-            cancelled.Dispose();renewalStop.Dispose();disposed = true;
+            cancelled.Dispose(); renewalStop.Dispose(); disposed = true;
             lock (Originals) Originals.Remove(this);
             lock (Creations) if (creation is not null) Creations.Remove(creation);
         }
-        catch (Exception error) { dispositionFailure = error;original.RetainUnknown();throw; }
+        catch (Exception error) { dispositionFailure = error; original.RetainUnknown(); throw; }
     }
 
     sealed class PinnedOperatorEvidence(AdmissionFile exact, ToolLifetime life) : IContinuumDeploymentEvidenceSource
@@ -298,9 +299,9 @@ public sealed class ParentCoordinationHost : ICoordinatedEffectAdmission, IOwned
         {
             cancellationToken.ThrowIfCancellationRequested();
             var bytes = InstalledHostAdmission.ReadExact(exact, life, 65536);
-            _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(bytes);life.Check();
+            _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(bytes); life.Check();
             var value = JsonSerializer.Deserialize<ContinuumDeploymentEvidence>(bytes, BoundedFiles.Json)
-                ?? throw new ToolUsageException("Pinned operator deployment evidence is null.");life.Check();
+                ?? throw new ToolUsageException("Pinned operator deployment evidence is null."); life.Check();
             return Task.FromResult(value);
         }
     }

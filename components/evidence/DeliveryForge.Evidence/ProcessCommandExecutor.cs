@@ -63,8 +63,8 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
     {
         if (_selectedLinuxScope is not null)
         {
-            var actualRoot=enclosing is OwnedWorkPhaseBudget phase?phase.Parent:enclosing;
-            if(actualRoot is OwnedCleanupPhaseBudget cleanup)actualRoot=cleanup.Parent;
+            var actualRoot = enclosing is OwnedWorkPhaseBudget phase ? phase.Parent : enclosing;
+            if (actualRoot is OwnedCleanupPhaseBudget cleanup) actualRoot = cleanup.Parent;
             if (enclosing is not null && !ReferenceEquals(actualRoot, _selectedLinuxOriginal))
                 throw new InvalidOperationException("Configured owner cannot be replaced by a foreign enclosing budget.");
             return ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing ?? _selectedLinuxOriginal, _selectedLinuxScope);
@@ -129,7 +129,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        CommandEnvironment.Complete(startInfo,invocation);
+        CommandEnvironment.Complete(startInfo, invocation);
         foreach (var argument in invocation.Arguments)
             startInfo.ArgumentList.Add(argument);
         foreach (var pair in invocation.Environment ?? new Dictionary<string, string>())

@@ -193,7 +193,7 @@ public sealed class PublicationService
 
     private async Task MarkUncertain(PublicationIntent intent)
     {
-        coordinationAdmission?.RetainUncertain(intent.RunIdentity,"Publication intent remains unresolved; no resend or lease release authority.");
+        coordinationAdmission?.RetainUncertain(intent.RunIdentity, "Publication intent remains unresolved; no resend or lease release authority.");
         try { await Append(intent with { State = PublicationIntentState.Uncertain }, CancellationToken.None).ConfigureAwait(false); }
         catch (Exception) { /* The earlier durable Sent intent remains unresolved; no retry is authorized. */ }
     }

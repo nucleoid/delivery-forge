@@ -18,7 +18,7 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
     private SafeFileHandle? _outRead, _outWrite, _errRead, _errWrite, _inRead, _inWrite;
     private StreamReader? _stdout, _stderr;
     private FileStream? _duplexInput;
-    private bool _creationReturned,_creationSucceeded;
+    private bool _creationReturned, _creationSucceeded;
     private bool _assigned;
     private bool _resumed;
     private string _stage = "create-job";
@@ -238,13 +238,13 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
                 }
                 string? finalFailure = null;
                 var finalKnown = restrictive.CleanupAvailable && owner.Observe(out rootExited, out active, out finalFailure);
-                known &= finalKnown; failure ??= finalFailure;if(!finalKnown)restrictive.BeginFailureCleanup();
+                known &= finalKnown; failure ??= finalFailure; if (!finalKnown) restrictive.BeginFailureCleanup();
             }
             int? exit = null;
             if (rootExited && owner?._process is not null && restrictive.CleanupAvailable)
             {
                 if (GetExitCodeProcess(owner._process, out var code)) exit = unchecked((int)code);
-                else { known = false; failure ??= "Original exit-code observation failed: " + Marshal.GetLastWin32Error();restrictive.BeginFailureCleanup(); }
+                else { known = false; failure ??= "Original exit-code observation failed: " + Marshal.GetLastWin32Error(); restrictive.BeginFailureCleanup(); }
             }
             var outputStatus = output?.Status; var errorStatus = error?.Status;
             var outEof = outputStatus == TaskStatus.RanToCompletion; var errEof = errorStatus == TaskStatus.RanToCompletion;
@@ -292,22 +292,28 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
 
     private RestrictiveCaptureBudget? _boundedBudget;
 
-    private void Start(CommandInvocation invocation, long originalStarted, TimeSpan originalTimeout, CancellationToken caller,bool keepInput=false)
+    private void Start(CommandInvocation invocation, long originalStarted, TimeSpan originalTimeout, CancellationToken caller, bool keepInput = false)
     {
         _stage = "configure-job";
+        CheckRestrictiveStartup(originalStarted, originalTimeout, caller);
         var limits = new ExtendedLimits { BasicLimitInformation = new() { LimitFlags = 0x2000 } };
         if (!SetInformationJobObject(_job, 9, ref limits, (uint)Marshal.SizeOf<ExtendedLimits>())) throw Native(_stage);
-        if(keepInput) {
-            if(IntPtr.Size!=8||!GetProcessAffinityMask(GetCurrentProcess(),out var allowed,out _))throw Native("duplex-parent-affinity");
-            nuint mask=0;for(var bit=0;bit<64&&System.Numerics.BitOperations.PopCount((ulong)mask)<2;bit++){var value=(nuint)1<<bit;if((allowed&value)!=0)mask|=value;}
-            if(System.Numerics.BitOperations.PopCount((ulong)mask)!=2)throw new IOException("Two actual available CPU bits required.");
-            limits.BasicLimitInformation.LimitFlags|=0x10|0x100;limits.BasicLimitInformation.Affinity=mask;var runtimeMemory=4294967296UL;limits.ProcessMemoryLimit=checked((nuint)runtimeMemory);
-            if(!SetInformationJobObject(_job,9,ref limits,(uint)Marshal.SizeOf<ExtendedLimits>()))throw Native("duplex-resource-limits");
+        CheckRestrictiveStartup(originalStarted, originalTimeout, caller);
+        if (keepInput)
+        {
+            if (IntPtr.Size != 8 || !GetProcessAffinityMask(GetCurrentProcess(), out var allowed, out _)) throw Native("duplex-parent-affinity");
+            nuint mask = 0; for (var bit = 0; bit < 64 && System.Numerics.BitOperations.PopCount((ulong)mask) < 2; bit++) { var value = (nuint)1 << bit; if ((allowed & value) != 0) mask |= value; }
+            if (System.Numerics.BitOperations.PopCount((ulong)mask) != 2) throw new IOException("Two actual available CPU bits required.");
+            limits.BasicLimitInformation.LimitFlags |= 0x10 | 0x100; limits.BasicLimitInformation.Affinity = mask; var runtimeMemory = 4294967296UL; limits.ProcessMemoryLimit = checked((nuint)runtimeMemory);
+            if (!SetInformationJobObject(_job, 9, ref limits, (uint)Marshal.SizeOf<ExtendedLimits>())) throw Native("duplex-resource-limits");
         }
         _stage = "create-owned-pipes";
         (_outRead, _outWrite) = Pipe(parentReads: true);
+        CheckRestrictiveStartup(originalStarted, originalTimeout, caller);
         (_errRead, _errWrite) = Pipe(parentReads: true);
+        CheckRestrictiveStartup(originalStarted, originalTimeout, caller);
         (_inRead, _inWrite) = Pipe(parentReads: false);
+        CheckRestrictiveStartup(originalStarted, originalTimeout, caller);
         _stage = "prepare-command";
         var executable = ResolveExecutable(invocation.FileName);
         var commandLine = new StringBuilder(Quote(executable, force: true));
@@ -338,8 +344,8 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
             _creationAttempted = true;
             var created = CreateProcessW(executable, commandLine, IntPtr.Zero, IntPtr.Zero, true,
                 0x00000004 | 0x08000000 | 0x00000400 | 0x00080000, environment, directory, ref startup, out var processInfo);
-            _creationReturned=true;_creationSucceeded=created;
-            if(!created)throw Native(_stage);
+            _creationReturned = true; _creationSucceeded = created;
+            if (!created) throw Native(_stage);
             _process = new(processInfo.Process); _thread = new(processInfo.Thread);
             _stage = "assign-before-resume";
             _assignmentAttempted = true;
@@ -348,7 +354,7 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
         }
         // Close every extra child-side endpoint in this parent before execution/EOF observation.
         _outWrite.Dispose(); _outWrite = null; _errWrite.Dispose(); _errWrite = null;
-        _inRead.Dispose(); _inRead = null; if(keepInput)_duplexInput=new FileStream(_inWrite,FileAccess.Write,4096,false);else{_inWrite.Dispose();_inWrite=null;}
+        _inRead.Dispose(); _inRead = null; if (keepInput) _duplexInput = new FileStream(_inWrite, FileAccess.Write, 4096, false); else { _inWrite.Dispose(); _inWrite = null; }
         _readerEndpointsAttempted = true;
         _stdout = new(new FileStream(_outRead, FileAccess.Read, 4096, false), Console.OutputEncoding, true);
         _stderr = new(new FileStream(_errRead, FileAccess.Read, 4096, false), Console.OutputEncoding, true);
@@ -446,12 +452,14 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
     private static string EnvironmentBlock(IReadOnlyDictionary<string, string>? additions, bool complete = false)
     {
         var values = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (complete) {
+        if (complete)
+        {
             var selected = new ProcessStartInfo();
-            CommandEnvironment.Complete(selected,new("",Array.Empty<string>(),"",additions){EnvironmentIsComplete=true});
-            foreach (var row in selected.Environment) values.Add(row.Key,row.Value!);
-        } else
-        foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables()) values[(string)entry.Key] = (string)entry.Value!;
+            CommandEnvironment.Complete(selected, new("", Array.Empty<string>(), "", additions) { EnvironmentIsComplete = true });
+            foreach (var row in selected.Environment) values.Add(row.Key, row.Value!);
+        }
+        else
+            foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables()) values[(string)entry.Key] = (string)entry.Value!;
         foreach (var entry in additions ?? new Dictionary<string, string>())
         {
             if (entry.Key.Length == 0 || entry.Key.Contains('=') || entry.Key.Contains('\0') || entry.Value.Contains('\0'))
@@ -492,10 +500,11 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
         {
             if (resource is null) continue;
             if (!BoundedCaptureStream.Within(started, budget) || restrictive?.CleanupAvailable == false) { known = false; continue; }
-            try {
-                var wasInvalid=resource is KernelHandle original&&original.IsInvalid;
+            try
+            {
+                var wasInvalid = resource is KernelHandle original && original.IsInvalid;
                 resource.Dispose();
-                if(resource is KernelHandle handle&&!wasInvalid&&(!handle.NativeCloseEntered||!handle.NativeCloseReturned||!handle.NativeClosed))throw new IOException("Actual original CloseHandle did not return successful first disposition.");
+                if (resource is KernelHandle handle && !wasInvalid && (!handle.NativeCloseEntered || !handle.NativeCloseReturned || !handle.NativeClosed)) throw new IOException("Actual original CloseHandle did not return successful first disposition.");
             }
             catch (Exception failure) { retention.Add(failure); restrictive?.BeginFailureCleanup(); known = false; }
         }
@@ -506,8 +515,8 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
     {
         public KernelHandle() : base(true) { }
         public KernelHandle(IntPtr value) : base(true) => SetHandle(value);
-        internal bool NativeCloseEntered,NativeCloseReturned,NativeClosed;
-        protected override bool ReleaseHandle(){NativeCloseEntered=true;var actual=CloseHandle(handle);NativeCloseReturned=true;NativeClosed=actual;return actual;}
+        internal bool NativeCloseEntered, NativeCloseReturned, NativeClosed;
+        protected override bool ReleaseHandle() { NativeCloseEntered = true; var actual = CloseHandle(handle); NativeCloseReturned = true; NativeClosed = actual; return actual; }
     }
     private sealed class InheritedHandles : IDisposable
     {

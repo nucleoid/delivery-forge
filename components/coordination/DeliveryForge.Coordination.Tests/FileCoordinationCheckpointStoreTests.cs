@@ -5,7 +5,7 @@ namespace DeliveryForge.Coordination.Tests;
 
 public sealed class FileCoordinationCheckpointStoreTests
 {
-    static string Root() { var root = Path.Combine(Path.GetTempPath(), "delivery-forge-parent-store-" + Guid.NewGuid().ToString("N"));Directory.CreateDirectory(root);return root; }
+    static string Root() { var root = Path.Combine(Path.GetTempPath(), "delivery-forge-parent-store-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root); return root; }
     static CoordinationCheckpointRecord Record(CoordinationWriterClaim claim) => new(1, 1, 1, CoordinationIntentKind.Acquire, claim.WriterEpoch, 1, null, null);
 
     [Fact]
@@ -45,7 +45,7 @@ public sealed class FileCoordinationCheckpointStoreTests
         {
             await using var store = new FileCoordinationCheckpointStore(root);
             var claim = await store.ClaimWriterAsync(Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"), null, TestContext.Current.CancellationToken);
-            var row = Record(claim);await store.AppendAsync(claim, 1, row, TestContext.Current.CancellationToken);
+            var row = Record(claim); await store.AppendAsync(claim, 1, row, TestContext.Current.CancellationToken);
             var file = Assert.Single(Directory.GetFiles(Path.Combine(root, claim.LifecycleId), "*-record.json"));
             File.WriteAllText(file, truncated ? "{" : JsonSerializer.Serialize(row with { ProgressRevision = 2 }));
             await Assert.ThrowsAnyAsync<Exception>(() => store.ReadLifecycleAsync(claim.LifecycleId, TestContext.Current.CancellationToken));
@@ -73,10 +73,10 @@ public sealed class FileCoordinationCheckpointStoreTests
     [Fact]
     public async Task Genuine_flushed_append_cancelled_before_readback_reconciles_only_original_bytes_then_advances()
     {
-        var root = Root();using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);var once = true;
+        var root = Root(); using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken); var once = true;
         try
         {
-            await using var store = new FileCoordinationCheckpointStore(root, path => { if (once && path.EndsWith("-record.json", StringComparison.Ordinal)) { once = false;cancellation.Cancel(); } }, null, null);
+            await using var store = new FileCoordinationCheckpointStore(root, path => { if (once && path.EndsWith("-record.json", StringComparison.Ordinal)) { once = false; cancellation.Cancel(); } }, null, null);
             var claim = await store.ClaimWriterAsync(Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"), null, TestContext.Current.CancellationToken);
             var row = Record(claim);
             await Assert.ThrowsAsync<AggregateException>(() => store.AppendAsync(claim, 1, row, cancellation.Token));
@@ -91,46 +91,50 @@ public sealed class FileCoordinationCheckpointStoreTests
     [Fact]
     public async Task Injected_first_close_refusal_retains_actual_child_and_exclusive_owner_without_repeat_success()
     {
-        var root = Root();FileStream? child = null, exclusive = null;
-        var store = new FileCoordinationCheckpointStore(root, null, stream => { child = stream;return ValueTask.FromException(new IOException("Explicit conformance first-close refusal; not an OS Dispose failure.")); }, stream => exclusive = stream);
+        var root = Root(); FileStream? child = null, exclusive = null;
+        var store = new FileCoordinationCheckpointStore(root, null, stream => { child = stream; return ValueTask.FromException(new IOException("Explicit conformance first-close refusal; not an OS Dispose failure.")); }, stream => exclusive = stream);
         try
         {
             await Assert.ThrowsAsync<AggregateException>(() => store.ClaimWriterAsync(Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"), null, TestContext.Current.CancellationToken));
             await Assert.ThrowsAsync<CoordinationUncertainException>(() => store.DisposeAsync().AsTask());
             Assert.Throws<IOException>(() => new FileStream(Path.Combine(root, "parent-writer.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None));
-            Assert.NotNull(child);Assert.False(child.SafeFileHandle.IsClosed);
+            Assert.NotNull(child); Assert.False(child.SafeFileHandle.IsClosed);
             await Assert.ThrowsAsync<CoordinationUncertainException>(() => store.DisposeAsync().AsTask());
         }
         finally
         {
             // Explicit teardown of these captured ORIGINAL fixture resources; never successful store disposition.
-            if (child is not null) await child.DisposeAsync();if (exclusive is not null) await exclusive.DisposeAsync();Directory.Delete(root, recursive: true);
+            if (child is not null) await child.DisposeAsync(); if (exclusive is not null) await exclusive.DisposeAsync(); Directory.Delete(root, recursive: true);
         }
     }
     [Fact]
     public async Task Visible_record_without_original_durable_flush_cannot_reconcile_or_release_writer()
     {
-        var root=Root();FileStream? exclusive=null;
-        var store=new FileCoordinationCheckpointStore(root,null,null,stream=>exclusive=stream,
-            path=>{if(path.EndsWith("-record.json",StringComparison.Ordinal))throw new IOException("Explicit conformance interruption before original durable flush; not an OS Flush failure.");});
-        try {
-            var claim=await store.ClaimWriterAsync(Guid.NewGuid().ToString("D"),Guid.NewGuid().ToString("D"),null,TestContext.Current.CancellationToken);
-            await Assert.ThrowsAsync<AggregateException>(()=>store.AppendAsync(claim,1,Record(claim),TestContext.Current.CancellationToken));
-            Assert.Single(Directory.GetFiles(Path.Combine(root,claim.LifecycleId),"*-record.json"));
-            await Assert.ThrowsAsync<CoordinationUncertainException>(()=>store.ReadLifecycleAsync(claim.LifecycleId,TestContext.Current.CancellationToken));
-            await Assert.ThrowsAsync<CoordinationUncertainException>(()=>store.DisposeAsync().AsTask());
-            Assert.Throws<IOException>(()=>new FileStream(Path.Combine(root,"parent-writer.lock"),FileMode.Open,FileAccess.ReadWrite,FileShare.None));
-        } finally {if(exclusive is not null)await exclusive.DisposeAsync();Directory.Delete(root,recursive:true);}
+        var root = Root(); FileStream? exclusive = null;
+        var store = new FileCoordinationCheckpointStore(root, null, null, stream => exclusive = stream,
+            path => { if (path.EndsWith("-record.json", StringComparison.Ordinal)) throw new IOException("Explicit conformance interruption before original durable flush; not an OS Flush failure."); });
+        try
+        {
+            var claim = await store.ClaimWriterAsync(Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"), null, TestContext.Current.CancellationToken);
+            await Assert.ThrowsAsync<AggregateException>(() => store.AppendAsync(claim, 1, Record(claim), TestContext.Current.CancellationToken));
+            Assert.Single(Directory.GetFiles(Path.Combine(root, claim.LifecycleId), "*-record.json"));
+            await Assert.ThrowsAsync<CoordinationUncertainException>(() => store.ReadLifecycleAsync(claim.LifecycleId, TestContext.Current.CancellationToken));
+            await Assert.ThrowsAsync<CoordinationUncertainException>(() => store.DisposeAsync().AsTask());
+            Assert.Throws<IOException>(() => new FileStream(Path.Combine(root, "parent-writer.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None));
+        }
+        finally { if (exclusive is not null) await exclusive.DisposeAsync(); Directory.Delete(root, recursive: true); }
     }
     [Fact]
     public async Task Constructor_callback_failure_retains_the_actual_returned_original_writer()
     {
-        var root=Root();FileStream? exclusive=null;
-        try {
-            Assert.Throws<IOException>(()=>new FileCoordinationCheckpointStore(root,null,null,stream=>{exclusive=stream;throw new IOException("Explicit post-acquisition fixture callback failure.");}));
-            Assert.NotNull(exclusive);Assert.True(FileCoordinationCheckpointStore.RetainsOriginalWriterForContractTests(exclusive));
-            Assert.Throws<IOException>(()=>new FileStream(Path.Combine(root,"parent-writer.lock"),FileMode.Open,FileAccess.ReadWrite,FileShare.None));
-        } finally {if(exclusive is not null)await exclusive.DisposeAsync();Directory.Delete(root,recursive:true);}
+        var root = Root(); FileStream? exclusive = null;
+        try
+        {
+            Assert.Throws<IOException>(() => new FileCoordinationCheckpointStore(root, null, null, stream => { exclusive = stream; throw new IOException("Explicit post-acquisition fixture callback failure."); }));
+            Assert.NotNull(exclusive); Assert.True(FileCoordinationCheckpointStore.RetainsOriginalWriterForContractTests(exclusive));
+            Assert.Throws<IOException>(() => new FileStream(Path.Combine(root, "parent-writer.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None));
+        }
+        finally { if (exclusive is not null) await exclusive.DisposeAsync(); Directory.Delete(root, recursive: true); }
     }
 
 }

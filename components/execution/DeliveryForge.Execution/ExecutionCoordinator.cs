@@ -437,12 +437,12 @@ public sealed class ExecutionCoordinator : IDisposable
         }
         else try
             {
-                var worktree = await (requestedState==WorkflowState.Stopped
-                    ? _worktrees.ObserveOwnedCleanupAsync(prepared.Request.Worktree,cancellationToken)
-                    : _worktrees.ObserveAsync(prepared.Request.Worktree,cancellationToken)).ConfigureAwait(false);
-                if(requestedState==WorkflowState.Stopped)
-                    await _worktrees.EnsureDescendsFromOwnedCleanupAsync(prepared.Request.Worktree,prepared.Request.BaseCommit,worktree.HeadCommit,cancellationToken).ConfigureAwait(false);
-                else await _worktrees.EnsureDescendsFromAsync(prepared.Request.Worktree,prepared.Request.BaseCommit,worktree.HeadCommit,cancellationToken).ConfigureAwait(false);
+                var worktree = await (requestedState == WorkflowState.Stopped
+                    ? _worktrees.ObserveOwnedCleanupAsync(prepared.Request.Worktree, cancellationToken)
+                    : _worktrees.ObserveAsync(prepared.Request.Worktree, cancellationToken)).ConfigureAwait(false);
+                if (requestedState == WorkflowState.Stopped)
+                    await _worktrees.EnsureDescendsFromOwnedCleanupAsync(prepared.Request.Worktree, prepared.Request.BaseCommit, worktree.HeadCommit, cancellationToken).ConfigureAwait(false);
+                else await _worktrees.EnsureDescendsFromAsync(prepared.Request.Worktree, prepared.Request.BaseCommit, worktree.HeadCommit, cancellationToken).ConfigureAwait(false);
                 var facts = await ObserveOwnedFactsAsync(prepared.Request, worktree, true, cancellationToken).ConfigureAwait(false);
                 limitations.Add("External dependency, lease, and authorization-revocation facts belong to later adapters and are not claimed by the issue #5 core.");
                 checkpoint = new AgentCheckpoint(prepared.Request.RequestIdentity, worktree.HeadCommit, worktree.TreeId,

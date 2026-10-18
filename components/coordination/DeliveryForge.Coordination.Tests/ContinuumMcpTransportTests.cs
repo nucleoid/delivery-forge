@@ -409,16 +409,32 @@ public sealed class ContinuumMcpTransportTests
                 else if (name == "continuum.lock_acquire")
                 {
                     Acquisitions++; LastScope = args.GetProperty("scope").GetString(); LastRun = args.GetProperty("run_id").GetString();
-                    payload = new() { ["acquired"] = true, ["scope"] = LastScope, ["resource"] = args.GetProperty("resource").GetString(), ["run_id"] = LastRun,
-                        ["lease_id"] = "42ec0ed3-1c10-4d7e-8dc1-52c1f1b912ab", ["fencing_token"] = "42", ["server_time"] = server, ["expires_at"] = expiry };
+                    payload = new()
+                    {
+                        ["acquired"] = true,
+                        ["scope"] = LastScope,
+                        ["resource"] = args.GetProperty("resource").GetString(),
+                        ["run_id"] = LastRun,
+                        ["lease_id"] = "42ec0ed3-1c10-4d7e-8dc1-52c1f1b912ab",
+                        ["fencing_token"] = "42",
+                        ["server_time"] = server,
+                        ["expires_at"] = expiry
+                    };
                     if (CorruptField is not null) payload[CorruptField] = CorruptField == "fencing_token" ? "042" : "foreign";
                 }
                 else if (name == "continuum.lock_renew")
                 {
                     Renewals++;
                     Assert.Equal(300, args.GetProperty("ttl_seconds").GetInt32());
-                    payload = new() { ["renewed"] = true, ["lease_id"] = args.GetProperty("lease_id").GetString(), ["run_id"] = args.GetProperty("run_id").GetString(),
-                        ["fencing_token"] = "42", ["server_time"] = "2026-10-18T00:00:01.000000Z", ["expires_at"] = "2026-10-18T00:05:01.000000Z" };
+                    payload = new()
+                    {
+                        ["renewed"] = true,
+                        ["lease_id"] = args.GetProperty("lease_id").GetString(),
+                        ["run_id"] = args.GetProperty("run_id").GetString(),
+                        ["fencing_token"] = "42",
+                        ["server_time"] = "2026-10-18T00:00:01.000000Z",
+                        ["expires_at"] = "2026-10-18T00:05:01.000000Z"
+                    };
                 }
                 else if (name == "continuum.lock_release") { Releases++; Assert.False(args.TryGetProperty("fencing_token", out _)); payload = new() { ["released"] = true }; }
                 else throw new InvalidOperationException("Unexpected synthetic request.");

@@ -32,15 +32,20 @@ public sealed class GateRunner
     public async Task<GateRunResult> RunAsync(GateRequest request, CancellationToken cancellationToken = default)
     {
         ValidateRequest(request);
-        Directory.CreateDirectory(request.OutputDirectory);
+        if (request.InstalledInvocation is { } installedOutput) installedOutput.EnsureDirectory(request.OutputDirectory);
+        else Directory.CreateDirectory(request.OutputDirectory);
         var claimPath = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId) + ".claim");
         var gateDirectory = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
         var gateDirectoryPreexisted = Directory.Exists(gateDirectory);
         try
         {
-            await using var claim = new FileStream(
-                claimPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.WriteThrough);
-            claim.Flush(true);
+            if (request.InstalledInvocation is { } installedClaim) installedClaim.Claim(claimPath);
+            else
+            {
+                await using var claim = new FileStream(
+                    claimPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.WriteThrough);
+                claim.Flush(true);
+            }
         }
         catch (IOException exception)
         {
@@ -95,13 +100,14 @@ public sealed class GateRunner
         }
 
 
-        Directory.CreateDirectory(gateDirectory);
+        if (request.InstalledInvocation is { } installedDirectory) installedDirectory.EnsureDirectory(gateDirectory);
+        else Directory.CreateDirectory(gateDirectory);
         EvidenceExecutionSnapshot evidenceSnapshot;
         try
         {
             evidenceSnapshot = EvidenceAdapterDispatcher.CaptureBefore(request);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or EvidenceWriteException or AggregateException)
         {
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, before, before,
@@ -129,17 +135,7 @@ public sealed class GateRunner
                 null, string.Empty, $"Command execution failed: {exception.Message}", false, false, now, now,
                 OwnedProcessQuiescent: false);
         }
-        var artifactHashes = await WriteArtifactsAsync(gateDirectory, execution, CancellationToken.None).ConfigureAwait(false);
-        string? artifactBindingError = null;
-        try
-        {
-            EvidenceAdapterDispatcher.AppendBoundArtifacts(
-                request, evidenceSnapshot, gateDirectory, artifactHashes);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            artifactBindingError = exception.Message;
-        }
+        var artifactHashes = await WriteArtifactsAsync(gateDirectory, execution, CancellationToken.None, request.InstalledInvocation).ConfigureAwait(false);
         RepositoryIdentity after;
         var identityReadFailed = false;
         try
@@ -152,6 +148,17 @@ public sealed class GateRunner
             identityReadFailed = true;
         }
         var sourceChanged = identityReadFailed || before != after || !after.IsClean;
+        string? artifactBindingError = null;
+        try
+        {
+            EvidenceAdapterDispatcher.AppendBoundArtifacts(
+                request, evidenceSnapshot, gateDirectory, artifactHashes);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or EvidenceWriteException or AggregateException)
+        {
+            artifactBindingError = exception.Message;
+        }
+
 
         NormalizedEvidence normalized;
         try
@@ -187,7 +194,7 @@ public sealed class GateRunner
         else if (normalized.Outcome == GateOutcome.Pass &&
                  (!request.Policy.AuthorityVerified ||
                   !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
-                  !normalized.ProductionCapable))
+                  !normalized.ProductionCapable && !normalized.ProducerVerified))
             normalized = NormalizedEvidence.Incomplete(
                 "Tool PASS is advisory because protected policy/gate authority or certified producer evidence is absent.");
 
@@ -204,10 +211,11 @@ public sealed class GateRunner
         NormalizedEvidence normalized,
         CancellationToken cancellationToken)
     {
-        Directory.CreateDirectory(gateDirectory);
+        if (request.InstalledInvocation is { } installedDirectory) installedDirectory.EnsureDirectory(gateDirectory);
+        else Directory.CreateDirectory(gateDirectory);
         var now = DateTimeOffset.UtcNow;
         var execution = new CommandResult(null, string.Empty, string.Empty, false, false, now, now);
-        var hashes = await WriteArtifactsAsync(gateDirectory, execution, cancellationToken).ConfigureAwait(false);
+        var hashes = await WriteArtifactsAsync(gateDirectory, execution, cancellationToken, request.InstalledInvocation).ConfigureAwait(false);
         return await PersistAsync(
             request, gateDirectory, before, after, execution, hashes, normalized, true, cancellationToken)
             .ConfigureAwait(false);
@@ -253,11 +261,14 @@ public sealed class GateRunner
             OutcomeText(normalized.Outcome), normalized.Reason, artifactHashes,
             sourceChanged, limitations, normalized.NotApplicableRationale);
 
+        request.InstalledInvocation?.CheckEndpoint();
         var provisionalBytes = SerializeReceipt(provisional);
         var receipt = provisional with { Identity = CanonicalJson.ComputeIdentity(provisionalBytes) };
         var receiptBytes = SerializeReceipt(receipt);
-        var receiptPath = await new AppendOnlyContractStore(Path.Combine(gateDirectory, "receipts"))
-            .WriteImmutableAsync(receiptBytes, cancellationToken).ConfigureAwait(false);
+        var receiptPath = request.InstalledInvocation is { } installedReceipt
+            ? installedReceipt.WriteReceipt(gateDirectory, receiptBytes)
+            : await new AppendOnlyContractStore(Path.Combine(gateDirectory, "receipts"))
+                .WriteImmutableAsync(receiptBytes, cancellationToken).ConfigureAwait(false);
 
         return new GateRunResult(
             normalized.Outcome, normalized.Reason, normalized.Fixture, normalized.ProductionCapable,
@@ -269,8 +280,9 @@ public sealed class GateRunner
     private static async Task<Dictionary<string, string>> WriteArtifactsAsync(
         string directory,
         CommandResult result,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, InstalledToolInvocation? installed = null)
     {
+        if (installed is not null) return installed.WriteExecutionArtifacts(directory, result);
         var artifacts = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var (name, content) in new[] { ("stdout.txt", result.StandardOutput), ("stderr.txt", result.StandardError) })
         {
@@ -375,12 +387,12 @@ public sealed class GateRunner
 
         try
         {
-            var identity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(expected)))}";
+            var identity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(request.InstalledInvocation?.ReadCapability(expected) ?? File.ReadAllBytes(expected)))}";
             return string.Equals(identity, request.Capability.ExecutableIdentity, StringComparison.Ordinal)
                 ? null
                 : NormalizedEvidence.Error("The detected executable bytes do not match the bound capability identity.");
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or EvidenceWriteException or AggregateException)
         {
             return NormalizedEvidence.Error("The bound capability executable cannot be read.");
         }

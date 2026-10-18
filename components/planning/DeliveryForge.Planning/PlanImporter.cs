@@ -30,19 +30,20 @@ public static class PlanImporter
     public static Task<PlanImportResult> ImportAndReconcileAsync(ReadOnlyMemory<byte> richBundle,
         PlanImportSource source, PlanImportExpectations expectations, TimeSpan entireBudget,
         ImportedContextEnvelope? freshImportedContext = null, CancellationToken cancellationToken = default) =>
-        ImportCoreAsync(richBundle,source,expectations,entireBudget,freshImportedContext,cancellationToken,null,null);
+        ImportCoreAsync(richBundle, source, expectations, entireBudget, freshImportedContext, cancellationToken, null, null);
 
     public static Task<PlanImportResult> ImportAndReconcileOwnedAsync(ReadOnlyMemory<byte> richBundle,
-        PlanImportSource source,PlanImportExpectations expectations,TimeSpan entireBudget,
-        ProcessCommandExecutor actualExecutor,IOwnedDuplexBudget actualOriginal,
-        ImportedContextEnvelope? freshImportedContext=null,CancellationToken cancellationToken=default) {
-        ArgumentNullException.ThrowIfNull(actualExecutor);ArgumentNullException.ThrowIfNull(actualOriginal);actualOriginal.CheckWork();
-        return ImportCoreAsync(richBundle,source,expectations,entireBudget,freshImportedContext,cancellationToken,actualExecutor,actualOriginal);
+        PlanImportSource source, PlanImportExpectations expectations, TimeSpan entireBudget,
+        ProcessCommandExecutor actualExecutor, IOwnedDuplexBudget actualOriginal,
+        ImportedContextEnvelope? freshImportedContext = null, CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(actualExecutor); ArgumentNullException.ThrowIfNull(actualOriginal); actualOriginal.CheckWork();
+        return ImportCoreAsync(richBundle, source, expectations, entireBudget, freshImportedContext, cancellationToken, actualExecutor, actualOriginal);
     }
     static async Task<PlanImportResult> ImportCoreAsync(ReadOnlyMemory<byte> richBundle,
-        PlanImportSource source,PlanImportExpectations expectations,TimeSpan entireBudget,
-        ImportedContextEnvelope? freshImportedContext,CancellationToken cancellationToken,
-        ProcessCommandExecutor? actualExecutor,IOwnedDuplexBudget? actualOriginal)
+        PlanImportSource source, PlanImportExpectations expectations, TimeSpan entireBudget,
+        ImportedContextEnvelope? freshImportedContext, CancellationToken cancellationToken,
+        ProcessCommandExecutor? actualExecutor, IOwnedDuplexBudget? actualOriginal)
     {
         cancellationToken.ThrowIfCancellationRequested(); // No Git/path access for pre-cancelled callers.
         ArgumentNullException.ThrowIfNull(source); ArgumentNullException.ThrowIfNull(expectations);
@@ -52,7 +53,7 @@ public static class PlanImporter
             throw new PlanningException("Rich planning bundle exceeds the bounded import byte allowance.");
         if (string.IsNullOrWhiteSpace(source.TrustedGitExecutable) || !System.IO.Path.IsPathFullyQualified(source.TrustedGitExecutable))
             throw new PlanningException("An explicit absolute trusted Git executable is required for import; ambient fallback is refused.");
-        using var life = new PlanImportLifetime(entireBudget, cancellationToken,actualOriginal);
+        using var life = new PlanImportLifetime(entireBudget, cancellationToken, actualOriginal);
         PlanImportResult Refusal(string reason) => new(null, [reason], life.Resources.Snapshot());
         // Own caller bytes before the first asynchronous handoff.
         var ownedBundle = richBundle.ToArray(); life.Check();
@@ -83,7 +84,7 @@ public static class PlanImporter
         try { view = await life.Observe(() => new PlanImportGitView(source.RepositoryRoot, source.TrustedGitExecutable, life)); }
         catch (PlanningException error) { return Refusal(error.Message); }
         using var ownedView = view;
-        var reader = await life.Observe(() => GitRepositoryContextReader.ForImport(source.TrustedGitExecutable, life, view,actualExecutor,actualOriginal));
+        var reader = await life.Observe(() => GitRepositoryContextReader.ForImport(source.TrustedGitExecutable, life, view, actualExecutor, actualOriginal));
         PlanImportSourceSnapshot before;
         try { before = await PlanImportSourceSnapshot.Capture(source.RepositoryRoot, reader, life); }
         catch (PlanningException error) { return Refusal(error.Message); }

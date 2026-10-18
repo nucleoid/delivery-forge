@@ -13,9 +13,9 @@ namespace DeliveryForge.Coordination;
 public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDisposable
 {
     // Bounded outgoing actual parsed renewal DATA. Never authority/session input.
-    public sealed record ActualRenewalData(string RequestId,string Scope,string Resource,string LeaseId,string RunId,string FencingToken,TransportOutcome Outcome);
-    readonly List<ActualRenewalData> _actualRenewals=[];int _renewalObservationReservations;
-    public IReadOnlyList<ActualRenewalData> ReadActualRenewalData(){lock(_state)return Array.AsReadOnly(_actualRenewals.ToArray());}
+    public sealed record ActualRenewalData(string RequestId, string Scope, string Resource, string LeaseId, string RunId, string FencingToken, TransportOutcome Outcome);
+    readonly List<ActualRenewalData> _actualRenewals = []; int _renewalObservationReservations;
+    public IReadOnlyList<ActualRenewalData> ReadActualRenewalData() { lock (_state) return Array.AsReadOnly(_actualRenewals.ToArray()); }
     private const string Protocol = "2025-11-25";
     private const int MaximumResponseBytes = 1048576;
     private readonly Uri _endpoint;
@@ -59,7 +59,8 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
                 MaxResponseHeadersLength = 16,
                 ConnectTimeout = operationTimeout,
                 PooledConnectionLifetime = TimeSpan.FromMinutes(5),
-            }, false, null) { }
+            }, false, null)
+    { }
 
     internal ContinuumMcpTransport(Uri endpoint, string project, string principalId,
         ContinuumApiKeyFile credential, IContinuumDeploymentEvidenceSource deployment,
@@ -207,21 +208,21 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
             ttl_seconds = (int)request.Ttl.TotalSeconds,
         }, result =>
         {
-        if (ErrorCode(result) is not null) return AcquireTransportResult.Uncertain("continuum-acquire-refused");
-        MatchResource(result, request.Resource);
-        if (!ContinuumWireJson.Boolean(result, "acquired"))
-        {
-            ContinuumWireJson.Shape(result, ["acquired", "reason", "scope", "resource", "expires_at", "retry_after_seconds", "server_time"]);
-            if (ContinuumWireJson.Text(result, "reason", 32) != "LOCK_HELD" ||
-                !result.GetProperty("retry_after_seconds").TryGetInt32(out var delay) || delay is < 1 or > 900 ||
-                ContinuumWireJson.Time(result, "expires_at") <= ContinuumWireJson.Time(result, "server_time"))
-                throw ContinuumWireJson.Invalid();
-            return AcquireTransportResult.Contended("LOCK_HELD");
-        }
-        ContinuumWireJson.Shape(result, ["acquired", "scope", "resource", "lease_id", "run_id", "fencing_token", "expires_at", "server_time"]);
-        if (ContinuumWireJson.Uuid(result, "run_id") != request.Owner.RunId) throw ContinuumWireJson.Invalid();
-        var (server, expiry) = GrantTimes(result, request.Ttl);
-        return AcquireTransportResult.Acquired(ContinuumWireJson.Uuid(result, "lease_id"), ContinuumWireJson.Fence(result), server, expiry);
+            if (ErrorCode(result) is not null) return AcquireTransportResult.Uncertain("continuum-acquire-refused");
+            MatchResource(result, request.Resource);
+            if (!ContinuumWireJson.Boolean(result, "acquired"))
+            {
+                ContinuumWireJson.Shape(result, ["acquired", "reason", "scope", "resource", "expires_at", "retry_after_seconds", "server_time"]);
+                if (ContinuumWireJson.Text(result, "reason", 32) != "LOCK_HELD" ||
+                    !result.GetProperty("retry_after_seconds").TryGetInt32(out var delay) || delay is < 1 or > 900 ||
+                    ContinuumWireJson.Time(result, "expires_at") <= ContinuumWireJson.Time(result, "server_time"))
+                    throw ContinuumWireJson.Invalid();
+                return AcquireTransportResult.Contended("LOCK_HELD");
+            }
+            ContinuumWireJson.Shape(result, ["acquired", "scope", "resource", "lease_id", "run_id", "fencing_token", "expires_at", "server_time"]);
+            if (ContinuumWireJson.Uuid(result, "run_id") != request.Owner.RunId) throw ContinuumWireJson.Invalid();
+            var (server, expiry) = GrantTimes(result, request.Ttl);
+            return AcquireTransportResult.Acquired(ContinuumWireJson.Uuid(result, "lease_id"), ContinuumWireJson.Fence(result), server, expiry);
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -229,7 +230,7 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
     {
         RequireResource(request.Lease.Resource); RequireOwner(request.Lease.Owner); RequireUuid(request.RequestId);
         RequireUuid(request.Lease.LeaseId); request.Lease.Validate();
-        lock(_state){if(_renewalObservationReservations>=512)throw new CoordinationUnavailableException("Finite actual renewal observation bound.");_renewalObservationReservations++;}
+        lock (_state) { if (_renewalObservationReservations >= 512) throw new CoordinationUnavailableException("Finite actual renewal observation bound."); _renewalObservationReservations++; }
         var actual = await ToolAsync("continuum.lock_renew", new
         {
             lease_id = request.Lease.LeaseId,
@@ -238,16 +239,16 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
             ttl_seconds = 300,
         }, result =>
         {
-        var code = ErrorCode(result);
-        if (code is not null) return new RenewTransportResult(code == "LEASE_LOST" ? TransportOutcome.LeaseLost : TransportOutcome.Uncertain, null, null, "continuum-renew-refused");
-        ContinuumWireJson.Shape(result, ["renewed", "lease_id", "run_id", "fencing_token", "expires_at", "server_time"]);
-        if (!ContinuumWireJson.Boolean(result, "renewed") || ContinuumWireJson.Uuid(result, "lease_id") != request.Lease.LeaseId ||
-            ContinuumWireJson.Uuid(result, "run_id") != request.Lease.Owner.RunId || ContinuumWireJson.Fence(result) != request.Lease.FencingToken)
-            throw ContinuumWireJson.Invalid();
-        var (server, expiry) = GrantTimes(result, ContinuumCoordinationAdapter.DefaultTtl);
-        return RenewTransportResult.Renewed(server, expiry);
+            var code = ErrorCode(result);
+            if (code is not null) return new RenewTransportResult(code == "LEASE_LOST" ? TransportOutcome.LeaseLost : TransportOutcome.Uncertain, null, null, "continuum-renew-refused");
+            ContinuumWireJson.Shape(result, ["renewed", "lease_id", "run_id", "fencing_token", "expires_at", "server_time"]);
+            if (!ContinuumWireJson.Boolean(result, "renewed") || ContinuumWireJson.Uuid(result, "lease_id") != request.Lease.LeaseId ||
+                ContinuumWireJson.Uuid(result, "run_id") != request.Lease.Owner.RunId || ContinuumWireJson.Fence(result) != request.Lease.FencingToken)
+                throw ContinuumWireJson.Invalid();
+            var (server, expiry) = GrantTimes(result, ContinuumCoordinationAdapter.DefaultTtl);
+            return RenewTransportResult.Renewed(server, expiry);
         }, cancellationToken).ConfigureAwait(false);
-        lock(_state)_actualRenewals.Add(new(request.RequestId,request.Lease.Resource.Scope,request.Lease.Resource.ResourceKey,request.Lease.LeaseId,request.Lease.Owner.RunId,request.Lease.FencingToken,actual.Outcome));
+        lock (_state) _actualRenewals.Add(new(request.RequestId, request.Lease.Resource.Scope, request.Lease.Resource.ResourceKey, request.Lease.LeaseId, request.Lease.Owner.RunId, request.Lease.FencingToken, actual.Outcome));
         return actual;
     }
 
@@ -256,29 +257,29 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
         RequireResource(request.Resource); RequireOwner(request.Owner); RequireUuid(request.RequestId);
         return await ToolAsync("continuum.lock_inspect", new { scope = WireScope, resource = request.Resource.ResourceKey }, result =>
         {
-        if (ErrorCode(result) is not null)
-            return new InspectTransportResult(TransportOutcome.Uncertain, false, false, null, null, null, null, "continuum-inspect-refused");
-        MatchResource(result, request.Resource);
-        var held = ContinuumWireJson.Boolean(result, "held");
-        var server = ContinuumWireJson.Time(result, "server_time");
-        if (!held)
-        {
-            ContinuumWireJson.Shape(result, ["held", "scope", "resource", "server_time"]);
-            return InspectTransportResult.Available();
-        }
-        if (ContinuumWireJson.Time(result, "expires_at") <= server) throw ContinuumWireJson.Invalid();
-        if (!result.TryGetProperty("lease_id", out _))
-        {
-            ContinuumWireJson.Shape(result, ["held", "scope", "resource", "server_time", "expires_at"]);
-            return InspectTransportResult.HeldByOther();
-        }
-        ContinuumWireJson.Shape(result, ["held", "scope", "resource", "server_time", "expires_at", "lease_id", "run_id", "fencing_token"]);
-        var lease = ContinuumWireJson.Uuid(result, "lease_id");
-        var run = ContinuumWireJson.Uuid(result, "run_id");
-        var fence = ContinuumWireJson.Fence(result);
-        // Server exposes identity for the authenticated principal, not necessarily this run.
-        if (run != request.Owner.RunId) return InspectTransportResult.HeldByOther();
-        return InspectTransportResult.HeldByCaller(lease, fence, server, ContinuumWireJson.Time(result, "expires_at"));
+            if (ErrorCode(result) is not null)
+                return new InspectTransportResult(TransportOutcome.Uncertain, false, false, null, null, null, null, "continuum-inspect-refused");
+            MatchResource(result, request.Resource);
+            var held = ContinuumWireJson.Boolean(result, "held");
+            var server = ContinuumWireJson.Time(result, "server_time");
+            if (!held)
+            {
+                ContinuumWireJson.Shape(result, ["held", "scope", "resource", "server_time"]);
+                return InspectTransportResult.Available();
+            }
+            if (ContinuumWireJson.Time(result, "expires_at") <= server) throw ContinuumWireJson.Invalid();
+            if (!result.TryGetProperty("lease_id", out _))
+            {
+                ContinuumWireJson.Shape(result, ["held", "scope", "resource", "server_time", "expires_at"]);
+                return InspectTransportResult.HeldByOther();
+            }
+            ContinuumWireJson.Shape(result, ["held", "scope", "resource", "server_time", "expires_at", "lease_id", "run_id", "fencing_token"]);
+            var lease = ContinuumWireJson.Uuid(result, "lease_id");
+            var run = ContinuumWireJson.Uuid(result, "run_id");
+            var fence = ContinuumWireJson.Fence(result);
+            // Server exposes identity for the authenticated principal, not necessarily this run.
+            if (run != request.Owner.RunId) return InspectTransportResult.HeldByOther();
+            return InspectTransportResult.HeldByCaller(lease, fence, server, ContinuumWireJson.Time(result, "expires_at"));
         }, cancellationToken, cleanup: true).ConfigureAwait(false);
     }
 
@@ -294,12 +295,12 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
             request_id = request.RequestId,
         }, result =>
         {
-        var code = ErrorCode(result);
-        if (code is not null) return code == "LEASE_LOST" ? ReleaseTransportResult.LeaseLost() : ReleaseTransportResult.Uncertain("continuum-release-refused");
-        ContinuumWireJson.Shape(result, ["released"], "already_released");
-        if (!ContinuumWireJson.Boolean(result, "released") ||
-            (result.TryGetProperty("already_released", out _) && !ContinuumWireJson.Boolean(result, "already_released"))) throw ContinuumWireJson.Invalid();
-        return ReleaseTransportResult.Released();
+            var code = ErrorCode(result);
+            if (code is not null) return code == "LEASE_LOST" ? ReleaseTransportResult.LeaseLost() : ReleaseTransportResult.Uncertain("continuum-release-refused");
+            ContinuumWireJson.Shape(result, ["released"], "already_released");
+            if (!ContinuumWireJson.Boolean(result, "released") ||
+                (result.TryGetProperty("already_released", out _) && !ContinuumWireJson.Boolean(result, "already_released"))) throw ContinuumWireJson.Invalid();
+            return ReleaseTransportResult.Released();
         }, cancellationToken, cleanup: true).ConfigureAwait(false);
     }
 

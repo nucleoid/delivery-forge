@@ -136,10 +136,20 @@ internal static class Program
             if (store is not null) try { await store.DisposeAsync(); } catch (Exception error) { failures.Add(error); }
         }
         var pass = failures.Count == 0 && steps.Count == 5 && Stopwatch.GetElapsedTime(original) < TimeSpan.FromMinutes(3);
-        var summary = new { Kind = "ContinuumActualDryRunControls-v1", Pass = pass, Steps = steps,
-            Failures = failures.Count, ErrorTypes = failures.Select(error => error.GetType().Name).ToArray(),
-            ProductionWorkflowAccepted = false, RealWorkerInvocations = 0, GitHubWrites = 0, ServerChanges = 0,
-            ElapsedSeconds = Stopwatch.GetElapsedTime(original).TotalSeconds, UncertainLeasesRequireReconciliationOrTtl = !pass };
+        var summary = new
+        {
+            Kind = "ContinuumActualDryRunControls-v1",
+            Pass = pass,
+            Steps = steps,
+            Failures = failures.Count,
+            ErrorTypes = failures.Select(error => error.GetType().Name).ToArray(),
+            ProductionWorkflowAccepted = false,
+            RealWorkerInvocations = 0,
+            GitHubWrites = 0,
+            ServerChanges = 0,
+            ElapsedSeconds = Stopwatch.GetElapsedTime(original).TotalSeconds,
+            UncertainLeasesRequireReconciliationOrTtl = !pass
+        };
         if (root.Length != 0)
         {
             try
@@ -150,8 +160,17 @@ internal static class Program
             }
             catch { pass = false; }
         }
-        Console.WriteLine(JsonSerializer.Serialize(new { Kind = summary.Kind, Pass = pass, CompletedSteps = steps.Count, Failures = failures.Count,
-            ProductionWorkflowAccepted = false, RealWorkerInvocations = 0, GitHubWrites = 0, ServerChanges = 0 }));
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            Kind = summary.Kind,
+            Pass = pass,
+            CompletedSteps = steps.Count,
+            Failures = failures.Count,
+            ProductionWorkflowAccepted = false,
+            RealWorkerInvocations = 0,
+            GitHubWrites = 0,
+            ServerChanges = 0
+        }));
         return pass ? 0 : 1;
     }
 

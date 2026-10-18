@@ -24,6 +24,9 @@ public sealed record NormalizedEvidence(
     IReadOnlyList<string> Limitations,
     string? NotApplicableRationale = null)
 {
+    // Set only by a retained current installed execution; this is distinct from production authority.
+    internal bool ProducerVerified { get; init; }
+
     public static NormalizedEvidence Pass(string reason, bool fixture = false) =>
         new(GateOutcome.Pass, reason, fixture, false, ["Tool outcome is not production authority."], null);
 
@@ -149,7 +152,10 @@ public sealed record GateRequest(
     CommandInvocation Invocation,
     string Scope,
     TimeSpan Timeout,
-    string OutputDirectory);
+    string OutputDirectory)
+{
+    internal InstalledToolInvocation? InstalledInvocation { get; init; }
+}
 
 public sealed record GateRunResult(
     GateOutcome Outcome,

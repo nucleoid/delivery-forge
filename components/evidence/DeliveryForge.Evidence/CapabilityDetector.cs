@@ -32,6 +32,9 @@ public sealed record CapabilityDetection(
 
 public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
 {
+    private readonly InstalledToolFiles? _installedFiles;
+    internal ToolCapabilityDetector(ICommandExecutor executor, InstalledToolFiles installedFiles) : this(executor)
+        => _installedFiles = installedFiles;
     public async Task<CapabilityDetection> DetectAsync(
         CapabilityProbe probe,
         CancellationToken cancellationToken = default)
@@ -184,8 +187,8 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
         observed.StartsWith(required + "-", StringComparison.Ordinal) ||
         observed.StartsWith(required + "+", StringComparison.Ordinal);
 
-    private static string HashExecutable(string executable) =>
-        $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(executable)))}";
+    private string HashExecutable(string executable) =>
+        $"sha256:{Convert.ToHexStringLower(SHA256.HashData(_installedFiles?.Read(executable, 128 * 1024 * 1024) ?? File.ReadAllBytes(executable)))}";
 
     private static CapabilityDetection Unsupported(
         CapabilityProbe probe,

@@ -1,43 +1,47 @@
 using System.Diagnostics;
 // Test-only actual process. No model/provider/auth/SDK/production capability.
-if(args.Length!=3)return 64;
-var mode=args[0];var directory=Path.GetFullPath(args[1]);var nonce=args[2];
-if(!Directory.Exists(directory)||nonce.Length!=32||nonce.Any(x=>!char.IsAsciiHexDigit(x)))return 65;
-if(mode=="orphan-child") {
-    using(var file=new FileStream(Path.Combine(directory,nonce+"-child-entered"),FileMode.CreateNew,FileAccess.Write,FileShare.Read))file.WriteByte(1);
-    Console.Out.Close();Console.Error.Close();Console.In.Close();await Task.Delay(4000);
-    using(var file=new FileStream(Path.Combine(directory,nonce+"-child-returned"),FileMode.CreateNew,FileAccess.Write,FileShare.Read))file.WriteByte(1);
+if (args.Length != 3) return 64;
+var mode = args[0]; var directory = Path.GetFullPath(args[1]); var nonce = args[2];
+if (!Directory.Exists(directory) || nonce.Length != 32 || nonce.Any(x => !char.IsAsciiHexDigit(x))) return 65;
+if (mode == "orphan-child")
+{
+    using (var file = new FileStream(Path.Combine(directory, nonce + "-child-entered"), FileMode.CreateNew, FileAccess.Write, FileShare.Read)) file.WriteByte(1);
+    Console.Out.Close(); Console.Error.Close(); Console.In.Close(); await Task.Delay(4000);
+    using (var file = new FileStream(Path.Combine(directory, nonce + "-child-returned"), FileMode.CreateNew, FileAccess.Write, FileShare.Read)) file.WriteByte(1);
     return 0;
 }
-if(!OperatingSystem.IsWindows()&&!OperatingSystem.IsLinux())return 68;
-if(mode is "parent-contract" or "parent-contract-hold")Console.Out.NewLine="\n";
-using(var actual=Process.GetCurrentProcess()) {
-    Console.WriteLine("READY|"+actual.ProcessorAffinity.ToInt64()+"|"+Environment.GetEnvironmentVariable("DOTNET_PROCESSOR_COUNT")+"|"+Environment.GetEnvironmentVariable("DOTNET_GCHeapHardLimit"));Console.Out.Flush();
+if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) return 68;
+if (mode is "parent-contract" or "parent-contract-hold") Console.Out.NewLine = "\n";
+using (var actual = Process.GetCurrentProcess())
+{
+    Console.WriteLine("READY|" + actual.ProcessorAffinity.ToInt64() + "|" + Environment.GetEnvironmentVariable("DOTNET_PROCESSOR_COUNT") + "|" + Environment.GetEnvironmentVariable("DOTNET_GCHeapHardLimit")); Console.Out.Flush();
 }
-if(mode is "parent-contract" or "parent-contract-hold") {
+if (mode is "parent-contract" or "parent-contract-hold")
+{
     // Explicit fixture task, bounded stdin protocol; no model/provider/auth.
-    var bytes=new List<byte>();var one=new byte[1];var input=Console.OpenStandardInput();
-    while(true){if(await input.ReadAsync(one)!=1)return 69;if(one[0]==10)break;if(bytes.Count>=8192)return 70;bytes.Add(one[0]);}
-    using var doc=System.Text.Json.JsonDocument.Parse(bytes.ToArray());var body=doc.RootElement;
-    var path=body.GetProperty("Path").GetString()!;var git=body.GetProperty("Git").GetString()!;
-    if(body.GetProperty("Nonce").GetString()!=nonce||!Path.IsPathFullyQualified(git)||path.Length is <1 or >1024||path.Contains('\\')||path.StartsWith('/')||path.Split('/').Any(piece=>piece is "" or "." or "..")||path.Split('/').Any(piece=>piece.Equals(".git",StringComparison.OrdinalIgnoreCase)))return 71;
-    var target=Path.GetFullPath(Path.Combine(directory,path));if(!target.StartsWith(directory+Path.DirectorySeparatorChar,OperatingSystem.IsWindows()?StringComparison.OrdinalIgnoreCase:StringComparison.Ordinal))return 72;
-    var parent=Path.GetDirectoryName(target)!;for(var cursor=parent;cursor.Length>=directory.Length;cursor=Path.GetDirectoryName(cursor)!){if(File.GetAttributes(cursor).HasFlag(FileAttributes.ReparsePoint))return 73;if(cursor==directory)break;}
-    if(File.Exists(target)&&File.GetAttributes(target).HasFlag(FileAttributes.ReparsePoint))return 74;
-    await File.WriteAllTextAsync(target,"genuine native parent contract fixture "+nonce+"\n");
-    if(mode=="parent-contract-hold"){Console.WriteLine("STARTED|"+nonce);Console.Out.Flush();await Task.Delay(Timeout.Infinite);return 76;}
-    Console.WriteLine("WRITTEN|"+nonce);Console.Out.Flush();return 0;
+    var bytes = new List<byte>(); var one = new byte[1]; var input = Console.OpenStandardInput();
+    while (true) { if (await input.ReadAsync(one) != 1) return 69; if (one[0] == 10) break; if (bytes.Count >= 8192) return 70; bytes.Add(one[0]); }
+    using var doc = System.Text.Json.JsonDocument.Parse(bytes.ToArray()); var body = doc.RootElement;
+    var path = body.GetProperty("Path").GetString()!; var git = body.GetProperty("Git").GetString()!;
+    if (body.GetProperty("Nonce").GetString() != nonce || !Path.IsPathFullyQualified(git) || path.Length is < 1 or > 1024 || path.Contains('\\') || path.StartsWith('/') || path.Split('/').Any(piece => piece is "" or "." or "..") || path.Split('/').Any(piece => piece.Equals(".git", StringComparison.OrdinalIgnoreCase))) return 71;
+    var target = Path.GetFullPath(Path.Combine(directory, path)); if (!target.StartsWith(directory + Path.DirectorySeparatorChar, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) return 72;
+    var parent = Path.GetDirectoryName(target)!; for (var cursor = parent; cursor.Length >= directory.Length; cursor = Path.GetDirectoryName(cursor)!) { if (File.GetAttributes(cursor).HasFlag(FileAttributes.ReparsePoint)) return 73; if (cursor == directory) break; }
+    if (File.Exists(target) && File.GetAttributes(target).HasFlag(FileAttributes.ReparsePoint)) return 74;
+    await File.WriteAllTextAsync(target, "genuine native parent contract fixture " + nonce + "\n");
+    if (mode == "parent-contract-hold") { Console.WriteLine("STARTED|" + nonce); Console.Out.Flush(); await Task.Delay(Timeout.Infinite); return 76; }
+    Console.WriteLine("WRITTEN|" + nonce); Console.Out.Flush(); return 0;
 }
-if(mode=="echo") {var data=new byte[16];await Console.OpenStandardInput().ReadExactlyAsync(data);await Console.OpenStandardOutput().WriteAsync(data);await Console.Error.WriteAsync("actual-stderr");return 0;}
-if(mode=="input-block") {await Task.Delay(20000);return 0;}
-if(mode=="output-block") {var data=new byte[2*1024*1024];Array.Fill(data,(byte)'x');await Console.OpenStandardOutput().WriteAsync(data);return 0;}
-if(mode=="stderr-overflow") {var data=new byte[1048577];Array.Fill(data,(byte)'e');await Console.OpenStandardError().WriteAsync(data);Console.WriteLine("{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"actual-fixture-thread\",\"turn\":{\"id\":\"actual-fixture-turn\",\"status\":\"completed\"}}}");return 0;}
-if(mode=="orphan-parent") {
-    var image=Environment.ProcessPath??throw new IOException("Actual fixture apphost required.");
-    var info=new ProcessStartInfo(image){UseShellExecute=false,RedirectStandardInput=true,RedirectStandardOutput=true,RedirectStandardError=true};
-    foreach(var arg in new[]{"orphan-child",directory,nonce})info.ArgumentList.Add(arg);
-    using var child=Process.Start(info)??throw new IOException("Actual fixture child did not start.");
-    var bound=Stopwatch.GetTimestamp();while(!File.Exists(Path.Combine(directory,nonce+"-child-entered"))){if(Stopwatch.GetElapsedTime(bound)>TimeSpan.FromSeconds(3))return 66;await Task.Delay(5);}
+if (mode == "echo") { var data = new byte[16]; await Console.OpenStandardInput().ReadExactlyAsync(data); await Console.OpenStandardOutput().WriteAsync(data); await Console.Error.WriteAsync("actual-stderr"); return 0; }
+if (mode == "input-block") { await Task.Delay(20000); return 0; }
+if (mode == "output-block") { var data = new byte[2 * 1024 * 1024]; Array.Fill(data, (byte)'x'); await Console.OpenStandardOutput().WriteAsync(data); return 0; }
+if (mode == "stderr-overflow") { var data = new byte[1048577]; Array.Fill(data, (byte)'e'); await Console.OpenStandardError().WriteAsync(data); Console.WriteLine("{\"method\":\"turn/completed\",\"params\":{\"threadId\":\"actual-fixture-thread\",\"turn\":{\"id\":\"actual-fixture-turn\",\"status\":\"completed\"}}}"); return 0; }
+if (mode == "orphan-parent")
+{
+    var image = Environment.ProcessPath ?? throw new IOException("Actual fixture apphost required.");
+    var info = new ProcessStartInfo(image) { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+    foreach (var arg in new[] { "orphan-child", directory, nonce }) info.ArgumentList.Add(arg);
+    using var child = Process.Start(info) ?? throw new IOException("Actual fixture child did not start.");
+    var bound = Stopwatch.GetTimestamp(); while (!File.Exists(Path.Combine(directory, nonce + "-child-entered"))) { if (Stopwatch.GetElapsedTime(bound) > TimeSpan.FromSeconds(3)) return 66; await Task.Delay(5); }
     return 0; // Ordinary descendant intentionally outlives this root, with closed pipes.
 }
 return 67;
