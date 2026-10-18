@@ -71,7 +71,7 @@ public sealed class OwnedDuplexProcessTests
     {
         using var affinity = new Affinity(); await using var run = new Run("input-block"); await run.Ready(); using var cancel = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken); var data = new byte[65536]; Task? originalWrite = null; for (var index = 0; index < 128; index++) { run.Original.Check(); originalWrite = run.Session.Input.WriteAsync(data, 0, data.Length, cancel.Token); if (!originalWrite.IsCompleted) break; await originalWrite; }
         Assert.NotNull(originalWrite); Assert.False(originalWrite.IsCompleted); Assert.True(run.Session.HasUnknownIo);
-        var pendingWrite = Assert.Single(run.Session.ActualIo.Where(x => x.Kind == "stdin-write" && x.Unknown));
+        var pendingWrite = Assert.Single(run.Session.ActualIo, x => x.Kind == "stdin-write" && x.Unknown);
         Assert.NotNull(pendingWrite.ActualTask);
         cancel.Cancel(); var retirement = run.Session.RetireAsync(true);
         // Retirement latches cleanup synchronously. Preserve the cancelled actual
