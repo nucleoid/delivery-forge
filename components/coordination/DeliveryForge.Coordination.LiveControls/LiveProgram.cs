@@ -15,7 +15,7 @@ internal static class Program
         var steps = new List<string>();
         var failures = new List<Exception>();
         ContinuumMcpTransport? a = null, b = null;
-        LiveCheckpointStore? store = null;
+        FileCoordinationCheckpointStore? store = null;
         var root = "";
         using var entire = new CancellationTokenSource(TimeSpan.FromMinutes(3));
         try
@@ -47,7 +47,7 @@ internal static class Program
             root = Path.GetFullPath(config.JournalRoot);
             if (Directory.Exists(root) || File.Exists(root)) throw new ArgumentException("Fresh owned journal directory required.");
             Directory.CreateDirectory(root);
-            store = new LiveCheckpointStore(root);
+            store = LiveControlHost.CreateCheckpointStore(root);
             var timeout = TimeSpan.FromSeconds(10);
             a = Transport(config, config.A, timeout);
             b = Transport(config, config.B, timeout);

@@ -223,10 +223,10 @@ public sealed class ContinuumMcpTransportTests
         Directory.CreateDirectory(root);
         using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
         var cancelOnce = true;
-        var store = new LiveCheckpointStore(root, beforeReadbackForContractTests: path =>
+        var store = new FileCoordinationCheckpointStore(root, beforeReadbackForContractTests: path =>
         {
             if (cancelOnce && path.EndsWith("-record.json", StringComparison.Ordinal)) { cancelOnce = false; cancelled.Cancel(); }
-        });
+        }, firstCloseForContractTests: null, exclusiveCreatedForContractTests: null);
         try
         {
             var lifecycle = Guid.NewGuid().ToString("D");
@@ -250,7 +250,7 @@ public sealed class ContinuumMcpTransportTests
         Directory.CreateDirectory(root);
         FileStream? actualExclusive = null;
         FileStream? actualChild = null;
-        var store = new LiveCheckpointStore(root,
+        var store = new FileCoordinationCheckpointStore(root, beforeReadbackForContractTests: null,
             firstCloseForContractTests: stream => { actualChild = stream; return ValueTask.FromException(new IOException("Synthetic first-close refusal; actual child retained.")); },
             exclusiveCreatedForContractTests: stream => actualExclusive = stream);
         try
@@ -267,6 +267,51 @@ public sealed class ContinuumMcpTransportTests
             // Explicit fixture teardown of the retained original handles; never a successful store disposition.
             if (actualChild is not null) await actualChild.DisposeAsync();
             if (actualExclusive is not null) await actualExclusive.DisposeAsync();
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task Live_checkpoint_composition_refuses_visible_record_without_original_durable_flush()
+    {
+        var compositionRoot = Path.Combine(Path.GetTempPath(), "delivery-forge-live-composition-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(compositionRoot);
+        // This is the exact construction method called by LiveProgram, not a supplied factory/type label.
+        var composed = LiveControlHost.CreateCheckpointStore(compositionRoot);
+        try { Assert.IsType<FileCoordinationCheckpointStore>(composed); }
+        finally { await composed.DisposeAsync(); Directory.Delete(compositionRoot, recursive: true); }
+
+        var root = Path.Combine(Path.GetTempPath(), "delivery-forge-live-durability-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        FileStream? originalExclusive = null;
+        var interruption = new IOException("Explicit conformance interruption before original durable flush; not an OS Flush failure.");
+        // The same concrete production store, using its existing friend-only fault seam.
+        var store = new FileCoordinationCheckpointStore(root, null, null, stream => originalExclusive = stream,
+            path => { if (path.EndsWith("-record.json", StringComparison.Ordinal)) throw interruption; });
+        Assert.Equal(composed.GetType(), store.GetType());
+        try
+        {
+            var claim = await store.ClaimWriterAsync(Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"), null, TestContext.Current.CancellationToken);
+            var record = new CoordinationCheckpointRecord(1, 1, 1, CoordinationIntentKind.Acquire, claim.WriterEpoch, 1, null, null);
+            var failure = await Assert.ThrowsAsync<AggregateException>(() => store.AppendAsync(claim, 1, record, TestContext.Current.CancellationToken));
+            Assert.Contains(interruption, failure.InnerExceptions);
+            var recordPath = Assert.Single(Directory.GetFiles(Path.Combine(root, claim.LifecycleId), "*-record.json"));
+            Assert.InRange(new FileInfo(recordPath).Length, 1, 65536);
+            Assert.Equal(record, JsonSerializer.Deserialize<CoordinationCheckpointRecord>(
+                await File.ReadAllBytesAsync(recordPath, TestContext.Current.CancellationToken)));
+            await Assert.ThrowsAsync<CoordinationUncertainException>(() => store.ReadLifecycleAsync(claim.LifecycleId, TestContext.Current.CancellationToken));
+            await Assert.ThrowsAsync<CoordinationUncertainException>(() => store.AppendAsync(claim, 1, record, TestContext.Current.CancellationToken));
+            await Assert.ThrowsAsync<CoordinationUncertainException>(() => store.DisposeAsync().AsTask());
+            await Assert.ThrowsAsync<CoordinationUncertainException>(() => store.DisposeAsync().AsTask());
+            Assert.NotNull(originalExclusive);
+            Assert.False(originalExclusive.SafeFileHandle.IsClosed);
+            Assert.True(FileCoordinationCheckpointStore.RetainsOriginalWriterForContractTests(originalExclusive));
+            Assert.Throws<IOException>(() => new FileStream(Path.Combine(root, "parent-writer.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None));
+        }
+        finally
+        {
+            // Explicit teardown of the captured original fixture handle; never store cleanup success.
+            if (originalExclusive is not null) await originalExclusive.DisposeAsync();
             Directory.Delete(root, recursive: true);
         }
     }

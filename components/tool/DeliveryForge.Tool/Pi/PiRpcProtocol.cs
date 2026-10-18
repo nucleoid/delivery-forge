@@ -4,19 +4,23 @@ namespace DeliveryForge.Tool.Pi;
 // Provider-specific schema/state; only byte framing is shared with the Codex codec.
 // One actual process, one prompt, no queue/steer/model/auth mutation route.
 public sealed class PiRpcProtocol {
-    bool prompt,entered,settled;string? finalAssistantStop;
+    bool prompt,entered,settled;string? finalAssistantStop;Exception? protocolFailure;
     public void AdmitPrompt(){if(prompt)throw new IOException("One actual selected Pi prompt only.");prompt=true;}
     public bool Settled=>settled;
     public bool Aborted {get;private set;}
     public void ObserveEvent(JsonElement row) {
+        try {
+        if(protocolFailure is not null)throw new IOException("Pi event stream previously refused.",protocolFailure);
         var type=Text(row,"type");
+        if(settled && type is "agent_start" or "message_end" or "agent_settled")throw new IOException("Pi state-changing event after settlement; success permanently refused.");
         if(type=="agent_start") {if(!prompt)throw new IOException("Unrequested Pi run before actual prompt admission.");if(settled)throw new IOException("Pi restarted after settled; no automatic second dispatch admitted.");entered=true;}
         if(type=="message_end") {var message=row.GetProperty("message");if(Text(message,"role")=="assistant")finalAssistantStop=Text(message,"stopReason");}
         if(type=="agent_settled") {if(!entered||settled)throw new IOException("Pi settled without actual run or repeated settlement.");Aborted=Boolean(row,"aborted");settled=true;}
         if(type=="extension_error")throw new IOException("Actual Pi extension failed; no successful worker result inferred.");
         if(type=="queue_update"&&(row.GetProperty("steering").GetArrayLength()!=0||row.GetProperty("followUp").GetArrayLength()!=0))throw new IOException("Pi acquired unrequested queued work.");
+        }catch(Exception failure){protocolFailure??=failure;throw;}
     }
-    public void RequireSuccess() {if(!settled||Aborted||finalAssistantStop!="stop")throw new IOException("Actual Pi run is not settled with a successful final assistant message.");}
+    public void RequireSuccess() {if(protocolFailure is not null)throw new IOException("Pi event stream remains failed.",protocolFailure);if(!settled||Aborted||finalAssistantStop!="stop")throw new IOException("Actual Pi run is not settled with a successful final assistant message.");}
     public static JsonElement Response(JsonElement row,string expectedId,string expectedCommand) {
         if(Text(row,"type")!="response"||Text(row,"id")!=expectedId||Text(row,"command")!=expectedCommand)throw new IOException("Pi response has foreign ID or command.");
         var success=Boolean(row,"success");

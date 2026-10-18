@@ -19,4 +19,24 @@ public sealed class PiRpcProtocolTests {
     [Theory][InlineData("queued")][InlineData("handled")]
     public void Echoed_prompt_without_started_run_is_not_acceptance(string disposition){using var doc=JsonDocument.Parse(JsonSerializer.Serialize(new {disposition}));Assert.Throws<IOException>(()=>PiRpcProtocol.RequireStarted(doc.RootElement));}
     [Fact] public void Premature_settlement_queued_work_and_string_booleans_refuse(){var state=new PiRpcProtocol();Assert.Throws<IOException>(()=>Event(state,"{\"type\":\"agent_start\"}"));state.AdmitPrompt();Assert.Throws<IOException>(()=>Event(state,"{\"type\":\"agent_settled\",\"aborted\":false}"));Assert.Throws<IOException>(()=>Event(state,"{\"type\":\"queue_update\",\"steering\":[\"unrequested\"],\"followUp\":[]}"));using var doc=JsonDocument.Parse("{\"sessionId\":\"a\",\"isStreaming\":\"false\",\"isCompacting\":false,\"pendingMessageCount\":0}");Assert.Throws<IOException>(()=>PiRpcProtocol.RequireIdleSession(doc.RootElement));}
+    [Theory][InlineData("message-stop")][InlineData("message-error")][InlineData("agent-start")][InlineData("repeated-settlement")][InlineData("extension-error")][InlineData("queued-work")]
+    public void Late_state_event_permanently_refuses_previously_successful_settlement(string late)
+    {
+        var state=Started();
+        const string successfulMessage="{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"stop\"}}";
+        Event(state,successfulMessage);Event(state,"{\"type\":\"agent_settled\",\"aborted\":false}");state.RequireSuccess();
+        var actual=late switch {
+            "message-stop"=>successfulMessage,
+            "message-error"=>"{\"type\":\"message_end\",\"message\":{\"role\":\"assistant\",\"stopReason\":\"error\"}}",
+            "agent-start"=>"{\"type\":\"agent_start\"}",
+            "repeated-settlement"=>"{\"type\":\"agent_settled\",\"aborted\":false}",
+            "extension-error"=>"{\"type\":\"extension_error\"}",
+            "queued-work"=>"{\"type\":\"queue_update\",\"steering\":[\"unrequested\"],\"followUp\":[]}",
+            _=>throw new ArgumentOutOfRangeException(nameof(late)),
+        };
+        Assert.Throws<IOException>(()=>Event(state,actual));
+        Assert.Throws<IOException>(state.RequireSuccess);
+        Assert.Throws<IOException>(()=>Event(state,successfulMessage));
+        Assert.Throws<IOException>(state.RequireSuccess);
+    }
 }
