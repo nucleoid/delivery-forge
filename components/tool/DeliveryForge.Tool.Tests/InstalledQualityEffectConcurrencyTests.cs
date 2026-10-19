@@ -8,6 +8,33 @@ namespace DeliveryForge.Tool.Tests;
 // synchronous callback. No live lease, tool outcome or baseline is fabricated.
 public sealed class InstalledQualityEffectConcurrencyTests
 {
+    [Fact]
+    public void Revocation_after_acquisition_still_closes_the_original_input_handle()
+    {
+        if (!OperatingSystem.IsWindows()) Assert.Skip("Observes actual Windows file-sharing ownership; Linux conformance remains separate.");
+        var path = Path.Combine(Path.GetTempPath(), "forge-acquired-input-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(path, "same original input");
+        var current = true; var observedOpenHandle = false;
+        var admission = new ParentEffectAdmission(new object(), _ =>
+        {
+            if (!current) return false;
+            try { using var probe = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite); }
+            catch (IOException)
+            {
+                // The actual reader's FileShare.Read denies this write-open.
+                // Revoke only after acquisition has positively happened.
+                observedOpenHandle = true; current = false;
+            }
+            return current;
+        }, _ => current = false);
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var files = new InstalledToolFiles(life, TimeSpan.FromSeconds(20), new InstalledToolHostScope.Credits(), admission, "owned");
+        Assert.ThrowsAny<Exception>(() => files.Read(path, 128));
+        Assert.True(observedOpenHandle);
+        using var exclusive = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
+        Assert.False(life.HasRetainedUnknown);
+    }
+
     [Fact(Timeout = 15000)]
     public async Task Revocation_does_not_wait_for_file_finalization_and_prevents_its_next_write()
     {
