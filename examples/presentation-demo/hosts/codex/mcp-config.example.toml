@@ -1,0 +1,6 @@
+# EXAMPLE ONLY — copy/adapt only in a future explicitly authorized session.
+# The endpoint is local stdio and has no network or live Forge adapter.
+[mcp_servers.forge_demo]
+command = "node"
+args = ["/ABSOLUTE/PATH/TO/prototypes/hosts/codex/mcp-server.mjs"]
+

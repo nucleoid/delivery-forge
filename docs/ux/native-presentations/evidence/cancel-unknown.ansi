@@ -1,0 +1,44 @@
+HARNESS RENDER — native text contract (not an installed host screenshot)
+DEMO • SYNTHETIC — zero live adapters
+FORGE / demo-014 / plan r3 / head c82e4a1 / ceiling PR
+Source snapshot-cancel-unknown-011 | seq 11 | current/complete | fixture-capabilities-v1
+Phase: Launch -> Plan -> [Execute] -> Evaluate -> Repair -> Review -> PR
+
+EXECUTE / INCOMPLETE
+Stop requested. Cleanup is unconfirmed.
+Resume, repair and publication are blocked until reconciliation proves owned-resource state.
+
+Evidence
+Build PASS receipt-build-c82e4a1
+Tests PASS receipt-tests-c82e4a1
+Crap4CSharp PASS receipt-crap4csharp-c82e4a1
+Mutate4CSharp PASS receipt-mutation-c82e4a1
+Migration NOT_APPLICABLE receipt-migration-c82e4a1
+N/A rationale: No schema or data migration in approved scope.
+Review PASS / independence accepted / fixture://evidence/review-assessment.json
+  Attempt history (retained)
+mutation-attempt-1: superseded-incomplete; head b45e000; receipt-mutation-attempt-1
+mutation-attempt-2: current-capture-only; head c82e4a1; receipt-mutation-attempt-2
+
+Control
+Desired STOPPED; observed UNKNOWN; cleanup unknown; active owned operations UNKNOWN.
+
+Next
+Inspect reconciliation detail — AVAILABLE. Unknown cleanup is preserved.
+
+Integrations
+Engram: unavailable; not connected. Demo does not connect to Engram
+Continuum memory: unavailable; not connected. Memory is distinct from coordination authority
+Continuum coordination: unavailable; not connected. No lease was requested or inferred
+Switchyard: unverified; not measured. No runtime readiness claim
+
+Measurements
+  Elapsed: not measured (not measured)
+  Cost: not measured (not measured)
+  CPU: not measured (not measured)
+  Memory: not measured (not measured)
+
+Full identity: run=demo-014 plan=plan-demo-014-csv-export-r3
+head=c82e4a100000000000000000000000000000003
+tree=tree-demo-c82e4a1000000000000000000000000002 policy=policy-demo-safe-v1
+capability=fixture-capabilities-v1

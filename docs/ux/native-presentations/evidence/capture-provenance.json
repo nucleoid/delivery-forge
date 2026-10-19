@@ -1,0 +1,144 @@
+{
+  "generatedAt": "2026-10-19T09:58:03.303Z",
+  "generator": "scripts/capture-evidence.mjs",
+  "runtime": "v24.21.0",
+  "commands": [
+    {
+      "output": "terminal-80.txt/.ansi",
+      "argv": [
+        "node",
+        "scripts/demo.mjs",
+        "failed-gate",
+        "80"
+      ],
+      "exitCode": 0
+    },
+    {
+      "output": "terminal-120.txt/.ansi",
+      "argv": [
+        "node",
+        "scripts/demo.mjs",
+        "failed-gate",
+        "120"
+      ],
+      "exitCode": 0
+    },
+    {
+      "output": "failure.txt/.ansi",
+      "argv": [
+        "node",
+        "scripts/demo.mjs",
+        "tool-fail",
+        "100"
+      ],
+      "exitCode": 0
+    },
+    {
+      "output": "repair.txt/.ansi",
+      "argv": [
+        "node",
+        "scripts/demo.mjs",
+        "repair",
+        "100"
+      ],
+      "exitCode": 0
+    },
+    {
+      "output": "review.txt/.ansi",
+      "argv": [
+        "node",
+        "scripts/demo.mjs",
+        "review",
+        "100"
+      ],
+      "exitCode": 0
+    },
+    {
+      "output": "stale.txt/.ansi",
+      "argv": [
+        "node",
+        "scripts/demo.mjs",
+        "stale-reconnected",
+        "100"
+      ],
+      "exitCode": 0
+    },
+    {
+      "output": "head-drift.txt/.ansi",
+      "argv": [
+        "node",
+        "scripts/demo.mjs",
+        "head-drift",
+        "100"
+      ],
+      "exitCode": 0
+    },
+    {
+      "output": "cancel-unknown.txt/.ansi",
+      "argv": [
+        "node",
+        "scripts/demo.mjs",
+        "cancel-unknown",
+        "100"
+      ],
+      "exitCode": 0
+    },
+    {
+      "output": "codex-mcp-protocol.txt",
+      "argv": [
+        "node",
+        "hosts/codex/protocol-harness.mjs",
+        "failed-gate",
+        "80"
+      ],
+      "exitCode": 0
+    },
+    {
+      "output": "claude-statusline-80.txt",
+      "argv": [
+        "node",
+        "hosts/claude/statusline.mjs",
+        "--state",
+        "hosts/claude/statusline-state.json"
+      ],
+      "stdin": "bounded synthetic host JSON with FORGE_PRESENTATION=harness",
+      "exitCode": 0
+    },
+    {
+      "output": "pi-detail-list-52.txt / pi-detail-selected-52.txt / pi-evidence-detail-52.txt",
+      "argv": [
+        "in-process",
+        "createDetailComponent",
+        "failed-gate",
+        "width=52",
+        "presentation=harness"
+      ],
+      "exitCode": 0
+    }
+  ],
+  "sha256": {
+    "cancel-unknown.ansi": "4cd9a9640352bbd7ccf1d703a489a23cdadf59b25545846b66fbf7135e7afed2",
+    "cancel-unknown.txt": "4cd9a9640352bbd7ccf1d703a489a23cdadf59b25545846b66fbf7135e7afed2",
+    "claude-statusline-80.txt": "32fd30dbf7f8183cefb2ab2daaa3a3a6b1512684a643ce7958420e04f54dd6f6",
+    "codex-mcp-protocol.txt": "521e8ec4ba18ea24a4fb86d8a34dd3ce62c9b32d71347dd83763ccd4d3cdc338",
+    "failure.ansi": "05fb0687fd9dc1c486f9bf881ccc24b6a74cd00b71e61b7cf20f0e420db8d2a0",
+    "failure.txt": "05fb0687fd9dc1c486f9bf881ccc24b6a74cd00b71e61b7cf20f0e420db8d2a0",
+    "head-drift.ansi": "2d08d8d552341e82af79aa5415ecbcf68ee96c0c1ae3e5196c7f070742266d00",
+    "head-drift.txt": "2d08d8d552341e82af79aa5415ecbcf68ee96c0c1ae3e5196c7f070742266d00",
+    "pi-detail-list-52.txt": "4c769af5c8608cc88917bf88a90e4b3c1f895cd9b18ef515e670ba4030a367dd",
+    "pi-detail-selected-52.txt": "6067f257c97e4849156bb1ffbdcac7077129711385c85f36e42b883ad59a497c",
+    "pi-evidence-detail-52.txt": "765b21f17e443524a5a80475d5fc88ff963af734789952654200f71f6c68a4de",
+    "red-baseline-3a97fe0.txt": "12f7ee800083b5e4ed4fcda1be31dc81f0aa85d676ab2ea67a05a57946481732",
+    "repair.ansi": "e750808670739d317a4fd4781904194047e4f2d33822c20ec9a289b4fa9267a4",
+    "repair.txt": "e750808670739d317a4fd4781904194047e4f2d33822c20ec9a289b4fa9267a4",
+    "review.ansi": "183519052263cd823e4245472dea732ddf85fba7c409238a50f835f53b02641d",
+    "review.txt": "183519052263cd823e4245472dea732ddf85fba7c409238a50f835f53b02641d",
+    "stale.ansi": "33301aaa1576dca5eba946aeab631c56dfeb172311489854d78294a632de2f8f",
+    "stale.txt": "33301aaa1576dca5eba946aeab631c56dfeb172311489854d78294a632de2f8f",
+    "terminal-120.ansi": "510fca0743010f64f20ad5e113f50582483f92cf86f9a7306f8ffce02037ef07",
+    "terminal-120.txt": "510fca0743010f64f20ad5e113f50582483f92cf86f9a7306f8ffce02037ef07",
+    "terminal-80.ansi": "8fd20f04b6777d67e9de35def639c734b093e4ba4c2396887072e4062ab3c8ce",
+    "terminal-80.txt": "8fd20f04b6777d67e9de35def639c734b093e4ba4c2396887072e4062ab3c8ce"
+  },
+  "note": "All captures are deterministic local harness output from shared synthetic fixtures. No installed coding host was launched."
+}

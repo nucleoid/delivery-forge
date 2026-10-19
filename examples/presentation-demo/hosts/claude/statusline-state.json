@@ -1,0 +1,6 @@
+{
+  "schemaVersion": "forge.statusline-state/0.1",
+  "mode": "demo",
+  "scenario": "failed-gate",
+  "note": "Explicit static fixture pointer; no watcher and no live adapter."
+}

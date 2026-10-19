@@ -1,0 +1,38 @@
+HARNESS RENDER — native text contract (not an installed host screenshot)
+DEMO • SYNTHETIC — zero live adapters
+FORGE / demo-014 / plan r3 / head c82e4a1 / ceiling IMPLEMENT
+Source snapshot-repair-005 | seq 5 | current/complete | fixture-capabilities-v1
+Phase: Launch -> Plan -> Execute -> Evaluate -> [Repair] -> Review -> PR
+
+REPAIR / INCOMPLETE
+Repair the evidence—not the threshold.
+Attempt 2 captures missing mutation outcomes. Old-head PASS receipts remain visible but stale.
+
+Evidence
+  No gate receipts in this fixture state. Aggregate cannot infer green.
+  Attempt history (retained)
+mutation-attempt-1: superseded-incomplete; head b45e000; receipt-mutation-attempt-1
+mutation-attempt-2: current-capture-only; head c82e4a1; receipt-mutation-attempt-2
+
+Control
+Desired EVALUATING; observed READY; cleanup not-requested; active owned operations 0.
+
+Next
+Re-evaluate exact head — AVAILABLE. No old-head receipt can aggregate PASS.
+
+Integrations
+Engram: unavailable; not connected. Demo does not connect to Engram
+Continuum memory: unavailable; not connected. Memory is distinct from coordination authority
+Continuum coordination: unavailable; not connected. No lease was requested or inferred
+Switchyard: unverified; not measured. No runtime readiness claim
+
+Measurements
+  Elapsed: not measured (not measured)
+  Cost: not measured (not measured)
+  CPU: not measured (not measured)
+  Memory: not measured (not measured)
+
+Full identity: run=demo-014 plan=plan-demo-014-csv-export-r3
+head=c82e4a100000000000000000000000000000003
+tree=tree-demo-c82e4a1000000000000000000000000002 policy=policy-demo-safe-v1
+capability=fixture-capabilities-v1

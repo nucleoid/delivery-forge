@@ -1,0 +1,17 @@
+{
+  "name": "delivery-forge-ux1-native-prototypes",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DEMO-ONLY synthetic UX-1 presentation prototypes; no live adapters",
+  "scripts": {
+    "test": "node --test",
+    "demo": "node scripts/demo.mjs",
+    "capture": "node scripts/capture-evidence.mjs",
+    "screenshots": "node scripts/screenshots.mjs"
+  },
+  "engines": { "node": ">=20" },
+  "devDependencies": {
+    "playwright": "1.58.2"
+  }
+}

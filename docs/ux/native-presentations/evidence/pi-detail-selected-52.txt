@@ -1,0 +1,11 @@
+HARNESS RENDER — evidence selector (not an installed
+host screenshot)
+DEMO • SYNTHETIC
+Evidence / INCOMPLETE
+  Build: PASS | receipt-build-b45e
+> Tests: PASS | receipt-tests-b45e
+  Crap4CSharp: PASS | receipt-crap-b45e
+Mutate4CSharp: INCOMPLETE |
+receipt-mutation-attempt-1
+  Migration: NOT_APPLICABLE | receipt-migration-na
+j/k or arrows: select | Enter: detail | Esc: close
