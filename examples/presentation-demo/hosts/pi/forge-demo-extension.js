@@ -7,7 +7,8 @@ const HINTS='/forge-demo detail · usage · next · prev · reset';
 const states=snapshotsFromCatalog();
 // ANSI colour only when the host hands us a real theme; test doubles and NO_COLOR stay plain
 const useColor=(theme)=>Boolean(theme&&typeof theme.fg==='function')&&process.env.NO_COLOR!=='1';
-const clean=(value,max=4096)=>String(value??'').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g,' ').slice(0,max);
+// strip control characters but keep ESC (0x1b): renderer output carries SGR colour sequences, fixture text was already cleaned by the projector
+const clean=(value,max=4096)=>String(value??'').replace(/[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]/g,' ').slice(0,max);
 const clip=(line,width)=>displayWidth(line)<=Math.max(1,width)?line:[...stripAnsi(line)].slice(0,Math.max(1,width)).join('');
 
 export function restoreFromActiveBranch(ctx){
