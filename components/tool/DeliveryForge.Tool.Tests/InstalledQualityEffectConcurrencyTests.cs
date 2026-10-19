@@ -26,14 +26,14 @@ public sealed class InstalledQualityEffectConcurrencyTests
         {
             Assert.Equal("known complete input", Encoding.UTF8.GetString(files.Read(input, 128)));
             entered.Set();
-            if (!release.Wait(TimeSpan.FromSeconds(8))) throw new TimeoutException("Test callback release did not arrive.");
+            if (!release.Wait(TimeSpan.FromSeconds(8), TestContext.Current.CancellationToken)) throw new TimeoutException("Test callback release did not arrive.");
             files.WriteNew(forbidden, "forbidden"u8.ToArray());
             return true;
         }), CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         Task? revocation = null;
         try
         {
-            Assert.True(entered.Wait(TimeSpan.FromSeconds(5)));
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
             revocation = Task.Factory.StartNew(() => { lock (gate) current = false; },
                 CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
             Assert.Same(revocation, await Task.WhenAny(revocation, Task.Delay(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken)));
@@ -42,8 +42,9 @@ public sealed class InstalledQualityEffectConcurrencyTests
         finally
         {
             release.Set();
-            try { await effect.WaitAsync(TimeSpan.FromSeconds(5)); } catch (CoordinationUncertainException) { }
-            if (revocation is not null) await revocation.WaitAsync(TimeSpan.FromSeconds(5));
+            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            try { await effect.WaitAsync(cleanup.Token); } catch (CoordinationUncertainException) { }
+            if (revocation is not null) await revocation.WaitAsync(cleanup.Token);
         }
         await Assert.ThrowsAsync<CoordinationUncertainException>(() => effect);
         Assert.False(File.Exists(forbidden));
