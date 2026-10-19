@@ -124,7 +124,7 @@ public sealed class InstalledToolProfileTests
         using var consumer = new TempDirectory(); using var artifacts = new TempDirectory();
         var expected = TestEvidence.Repository(); var output = Path.Combine(artifacts.Path, "must-stay-absent");
         var files = new InstalledToolFiles(TimeSpan.FromSeconds(10));
-        var owner = new InstalledToolGateProvider.ActualExecutor(files, new Dictionary<string,string>(), fixture.Paths["git"]);
+        var owner = new InstalledToolGateProvider.ActualExecutor(files, new Dictionary<string, string>(), fixture.Paths["git"]);
         File.Delete(fixture.Paths["payload"]); File.Delete(fixture.Paths["git"]);
         var provider = new InstalledToolGateProvider(consumer.Path, expected.BaseCommit);
         var error = await Assert.ThrowsAsync<EvidenceWriteException>(() => provider.RunOwnedAsync(profile,

@@ -8,6 +8,7 @@ namespace DeliveryForge.Tool.Tests;
 
 // Two separately admitted live UAT cases. Genuine native fixture process and
 // actual original parent, never supported AI-host or production publication.
+[Trait("Category", "LiveContinuumAcceptance")]
 public sealed class ParentNativeContinuumLiveTests
 {
     public sealed record Profile(string Kind, TrustedConfiguration Configuration, AdmissionFile PlanBundle, LocalWorkerPaths Paths, string RunStore, StandaloneHostSelection Native, IReadOnlyList<AdmissionFile> NativeClosure, AdmissionFile? LinuxScope, ParentCoordinationConfiguration OtherPrincipal, string EvidenceOutput, AdmissionFile? InstalledQualityProfile = null, ProtectedBaselineRegistrySelection? BaselineRegistry = null, string? RegistryPolicyRelativePath = null);
@@ -115,10 +116,20 @@ public sealed class ParentNativeContinuumLiveTests
             comparison = files.Effect(() => { registry.RecheckApproval(files); return BaselineComparer.Compare(registry.Baseline.Metrics, registry.Baseline, policy); });
             files.ReleaseKnown();
             await f.CloseOwner();
-            await f.Finish(new { Kind = "ActualParentProtectedBaselineIssuerConformance-v1", Fixture = true, actual.Run,
-                ActualNativeWorkerCompleted = true, GenuineLeases = 4, registry.RegistryCommit,
-                BaselineH0 = registry.Baseline.SourceRevision, registry.ArtifactManifestIdentity,
-                ActualComparison = comparison.Outcome.ToString(), CurrentQualityExecuted = false, OwnerApprovalInvented = false });
+            await f.Finish(new
+            {
+                Kind = "ActualParentProtectedBaselineIssuerConformance-v1",
+                Fixture = true,
+                actual.Run,
+                ActualNativeWorkerCompleted = true,
+                GenuineLeases = 4,
+                registry.RegistryCommit,
+                BaselineH0 = registry.Baseline.SourceRevision,
+                registry.ArtifactManifestIdentity,
+                ActualComparison = comparison.Outcome.ToString(),
+                CurrentQualityExecuted = false,
+                OwnerApprovalInvented = false
+            });
         }
         catch (Exception error) { f.Failure = error; f.Original.RetainUnknown(); f.ObserverOriginal.RetainUnknown(); throw; }
         // Known owner/IO disposition precedes the causal RED assertion. RED can be

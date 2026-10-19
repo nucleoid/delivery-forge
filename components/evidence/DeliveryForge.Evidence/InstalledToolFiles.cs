@@ -225,7 +225,7 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     }
 
     internal byte[] Read(string path, long maximum) => Effect(() => ReadCore(path, maximum));
-private byte[] ReadCore(string path, long maximum)
+    private byte[] ReadCore(string path, long maximum)
     {
         var frame = NewFrame(path, false);
         try
@@ -258,13 +258,13 @@ private byte[] ReadCore(string path, long maximum)
     }
 
     internal string FileHash(string path, long maximum) => Effect(() => FileHashCore(path, maximum));
-private string FileHashCore(string path, long maximum)
+    private string FileHashCore(string path, long maximum)
     {
         var bytes = Read(path, maximum); Check(); var hash = Identity(bytes); Check(); return hash;
     }
 
     internal void WriteNew(string path, byte[] bytes) => Effect(() => WriteNewCore(path, bytes));
-private void WriteNewCore(string path, byte[] bytes)
+    private void WriteNewCore(string path, byte[] bytes)
     {
         _credits?.Write(bytes.LongLength);
         var frame = NewFrame(path, true); frame.Bytes = bytes;
@@ -289,7 +289,7 @@ private void WriteNewCore(string path, byte[] bytes)
         _retained.ReleaseKnown();
     }
     internal Dictionary<string, string> Inventory(string root, int count, long bytes, bool skipGit) => Effect(() => InventoryCore(root, count, bytes, skipGit));
-private Dictionary<string, string> InventoryCore(string root, int count, long bytes, bool skipGit)
+    private Dictionary<string, string> InventoryCore(string root, int count, long bytes, bool skipGit)
     {
         Check(); PlainPath(root);
         var rows = new Dictionary<string, string>(PathComparer);

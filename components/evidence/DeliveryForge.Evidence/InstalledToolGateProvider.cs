@@ -188,7 +188,7 @@ public sealed class InstalledToolGateProvider
     }
 
     private Dictionary<string, string> CaptureGitState(InstalledToolFiles files) => files.Effect(() => CaptureGitStateCore(files));
-private Dictionary<string, string> CaptureGitStateCore(InstalledToolFiles files)
+    private Dictionary<string, string> CaptureGitStateCore(InstalledToolFiles files)
     {
         var git = Path.Combine(_root, ".git");
         if (File.Exists(git))
@@ -223,7 +223,7 @@ private Dictionary<string, string> CaptureGitStateCore(InstalledToolFiles files)
     }
 
     internal static Dictionary<string, string> CaptureInstallation(InstalledToolProfile profile, InstalledToolFiles files) => files.Effect(() => CaptureInstallationCore(profile, files));
-private static Dictionary<string, string> CaptureInstallationCore(InstalledToolProfile profile, InstalledToolFiles files)
+    private static Dictionary<string, string> CaptureInstallationCore(InstalledToolProfile profile, InstalledToolFiles files)
     {
         var data = profile.Data;
         var actual = files.Inventory(data.InstallationRoot, 20000, 1024L * 1024 * 1024, false);

@@ -183,9 +183,15 @@ internal sealed class InstalledQualityHost
                 var compared = actualTools.CompareBaseline(crapResult);
                 BoundedFiles.WriteNew(Path.Combine(output, "protected-baseline-comparison.json"), JsonSerializer.SerializeToUtf8Bytes(new
                 {
-                    Kind = "ParentProtectedBaselineComparisonData-v1", run.RunId, run.PlanIdentity, run.BaseCommit,
-                    completion.HeadCommit, completion.TreeId, Comparison = compared,
-                    CurrentReceipts = results.Select(r => r.ReceiptPath).ToArray(), PublicationAuthority = false
+                    Kind = "ParentProtectedBaselineComparisonData-v1",
+                    run.RunId,
+                    run.PlanIdentity,
+                    run.BaseCommit,
+                    completion.HeadCommit,
+                    completion.TreeId,
+                    Comparison = compared,
+                    CurrentReceipts = results.Select(r => r.ReceiptPath).ToArray(),
+                    PublicationAuthority = false
                 }), original);
                 return compared;
             });

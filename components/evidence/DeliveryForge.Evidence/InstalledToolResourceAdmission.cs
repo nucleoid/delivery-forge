@@ -14,7 +14,7 @@ internal static class InstalledToolResourceAdmission
         internal Exception? Primary, CloseFailure, Post;
     }
     internal static Data Capture(InstalledToolFiles files) => files.Effect(() => CaptureCore(files));
-private static Data CaptureCore(InstalledToolFiles files)
+    private static Data CaptureCore(InstalledToolFiles files)
     {
         if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
             throw new PlatformNotSupportedException("The installed producer owner supports Windows and Linux only.");

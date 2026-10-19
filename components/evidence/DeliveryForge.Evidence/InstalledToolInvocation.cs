@@ -220,7 +220,7 @@ internal sealed class InstalledToolInvocation(
     }
     internal void Claim(string path) => files.WriteNew(path, []);
     internal Dictionary<string, string> WriteExecutionArtifacts(string directory, CommandResult execution) => files.Effect(() => WriteExecutionArtifactsCore(directory, execution));
-private Dictionary<string, string> WriteExecutionArtifactsCore(string directory, CommandResult execution)
+    private Dictionary<string, string> WriteExecutionArtifactsCore(string directory, CommandResult execution)
     {
         if (!ReferenceEquals(_actual, execution)) throw new EvidenceWriteException("Only the retained actual main result can publish installed execution artifacts.");
         var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -232,7 +232,7 @@ private Dictionary<string, string> WriteExecutionArtifactsCore(string directory,
         return hashes;
     }
     internal string WriteReceipt(string directory, byte[] receiptBytes) => files.Effect(() => WriteReceiptCore(directory, receiptBytes));
-private string WriteReceiptCore(string directory, byte[] receiptBytes)
+    private string WriteReceiptCore(string directory, byte[] receiptBytes)
     {
         files.Check();
         if (receiptBytes.Length > ProducerJson.MaximumBytes) throw new EvidenceWriteException("Complete receipt exceeds finite profile.");
@@ -245,7 +245,7 @@ private string WriteReceiptCore(string directory, byte[] receiptBytes)
         files.WriteNew(path, validated.CanonicalBytes.ToArray()); files.Check(); return path;
     }
     internal void Append(string directory, IDictionary<string, string> hashes) => files.Effect(() => AppendCore(directory, hashes));
-private void AppendCore(string directory, IDictionary<string, string> hashes)
+    private void AppendCore(string directory, IDictionary<string, string> hashes)
     {
         if (_report is not null) Save("producer-report.json", _report);
         if (changedDiff is not null) Save("producer-changed-lines.diff", changedDiff);
@@ -317,7 +317,7 @@ private void AppendCore(string directory, IDictionary<string, string> hashes)
         });
 
     internal NormalizedEvidence Normalize(CommandResult execution, ToolCapability capability) => files.Effect(() => NormalizeCore(execution, capability));
-private NormalizedEvidence NormalizeCore(CommandResult execution, ToolCapability capability)
+    private NormalizedEvidence NormalizeCore(CommandResult execution, ToolCapability capability)
     {
         if (!_entered || !_returned || _failure is not null || !ReferenceEquals(_actual, execution) || _report is null)
             return NormalizedEvidence.Error("Current installed-tool binding did not complete: " + (_failure?.Message ?? "original observation missing"), profile.Fixture);
