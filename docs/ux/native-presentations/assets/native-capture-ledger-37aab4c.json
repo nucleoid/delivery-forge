@@ -19,8 +19,20 @@
   "environment": {
     "os": "Windows laptop",
     "captureViewportPixels": "1920x1032",
-    "sanitizationReview": "All published images visually reviewed; only cropped native terminal/TUI content is public."
+    "sanitizationReview": "All current published images were visually reviewed. Only cropped native terminal/TUI content is public; account metadata, absolute host paths, and private application chrome are excluded."
   },
+  "errata": [
+    {
+      "publishedAfterCommit": "1d4c5a83124acc0c1047fcbce89fb41eb268e752",
+      "file": "codex-native-0.153.4-execute.png",
+      "correction": "Replaced a wrongly selected LAUNCH frame and unsafe crop with a new native EXECUTE capture showing ceiling IMPLEMENT and approximately USD 0.021700. The superseded blob remains in repository history."
+    },
+    {
+      "publishedAfterCommit": "1d4c5a83124acc0c1047fcbce89fb41eb268e752",
+      "file": "pi-native-0.80.7-usage.png",
+      "correction": "Re-cropped the original native usage frame to exclude startup warnings and absolute host paths while retaining the complete usage panel and scroll hint. The superseded blob remains in repository history."
+    }
+  ],
   "caveats": [
     "The distributed ZIP contains no test files, so its local node --test run discovered 0 tests; the independent source-tree receipt reported 63/63 tests.",
     "Claude Code was installed as 2.1.303 at capture time, not the planned 2.1.302.",
@@ -59,17 +71,23 @@
       "surface": "native user-shell transcript",
       "action": "execute",
       "view": "compact",
-      "capturedUtc": "2026-10-19T10:48:08.6512271Z",
+      "capturedUtc": "2026-10-19T11:09:58Z",
       "dimensions": {
         "width": 1920,
-        "height": 285
+        "height": 72
       },
-      "bytes": 36932,
-      "sha256": "599fc9c87da5dbb54b17882bb0fd206a2b3e50e36371317c133039fdef71ac52",
-      "observed": "EXECUTE / INCOMPLETE; ~USD 0.021700; writer COMPLETE",
-      "provenance": "literal local user-shell command; no model turn",
+      "bytes": 12083,
+      "sha256": "9fd64efe9a083ea7ddbf39493dcf4af1c908097650289a153c2b6e796120fff4",
+      "observed": "EXECUTE / INCOMPLETE; ceiling IMPLEMENT; ~USD 0.021700; writer COMPLETE",
+      "provenance": "new literal local user-shell recapture; no model turn; private full-window source SHA-256 ab50b56b29a36c49161c3d0839eda2ba3d0f68536d63b5a3eca699f5942ffa1c",
       "crop": {
         "kind": "truthful terminal/TUI viewport crop",
+        "sourcePixels": {
+          "left": 8,
+          "top": 78,
+          "width": 1920,
+          "height": 72
+        },
         "accountMetadataExcluded": true,
         "absoluteHostPathsExcluded": true,
         "privateApplicationChromeExcluded": true,
@@ -302,14 +320,20 @@
       "capturedUtc": "2026-10-19T10:52:51.2298920Z",
       "dimensions": {
         "width": 1920,
-        "height": 690
+        "height": 780
       },
-      "bytes": 73360,
-      "sha256": "582ab8ca589e7a8b05aa63c4bfd615f04bd6206009e93f3584103e4b42884875",
-      "observed": "USD 0.044225 known subtotal / PARTIAL; 19,300 tokens; one unpriced request; keyboard scrolling verified",
-      "provenance": "offline extension command; no model available or invoked",
+      "bytes": 81607,
+      "sha256": "1213a477bcae882eec198f9539fb466c5d7ea7e09fb5891da2c327990d99602d",
+      "observed": "USD 0.044225 known subtotal / PARTIAL; 19,300 tokens; one unpriced request; complete usage panel and scroll hint visible; keyboard scrolling verified",
+      "provenance": "re-crop of the original offline extension frame; no model available or invoked; private full-window source SHA-256 9fc73f3e17c480277c529871af793bc07e077194f31dbaf7abe5055378ab8535",
       "crop": {
         "kind": "truthful terminal/TUI viewport crop",
+        "sourcePixels": {
+          "left": 8,
+          "top": 120,
+          "width": 1920,
+          "height": 780
+        },
         "accountMetadataExcluded": true,
         "absoluteHostPathsExcluded": true,
         "privateApplicationChromeExcluded": true,
