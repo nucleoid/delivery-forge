@@ -32,10 +32,11 @@ public sealed class InstalledToolGateProvider
     private async Task<GateRunResult> RunCoreAsync(InstalledToolProfile profile, InstalledToolGateRequest request,
         InstalledToolFiles? actualFiles, ActualExecutor? actualOwner, CancellationToken cancellationToken)
     {
-        // Root exit and pipe EOF do not prove Linux descendant settlement. Until
-        // the shared creation-owned scope is integrated, refuse before ANY tool,
-        // Git or SDK invocation; caller profiles cannot assert owner capability.
-        if (!OperatingSystem.IsWindows())
+        // Public unowned Linux execution remains closed. Only this exact internal
+        // containing files/executor pair can use the selected kernel scope; selection
+        // DATA does not establish birth or successful descendant settlement.
+        if (!OperatingSystem.IsWindows() && !(OperatingSystem.IsLinux() && actualFiles is not null &&
+            actualOwner is not null && actualOwner.OwnsScopedFiles(actualFiles)))
             throw new EvidenceWriteException("Current installed-tool execution requires a genuine creation-owned process scope; the shared Linux owner is not yet integrated.");
         if (request.Timeout <= TimeSpan.Zero || request.Timeout > TimeSpan.FromMinutes(20) ||
             profile.Tool == "mutate4csharp" && request.Timeout > TimeSpan.FromMinutes(10) ||
@@ -265,9 +266,11 @@ private static Dictionary<string, string> CaptureInstallationCore(InstalledToolP
     }
 
     // This class has no injectable owner and retains each exact creator result, not a copied DTO.
-    internal sealed class ActualExecutor(InstalledToolFiles files, IReadOnlyDictionary<string, string> environment, string gitExecutable, ICoordinatedEffectAdmission? actualAdmission = null, string? actualRunId = null) : ICommandExecutor
+    internal sealed class ActualExecutor(InstalledToolFiles files, IReadOnlyDictionary<string, string> environment, string gitExecutable, ICoordinatedEffectAdmission? actualAdmission = null, string? actualRunId = null, LinuxScopeSelection? selectedLinuxScope = null) : ICommandExecutor
     {
         private readonly ProcessCommandExecutor _owner = new();
+        internal bool OwnsScopedFiles(InstalledToolFiles actualFiles) =>
+            ReferenceEquals(files, actualFiles) && selectedLinuxScope is not null && actualAdmission is not null && actualRunId is not null;
         private readonly Dictionary<CommandResult, BoundedCommandCaptureResult> _actual = new(ReferenceEqualityComparer.Instance);
         internal sealed record ActualCall(CommandInvocation Invocation, CommandResult Result, BoundedCommandCaptureResult Capture);
         private readonly List<ActualCall> _calls = [];
@@ -300,14 +303,29 @@ private static Dictionary<string, string> CaptureInstallationCore(InstalledToolP
                 Environment = effectiveEnvironment
             };
             var selectedBudget = ReferenceEquals(invocation, _main) ? (IOwnedDuplexBudget)files : new NestedBudget(files, files.IsClosing);
+            Task<BoundedCommandCaptureResult> StartActual() => OperatingSystem.IsLinux()
+                ? _owner.ExecuteBoundedCaptureAsync(effective, limit, ProducerJson.MaximumBytes, cancellationToken,
+                    selectedBudget, selectedLinuxScope ?? throw new EvidenceWriteException("Explicit containing Linux scope required before process birth."))
+                : _owner.ExecuteBoundedCaptureAsync(effective, limit, ProducerJson.MaximumBytes, cancellationToken, selectedBudget);
             var actualCapture = actualAdmission is null
-                ? _owner.ExecuteBoundedCaptureAsync(effective, limit, ProducerJson.MaximumBytes, cancellationToken, selectedBudget)
-                : actualAdmission.EnterAsync(actualRunId ?? throw new EvidenceWriteException("Missing actual containing run."),
-                    () => _owner.ExecuteBoundedCaptureAsync(effective, limit, ProducerJson.MaximumBytes, cancellationToken, selectedBudget));
+                ? StartActual()
+                : actualAdmission.EnterAsync(actualRunId ?? throw new EvidenceWriteException("Missing actual containing run."), StartActual);
             var capture = await actualCapture.ConfigureAwait(false);
             _retainedOriginalCaptures.Add(capture);
             if ((ReferenceEquals(invocation, _main) || capture.Command.ExitCode != 0 || !capture.Command.OwnedProcessQuiescent) && capture.Timing is { } actualTiming)
-                files.ImportActualCleanup(actualTiming);
+            {
+                // A normal Linux WORK retirement can settle every actual resource
+                // without entering child cleanup. Close this files phase locally;
+                // do not fabricate a child stamp or close the containing original.
+                if (actualTiming.CleanupStartedTimestamp is null &&
+                    capture.OwnershipKind == BoundedCaptureOwnershipKind.LinuxCreationOwnedScope &&
+                    capture.RootExitObserved && capture.StandardOutputDrainCompleted && capture.StandardErrorDrainCompleted &&
+                    !capture.CaptureBoundExceeded && capture.Command.OwnedProcessQuiescent &&
+                    !capture.Command.TimedOut && !capture.Command.Cancelled && capture.Command.ExitCode is not null &&
+                    capture.Command.LifecycleDiagnostics is { NativeFailure: null })
+                    files.FinishSettledWorkCapture(actualTiming);
+                else files.ImportActualCleanup(actualTiming);
+            }
             var command = files.Effect(() =>
             {
             var rawOut = capture.StandardOutputBytes; var rawError = capture.StandardErrorBytes;

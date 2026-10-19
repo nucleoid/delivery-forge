@@ -134,10 +134,85 @@ public sealed class PiHostAdapter(IHostToolSessionPort tools) : NamedHostAdapter
 // The frame, owner coordinator, every entered actual Task and primary/post remain
 // reachable after timeout. No automatic retry, private owner reconstruction or
 // coordinator disposal follows an unknown transport operation.
+// One actual invocation identity per retained phase. This does not issue owner
+// authority, start a clock, retry work or turn a terminal fault into a result.
+internal sealed class RetainedHostTask<T>(ToolLifetime original)
+{
+    readonly object gate = new(); bool entered; Task<T>? actual; Exception? invocationFailure;
+    readonly TaskCompletionSource<bool> invocationReturned = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal Task<T>? Actual { get { lock (gate) return actual; } }
+    internal bool Started { get { lock (gate) return entered; } }
+    internal bool Unknown { get { lock (gate) return entered && (actual is null || !actual.IsCompleted); } }
+    internal Exception? Primary { get; private set; }
+    internal Exception? Post { get; private set; }
+    internal void Start(ToolLifetime life, Func<Task<T>> invoke) => Prepare(life, invoke)?.Invoke();
+    internal Action? Prepare(ToolLifetime life, Func<Task<T>> invoke)
+    {
+        if (!ReferenceEquals(life, original)) throw new WorkerEnvelopeException("Foreign lifetime cannot enter a retained phase.");
+        lock (gate) { if (entered) return null; life.Check(); entered = true; }
+        var invoked = 0;
+        return () =>
+        {
+            if (Interlocked.Exchange(ref invoked, 1) != 0) throw new WorkerEnvelopeException("Original phase birth cannot replay.");
+            // No monitor spans invocation or await. Publication only notifies
+            // observers; authority and identity remain on the real returned Task.
+            try { var returned = invoke() ?? throw new IOException("Original phase returned no actual Task."); lock (gate) actual = returned; }
+            catch (Exception error) { lock (gate) { invocationFailure = error; Primary ??= error; } }
+            finally { invocationReturned.TrySetResult(true); }
+        };
+    }
+    internal async Task<T> ObserveAsync(ToolLifetime life)
+    {
+        if (!ReferenceEquals(life, original)) throw new WorkerEnvelopeException("A new lifetime cannot observe this phase as its own.");
+        lock (gate) { if (!entered) throw new WorkerEnvelopeException("No original phase was entered."); }
+        T value = default!; Exception? primary = null; Exception? post = null;
+        try
+        {
+            if (!invocationReturned.Task.IsCompleted) _ = await invocationReturned.Task.WaitAsync(life.Remaining).ConfigureAwait(false);
+            Task<T>? task; Exception? failure; lock (gate) { task = actual; failure = invocationFailure; }
+            if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            if (task is null) throw new IOException("Original phase invocation return is unknown.");
+            value = task.IsCompleted ? await task.ConfigureAwait(false) : await task.WaitAsync(life.Remaining).ConfigureAwait(false);
+        }
+        catch (Exception error) { primary = error; lock (gate) Primary ??= error; }
+        try { life.Check(); } catch (Exception error) { post = error; lock (gate) Post ??= error; }
+        lock (gate) { primary ??= Primary; post ??= Post; }
+        if (primary is not null && post is not null) throw new AggregateException("Retained actual phase and independent original endpoint.", primary, post);
+        if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+        if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+        return value;
+    }
+}
+
 public sealed class HostBridgeFrame
 {
-    internal HostBridgeFrame(string runId, ToolLifetime life, ExecutionCoordinator owner, Func<bool> externalUnknown, bool ownsOriginal) { RunId = runId; Lifetime = life; Owner = owner; ExternalUnknown = externalUnknown; OwnsOriginal = ownsOriginal; }
+    internal HostBridgeFrame(string runId, ToolLifetime life, ExecutionCoordinator owner, Func<bool> externalUnknown, bool ownsOriginal) { RunId = runId; Lifetime = life; Owner = owner; ExternalUnknown = externalUnknown; OwnsOriginal = ownsOriginal; Worker = new(life); Quality = new(life); }
     readonly Func<bool> ExternalUnknown; readonly bool OwnsOriginal;
+    internal readonly object ReconciliationGate = new();
+    internal RetainedHostTask<ToolResult> Worker { get; }
+    internal RetainedHostTask<ToolResult> Quality { get; }
+    readonly List<(QuiescenceResult Pause, RetainedHostTask<ResumeResult> Control)> resumeControls = [];
+    QuiescenceResult? actualPause;
+    internal QuiescenceResult? ActualPause { get { lock (ReconciliationGate) return actualPause; } }
+    internal void RetainActualPause(QuiescenceResult value)
+    {
+        lock (operationGate)
+        {
+            if (!operations.Any(row => row.Task is Task<QuiescenceResult> { IsCompletedSuccessfully: true } actual && ReferenceEquals(actual.Result, value)))
+                throw new WorkerEnvelopeException("Pause DATA did not come from this frame's actual completed owner Task.");
+        }
+        lock (ReconciliationGate) actualPause = value;
+    }
+    internal IReadOnlyList<RetainedHostTask<ResumeResult>> ResumeControls { get { lock (ReconciliationGate) return resumeControls.Select(row => row.Control).ToArray(); } }
+    internal RetainedHostTask<ResumeResult> ControlForActualPause(QuiescenceResult pause)
+    {
+        if (!Monitor.IsEntered(ReconciliationGate) || !ReferenceEquals(pause, ActualPause) || !pause.Quiescent)
+            throw new WorkerEnvelopeException("Resume requires the actual retained quiescent owner pause, never copied DATA.");
+        var prior = resumeControls.FirstOrDefault(row => ReferenceEquals(row.Pause, pause));
+        if (prior.Control is not null) return prior.Control;
+        if (resumeControls.Count >= 1024) throw new IOException("Finite original control ledger exhausted.");
+        var control = new RetainedHostTask<ResumeResult>(Lifetime); resumeControls.Add((pause, control)); return control;
+    }
     public string RunId { get; }
     internal ToolLifetime Lifetime { get; }
     internal ExecutionCoordinator Owner { get; }
@@ -149,18 +224,19 @@ public sealed class HostBridgeFrame
     internal void LeaveRoute() { lock (operationGate) activeRoutes--; }
     bool RouteActive { get { lock (operationGate) return activeRoutes != 0; } }
     Operation AdmitOperation() { lock (operationGate) { if (operations.Count >= 1024) throw new IOException("Finite original operation ledger exhausted."); Lifetime.RetainBridgeUnknown(this); var row = new Operation { Entered = true }; operations.Add(row); return row; } }
-    public Exception? Primary { get; internal set; }
-    public Exception? Post { get; internal set; }
+    Exception? primary, post;
+    public Exception? Primary { get => Volatile.Read(ref primary); internal set { if (value is not null) Interlocked.CompareExchange(ref primary, value, null); } }
+    public Exception? Post { get => Volatile.Read(ref post); internal set { if (value is not null) Interlocked.CompareExchange(ref post, value, null); } }
     public AgentRequest? Request { get; internal set; }
     public AgentAcceptedReceipt? Accepted { get; internal set; }
     public AgentCompletionReceipt? Completion { get; internal set; }
     public bool OwnerCompleted { get; internal set; }
     public bool OwnerStopped { get; internal set; }
-    public bool Unknown => RouteActive || InvocationUnknown || EnteredTasks.Any(t => !t.IsCompleted) || Owner.HasPendingControlOperations(RunId) || ExternalUnknown() || (Accepted is not null && !OwnerCompleted && !OwnerStopped);
+    public bool Unknown => Worker.Unknown || Quality.Unknown || ResumeControls.Any(control => control.Unknown) || RouteActive || InvocationUnknown || EnteredTasks.Any(t => !t.IsCompleted) || Owner.HasPendingControlOperations(RunId) || ExternalUnknown() || (Accepted is not null && !OwnerCompleted && !OwnerStopped);
     internal async Task<T> Enter<T>(Func<Task<T>> invoke)
     {
         Lifetime.Check(); T value = default!; Exception? primary = null; Exception? post = null; var operation = AdmitOperation();
-        try { var task = invoke(); if (task is null) throw new IOException("Actual operation returned no task."); lock (operationGate) { operation.Task = task; operation.Returned = true; } value = await task.WaitAsync(Lifetime.Remaining).ConfigureAwait(false); }
+        try { var task = invoke(); if (task is null) throw new IOException("Actual operation returned no task."); lock (operationGate) { operation.Task = task; operation.Returned = true; } value = task.IsCompleted ? await task.ConfigureAwait(false) : await task.WaitAsync(Lifetime.Remaining).ConfigureAwait(false); }
         catch (Exception error) { primary = error; operation.Failure = error; }
         try { Lifetime.Check(); } catch (Exception error) { post = error; Post ??= error; }
         if (primary is not null && post is not null) throw new AggregateException("Actual operation and independent endpoint post.", primary, post);
@@ -202,8 +278,11 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
     internal bool ObserveCoordinationWorkSettled(string runId)
     {
         if (!frames.TryGetValue(runId, out var actual)) return false;
-        // Exclude the observation route itself, never any original dispatch/worker/control task.
-        if (actual.InvocationUnknown || actual.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(runId) || !adapter.ObserveBoundNativeQuiescence(runId) || !coordinator.ObserveOriginalProcessesSettled(runId)) return false;
+        // This is the synchronous parent quiescence sample, not quality's
+        // CurrentAsync/EnterAsync admission. Every actual containing phase and
+        // child/control remains an obligation; only this observation route is
+        // excluded. In particular an unreturned phase invocation is not quiet.
+        if (actual.Worker.Unknown || actual.Quality.Unknown || actual.ResumeControls.Any(control => control.Unknown) || actual.InvocationUnknown || actual.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(runId) || !adapter.ObserveBoundNativeQuiescence(runId) || !coordinator.ObserveOriginalProcessesSettled(runId)) return false;
         return actual.OwnerCompleted || actual.OwnerStopped || actual.Accepted is null && !adapter.ActualCalls.Any(call => call.RunId == runId && call.Kind == "Start");
     }
     readonly ConcurrentDictionary<string, HostBridgeFrame> frames = new(StringComparer.Ordinal);
@@ -221,7 +300,17 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
         try { instructions.Require(WorkerEnvelope.PrepareWorker(plan)); adapter.BindInstructions(instructions); adapter.BindOriginal(original); } catch { if (ownsOriginal) original.Dispose(); throw; }
         var frame = new HostBridgeFrame(plan.RunId, original, coordinator, () => adapter.HasUnknownCalls(plan.RunId) || installedQuality?.Unknown == true, ownsOriginal);
         if (!Register(plan.RunId, frame)) { if (ownsOriginal) original.Dispose(); throw new WorkerEnvelopeException("Run already entered or finite host frame allowance exhausted; no replay."); }
-        frame.EnterRoute();
+        frame.EnterRoute(); // Retain the actual original before phase factory entry.
+        try
+        {
+            frame.Worker.Start(original, () => ImplementRetainedCoreAsync(plan, frame));
+            var actualResult = await frame.Worker.ObserveAsync(original).ConfigureAwait(false);
+            return RetainedResult(frame, actualResult);
+        }
+        finally { if (!frame.Worker.Started) frame.LeaveRoute(); frame.CloseWhenSettled(); }
+    }
+    async Task<ToolResult> ImplementRetainedCoreAsync(FrozenWorkerPlan plan, HostBridgeFrame frame)
+    {
         try
         {
             if (coordination is not null) await coordination.AcquireAsync(plan.RunId).ConfigureAwait(false);
@@ -231,12 +320,21 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
             var a = frame.Accepted ?? throw new WorkerEnvelopeException("Missing actual acceptance."); var binding = new AgentRunBinding(a.AdapterId, a.AdapterVersion, a.RunId, a.RequestIdentity, a.RuntimeRunIdentity, a.RuntimeTaskIdentity);
             frame.Completion = await frame.Enter(() => adapter.WaitAsync(binding, frame.Lifetime.Remaining, frame.Lifetime.Token)).ConfigureAwait(false);
             WorkerEnvelope.ValidateCompletion(prepared.Request, a, frame.Completion ?? throw new WorkerEnvelopeException("Missing actual completion."));
-            var committed = await frame.Enter(() => coordinator.CompleteAsync(frame.Completion ?? throw new WorkerEnvelopeException("Missing actual completion."), frame.Lifetime.Token)).ConfigureAwait(false); frame.OwnerCompleted = true; adapter.MarkOwnerCompleted(binding);
+            if (frame.OwnerStopped) throw new WorkerEnvelopeException("Stopped original cannot enter completion or installed quality.");
+            var committed = await frame.Enter(() => coordinator.CompleteAsync(frame.Completion ?? throw new WorkerEnvelopeException("Missing actual completion."), frame.Lifetime.Token)).ConfigureAwait(false); lock (frame.ReconciliationGate) frame.OwnerCompleted = true; adapter.MarkOwnerCompleted(binding);
             if (installedQuality is not null)
             {
-                if (coordination is null || adapter.Realm == HostObservationRealm.ContractFixture || frame.InvocationUnknown || frame.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(plan.RunId) || !adapter.ObserveBoundNativeQuiescence(plan.RunId) || !coordinator.ObserveOriginalProcessesSettled(plan.RunId))
+                foreach (var enteredControl in frame.ResumeControls)
+                {
+                    var actualResume = await enteredControl.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
+                    if (actualResume.Reconciliation.Action != ReconciliationAction.ResumeDispatch || actualResume.Record is null)
+                        throw new WorkerEnvelopeException("Actual owner resume did not authorize forward quality work.");
+                }
+                if (frame.OwnerStopped) throw new WorkerEnvelopeException("Stopped original cannot enter installed quality.");
+                if (frame.Primary is not null || frame.Post is not null || coordination is null || adapter.Realm == HostObservationRealm.ContractFixture || frame.InvocationUnknown || frame.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(plan.RunId) || !adapter.ObserveBoundNativeQuiescence(plan.RunId) || !coordinator.ObserveOriginalProcessesSettled(plan.RunId))
                     throw new WorkerEnvelopeException("Installed quality requires the genuine original completed native worker and current parent owner.");
-                return await installedQuality.RunCompletedAsync(frame, coordination).ConfigureAwait(false);
+                frame.Quality.Start(frame.Lifetime, () => installedQuality.RunCompletedAsync(frame, coordination));
+                return await frame.Quality.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
             }
             return new("COMPLETE", adapter.Realm == HostObservationRealm.ContractFixture ? "CONTRACT_FIXTURE_COMPLETE" : "OWNER_COMPLETED_REQUIRES_PROFILE_AUDIT", "Actual owner completion recorded; quality/review/publication and installed certification remain separate.", new { committed.RunId, committed.Sequence, committed.Sha256, Realm = adapter.Realm.ToString() });
         }
@@ -254,7 +352,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
             var result = await frame.EnterCleanup(left => coordinator.StopAsync(runId, left, CancellationToken.None)).ConfigureAwait(false);
             if (result.Quiescent)
             {
-                frame.OwnerStopped = true;
+                lock (frame.ReconciliationGate) frame.OwnerStopped = true;
                 if (frame.Accepted is AgentAcceptedReceipt a) adapter.MarkOwnerCompleted(new(a.AdapterId, a.AdapterVersion, a.RunId, a.RequestIdentity, a.RuntimeRunIdentity, a.RuntimeTaskIdentity));
             }
             return new(result.Quiescent ? "COMPLETE" : "INCOMPLETE", "OWNER_STOP", "Actual same-owner stop observation recorded; unknown original tasks still prevent frame disposal.", new { runId, result.Quiescent, frame.Unknown });
@@ -266,33 +364,52 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
     {
         if (!frames.TryGetValue(runId, out var frame)) return ToolResult.Incomplete("ORIGINAL_OWNER_REQUIRED", "No retained same-original owner frame exists.");
         frame.EnterRoute();
-        try { var result = await frame.Enter(() => coordinator.PauseAsync(runId, frame.Lifetime.Remaining, frame.Lifetime.Token)).ConfigureAwait(false); return new(result.Quiescent ? "COMPLETE" : "INCOMPLETE", "OWNER_PAUSE", "Actual owner checkpoint/control observation; no new original.", new { runId, result.Quiescent }); }
+        try { var result = await frame.Enter(() => coordinator.PauseAsync(runId, frame.Lifetime.Remaining, frame.Lifetime.Token)).ConfigureAwait(false); frame.RetainActualPause(result); return new(result.Quiescent ? "COMPLETE" : "INCOMPLETE", "OWNER_PAUSE", "Actual owner checkpoint/control observation; no new original.", new { runId, result.Quiescent }); }
         catch (Exception error) { frame.Primary ??= error; return ToolResult.Incomplete("PAUSE_RETAINED", "Actual owner/control frame retained.", new { runId, frame.Unknown, Type = error.GetType().FullName }); }
         finally { frame.LeaveRoute(); frame.CloseWhenSettled(); }
     }
-    public async Task<ToolResult> ResumeRetainedAsync(string runId)
+    static ToolResult RetainedResult(HostBridgeFrame frame, ToolResult actualResult) =>
+        frame.Primary is not null || frame.Post is not null
+            ? ToolResult.Incomplete("HOST_OPERATION_RETAINED", "A retained original failure/post cannot become a successful resume.", new { frame.RunId, ActualResult = actualResult, frame.Unknown })
+            : actualResult;
+    public Task<ToolResult> ResumeRetainedAsync(string runId) => ResumeRetainedAsync(runId, null, null);
+    internal async Task<ToolResult> ResumeRetainedAsync(string runId, ToolLifetime? actualOriginal, TrustedConfiguration? actualConfiguration)
     {
-        if (!frames.TryGetValue(runId, out var frame)) return ToolResult.Incomplete("ORIGINAL_OWNER_REQUIRED", "No retained actual owner frame exists.");
+        if (!frames.TryGetValue(runId, out var frame) || !frame.Worker.Started)
+            return ToolResult.Incomplete("ORIGINAL_OWNER_REQUIRED", "No retained actual worker pipeline exists; stored JSON is not an owner.");
+        if (actualOriginal is not null && !ReferenceEquals(actualOriginal, frame.Lifetime))
+            return ToolResult.Incomplete("ORIGINAL_OWNER_REQUIRED", "Resume cannot replace or renew the actual original.");
+        if (installedQuality is not null && !installedQuality.MatchesRetained(frame, actualConfiguration, actualOriginal))
+            return ToolResult.Incomplete("ORIGINAL_QUALITY_BINDING_REQUIRED", "Same retained original/configuration/plan/assignment is required.");
         frame.EnterRoute();
         try
         {
-            var actual = await frame.Enter(() => coordinator.ResumeAsync(runId, frame.Lifetime.Remaining, frame.Lifetime.Token)).ConfigureAwait(false);
-            var resumed = actual.Reconciliation.Action == ReconciliationAction.ResumeDispatch && actual.Record is not null;
-            return new(resumed ? "COMPLETE" : "INCOMPLETE", "OWNER_RESUME_RETAINED", "Actual same-owner checkpoint/control reconciliation; SAME original, no redispatch.", new { runId, Record = actual.Record?.Sha256 });
+            // Terminal actual tasks are observed, never restarted. Only the real
+            // still-live worker may need the existing owner's resume control.
+            Action? enterControl = null; RetainedHostTask<ResumeResult>? selectedControl = null;
+            lock (frame.ReconciliationGate)
+            {
+                if (!frame.OwnerCompleted && !frame.OwnerStopped && frame.Accepted is not null && frame.Worker.Actual?.IsCompleted == false && frame.ActualPause is { Quiescent: true } actualPause)
+                {
+                    selectedControl = frame.ControlForActualPause(actualPause);
+                    enterControl = selectedControl.Prepare(frame.Lifetime, () => frame.Enter(() => coordinator.ResumeAsync(runId, frame.Lifetime.Remaining, frame.Lifetime.Token)));
+                }
+            }
+            enterControl?.Invoke();
+            if (selectedControl is not null)
+            {
+                var control = await selectedControl.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
+                if (control.Reconciliation.Action != ReconciliationAction.ResumeDispatch || control.Record is null)
+                    return ToolResult.Incomplete("OWNER_RESUME_RETAINED", "Actual parent/worker reconciliation did not authorize resume; no quality replay.");
+            }
+            var actualResult = await frame.Worker.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
+            return RetainedResult(frame, actualResult);
         }
-        catch (Exception error) { frame.Primary ??= error; return ToolResult.Incomplete("RESUME_RETAINED", "Original live owner/control frame remains retained.", new { runId, frame.Unknown, Type = error.GetType().FullName }); }
+        catch (Exception error) { frame.Primary ??= error; return ToolResult.Incomplete("RESUME_RETAINED", "Same actual worker/quality/control task failed, cancelled or remains unknown; no retry.", new { runId, frame.Unknown, Type = error.GetType().FullName }); }
         finally { frame.LeaveRoute(); frame.CloseWhenSettled(); }
     }
-    public Task<ToolResult> ResumeAsync(string runId, TimeSpan total, CancellationToken cancellationToken = default) => ResumeAsync(runId, new ToolLifetime(total, cancellationToken), cancellationToken, true);
-    internal async Task<ToolResult> ResumeAsync(string runId, ToolLifetime original, CancellationToken cancellationToken = default, bool ownsOriginal = false)
-    {
-        // The same coordinator alone can recover its writer and actual accepted adapter binding.
-        // A new CLI process does not obtain these private live objects from stored JSON.
-        var frame = new HostBridgeFrame(runId, original, coordinator, () => adapter.HasUnknownCalls(runId), ownsOriginal);
-        if (!Register(runId, frame)) { if (ownsOriginal) original.Dispose(); throw new WorkerEnvelopeException("Duplicate resume entry requires explicit owner reconciliation."); }
-        frame.EnterRoute();
-        try { var result = await frame.Enter(() => coordinator.ResumeAsync(runId, frame.Lifetime.Remaining, frame.Lifetime.Token)).ConfigureAwait(false); return new(result.Reconciliation.Action == ReconciliationAction.ResumeDispatch && result.Record is not null ? "COMPLETE" : "INCOMPLETE", "OWNER_RESUME", "Fresh owner reconciliation returned; no stored capability was promoted.", new { runId, Record = result.Record?.Sha256 }); }
-        catch (Exception error) { frame.Primary = error; return ToolResult.Incomplete("RESUME_RETAINED", "Actual reconciliation failed; original owner/task frame retained.", new { runId, frame.Unknown, Type = error.GetType().FullName }); }
-        finally { frame.LeaveRoute(); frame.CloseWhenSettled(); }
-    }
+    public Task<ToolResult> ResumeAsync(string runId, TimeSpan total, CancellationToken cancellationToken = default) =>
+        Task.FromResult(ToolResult.Incomplete("ORIGINAL_OWNER_REQUIRED", "A new CLI/lifetime cannot reconstruct retained worker or quality authority."));
+    internal Task<ToolResult> ResumeAsync(string runId, ToolLifetime original, CancellationToken cancellationToken = default, bool ownsOriginal = false) =>
+        ResumeRetainedAsync(runId, original, null);
 }

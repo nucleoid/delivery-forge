@@ -99,6 +99,42 @@ public sealed class InstalledToolProfileTests
         Assert.Empty(Directory.EnumerateFileSystemEntries(consumer.Path));
     }
     [Fact]
+    public async Task Linux_containing_quality_without_selected_scope_refuses_before_effects()
+    {
+        if (!OperatingSystem.IsLinux()) Assert.Skip("Linux containing-scope safety boundary; actual Windows execution remains separate.");
+        using var fixture = new ProfileFiles();
+        var original = new ProfileOriginal(); var containing = new InstalledToolHostScope(original);
+        var profile = containing.LoadProfile(fixture.ProfilePath, InstalledToolFiles.Identity(fixture.Bytes));
+        using var consumer = new TempDirectory(); using var artifacts = new TempDirectory();
+        var output = Path.Combine(artifacts.Path, "must-stay-absent"); var expected = TestEvidence.Repository();
+        // A real complete profile read precedes the absence refusal; no tool or Git is usable.
+        File.Delete(fixture.Paths["payload"]); File.Delete(fixture.Paths["git"]);
+        var error = await Assert.ThrowsAsync<EvidenceWriteException>(() => containing.RunAsync(
+            consumer.Path, expected.BaseCommit, "policy.json", TestEvidence.Identity('1'), profile,
+            "quality", expected, "base", null, TimeSpan.FromSeconds(10), output, TestContext.Current.CancellationToken));
+        Assert.Contains("explicitly selected Linux creation-owned scope", error.Message, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(output)); Assert.Empty(Directory.EnumerateFileSystemEntries(consumer.Path));
+        Assert.False(containing.HasUncertainOriginals);
+    }
+    [Fact]
+    public async Task Linux_internal_provider_without_scoped_files_owner_refuses_before_effects()
+    {
+        if (!OperatingSystem.IsLinux()) Assert.Skip("Linux internal ownership boundary; real Linux positive remains mandatory.");
+        using var fixture = new ProfileFiles(); var profile = fixture.Load();
+        using var consumer = new TempDirectory(); using var artifacts = new TempDirectory();
+        var expected = TestEvidence.Repository(); var output = Path.Combine(artifacts.Path, "must-stay-absent");
+        var files = new InstalledToolFiles(TimeSpan.FromSeconds(10));
+        var owner = new InstalledToolGateProvider.ActualExecutor(files, new Dictionary<string,string>(), fixture.Paths["git"]);
+        File.Delete(fixture.Paths["payload"]); File.Delete(fixture.Paths["git"]);
+        var provider = new InstalledToolGateProvider(consumer.Path, expected.BaseCommit);
+        var error = await Assert.ThrowsAsync<EvidenceWriteException>(() => provider.RunOwnedAsync(profile,
+            new InstalledToolGateRequest("quality", TestEvidence.ResolvedPolicy(), expected, "base", null,
+                TimeSpan.FromSeconds(10), output), files, owner, TestContext.Current.CancellationToken));
+        Assert.Contains("genuine creation-owned process scope", error.Message, StringComparison.Ordinal);
+        Assert.Empty(owner.Calls); Assert.False(Directory.Exists(output));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(consumer.Path));
+    }
+    [Fact]
     public void Containing_cleanup_closes_real_profile_io_without_a_new_loader_original()
     {
         using var fixture = new ProfileFiles();

@@ -16,15 +16,18 @@ internal sealed class InstalledQualityHost
 {
     readonly TrustedConfiguration configuration; readonly AdmissionFile configurationPin;
     readonly InstalledQualitySelection selection; readonly ToolLifetime original;
+    readonly LinuxScopeSelection? linuxScope;
     readonly WorktreeManager worktrees; WorktreeManager? admittedCurrentness; InstalledToolHostScope? tools;
-    FrozenPlan? frozen; FrozenWorkerPlan? assignment; bool entered;
+    FrozenPlan? frozen; FrozenWorkerPlan? assignment; TrustedConfiguration? boundConfiguration; bool entered;
     readonly List<GateRunResult> results = [];
     readonly Dictionary<string, GateRunResult> gateResults = new(StringComparer.Ordinal);
     internal bool Unknown => tools?.HasUncertainOriginals == true;
     internal InstalledQualityHost(TrustedConfiguration config, AdmissionFile actualConfigurationPin,
-        ToolLifetime actualOriginal, WorktreeManager actualWorktrees)
+        ToolLifetime actualOriginal, WorktreeManager actualWorktrees, LinuxScopeSelection? selectedLinuxScope = null)
     {
-        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Installed Linux quality remains fail closed before host dispatch.");
+        if (!OperatingSystem.IsWindows() && !(OperatingSystem.IsLinux() && selectedLinuxScope is not null))
+            throw new PlatformNotSupportedException("Installed quality requires Windows or the trusted selected Linux scope.");
+        linuxScope = selectedLinuxScope;
         configuration = config; configurationPin = actualConfigurationPin; original = actualOriginal;
         var requested = config.InstalledQuality ?? throw new ToolUsageException("No trusted installed quality selection.");
         ValidateSelection(requested);
@@ -79,13 +82,16 @@ internal sealed class InstalledQualityHost
                 foreach (var input in new[] { registry.OwnerApproval.Path, registry.ArtifactRoot }) BoundedFiles.Separate(root, input);
             BoundedFiles.Separate(registry.OwnerApproval.Path, registry.ArtifactRoot);
         }
-        frozen = actualPlan; assignment = actualAssignment;
+        frozen = actualPlan; assignment = actualAssignment; boundConfiguration = config;
     }
+    internal bool MatchesRetained(HostBridgeFrame frame, TrustedConfiguration? config, ToolLifetime? life) =>
+        ReferenceEquals(life, original) && ReferenceEquals(config, boundConfiguration) && frozen is not null && assignment is not null &&
+        frame.RunId == assignment.RunId && ReferenceEquals(frame.Lifetime, original) && frame.Request?.PlanIdentity == assignment.PlanIdentity;
     async Task CurrentAsync(HostBridgeFrame frame, AgentCompletionReceipt actualCompletion)
     {
         original.Check();
         if (tools is null || tools.HasUncertainOriginals || frozen is null || assignment is null || !ReferenceEquals(frame.Completion, actualCompletion) ||
-            !ReferenceEquals(frame.Lifetime, original) || !frame.OwnerCompleted || frame.RunId != assignment.RunId ||
+            !ReferenceEquals(frame.Lifetime, original) || !frame.OwnerCompleted || frame.OwnerStopped || frame.RunId != assignment.RunId ||
             actualCompletion.RunId != assignment.RunId || actualCompletion.Worktree != assignment.Worktree || actualCompletion.RequestIdentity != frame.Request?.RequestIdentity)
             throw new WorkerEnvelopeException("Real completed same-owner quality binding is absent or changed.");
         _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
@@ -104,7 +110,7 @@ internal sealed class InstalledQualityHost
         entered = true;
         var run = assignment;
         admittedCurrentness = worktrees.WithParentAdmission(parent, run.RunId);
-        var actualTools = new InstalledToolHostScope(original, parent, run.RunId); tools = actualTools;
+        var actualTools = new InstalledToolHostScope(original, parent, run.RunId, linuxScope); tools = actualTools;
         var output = Path.Combine(selection.ArtifactRoot, run.RunId);
         await frame.Enter(() => parent.EnterAsync(run.RunId, async () =>
         {

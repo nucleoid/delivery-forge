@@ -15,6 +15,7 @@ public sealed record RunSelection(string RunId, string StoreRoot, string Reposit
 public sealed class ToolApplication(OwnerHostBridge? host = null, IIssueContentPort? issues = null, ParentPublicationBinding? publication = null, IWorkerAssignmentPort? assignments = null, ProcessCommandExecutor? actualExecutor = null, ToolLifetime? actualOriginal = null, AdmissionFile? actualConfigurationPin = null)
 {
     readonly List<ToolCallObservation> externalCalls = [];
+    readonly object retainedConfigurationGate = new(); TrustedConfiguration? retainedQualityConfiguration; string? retainedQualityConfigurationPath;
     public IReadOnlyList<ToolCallObservation> RetainedExternalCalls { get { lock (externalCalls) return externalCalls.ToArray(); } }
     async Task<T> Observe<T>(string kind, Func<Task<T>> invoke, ToolLifetime life)
     {
@@ -40,7 +41,19 @@ public sealed class ToolApplication(OwnerHostBridge? host = null, IIssueContentP
         var life = actualOriginal ?? new ToolLifetime(TimeSpan.FromSeconds(1200), cancellationToken);
         using var locallyOwnedLifetime = actualOriginal is null ? life : null;
         life.Check();
-        var config = TrustedConfiguration.LoadSelected(configPath, life, actualConfigurationPin); life.Restrict(TimeSpan.FromSeconds(config.OperationSeconds));
+        var config = TrustedConfiguration.LoadSelected(configPath, life, actualConfigurationPin);
+        if (config.InstalledQuality is not null && actualOriginal is not null && actualConfigurationPin is not null)
+        {
+            // Reload verifies the exact current admitted bytes; retain the same
+            // actual selected configuration object rather than adopt saved DATA.
+            lock (retainedConfigurationGate)
+            {
+                if (retainedQualityConfiguration is null) { retainedQualityConfiguration = config; retainedQualityConfigurationPath = configPath; }
+                else if (!Same(configPath, retainedQualityConfigurationPath!)) throw new ToolUsageException("Retained quality configuration path changed.");
+                config = retainedQualityConfiguration;
+            }
+        }
+        life.Restrict(TimeSpan.FromSeconds(config.OperationSeconds));
         if (config.PolicyFile is string policyPath)
         {
             var policy = ContractValidator.ParseAndValidate(BoundedFiles.Read(policyPath, life)); life.Check();
@@ -149,7 +162,7 @@ public sealed class ToolApplication(OwnerHostBridge? host = null, IIssueContentP
         host is null ? Task.FromResult(ToolResult.Incomplete("HOST_BRIDGE_UNAVAILABLE", "No actual host bridge was supplied.")) : host.ImplementAsync(assignment, instructions, total, cancellationToken);
     async Task<ToolResult> RunAsync(ToolCommand command, TrustedConfiguration config, ToolLifetime life)
     {
-        if (command.Mode == ToolMode.Resume && config.InstalledQuality is not null && !command.Has("dry-run")) return ToolResult.Incomplete("CONTAINING_QUALITY_RESUME_NOT_COMPOSED", "Configured quality resume requires separately implemented same-original retained worker/quality reconciliation; no saved JSON or new phase can recreate it.");
+        if (command.Mode == ToolMode.Resume && config.InstalledQuality is not null && !command.Has("dry-run") && (actualOriginal is null || actualConfigurationPin is null || host is null)) return ToolResult.Incomplete("ORIGINAL_QUALITY_BINDING_REQUIRED", "The exact live containing owner/configuration is required; a new process cannot adopt it from JSON.");
         var directory = BoundedFiles.Plain(command.Get("run-dir")!, true); var selection = BoundedFiles.ReadJson<RunSelection>(Path.Combine(directory, "selection.json"), life, 65536);
         if (selection.Repository != config.Repository || !Same(selection.RepositoryRoot, config.RepositoryRoot)) throw new ToolUsageException("Stored run identity differs from protected repository selection.");
         var ceiling = TrustedConfiguration.Ceiling(selection.StoredCeiling); if (ceiling > TrustedConfiguration.Ceiling(config.MaximumCeiling)) throw new ToolUsageException("Stored ceiling exceeds current protected ceiling.");
@@ -169,7 +182,7 @@ public sealed class ToolApplication(OwnerHostBridge? host = null, IIssueContentP
         if (command.Mode == ToolMode.Resume)
         {
             if (command.Has("dry-run")) return new("DRY_RUN", "RECOVERY_OBSERVED", "Immutable history inspected; saved history is not live adapter/writer authority.", new { selection.RunId, Records = recovery.Records.Count });
-            return host is null ? ToolResult.Incomplete("RESUME_HOST_UNAVAILABLE", "Fresh same-owner host/writer/control reconciliation is required; a new process cannot adopt them from JSON.") : await host.ResumeAsync(selection.RunId, life, life.Token).ConfigureAwait(false);
+            return host is null ? ToolResult.Incomplete("RESUME_HOST_UNAVAILABLE", "Fresh same-owner host/writer/control reconciliation is required; a new process cannot adopt them from JSON.") : await host.ResumeRetainedAsync(selection.RunId, life, config).ConfigureAwait(false);
         }
         if (publication is not null)
         {

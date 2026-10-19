@@ -8,11 +8,14 @@ public sealed class InstalledToolHostScope
     readonly IOwnedDuplexBudget original;
     readonly ICoordinatedEffectAdmission? admission;
     readonly string? runId;
-    public InstalledToolHostScope(IOwnedDuplexBudget actualOriginal, ICoordinatedEffectAdmission actualAdmission, string actualRunId) : this(actualOriginal)
+    readonly LinuxScopeSelection? linuxScope;
+    public InstalledToolHostScope(IOwnedDuplexBudget actualOriginal, ICoordinatedEffectAdmission actualAdmission, string actualRunId, LinuxScopeSelection? selectedLinuxScope = null) : this(actualOriginal)
     {
         ArgumentNullException.ThrowIfNull(actualAdmission);
         if (string.IsNullOrWhiteSpace(actualRunId) || actualRunId.Length > 128) throw new ArgumentException("Actual containing run required.");
         admission = actualAdmission; runId = actualRunId;
+        linuxScope = selectedLinuxScope is null ? null : selectedLinuxScope with
+        { BirthGateClosure = Array.AsReadOnly(selectedLinuxScope.BirthGateClosure.ToArray()) };
     }
     readonly Credits credits = new();
     readonly List<object> retained = [];
@@ -65,7 +68,8 @@ public sealed class InstalledToolHostScope
         string outputDirectory, CancellationToken cancellationToken = default,
         ProtectedBaselineRegistrySelection? baselineRegistry = null)
     {
-        if (!OperatingSystem.IsWindows()) throw new EvidenceWriteException("Containing installed quality has no supported Linux process composition.");
+        if (!OperatingSystem.IsWindows() && !(OperatingSystem.IsLinux() && linuxScope is not null))
+            throw new EvidenceWriteException("Containing installed quality requires Windows or an explicitly selected Linux creation-owned scope.");
         if (profile.Fixture) throw new EvidenceWriteException("Fixture profiles cannot enter the standalone real quality path.");
         if (admission is null || runId is null) throw new EvidenceWriteException("Actual containing coordination admission is required before any Git/tool birth.");
         InstalledToolFiles files; InstalledToolGateProvider.ActualExecutor owner; OriginalRun row;
@@ -73,7 +77,7 @@ public sealed class InstalledToolHostScope
         {
             if (runs.Count >= 8 || runs.Any(r => r.Task is { IsFaulted: true } or { IsCanceled: true })) throw new EvidenceWriteException("Containing installed route exhausted or a prior original failed; no retry.");
             files = Files(maximum);
-            owner = new InstalledToolGateProvider.ActualExecutor(files, profile.Data.Environment, profile.Data.GitExecutablePath, admission, runId);
+            owner = new InstalledToolGateProvider.ActualExecutor(files, profile.Data.Environment, profile.Data.GitExecutablePath, admission, runId, linuxScope);
             retained.Add(owner);
             row = new OriginalRun { Entered = true, Files = files, Owner = owner }; runs.Add(row);
         }

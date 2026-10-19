@@ -101,6 +101,22 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
             }
         }
     }
+    // Called only after the concrete executor has joined the actual settled Linux
+    // capture. This starts ONLY this subordinate files finalization; no timestamp
+    // is imported from a child that never entered cleanup, and no parent failure
+    // notification is sent. Parent WORK/whole and prior cleanup still bound MIN.
+    internal void FinishSettledWorkCapture(BoundedCaptureTimingObservation timing)
+    {
+        lock (_timing)
+        {
+            if (_cleanup is not null || timing.StopwatchFrequency != Stopwatch.Frequency ||
+                timing.OriginalStartedTimestamp != _started || timing.CleanupStartedTimestamp is not null)
+                throw new EvidenceWriteException("Actual settled WORK capture must join this original once without a child cleanup stamp.");
+            CheckWork();
+            _cleanup = Stopwatch.GetTimestamp();
+        }
+        _ = CleanupRemaining;
+    }
     internal void ImportActualCleanup(BoundedCaptureTimingObservation timing)
     {
         lock (_timing)
