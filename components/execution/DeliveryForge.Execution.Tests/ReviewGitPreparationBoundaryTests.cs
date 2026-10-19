@@ -163,7 +163,6 @@ public sealed class ReviewGitPreparationBoundaryTests
     }
 
     [Theory(Timeout = 120_000)]
-    [InlineData("stall", false, ReviewGitPreparationOutcome.TimedOut)]
     [InlineData("stall", true, ReviewGitPreparationOutcome.Cancelled)]
     [InlineData("pressure", false, ReviewGitPreparationOutcome.CaptureBoundExceeded)]
     public async Task Actual_negative_helper_is_bounded_settled_and_never_mints_Git_context(string mode, bool cancelAfterEntry, ReviewGitPreparationOutcome expected)
@@ -212,6 +211,92 @@ public sealed class ReviewGitPreparationBoundaryTests
             Assert.NotEmpty(result.Observation.CapturedStandardOutput);
             Assert.NotEmpty(result.Observation.CapturedStandardError);
         }
+    }
+
+    // A one-second original lifetime can expire during synchronous startup or scheduling.
+    // This case proves refusal and faithful DATA projection, never native cleanup acceptance.
+    [Fact(Timeout = 120_000)]
+    public async Task Actual_one_second_timeout_refuses_Git_context_and_preserves_closure_DATA()
+    {
+        using var bound = Bound();
+        var fixture = await Fixture.CreateAsync("stall", bound.Token);
+        var started = Stopwatch.GetTimestamp();
+        var result = await ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidenceAsync(
+            fixture.Root, fixture.GitDirectory, fixture.Helper!, 1024 * 1024, TimeSpan.FromSeconds(1), bound.Token);
+        await fixture.SaveAsync(result, bound.Token);
+        Assert.Equal(ReviewGitPreparationOutcome.TimedOut, result.Observation.Outcome);
+        Assert.Null(result.Context);
+        var data = Assert.IsType<ReviewGitPreparationCaptureData>(result.Observation.LastCapture);
+        Assert.Equal(data.OwnedProcessQuiescent, result.Observation.OwnedProcessQuiescent);
+        Assert.Equal(data.RootExitObserved, result.Observation.RootExitObserved);
+        Assert.Equal(data.StandardOutputDrainCompleted, result.Observation.StandardOutputDrainCompleted);
+        Assert.Equal(data.StandardErrorDrainCompleted, result.Observation.StandardErrorDrainCompleted);
+        Assert.False(data.Cancelled);
+        Assert.False(data.CaptureBoundExceeded);
+        if (data.CaptureReturned)
+        {
+            Assert.True(data.TimedOut);
+            var startup = Assert.IsType<CommandStartupObservation>(data.Startup);
+            Assert.InRange(startup.OriginalTotalSeconds, double.Epsilon, 1d);
+            Assert.InRange(startup.OriginalWorkSeconds, 0d, startup.OriginalTotalSeconds);
+            var lifecycle = Assert.IsType<CommandLifecycleDiagnostics>(data.Lifecycle);
+            Assert.Equal(lifecycle.RootExited, data.RootExitObserved);
+            Assert.Equal(lifecycle.StandardOutput.CompletedSuccessfully, data.StandardOutputDrainCompleted);
+            Assert.Equal(lifecycle.StandardError.CompletedSuccessfully, data.StandardErrorDrainCompleted);
+        }
+        else
+        {
+            // Preflight exhaustion has no capture owner; absence cannot mint exit/EOF/closure.
+            Assert.Null(data.Startup);
+            Assert.Null(data.Lifecycle);
+            Assert.Null(data.ExitCode);
+            Assert.False(data.OwnedProcessQuiescent);
+            Assert.False(data.RootExitObserved);
+            Assert.False(data.StandardOutputDrainCompleted);
+            Assert.False(data.StandardErrorDrainCompleted);
+        }
+        Assert.True(Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(7));
+    }
+
+    // Independently admitted original five seconds, not a renewal of the one-second case.
+    // This is a real timeout-cleanup acceptance control and must fail on UNKNOWN settlement.
+    [Fact(Timeout = 120_000)]
+    public async Task Actual_entered_stall_timeout_settles_root_and_each_original_pipe()
+    {
+        using var bound = Bound();
+        var fixture = await Fixture.CreateAsync("stall", bound.Token);
+        var started = Stopwatch.GetTimestamp();
+        var result = await ReviewAuthorityHost.CreateIsolatedTest().PrepareIsolatedTestGitEvidenceAsync(
+            fixture.Root, fixture.GitDirectory, fixture.Helper!, 1024 * 1024, TimeSpan.FromSeconds(5), bound.Token);
+        await fixture.SaveAsync(result, bound.Token);
+        Assert.Equal(ReviewGitPreparationOutcome.TimedOut, result.Observation.Outcome);
+        Assert.Null(result.Context);
+        Assert.Equal(fixture.Nonce, await File.ReadAllTextAsync(fixture.EnteredPath, bound.Token));
+        Assert.True(result.Observation.OwnedProcessQuiescent);
+        Assert.True(result.Observation.RootExitObserved);
+        Assert.True(result.Observation.StandardOutputDrainCompleted);
+        Assert.True(result.Observation.StandardErrorDrainCompleted);
+        var data = Assert.IsType<ReviewGitPreparationCaptureData>(result.Observation.LastCapture);
+        Assert.True(data.CaptureReturned);
+        Assert.True(data.TimedOut);
+        Assert.False(data.Cancelled);
+        Assert.False(data.CaptureBoundExceeded);
+        var lifecycle = Assert.IsType<CommandLifecycleDiagnostics>(data.Lifecycle);
+        Assert.True(lifecycle.KillAttempted);
+        Assert.True(lifecycle.KillSucceeded);
+        Assert.True(lifecycle.ExitWaitCompleted);
+        Assert.True(lifecycle.DrainWaitCompleted);
+        if (OperatingSystem.IsWindows())
+        {
+            var tree = Assert.IsType<CommandOwnedTreeObservation>(lifecycle.OwnedTree);
+            Assert.True(tree.CreationOwned);
+            Assert.True(tree.SettlementObserved);
+            Assert.Equal(0, tree.ActiveProcesses);
+        }
+        var startup = Assert.IsType<CommandStartupObservation>(data.Startup);
+        Assert.InRange(startup.OriginalTotalSeconds, double.Epsilon, 5d);
+        Assert.True(startup.OriginalElapsedSeconds < startup.OriginalTotalSeconds);
+        Assert.True(Stopwatch.GetElapsedTime(started) < TimeSpan.FromSeconds(7));
     }
 
     private static CancellationTokenSource Bound()

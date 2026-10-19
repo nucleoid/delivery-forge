@@ -174,11 +174,15 @@ public sealed class CompletedToolIntegrationTests
         const string hidden = "private/secret-λ.cs";
         var before = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            [hidden] = "private-before-value", ["missing.cs"] = "old", ["unchanged.cs"] = "same"
+            [hidden] = "private-before-value",
+            ["missing.cs"] = "old",
+            ["unchanged.cs"] = "same"
         };
         var after = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            [hidden] = "private-after-value", ["new.cs"] = "new", ["unchanged.cs"] = "same"
+            [hidden] = "private-after-value",
+            ["new.cs"] = "new",
+            ["unchanged.cs"] = "same"
         };
         foreach (var phase in Enum.GetValues<InstalledToolFiles.ComparisonPhase>())
         {
