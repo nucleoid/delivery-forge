@@ -1,11 +1,11 @@
 # Delivery Forge UX-1.1 repair implementation report
 
-Date: 2026-10-19 UTC  
-Implementation writer: native GPT-5.6 SOL, sole prototype writer  
-Design authority: frozen UX-1 plus `04a-projection-completeness-addendum.md`  
-Baseline commit: `3a97fe0d7148459ee5b74e18fb57ba3604292026`  
-Repaired immutable commit: **`f9b05e6bdf6c2d6b869323f6a6aa08297b862a63`**  
-Branch: `ux/native-presentations-20261019`  
+Date: 2026-10-19 UTC
+Implementation writer: native GPT-5.6 SOL, sole prototype writer
+Design authority: frozen UX-1 plus `04a-projection-completeness-addendum.md`
+Baseline commit: `3a97fe0d7148459ee5b74e18fb57ba3604292026`
+Repaired immutable commit: **`f9b05e6bdf6c2d6b869323f6a6aa08297b862a63`**
+Branch: `ux/native-presentations-20261019`
 Remote: none
 
 ## Result

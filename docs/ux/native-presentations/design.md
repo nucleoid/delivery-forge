@@ -1,6 +1,6 @@
 # FORGE / The quiet cockpit
 
-**Design revision UX-1 — frozen for the presentation prototype**  
+**Design revision UX-1 — frozen for the presentation prototype**
 Designer/reviewer: **openai/gpt-6-astra · xhigh**. Implementation must follow this design; do not delegate design to another model. This is a proposal, not a shipped Forge UI.
 
 ## 1. Product promise
