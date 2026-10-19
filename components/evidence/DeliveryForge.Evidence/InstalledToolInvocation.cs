@@ -24,7 +24,12 @@ internal sealed class InstalledToolInvocation(
     private string? _bundleRoot;
     private ChangedLineCoverage.Result? _lines;
 
-    internal async Task CompleteAsync(CommandResult actual)
+    internal Task CompleteAsync(CommandResult actual)
+    {
+        files.Effect(() => Complete(actual));
+        return Task.CompletedTask;
+    }
+    private void Complete(CommandResult actual)
     {
         if (_entered) throw new EvidenceWriteException("An original installed invocation cannot be repeated.");
         _entered = true; _actual = actual;
@@ -37,7 +42,7 @@ internal sealed class InstalledToolInvocation(
             if (profile.Tool == "mutate4csharp") JoinMutation(document.RootElement);
             else JoinCrap(document.RootElement, actual);
             // No forward SDK process is dispatched after the actual main owner enters cleanup.
-            await Task.CompletedTask.ConfigureAwait(false);
+            // Synchronous consume is enclosed by the original parent monitor.
             InstalledToolFiles.Same(installBefore, captureInstall(), false, files, InstalledToolFiles.ComparisonPhase.InstallationCurrent);
             InstalledToolFiles.Same(gitBefore, captureGit(), false, files, InstalledToolFiles.ComparisonPhase.GitCurrent);
             var current = files.Inventory(invocation.WorkingDirectory, 100000, 1024L * 1024 * 1024, true);
@@ -193,14 +198,26 @@ internal sealed class InstalledToolInvocation(
                 locator => { InstalledToolProfile.Relative(locator); return files.Read(Path.Combine(_bundleRoot, locator), 128 * 1024 * 1024); }, files);
         }
     }
-    internal void CheckEndpoint() => files.Check();
+    internal NormalizedEvidence CompareApprovedBaseline(GateRunResult actual, ProtectedBaselineRegistry registry, ResolvedEvidencePolicy policy) => files.Effect(() =>
+    {
+        registry.RecheckApproval(files);
+        if (profile.Fixture || profile.Tool != "crap4csharp" || actual.Fixture || actual.SourceChanged || actual.Outcome != GateOutcome.Pass ||
+            !_entered || !_returned || _failure is not null || _report is null || _proof is null || !ReferenceEquals(actual.Execution, _actual) ||
+            actual.PolicyIdentity != policy.PolicyIdentity || request.Policy != policy || actual.After != request.ExpectedRepository)
+            return NormalizedEvidence.Incomplete("No genuine complete current nonfixture callable report for protected comparison.");
+        var metrics = ProtectedBaselineRegistry.CallableMetrics(_report);
+        return BaselineComparer.Compare(metrics, registry.Baseline, policy);
+    });
+    internal T Consume<T>(Func<T> consume) => files.Effect(consume);
+    internal void CheckEndpoint() => files.Effect(() => files.Check());
     internal byte[] ReadCapability(string path) => files.Read(path, 128 * 1024 * 1024);
     internal void EnsureDirectory(string directory)
     {
-        files.Check(); InstalledToolFiles.PlainPath(directory); Directory.CreateDirectory(directory); files.Check();
+        files.EnsureDirectory(directory);
     }
     internal void Claim(string path) => files.WriteNew(path, []);
-    internal Dictionary<string, string> WriteExecutionArtifacts(string directory, CommandResult execution)
+    internal Dictionary<string, string> WriteExecutionArtifacts(string directory, CommandResult execution) => files.Effect(() => WriteExecutionArtifactsCore(directory, execution));
+private Dictionary<string, string> WriteExecutionArtifactsCore(string directory, CommandResult execution)
     {
         if (!ReferenceEquals(_actual, execution)) throw new EvidenceWriteException("Only the retained actual main result can publish installed execution artifacts.");
         var hashes = new Dictionary<string, string>(StringComparer.Ordinal);
@@ -211,7 +228,8 @@ internal sealed class InstalledToolInvocation(
         }
         return hashes;
     }
-    internal string WriteReceipt(string directory, byte[] receiptBytes)
+    internal string WriteReceipt(string directory, byte[] receiptBytes) => files.Effect(() => WriteReceiptCore(directory, receiptBytes));
+private string WriteReceiptCore(string directory, byte[] receiptBytes)
     {
         files.Check();
         if (receiptBytes.Length > ProducerJson.MaximumBytes) throw new EvidenceWriteException("Complete receipt exceeds finite profile.");
@@ -223,7 +241,8 @@ internal sealed class InstalledToolInvocation(
         // retained on failure and never adopted/retried as a complete receipt.
         files.WriteNew(path, validated.CanonicalBytes.ToArray()); files.Check(); return path;
     }
-    internal void Append(string directory, IDictionary<string, string> hashes)
+    internal void Append(string directory, IDictionary<string, string> hashes) => files.Effect(() => AppendCore(directory, hashes));
+private void AppendCore(string directory, IDictionary<string, string> hashes)
     {
         if (_report is not null) Save("producer-report.json", _report);
         if (changedDiff is not null) Save("producer-changed-lines.diff", changedDiff);
@@ -294,7 +313,8 @@ internal sealed class InstalledToolInvocation(
             InventoryMismatchUnavailable = InstalledToolFiles.MismatchDiagnosticFailure(failure) is not null
         });
 
-    internal NormalizedEvidence Normalize(CommandResult execution, ToolCapability capability)
+    internal NormalizedEvidence Normalize(CommandResult execution, ToolCapability capability) => files.Effect(() => NormalizeCore(execution, capability));
+private NormalizedEvidence NormalizeCore(CommandResult execution, ToolCapability capability)
     {
         if (!_entered || !_returned || _failure is not null || !ReferenceEquals(_actual, execution) || _report is null)
             return NormalizedEvidence.Error("Current installed-tool binding did not complete: " + (_failure?.Message ?? "original observation missing"), profile.Fixture);

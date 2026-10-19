@@ -1,3 +1,4 @@
+using DeliveryForge.Coordination;
 using System.Collections;
 using System.Text;
 using System.Text.Json;
@@ -23,8 +24,13 @@ public sealed class InstalledToolGateProvider
         _root = Path.GetFullPath(repositoryRoot); _base = protectedBaseCommit;
     }
 
-    public async Task<GateRunResult> RunAsync(InstalledToolProfile profile, InstalledToolGateRequest request,
-        CancellationToken cancellationToken = default)
+    public Task<GateRunResult> RunAsync(InstalledToolProfile profile, InstalledToolGateRequest request,
+        CancellationToken cancellationToken = default) => RunCoreAsync(profile, request, null, null, cancellationToken);
+    internal Task<GateRunResult> RunOwnedAsync(InstalledToolProfile profile, InstalledToolGateRequest request,
+        InstalledToolFiles files, ActualExecutor owner, CancellationToken cancellationToken) =>
+        RunCoreAsync(profile, request, files, owner, cancellationToken);
+    private async Task<GateRunResult> RunCoreAsync(InstalledToolProfile profile, InstalledToolGateRequest request,
+        InstalledToolFiles? actualFiles, ActualExecutor? actualOwner, CancellationToken cancellationToken)
     {
         // Root exit and pipe EOF do not prove Linux descendant settlement. Until
         // the shared creation-owned scope is integrated, refuse before ANY tool,
@@ -41,8 +47,8 @@ public sealed class InstalledToolGateProvider
         InstalledToolFiles.PlainPath(request.OutputDirectory);
 
         if (Inside(request.OutputDirectory, _root)) throw new EvidenceWriteException("Owned artifacts must be external to the consumer.");
-        var files = new InstalledToolFiles(request.Timeout, cancellationToken);
-        var owner = new ActualExecutor(files, profile.Data.Environment, profile.Data.GitExecutablePath);
+        var files = actualFiles ?? new InstalledToolFiles(request.Timeout, cancellationToken);
+        var owner = actualOwner ?? new ActualExecutor(files, profile.Data.Environment, profile.Data.GitExecutablePath);
         try
         {
             var resourcesBefore = InstalledToolResourceAdmission.Capture(files);
@@ -60,7 +66,7 @@ public sealed class InstalledToolGateProvider
             if (profile.Tool == "mutate4csharp") RequireMutationBudget(configurationBytes, request.Timeout);
             var sdkBefore = await ObserveSdk(profile, owner, cancellationToken).ConfigureAwait(false);
             var runRoot = Path.Combine(request.OutputDirectory, request.GateId + "-producer-" + Guid.NewGuid().ToString("N"));
-            files.Check(); Directory.CreateDirectory(runRoot); files.Check();
+            files.EnsureDirectory(runRoot);
             var emptyProbe = Path.Combine(runRoot, "capability-input.cs");
             if (profile.Tool == "crap4csharp") files.WriteNew(emptyProbe, "public class Empty {}"u8.ToArray());
             var executable = Path.Combine(profile.Data.InstallationRoot, profile.Data.ExecutableRelativePath);
@@ -89,7 +95,7 @@ public sealed class InstalledToolGateProvider
                 new Dictionary<string, string>(profile.Data.Environment, StringComparer.Ordinal));
             var binding = new InstalledToolInvocation(profile, request, files, owner, invocation, reportPath, original, gitState,
                 install, environment, sdkBefore, resourcesBefore, changedDiff, () => CaptureGitState(files), () => CaptureInstallation(profile, files));
-            owner.BindMain(invocation, binding.CompleteAsync);
+            owner.BindMain(invocation, binding);
             var gate = new GateRequest(request.GateId, request.Policy, detected.Capability,
                 profile.Tool == "mutate4csharp" ? EvidenceAdapterKind.Mutate4CSharp : EvidenceAdapterKind.Crap4CSharp,
                 profile.Data.ConfigurationSha256, before, invocation, request.Scope, files.Remaining, request.OutputDirectory)
@@ -99,7 +105,7 @@ public sealed class InstalledToolGateProvider
         }
         catch (Exception primary)
         {
-            try { SaveFailedAttempt(profile, request, files, owner, primary); }
+            try { files.Effect(() => SaveFailedAttempt(profile, request, files, owner, primary)); }
             catch (Exception persistence)
             {
                 // No retry, new clock or positive receipt follows an uncertain save.
@@ -114,7 +120,7 @@ public sealed class InstalledToolGateProvider
     {
         _ = files.CleanupRemaining;
         var directory = Path.Combine(request.OutputDirectory, request.GateId + "-failed-" + Guid.NewGuid().ToString("N"));
-        files.Check(); Directory.CreateDirectory(directory); files.Check();
+        files.EnsureDirectory(directory);
         Save("failure.json", JsonSerializer.SerializeToUtf8Bytes(new
         {
             Schema = "forge-installed-attempt-failure-v1",
@@ -180,7 +186,8 @@ public sealed class InstalledToolGateProvider
             "--timeout-seconds", Math.Max(1, (int)Math.Floor(request.Timeout.TotalSeconds)).ToString(System.Globalization.CultureInfo.InvariantCulture)];
     }
 
-    private Dictionary<string, string> CaptureGitState(InstalledToolFiles files)
+    private Dictionary<string, string> CaptureGitState(InstalledToolFiles files) => files.Effect(() => CaptureGitStateCore(files));
+private Dictionary<string, string> CaptureGitStateCore(InstalledToolFiles files)
     {
         var git = Path.Combine(_root, ".git");
         if (File.Exists(git))
@@ -214,7 +221,8 @@ public sealed class InstalledToolGateProvider
         return rows;
     }
 
-    internal static Dictionary<string, string> CaptureInstallation(InstalledToolProfile profile, InstalledToolFiles files)
+    internal static Dictionary<string, string> CaptureInstallation(InstalledToolProfile profile, InstalledToolFiles files) => files.Effect(() => CaptureInstallationCore(profile, files));
+private static Dictionary<string, string> CaptureInstallationCore(InstalledToolProfile profile, InstalledToolFiles files)
     {
         var data = profile.Data;
         var actual = files.Inventory(data.InstallationRoot, 20000, 1024L * 1024 * 1024, false);
@@ -257,7 +265,7 @@ public sealed class InstalledToolGateProvider
     }
 
     // This class has no injectable owner and retains each exact creator result, not a copied DTO.
-    internal sealed class ActualExecutor(InstalledToolFiles files, IReadOnlyDictionary<string, string> environment, string gitExecutable) : ICommandExecutor
+    internal sealed class ActualExecutor(InstalledToolFiles files, IReadOnlyDictionary<string, string> environment, string gitExecutable, ICoordinatedEffectAdmission? actualAdmission = null, string? actualRunId = null) : ICommandExecutor
     {
         private readonly ProcessCommandExecutor _owner = new();
         private readonly Dictionary<CommandResult, BoundedCommandCaptureResult> _actual = new(ReferenceEqualityComparer.Instance);
@@ -265,15 +273,18 @@ public sealed class InstalledToolGateProvider
         private readonly List<ActualCall> _calls = [];
         internal IReadOnlyList<ActualCall> Calls => _calls;
         private long _capturedBytes;
+        private readonly List<BoundedCommandCaptureResult> _retainedOriginalCaptures = [];
         private CommandInvocation? _main;
         private Func<CommandResult, Task>? _complete;
-        internal void BindMain(CommandInvocation original, Func<CommandResult, Task> complete)
+        internal InstalledToolInvocation? MainBinding { get; private set; }
+        internal void BindMain(CommandInvocation original, InstalledToolInvocation binding)
         {
-            if (_main is not null) throw new EvidenceWriteException("Main invocation is already bound.");
-            _main = original; _complete = complete;
+            if (_main is not null || MainBinding is not null) throw new EvidenceWriteException("Main invocation is already bound.");
+            _main = original; MainBinding = binding; _complete = binding.CompleteAsync;
         }
         public async Task<CommandResult> ExecuteAsync(CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken)
         {
+            files.AdmitCaptureCall();
             if (_calls.Count >= 64) throw new EvidenceWriteException("Finite actual process-observation count exceeds64.");
             if (_capturedBytes > 112L * 1024 * 1024) throw new EvidenceWriteException("Insufficient cumulative128MiB complete process-capture credit.");
             if (files.IsClosing && !IsClosingIdentityAudit(invocation)) throw new EvidenceWriteException("No new tool/SDK forward work after terminal cleanup begins.");
@@ -289,26 +300,37 @@ public sealed class InstalledToolGateProvider
                 Environment = effectiveEnvironment
             };
             var selectedBudget = ReferenceEquals(invocation, _main) ? (IOwnedDuplexBudget)files : new NestedBudget(files, files.IsClosing);
-            var capture = await _owner.ExecuteBoundedCaptureAsync(effective, limit, ProducerJson.MaximumBytes, cancellationToken, selectedBudget).ConfigureAwait(false);
+            var actualCapture = actualAdmission is null
+                ? _owner.ExecuteBoundedCaptureAsync(effective, limit, ProducerJson.MaximumBytes, cancellationToken, selectedBudget)
+                : actualAdmission.EnterAsync(actualRunId ?? throw new EvidenceWriteException("Missing actual containing run."),
+                    () => _owner.ExecuteBoundedCaptureAsync(effective, limit, ProducerJson.MaximumBytes, cancellationToken, selectedBudget));
+            var capture = await actualCapture.ConfigureAwait(false);
+            _retainedOriginalCaptures.Add(capture);
+            if ((ReferenceEquals(invocation, _main) || capture.Command.ExitCode != 0 || !capture.Command.OwnedProcessQuiescent) && capture.Timing is { } actualTiming)
+                files.ImportActualCleanup(actualTiming);
+            var command = files.Effect(() =>
+            {
             var rawOut = capture.StandardOutputBytes; var rawError = capture.StandardErrorBytes;
             _capturedBytes += rawOut.LongLength + rawError.LongLength;
-            var command = capture.Command;
+            var decodedCommand = capture.Command;
             if (!capture.CaptureBoundExceeded)
             {
                 var utf8 = new UTF8Encoding(false, true);
-                try { command = command with { StandardOutput = utf8.GetString(rawOut), StandardError = utf8.GetString(rawError) }; }
+                try { decodedCommand = decodedCommand with { StandardOutput = utf8.GetString(rawOut), StandardError = utf8.GetString(rawError) }; }
                 catch (DecoderFallbackException)
                 {
                     // Preserve the real completed owner and exact raw invalid bytes before
                     // rejecting text; do not lose it behind a synthetic executor exception.
-                    _actual.Add(command, capture); _calls.Add(new(effective, command, capture));
+                    _actual.Add(decodedCommand, capture); _calls.Add(new(effective, decodedCommand, capture));
                     _ = files.CleanupRemaining;
                     throw;
                 }
             }
-            _actual.Add(command, capture);
-            _calls.Add(new(effective, command, capture));
-            if ((ReferenceEquals(invocation, _main) || command.ExitCode != 0 || !Known(command)) && capture.Timing is { } timing) files.ImportActualCleanup(timing);
+            _actual.Add(decodedCommand, capture);
+            _calls.Add(new(effective, decodedCommand, capture));
+            files.AdmitCaptureBytes(rawOut.LongLength + rawError.LongLength);
+            return decodedCommand;
+            });
             if (ReferenceEquals(invocation, _main))
             {
                 var complete = _complete ?? throw new EvidenceWriteException("Original main invocation cannot repeat.");
@@ -332,8 +354,10 @@ public sealed class InstalledToolGateProvider
         }
         // Successful ordinary preflight child close remains WORK. Only the exact fixed read-only
         // Git audit may be born after finalization, inside the SAME shrinking cleanup allowance.
-        private sealed class NestedBudget(InstalledToolFiles original, bool cleanupAudit) : IOwnedDuplexBudget
+        private sealed class NestedBudget(InstalledToolFiles original, bool cleanupAudit) : IOwnedDuplexBudget, IOwnedFailureCleanup, IOwnedBudgetUnknownRetention
         {
+            public void BeginFailureCleanup() => original.BeginFailureCleanup();
+            public void PreserveUnknown() => original.PreserveUnknown();
             public long OriginalStarted => original.OriginalStarted;
             public TimeSpan WholeLimit => original.WholeLimit;
             public TimeSpan WorkLimit => original.WorkLimit;

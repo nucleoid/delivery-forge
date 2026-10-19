@@ -183,6 +183,12 @@ public sealed class HostBridgeFrame
 public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostAdapter adapter, bool requireCoordination = false)
 {
     ParentCoordinationHost? coordination;
+    InstalledQualityHost? installedQuality;
+    internal bool HasInstalledQuality => installedQuality is not null;
+    internal void BindInstalledQuality(InstalledQualityHost actual)
+    {
+        lock (registration) { if (installedQuality is not null || frames.Count != 0) throw new ToolUsageException("Installed quality binds the idle actual bridge once."); installedQuality = actual; }
+    }
     internal void BindCoordination(ParentCoordinationHost actual)
     {
         lock (registration) { if (coordination is not null || frames.Count != 0) throw new WorkerEnvelopeException("Parent coordination binds the idle original bridge once."); coordination = actual; actual.BindBridge(this); adapter.BindEffectAdmission(actual); coordinator.BindCoordinationAdmission(actual); }
@@ -191,6 +197,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
     {
         if (coordination is null) { if (config.Coordination is not null || requireCoordination) throw new ToolUsageException("Configured production coordination owner is unavailable."); return; }
         coordination.BindSelection(plan, assignment, config, original);
+        installedQuality?.Bind(plan, assignment, config, original);
     }
     internal bool ObserveCoordinationWorkSettled(string runId)
     {
@@ -212,7 +219,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
     {
         if (requireCoordination && coordination is null) return ToolResult.Incomplete("CONTINUUM_PARENT_REQUIRED", "Actual standalone dispatch requires the explicitly configured original Continuum parent.");
         try { instructions.Require(WorkerEnvelope.PrepareWorker(plan)); adapter.BindInstructions(instructions); adapter.BindOriginal(original); } catch { if (ownsOriginal) original.Dispose(); throw; }
-        var frame = new HostBridgeFrame(plan.RunId, original, coordinator, () => adapter.HasUnknownCalls(plan.RunId), ownsOriginal);
+        var frame = new HostBridgeFrame(plan.RunId, original, coordinator, () => adapter.HasUnknownCalls(plan.RunId) || installedQuality?.Unknown == true, ownsOriginal);
         if (!Register(plan.RunId, frame)) { if (ownsOriginal) original.Dispose(); throw new WorkerEnvelopeException("Run already entered or finite host frame allowance exhausted; no replay."); }
         frame.EnterRoute();
         try
@@ -225,6 +232,12 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
             frame.Completion = await frame.Enter(() => adapter.WaitAsync(binding, frame.Lifetime.Remaining, frame.Lifetime.Token)).ConfigureAwait(false);
             WorkerEnvelope.ValidateCompletion(prepared.Request, a, frame.Completion ?? throw new WorkerEnvelopeException("Missing actual completion."));
             var committed = await frame.Enter(() => coordinator.CompleteAsync(frame.Completion ?? throw new WorkerEnvelopeException("Missing actual completion."), frame.Lifetime.Token)).ConfigureAwait(false); frame.OwnerCompleted = true; adapter.MarkOwnerCompleted(binding);
+            if (installedQuality is not null)
+            {
+                if (coordination is null || adapter.Realm == HostObservationRealm.ContractFixture || frame.InvocationUnknown || frame.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(plan.RunId) || !adapter.ObserveBoundNativeQuiescence(plan.RunId) || !coordinator.ObserveOriginalProcessesSettled(plan.RunId))
+                    throw new WorkerEnvelopeException("Installed quality requires the genuine original completed native worker and current parent owner.");
+                return await installedQuality.RunCompletedAsync(frame, coordination).ConfigureAwait(false);
+            }
             return new("COMPLETE", adapter.Realm == HostObservationRealm.ContractFixture ? "CONTRACT_FIXTURE_COMPLETE" : "OWNER_COMPLETED_REQUIRES_PROFILE_AUDIT", "Actual owner completion recorded; quality/review/publication and installed certification remain separate.", new { committed.RunId, committed.Sequence, committed.Sha256, Realm = adapter.Realm.ToString() });
         }
         catch (Exception error) { frame.Primary ??= error; return ToolResult.Incomplete("HOST_OPERATION_RETAINED", "Actual host/owner operation failed or remains unknown; no retry or invented quiescence.", new { frame.RunId, frame.Unknown, Type = error.GetType().FullName, OwnerCompleted = frame.OwnerCompleted }); }

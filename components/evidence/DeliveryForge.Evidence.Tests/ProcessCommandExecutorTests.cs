@@ -176,24 +176,29 @@ public sealed class ProcessCommandExecutorTests
         using var temp = new TempDirectory();
         var request = LongRunningRequest(temp.Path);
         Task? drainTask = null;
+        var drainReturn = new Stopwatch();
+        TimeSpan? requestedDrainTimeout = null;
         var executor = new ProcessCommandExecutor(
             killTree: process => process.Kill(entireProcessTree: false),
             hasExited: process => process.HasExited,
-            waitForDrain: (task, _) =>
+            waitForDrain: (task, timeout) =>
             {
                 drainTask = task;
+                requestedDrainTimeout = timeout;
+                drainReturn.Start();
                 throw new TimeoutException("simulated pipe drain hang");
             },
             waitTimeout: TimeSpan.FromMilliseconds(250));
-        var stopwatch = Stopwatch.StartNew();
 
         try
         {
             var result = await executor.ExecuteAsync(
-                request.Invocation, request.Timeout, TestContext.Current.CancellationToken);
+                request.Invocation, request.Timeout, TestContext.Current.CancellationToken)
+                .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
-            stopwatch.Stop();
-            Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"Execution took {stopwatch.Elapsed}.");
+            drainReturn.Stop();
+            Assert.Equal(TimeSpan.FromMilliseconds(250), requestedDrainTimeout);
+            Assert.True(drainReturn.Elapsed < TimeSpan.FromSeconds(2), $"Returning after the injected drain timeout took {drainReturn.Elapsed}.");
             Assert.True(result.TimedOut);
             Assert.False(result.OwnedProcessQuiescent);
             Assert.Equal("<stdout drain timed out>", result.StandardOutput);

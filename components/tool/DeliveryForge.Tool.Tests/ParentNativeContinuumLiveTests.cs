@@ -10,7 +10,7 @@ namespace DeliveryForge.Tool.Tests;
 // actual original parent, never supported AI-host or production publication.
 public sealed class ParentNativeContinuumLiveTests
 {
-    public sealed record Profile(string Kind, TrustedConfiguration Configuration, AdmissionFile PlanBundle, LocalWorkerPaths Paths, string RunStore, StandaloneHostSelection Native, IReadOnlyList<AdmissionFile> NativeClosure, AdmissionFile? LinuxScope, ParentCoordinationConfiguration OtherPrincipal, string EvidenceOutput);
+    public sealed record Profile(string Kind, TrustedConfiguration Configuration, AdmissionFile PlanBundle, LocalWorkerPaths Paths, string RunStore, StandaloneHostSelection Native, IReadOnlyList<AdmissionFile> NativeClosure, AdmissionFile? LinuxScope, ParentCoordinationConfiguration OtherPrincipal, string EvidenceOutput, AdmissionFile? InstalledQualityProfile = null, ProtectedBaselineRegistrySelection? BaselineRegistry = null, string? RegistryPolicyRelativePath = null);
     sealed class Evidence(AdmissionFile pin, ToolLifetime original) : IContinuumDeploymentEvidenceSource
     {
         public Task<ContinuumDeploymentEvidence> ObserveAsync(CancellationToken token = default) { token.ThrowIfCancellationRequested(); var raw = InstalledHostAdmission.ReadExact(pin, original, 65536); _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(raw); return Task.FromResult(JsonSerializer.Deserialize<ContinuumDeploymentEvidence>(raw, BoundedFiles.Json) ?? throw new IOException("Null actual operator evidence.")); }
@@ -84,6 +84,135 @@ public sealed class ParentNativeContinuumLiveTests
             Assert.False(Original.HasRetainedUnknown); BoundedFiles.WriteNew(Selected.EvidenceOutput, JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualParentNativeFixtureCaseEnvelope-v1", ProfileSha256, ToolAssemblySha256 = BoundedFiles.Sha(BoundedFiles.Read(typeof(ParentCoordinationHost).Assembly.Location, ObserverOriginal, 16777216)), Fixture = true, ProductionHostAccepted = false, ProductionPublicationAccepted = false, ProductionSchedulingAccepted = false, Case = evidence }, BoundedFiles.Json), ObserverOriginal); Completed = true; Original.Dispose(); ObserverOriginal.Dispose(); lock (Retained) Retained.Remove(this);
         }
     }
+    // Genuine approved artifacts are mandatory. This is issuer conformance only;
+    // historical baseline metrics do not become a current quality execution.
+    [Fact(Timeout = 650000)]
+    public async Task Actual_owner_pinned_protected_registry_issues_baseline_after_real_artifact_validation()
+    {
+        var f = await Frame.Open("REGISTRY");
+        NormalizedEvidence? comparison = null;
+        try
+        {
+            var actual = await f.CompleteWorker();
+            var selected = f.Selected.InstalledQualityProfile ?? throw new IOException("Real exact nonfixture installed profile required.");
+            var registrySelection = f.Selected.BaselineRegistry ?? throw new IOException("Actual complete-artifact owner approval and protected registry required; never fabricated in tests.");
+            var policyPath = f.Selected.RegistryPolicyRelativePath ?? throw new IOException("Actual protected policy locator required.");
+            ProtectedBaselineRegistry.ValidateSelection(registrySelection);
+            foreach (var worker in new[] { f.Selected.Configuration.RepositoryRoot, f.Selected.Paths.Worktree, f.Selected.Paths.ResultDirectory })
+                foreach (var input in new[] { selected.Path, registrySelection.OwnerApproval.Path, registrySelection.ArtifactRoot }) BoundedFiles.Separate(worker, input);
+            var files = new InstalledToolFiles(f.Original, TimeSpan.FromSeconds(300), new InstalledToolHostScope.Credits(), f.Owner.Parent, actual.Run);
+            var profile = InstalledToolProfile.LoadPinned(selected.Path, "sha256:" + selected.Sha256, files);
+            Assert.False(profile.Fixture);
+            var executor = new InstalledToolGateProvider.ActualExecutor(files, profile.Data.Environment, profile.Data.GitExecutablePath, f.Owner.Parent, actual.Run);
+            var policy = await f.Keep(new ProtectedGitPolicyResolver(executor, f.Selected.Paths.Worktree, f.Plan.BaseCommit).ResolveAsync(policyPath, f.Original.Token)).WaitAsync(f.Original.Remaining, TestContext.Current.CancellationToken);
+            var registry = await f.Keep(ProtectedBaselineRegistry.ResolveAsync(executor, files, f.Selected.Paths.Worktree, policy, registrySelection, f.Original.Token)).WaitAsync(f.Original.Remaining, TestContext.Current.CancellationToken);
+            Assert.Equal(f.Plan.BaseCommit, registry.Baseline.SourceRevision);
+            Assert.Equal(registrySelection.RegistryCommit, registry.RegistryCommit);
+            Assert.NotEmpty(registry.Baseline.Metrics);
+            var advisory = new ReviewedBaseline(registry.Baseline.BaselineIdentity, registry.Baseline.PolicyIdentity,
+                registry.Baseline.SourceRevision, registry.Baseline.ContentIdentity, false, registry.Baseline.Metrics);
+            Assert.Equal(GateOutcome.Incomplete, BaselineComparer.Compare(advisory.Metrics, advisory, policy).Outcome);
+            comparison = files.Effect(() => { registry.RecheckApproval(files); return BaselineComparer.Compare(registry.Baseline.Metrics, registry.Baseline, policy); });
+            files.ReleaseKnown();
+            await f.CloseOwner();
+            await f.Finish(new { Kind = "ActualParentProtectedBaselineIssuerConformance-v1", Fixture = true, actual.Run,
+                ActualNativeWorkerCompleted = true, GenuineLeases = 4, registry.RegistryCommit,
+                BaselineH0 = registry.Baseline.SourceRevision, registry.ArtifactManifestIdentity,
+                ActualComparison = comparison.Outcome.ToString(), CurrentQualityExecuted = false, OwnerApprovalInvented = false });
+        }
+        catch (Exception error) { f.Failure = error; f.Original.RetainUnknown(); f.ObserverOriginal.RetainUnknown(); throw; }
+        // Known owner/IO disposition precedes the causal RED assertion. RED can be
+        // an ordinary assertion failure without pretending an unclosed frame quiet.
+        Assert.NotNull(comparison);
+        Assert.Equal(GateOutcome.Pass, comparison.Outcome);
+    }
+
+    // Actual native worker/four leases and real Git positive precede revocation.
+    // No fake executor, Git process, parent authority or clock. UNEXECUTED.
+    [Fact(Timeout = 650000)]
+    public async Task Actual_quality_git_after_yield_requires_parent_admission_before_each_birth()
+    {
+        var f = await Frame.Open("QUALITY_GIT");
+        try
+        {
+            var actual = await f.CompleteWorker();
+            var git = new DeliveryForge.Execution.Git.WorktreeManager(f.Selected.Configuration.GitExecutable, f.Owner.Executor, f.Original)
+                .WithParentAdmission(f.Owner.Parent, actual.Run);
+            var positive = await f.Keep(git.ObserveAsync(f.Selected.Paths.Worktree, f.Original.Token));
+            Assert.True(positive.IsClean); Assert.NotEqual(f.Plan.BaseCommit, positive.HeadCommit); Assert.Equal(Assert.Single(f.Owner.Bridge.RetainedFrames).Completion!.HeadCommit, positive.HeadCommit);
+            var births = git.ActualOwnedGitInvocations; Assert.True(births > 0);
+            var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var operation = f.Keep(f.Owner.Parent.EnterAsync(actual.Run, async () =>
+            {
+                entered.SetResult(true); await release.Task.ConfigureAwait(false);
+                try { await git.EnsureDescendsFromAsync(f.Selected.Paths.Worktree, f.Plan.BaseCommit, positive.HeadCommit, f.Original.Token).ConfigureAwait(false); return (Exception?)null; }
+                catch (CoordinationUncertainException denied) { return denied; }
+            }));
+            await f.Keep(entered.Task).WaitAsync(f.Original.Remaining, TestContext.Current.CancellationToken);
+            var quiet = await f.Keep(f.Owner.Parent.ObserveAsync(actual.Leases[0].Owner, f.Original.Token));
+            Assert.False(quiet.Quiescent); Assert.True(f.Owner.Parent.ObserveContractFixtureData().Revoked);
+            f.Original.Check(); release.SetResult(true);
+            var denied = await operation.WaitAsync(f.Original.CleanupRemaining, TestContext.Current.CancellationToken);
+            Assert.IsType<CoordinationUncertainException>(denied); Assert.Equal(births, git.ActualOwnedGitInvocations);
+            await f.CloseOwner();
+            await f.Finish(new { Kind = "ActualParentCurrentnessGitRevokedBirthControl-v1", Fixture = true, actual.Run, GenuineLeases = 4, NativeWorkerCompleted = true, PositiveGitBirths = births, BirthsAfterRevocation = 0, ParentObservationQuiet = false });
+        }
+        catch (Exception error) { f.Failure = error; f.Original.RetainUnknown(); f.ObserverOriginal.RetainUnknown(); throw; }
+    }
+    // Genuine admitted live parent/leases/native completion, then actual pending effect.
+    // No fake quality executor/result. Root must supply a fresh QUALITY profile per row.
+    [Theory(Timeout = 650000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Actual_quality_io_after_entered_task_yields_rechecks_revoked_parent(bool persist)
+    {
+        var f = await Frame.Open(persist ? "QUALITY_WRITE" : "QUALITY_READ");
+        try
+        {
+            var actual = await f.CompleteWorker();
+            var selected = f.Selected.InstalledQualityProfile ?? throw new IOException("Fresh pinned genuine installed profile required for quality IO control.");
+            foreach (var worker in new[] { f.Selected.Configuration.RepositoryRoot, f.Selected.Paths.Worktree, f.Selected.Paths.ResultDirectory }) BoundedFiles.Separate(worker, selected.Path);
+            var files = new InstalledToolFiles(f.Original, TimeSpan.FromSeconds(120), new InstalledToolHostScope.Credits(), f.Owner.Parent, actual.Run);
+            var raw = files.Read(selected.Path, 1048576);
+            Assert.Equal(selected.Bytes, raw.LongLength); Assert.Equal(selected.Sha256, BoundedFiles.Sha(raw));
+            var profile = InstalledToolProfile.LoadPinned(selected.Path, "sha256:" + selected.Sha256, files);
+            Assert.NotNull(profile); // Genuine current profile read before revocation is mandatory.
+            var target = f.Selected.EvidenceOutput + ".quality-after-await.json";
+            Assert.False(File.Exists(target));
+            var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var operation = f.Keep(f.Owner.Parent.EnterAsync(actual.Run, async () =>
+            {
+                entered.SetResult(true);
+                await release.Task.ConfigureAwait(false);
+                try
+                {
+                    if (persist) files.WriteNew(target, raw);
+                    else _ = InstalledToolProfile.LoadPinned(selected.Path, "sha256:" + selected.Sha256, files);
+                    return (Exception?)null;
+                }
+                catch (CoordinationUncertainException refused) { return refused; }
+            }));
+            await f.Keep(entered.Task).WaitAsync(f.Original.Remaining, TestContext.Current.CancellationToken);
+            Assert.False(operation.IsCompleted);
+            var current = f.Owner.Parent.ObserveContractFixtureData();
+            Assert.False(current.Revoked); Assert.Equal(4, current.Leases.Count);
+            // Actual production quiescence observation closes this parent's admission.
+            // Pending real effect makes quiet=false; it is not a native completion claim.
+            var quiet = await f.Keep(f.Owner.Parent.ObserveAsync(actual.Leases[0].Owner, f.Original.Token));
+            Assert.False(quiet.Quiescent); Assert.True(f.Owner.Parent.ObserveContractFixtureData().Revoked);
+            f.Original.Check(); // Causal refusal must precede any time/cancellation cleanup.
+            release.SetResult(true);
+            var refusal = await operation.WaitAsync(f.Original.CleanupRemaining, TestContext.Current.CancellationToken);
+            Assert.IsType<CoordinationUncertainException>(refusal);
+            Assert.False(File.Exists(target));
+            await f.CloseOwner();
+            await f.Finish(new { Kind = "ActualParentInstalledQualityRevokedIoControl-v1", Fixture = true, actual.Run, Persist = persist, ActualNativeWorkerCompleted = true, GenuineLeases = 4, EnteredPendingEffect = true, ParentObservationQuiet = false, RefusedAfterAwait = true, ResultPublished = false });
+        }
+        catch (Exception error) { f.Failure = error; f.Original.RetainUnknown(); f.ObserverOriginal.RetainUnknown(); throw; }
+    }
+
     [Fact(Timeout = 650000)]
     public async Task Actual_parent_native_fixture_completion_releases_four_current_leases()
     {

@@ -7,9 +7,62 @@ namespace DeliveryForge.Evidence;
 
 // Cooperative whole-invocation deadline and cumulative byte admission. These checks do not
 // claim hard interruption of filesystem/crypto/runtime work or hostile-filesystem atomicity.
-internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken token = default) : IOwnedDuplexBudget
+internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken token = default) : IOwnedDuplexBudget, IOwnedFailureCleanup, IOwnedBudgetUnknownRetention
 {
     private readonly long _started = Stopwatch.GetTimestamp();
+    private readonly IOwnedDuplexBudget? _parent;
+    private readonly InstalledToolHostScope.Credits? _credits;
+    private readonly long _phaseStarted = Stopwatch.GetTimestamp();
+    internal InstalledToolFiles(IOwnedDuplexBudget actualParent, TimeSpan maximum, InstalledToolHostScope.Credits credits)
+        : this(maximum, actualParent.Token)
+    {
+        if (maximum <= TimeSpan.Zero || maximum > TimeSpan.FromSeconds(1200)) throw new ArgumentOutOfRangeException(nameof(maximum));
+        actualParent.CheckWork(); _parent = new OwnedWorkPhaseBudget(actualParent);
+        _started = actualParent.OriginalStarted; _credits = credits;
+    }
+    internal InstalledToolFiles(IOwnedDuplexBudget actualParent, TimeSpan maximum, InstalledToolHostScope.Credits credits,
+        DeliveryForge.Coordination.ICoordinatedEffectAdmission actualAdmission, string actualRunId)
+        : this(actualParent, maximum, credits)
+    {
+        ArgumentNullException.ThrowIfNull(actualAdmission);
+        if (string.IsNullOrWhiteSpace(actualRunId)) throw new ArgumentException("Actual containing run required.");
+        _admission = actualAdmission; _runId = actualRunId;
+    }
+    private readonly DeliveryForge.Coordination.ICoordinatedEffectAdmission? _admission;
+    private readonly string? _runId;
+    // Reentrancy applies ONLY to this synchronous thread while the original parent
+    // monitor is held. It never flows to a Task/async continuation or another thread.
+    [ThreadStatic] private static InstalledToolFiles? activeEffect;
+    internal T Effect<T>(Func<T> action)
+    {
+        Check();
+        if (ReferenceEquals(activeEffect, this) || _admission is null) return action();
+        return _admission.EnterAsync(_runId!, () =>
+        {
+            Check(); var prior = activeEffect; activeEffect = this;
+            try { var value = action(); Check(); return Task.FromResult(value); }
+            finally { activeEffect = prior; }
+        }).GetAwaiter().GetResult();
+    }
+    internal void Effect(Action action) => Effect(() => { action(); return true; });
+    internal void EnsureDirectory(string path) => Effect(() =>
+    {
+        Check(); PlainPath(path); Directory.CreateDirectory(path); Check();
+    });
+    private TimeSpan PhaseOffset => Stopwatch.GetElapsedTime(_started, _phaseStarted);
+    public void BeginFailureCleanup()
+    {
+        lock (_timing) _cleanup ??= Stopwatch.GetTimestamp();
+        if (_parent is IOwnedFailureCleanup actual) actual.BeginFailureCleanup();
+        _ = CleanupRemaining;
+    }
+    public void PreserveUnknown()
+    {
+        if (_credits is not null) _credits.Unknown = true;
+        if (_parent is IOwnedBudgetUnknownRetention actual) actual.PreserveUnknown();
+    }
+    internal void AdmitCaptureCall() => _credits?.Call();
+    internal void AdmitCaptureBytes(long bytes) => _credits?.Capture(bytes);
     private readonly object _timing = new();
     private long? _cleanup;
     private long _read;
@@ -17,15 +70,17 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     private readonly BoundedCaptureRetention _retained = new();
     internal const long MaximumReadBytes = 4L * 1024 * 1024 * 1024;
     public long OriginalStarted => _started;
-    public TimeSpan WholeLimit => budget;
-    public TimeSpan WorkLimit => TimeSpan.FromTicks(Math.Min(TimeSpan.FromSeconds(1100).Ticks,
+    public TimeSpan WholeLimit => _parent is null ? budget : Minimum(_parent.WholeLimit, PhaseOffset + budget);
+    public TimeSpan WorkLimit => _parent is null ? LocalWork : Minimum(_parent.WorkLimit, PhaseOffset + LocalWork);
+    private TimeSpan LocalWork => TimeSpan.FromTicks(Math.Min(TimeSpan.FromSeconds(1100).Ticks,
         budget.Ticks - Math.Min(budget.Ticks / 4, TimeSpan.FromSeconds(60).Ticks)));
+    private static TimeSpan Minimum(TimeSpan left, TimeSpan right) => left < right ? left : right;
     public CancellationToken Token => token;
     public void CheckWork()
     {
         lock (_timing)
         {
-            token.ThrowIfCancellationRequested();
+            _parent?.CheckWork(); token.ThrowIfCancellationRequested();
             if (_cleanup is not null || Stopwatch.GetElapsedTime(_started) >= WorkLimit)
                 throw new TimeoutException("Original installed provider WORK endpoint is closed or expired.");
         }
@@ -37,7 +92,8 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
             lock (_timing)
             {
                 _cleanup ??= Stopwatch.GetTimestamp();
-                var whole = budget - Stopwatch.GetElapsedTime(_started);
+                var whole = WholeLimit - Stopwatch.GetElapsedTime(_started);
+                if (_parent is not null) whole = Minimum(whole, _parent.CleanupRemaining);
                 var once = TimeSpan.FromSeconds(60) - Stopwatch.GetElapsedTime(_cleanup.Value);
                 var remaining = whole < once ? whole : once;
                 if (remaining <= TimeSpan.Zero) throw new TimeoutException("SAME original whole/earliest once60 endpoint expired.");
@@ -72,7 +128,7 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
             lock (_timing) return new
             {
                 OriginalStarted = _started,
-                WholeSeconds = budget.TotalSeconds,
+                WholeSeconds = WholeLimit.TotalSeconds,
                 WorkSeconds = WorkLimit.TotalSeconds,
                 CleanupStarted = _cleanup,
                 Frequency = Stopwatch.Frequency
@@ -110,7 +166,7 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     {
         Check(); PlainPath(path); Check();
         if (_frames.Count >= 400000) throw new EvidenceWriteException("Finite actual file-operation ledger exceeds400000.");
-        var frame = new FileFrame(path, write); _frames.Add(frame); _retained.Add(frame);
+        _credits?.File(); var frame = new FileFrame(path, write); _frames.Add(frame); _retained.Add(frame);
         return frame;
     }
 
@@ -127,15 +183,17 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
         try { Check(); } catch (Exception error) { frame.PostFailure = error; }
     }
 
-    private static void Require(FileFrame frame)
+    private void Require(FileFrame frame)
     {
         var errors = new[] { frame.Primary, frame.CloseFailure, frame.PostFailure }.Where(e => e is not null).Select(e => e!).ToArray();
+        if (frame.AcquireEntered && !frame.AcquireReturned && frame.Primary is null || frame.Stream is not null && (!frame.CloseReturned || frame.CloseFailure is not null || frame.PostFailure is not null)) PreserveUnknown();
         if (errors.Length > 0) throw new AggregateException("Original file primary/first-close/post failures retained.", errors);
         if (!frame.AcquireReturned || !frame.CloseEntered || !frame.CloseReturned)
             throw new EvidenceWriteException("Actual file acquisition/disposition remains unknown; original stream/buffer retained.");
     }
 
-    internal byte[] Read(string path, long maximum)
+    internal byte[] Read(string path, long maximum) => Effect(() => ReadCore(path, maximum));
+private byte[] ReadCore(string path, long maximum)
     {
         var frame = NewFrame(path, false);
         try
@@ -145,7 +203,7 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
             Check(); var length = frame.Stream.Length; Check();
             if (length < 0 || length > maximum || length > int.MaxValue || _read > MaximumReadBytes - length)
                 throw new EvidenceWriteException("Named complete-file or cumulative read bound exceeded.");
-            _read += length; Check(); frame.Bytes = new byte[(int)length];
+            _credits?.Read(length); _read += length; Check(); frame.Bytes = new byte[(int)length];
             var offset = 0;
             while (offset < frame.Bytes.Length)
             {
@@ -160,20 +218,23 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
         catch (Exception error)
         {
             frame.Primary = error;
-            try { _ = CleanupRemaining; } catch (Exception post) { frame.PostFailure = post; }
+            try { BeginFailureCleanup(); } catch (Exception post) { frame.PostFailure = post; }
         }
         finally { FirstClose(frame); }
         Require(frame);
         var complete = frame.Bytes!; frame.Bytes = null; frame.Stream = null; return complete;
     }
 
-    internal string FileHash(string path, long maximum)
+    internal string FileHash(string path, long maximum) => Effect(() => FileHashCore(path, maximum));
+private string FileHashCore(string path, long maximum)
     {
         var bytes = Read(path, maximum); Check(); var hash = Identity(bytes); Check(); return hash;
     }
 
-    internal void WriteNew(string path, byte[] bytes)
+    internal void WriteNew(string path, byte[] bytes) => Effect(() => WriteNewCore(path, bytes));
+private void WriteNewCore(string path, byte[] bytes)
     {
+        _credits?.Write(bytes.LongLength);
         var frame = NewFrame(path, true); frame.Bytes = bytes;
         try
         {
@@ -184,7 +245,7 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
         catch (Exception error)
         {
             frame.Primary = error;
-            try { _ = CleanupRemaining; } catch (Exception post) { frame.PostFailure = post; }
+            try { BeginFailureCleanup(); } catch (Exception post) { frame.PostFailure = post; }
         }
         finally { FirstClose(frame); }
         Require(frame); frame.Bytes = null; frame.Stream = null;
@@ -195,7 +256,8 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
         if (_frames.Any(f => f.AcquireEntered && !f.CloseReturned)) return;
         _retained.ReleaseKnown();
     }
-    internal Dictionary<string, string> Inventory(string root, int count, long bytes, bool skipGit)
+    internal Dictionary<string, string> Inventory(string root, int count, long bytes, bool skipGit) => Effect(() => InventoryCore(root, count, bytes, skipGit));
+private Dictionary<string, string> InventoryCore(string root, int count, long bytes, bool skipGit)
     {
         Check(); PlainPath(root);
         var rows = new Dictionary<string, string>(PathComparer);

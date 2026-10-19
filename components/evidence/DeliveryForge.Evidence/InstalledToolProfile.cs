@@ -22,6 +22,12 @@ public sealed class InstalledToolProfile
     {
         if (!InstalledToolFiles.Hash(parentApprovedSha256)) throw new ArgumentException("A parent-approved profile SHA256 is required.");
         var setup = new InstalledToolFiles(TimeSpan.FromSeconds(30));
+        return LoadPinned(absoluteProfilePath, parentApprovedSha256, setup);
+    }
+    internal static InstalledToolProfile LoadPinned(string absoluteProfilePath, string parentApprovedSha256, InstalledToolFiles setup) => setup.Effect(() => LoadPinnedCore(absoluteProfilePath, parentApprovedSha256, setup));
+private static InstalledToolProfile LoadPinnedCore(string absoluteProfilePath, string parentApprovedSha256, InstalledToolFiles setup)
+    {
+        if (!InstalledToolFiles.Hash(parentApprovedSha256)) throw new ArgumentException("A parent-approved profile SHA256 is required.");
         var bytes = setup.Read(absoluteProfilePath, 1024 * 1024); setup.Check(); setup.ReleaseKnown();
         if (InstalledToolFiles.Identity(bytes) != parentApprovedSha256) throw new EvidenceWriteException("Approved tool profile bytes differ.");
         using (var document = JsonDocument.Parse(bytes, new() { MaxDepth = 16 })) Unique(document.RootElement);
@@ -30,7 +36,7 @@ public sealed class InstalledToolProfile
             PropertyNameCaseInsensitive = false,
             UnmappedMemberHandling = JsonUnmappedMemberHandling.Disallow
         }) ?? throw new EvidenceWriteException("Missing installed tool profile.");
-        Validate(data);
+        Validate(data); setup.Check();
         return new(data, parentApprovedSha256);
     }
 

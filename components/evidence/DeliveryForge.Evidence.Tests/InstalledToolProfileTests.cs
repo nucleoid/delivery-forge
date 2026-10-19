@@ -98,6 +98,41 @@ public sealed class InstalledToolProfileTests
         Assert.False(Directory.Exists(output));
         Assert.Empty(Directory.EnumerateFileSystemEntries(consumer.Path));
     }
+    [Fact]
+    public void Containing_cleanup_closes_real_profile_io_without_a_new_loader_original()
+    {
+        using var fixture = new ProfileFiles();
+        var original = new ProfileOriginal();
+        var containing = new InstalledToolHostScope(original);
+        // This complete actual file/profile positive precedes the original closing.
+        // The fixture contains nonexecutable DATA; no tool outcome is injected.
+        Assert.True(containing.LoadProfile(fixture.ProfilePath,
+            InstalledToolFiles.Identity(fixture.Bytes)).Fixture);
+        original.BeginFailureCleanup();
+        var refusal = Assert.Throws<TimeoutException>(() => containing.LoadProfile(
+            fixture.ProfilePath, InstalledToolFiles.Identity(fixture.Bytes)));
+        Assert.Equal("Actual containing profile WORK is closed.", refusal.Message);
+        Assert.Equal(1, original.CleanupEntries);
+    }
+
+    sealed class ProfileOriginal : IOwnedDuplexBudget, IOwnedFailureCleanup
+    {
+        bool closing;
+        public int CleanupEntries { get; private set; }
+        public long OriginalStarted { get; } = System.Diagnostics.Stopwatch.GetTimestamp();
+        public TimeSpan WholeLimit => TimeSpan.FromSeconds(30);
+        public TimeSpan WorkLimit => TimeSpan.FromSeconds(20);
+        public CancellationToken Token => TestContext.Current.CancellationToken;
+        public void CheckWork()
+        {
+            Token.ThrowIfCancellationRequested();
+            if (closing) throw new TimeoutException("Actual containing profile WORK is closed.");
+        }
+        public TimeSpan CleanupRemaining => TimeSpan.FromSeconds(10) -
+            System.Diagnostics.Stopwatch.GetElapsedTime(OriginalStarted);
+        public void BeginFailureCleanup() { if (!closing) { closing = true; CleanupEntries++; } }
+    }
+
     private sealed class ProfileFiles : IDisposable
     {
         private readonly TempDirectory _temp = new();

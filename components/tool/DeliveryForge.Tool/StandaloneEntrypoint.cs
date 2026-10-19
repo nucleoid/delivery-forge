@@ -24,6 +24,14 @@ internal sealed class StandaloneEntrypoint
         BoundedFiles.Separate(config.RepositoryRoot, store); BoundedFiles.Separate(config.RepositoryRoot, work); BoundedFiles.Separate(config.RepositoryRoot, result); BoundedFiles.Separate(work, result); BoundedFiles.Separate(store, work); BoundedFiles.Separate(store, result);
         foreach (var pin in new[] { config.StandaloneRoot!, root.InstalledHostAdmission, root.LinuxScopeProfile }.Where(pin => pin is not null)) { BoundedFiles.Separate(work, pin!.Path); BoundedFiles.Separate(result, pin.Path); }
         BoundedFiles.Separate(work, configPath); BoundedFiles.Separate(result, configPath);
+        if (config.InstalledQuality is { } quality)
+        {
+            BoundedFiles.Separate(work, quality.ArtifactRoot); BoundedFiles.Separate(result, quality.ArtifactRoot);
+            foreach (var gate in quality.Gates) { BoundedFiles.Separate(work, gate.Profile.Path); BoundedFiles.Separate(result, gate.Profile.Path); }
+            if (quality.Registry is { } registry)
+                foreach (var source in new[] { config.RepositoryRoot, work, result, quality.ArtifactRoot })
+                    foreach (var input in new[] { registry.OwnerApproval.Path, registry.ArtifactRoot }) BoundedFiles.Separate(source, input);
+        }
     }
     async Task<int> Run(string[] args)
     {

@@ -37,6 +37,22 @@ public sealed class WorktreeManager
             .Where(Path.IsPathFullyQualified).Select(path => Path.Combine(path, name)).FirstOrDefault(File.Exists)
             ?? throw new WorktreeBoundaryException("No absolute Git executable was discovered on the trusted parent PATH.");
     }
+    readonly DeliveryForge.Coordination.ICoordinatedEffectAdmission? _effectAdmission;
+    readonly string? _effectRunId;
+    // A new immutable view retains the SAME executor/original/counter. No DTO issues authority.
+    // Provisioning and the existing explicitly owned cleanup observation view stay unchanged.
+    public WorktreeManager WithParentAdmission(DeliveryForge.Coordination.ICoordinatedEffectAdmission actualAdmission, string actualRunId)
+    {
+        ArgumentNullException.ThrowIfNull(actualAdmission);
+        if (_originalExecutor is null || _originalBudget is null || _effectAdmission is not null || string.IsNullOrWhiteSpace(actualRunId) || actualRunId.Length > 128)
+            throw new WorktreeBoundaryException("One actual original Git owner/parent binding required; no rebind.");
+        return new WorktreeManager(this, actualAdmission, actualRunId);
+    }
+    WorktreeManager(WorktreeManager source, DeliveryForge.Coordination.ICoordinatedEffectAdmission admission, string runId)
+    {
+        _gitExecutable = source._gitExecutable; _originalExecutor = source._originalExecutor; _originalBudget = source._originalBudget;
+        actualOwnedGitInvocations = source.actualOwnedGitInvocations; _effectAdmission = admission; _effectRunId = runId;
+    }
     sealed class InvocationCounter { internal long Value; }
     InvocationCounter actualOwnedGitInvocations = new();
     public long ActualOwnedGitInvocations => Interlocked.Read(ref actualOwnedGitInvocations.Value);
@@ -310,11 +326,18 @@ public sealed class WorktreeManager
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         if (_originalExecutor is not null)
         {
-            _originalBudget!.CheckWork();
+            var actualBudget = _originalBudget ?? throw new WorktreeBoundaryException("Actual original Git budget is absent.");
+            var actualExecutor = _originalExecutor;
+            actualBudget.CheckWork();
             var env = start.Environment.ToDictionary(x => x.Key, x => x.Value ?? "", OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-            Interlocked.Increment(ref actualOwnedGitInvocations.Value);
-            var actual = await _originalExecutor.ExecuteBoundedCaptureAsync(new(_gitExecutable, start.ArgumentList.ToArray(), cwd, env) { EnvironmentIsComplete = true }, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, cancellationToken, new OwnedWorkPhaseBudget(_originalBudget)).ConfigureAwait(false);
-            _originalBudget.CheckWork(); var command = actual.Command; var facts = command.LifecycleDiagnostics;
+            Task<BoundedCommandCaptureResult> Birth()
+            {
+                actualBudget.CheckWork();
+                Interlocked.Increment(ref actualOwnedGitInvocations.Value);
+                return actualExecutor.ExecuteBoundedCaptureAsync(new(_gitExecutable, start.ArgumentList.ToArray(), cwd, env) { EnvironmentIsComplete = true }, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, cancellationToken, new OwnedWorkPhaseBudget(actualBudget));
+            }
+            var actual = await (_effectAdmission is null ? Birth() : _effectAdmission.EnterAsync(_effectRunId!, Birth)).ConfigureAwait(false);
+            actualBudget.CheckWork(); var command = actual.Command; var facts = command.LifecycleDiagnostics;
             if (actual.CaptureBoundExceeded || command.TimedOut || command.Cancelled || !command.OwnedProcessQuiescent || !actual.RootExitObserved || !actual.StandardOutputDrainCompleted || !actual.StandardErrorDrainCompleted || facts?.NativeFailure is not null || facts?.OwnedTree is not { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 } || OperatingSystem.IsLinux() && actual.OwnershipKind != BoundedCaptureOwnershipKind.LinuxCreationOwnedScope || command.ExitCode is null)
                 throw new WorktreeBoundaryException("Actual original Git capture/group/stream closure is incomplete or failed.");
             return (command.ExitCode.Value, Encoding.UTF8.GetString(actual.StandardOutputBytes), Encoding.UTF8.GetString(actual.StandardErrorBytes));

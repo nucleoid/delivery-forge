@@ -196,7 +196,7 @@ public sealed class GateRunner
                   !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
                   !normalized.ProductionCapable && !normalized.ProducerVerified))
             normalized = NormalizedEvidence.Incomplete(
-                "Tool PASS is advisory because protected policy/gate authority or certified producer evidence is absent.");
+                "Tool PASS is advisory because protected policy/gate authority or certified producer evidence is absent.", fixture: normalized.Fixture);
 
         return await PersistAsync(
             request, gateDirectory, before, after, execution, artifactHashes, normalized, sourceChanged, CancellationToken.None)
@@ -270,11 +270,12 @@ public sealed class GateRunner
             : await new AppendOnlyContractStore(Path.Combine(gateDirectory, "receipts"))
                 .WriteImmutableAsync(receiptBytes, cancellationToken).ConfigureAwait(false);
 
-        return new GateRunResult(
+        GateRunResult Result() => new(
             normalized.Outcome, normalized.Reason, normalized.Fixture, normalized.ProductionCapable,
             limitations, sourceChanged, request.Invocation, execution, before, after,
             request.Policy.PolicyIdentity, request.Capability.ExecutableIdentity ?? "unavailable", request.ConfigurationIdentity, request.Scope,
             artifactHashes, receiptPath, normalized.NotApplicableRationale);
+        return request.InstalledInvocation is { } installedResult ? installedResult.Consume(Result) : Result();
     }
 
     private static async Task<Dictionary<string, string>> WriteArtifactsAsync(

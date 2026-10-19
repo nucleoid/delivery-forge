@@ -11,7 +11,8 @@
       "deliveryforge.evidence": {
         "type": "Project",
         "dependencies": {
-          "DeliveryForge.Contracts": "[1.0.0, )"
+          "DeliveryForge.Contracts": "[1.0.0, )",
+          "DeliveryForge.Coordination": "[1.0.0, )"
         }
       },
       "deliveryforge.execution": {
