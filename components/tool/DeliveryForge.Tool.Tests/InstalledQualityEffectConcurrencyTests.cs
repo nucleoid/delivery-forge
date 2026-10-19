@@ -9,6 +9,27 @@ namespace DeliveryForge.Tool.Tests;
 public sealed class InstalledQualityEffectConcurrencyTests
 {
     [Fact]
+    public void Cancellation_after_read_before_first_close_is_not_reported_as_success()
+    {
+        var path = Path.Combine(Path.GetTempPath(), "forge-close-cancel-" + Guid.NewGuid().ToString("N"));
+        File.WriteAllText(path, "completed bytes");
+        using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), cancelled.Token);
+        var files = new InstalledToolFiles(life, TimeSpan.FromSeconds(20), new InstalledToolHostScope.Credits());
+        var frame = new InstalledToolFiles.FileFrame(path, false)
+        {
+            AcquireEntered = true, AcquireReturned = true,
+            Stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)
+        };
+        Assert.NotEqual(-1, frame.Stream.ReadByte());
+        cancelled.Cancel();
+        files.FirstClose(frame);
+        Assert.True(frame.CloseReturned);
+        Assert.ThrowsAny<Exception>(() => files.Require(frame));
+        using var exclusive = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.None);
+    }
+
+    [Fact]
     public void Revocation_after_acquisition_still_closes_the_original_input_handle()
     {
         if (!OperatingSystem.IsWindows()) Assert.Skip("Observes actual Windows file-sharing ownership; Linux conformance remains separate.");

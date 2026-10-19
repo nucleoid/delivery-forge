@@ -175,7 +175,7 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
 
     // Each actual stream is rooted before constructor entry. Ordinary managed exceptions are
     // known returns; entered/unreturned construction or an inadmissible first close stays held.
-    private sealed class FileFrame(string path, bool write)
+    internal sealed class FileFrame(string path, bool write)
     {
         internal readonly string Path = path;
         internal readonly bool Write = write;
@@ -193,7 +193,7 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
         return frame;
     }
 
-    private void FirstClose(FileFrame frame)
+    internal void FirstClose(FileFrame frame)
     {
         if (!frame.AcquireReturned || frame.Stream is null) return;
         try
@@ -215,7 +215,7 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
         catch { BeginFailureCleanup(); _ = CleanupRemaining; }
     }
 
-    private void Require(FileFrame frame)
+    internal void Require(FileFrame frame)
     {
         var errors = new[] { frame.Primary, frame.CloseFailure, frame.PostFailure }.Where(e => e is not null).Select(e => e!).ToArray();
         if (frame.AcquireEntered && !frame.AcquireReturned && frame.Primary is null || frame.Stream is not null && (!frame.CloseReturned || frame.CloseFailure is not null || frame.PostFailure is not null)) PreserveUnknown();
