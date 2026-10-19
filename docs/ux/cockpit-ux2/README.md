@@ -120,7 +120,7 @@ MCP App surfaces follow the public `openai/mcp-extensions` spec: an **inline** c
 cd examples/presentation-demo
 npm install
 npx playwright install chromium
-npm test                          # includes test/cockpit.test.mjs and test/desktop.test.mjs
+npm test                          # 87 tests, includes test/cockpit.test.mjs and test/desktop.test.mjs
 npm run screenshots:ux2           # writes assets/*.png and assets/manifest.json with SHA-256 per image
 ```
 
@@ -131,4 +131,3 @@ npm run screenshots:ux2           # writes assets/*.png and assets/manifest.json
 - No installed-host recapture of Codex, Claude Code or Pi with the UX-2 renderer. The UX-1 native captures remain the only installed-host evidence; UX-2 native acceptance is the same work item as before (#38, #39, #40, #41) with a better renderer to point at.
 - No embedding test in Claude Code Desktop or the Codex desktop app. The mockups show where the panel would live according to public documentation; admission of each desktop surface still needs its own capability and version check.
 - The companion web app and the mobile layout from UX-1 were intentionally left as they were; the user asked for the TUI and the two desktop experiences.
-- Two pre-existing tests fail on Windows only (`mcp.test.mjs` Windows path comparison and `usage.test.mjs` fresh-process replay build a `C:\C:\…` path). They are unrelated to UX-2 and were not changed here.
