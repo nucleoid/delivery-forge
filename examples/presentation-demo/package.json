@@ -7,7 +7,9 @@
   "scripts": {
     "test": "node --test",
     "demo": "node scripts/demo.mjs",
+    "usage-ledger": "node scripts/usage-ledger.mjs",
     "capture": "node scripts/capture-evidence.mjs",
+    "capture:usage": "node scripts/capture-usage-durability.mjs",
     "screenshots": "node scripts/screenshots.mjs"
   },
   "engines": { "node": ">=20" },

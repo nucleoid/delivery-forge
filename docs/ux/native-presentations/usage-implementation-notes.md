@@ -89,10 +89,10 @@ Enrich existing main screenshots/states rather than invent a separate product: l
 
 Regenerate affected raw/harness/companion captures after the final immutable commit. Add clearly labelled supplemental usage harness/detail images and list exact names for later asset binding. No screenshot is native merely because the renderer's presentation flag says native.
 
-Parent will obtain3+ actual native frames perhost with usage updates, plus reserved supplemental slots:
+The published native set contains 3+ actual frames per host with usage updates:
 - `codex-native-0.153.4-usage.png`
-- `claude-native-2.1.302-usage.png` (real statusline usage state)
-- `pi-native-0.80.7-usage-detail.png`
+- compact usage is visible in `claude-native-2.1.303-execute.png` and `claude-native-2.1.303-failed-gate.png`; no separate expanded native usage panel is claimed
+- `pi-native-0.80.7-usage.png`
 
 Native data remains fixtures; production collector/model pricing integration is future issue work. Report source changed, exact test results, full revised CLI grammar, entrypoints, screenshot provenance and known remaining gaps. Do not run or publish an actual delivery.
 

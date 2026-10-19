@@ -4,6 +4,7 @@ import { project } from './projector.mjs';
 const trail = ['Launch','Plan','Execute','Evaluate','Repair','Review','PR'];
 const status = (gate) => `${gate.outcome}${gate.currentness === 'current' ? '' : ` / ${gate.currentness.toUpperCase()}`}`;
 const provenance=(presentation='harness',detail='native text contract')=>presentation==='native'?'NATIVE DEMO SURFACE — installed-host rendering requires a separate receipt':`HARNESS RENDER — ${detail} (not an installed host screenshot)`;
+export const formatCompactUsage=usage=>usage.available?`${usage.label} ${usage.knownCostUsd===null?'unknown':`~${Number(usage.knownCostUsd).toFixed(4)}`} | ${usage.models.length>1?'multiple models':usage.models[0]?.model||'unresolved'} | ${usage.status}`:`${usage.label} unavailable | SYNTHETIC TOKENS/RATES`;
 
 export function renderCompact(input, options = {}) {
   const s = project(input), width = Math.max(40, Math.min(120, Number(options.width) || 80));
@@ -13,7 +14,7 @@ export function renderCompact(input, options = {}) {
   if(options.presentation) lines.push(options.presentation==='native'?'NATIVE DEMO SURFACE | DEMO SYNTHETIC':'HARNESS RENDER | DEMO SYNTHETIC');
   lines.push(`FORGE DEMO${sep}${cleanText(s.run.id)}${sep}r${s.run.planRevision}${sep}${short(s.run.headCommit)}${sep}ceiling ${s.run.authorizationCeiling.toUpperCase()}`);
   lines.push(`${s.workflow.phase} / ${s.aggregate.outcome} — ${cleanText(s.focus.title)}`);
-  lines.push(s.usage.available?`${s.usage.label} ~${Number(s.usage.knownCostUsd).toFixed(4)} | ${s.usage.models.length>1?'multiple models':s.usage.models[0]?.model||'unresolved'} | ${s.usage.status}`:`${s.usage.label} unavailable | SYNTHETIC TOKENS/RATES`);
+  lines.push(formatCompactUsage(s.usage));
   lines.push(`Next: ${cleanText(s.focus.nextActionReason)}`);
   return boundLines(lines, width);
 }
@@ -77,7 +78,7 @@ export function renderEvidencePanel(input, selected = 0, width = 80, options = {
 }
 
 function renderUsageLines(usage,width,detail=true){
-  const lines=['Usage',`  ${usage.label}: ${usage.available?`USD ${usage.knownCostUsd} known / ${usage.status}`:'unavailable'}`,`  ${usage.legend}`,`  Observed tokens: ${usage.available?usage.observedTokens:'unknown'}; final ${usage.finalRequests}; provisional ${usage.provisionalRequests}; unpriced requests ${usage.unpricedRequests}; freshness ${usage.freshness}.`,`  Actual charge: unknown.`];
+  const lines=['Usage',`  ${usage.label}: ${usage.available?(usage.knownCostUsd===null?`unknown known subtotal / ${usage.status}`:`USD ${usage.knownCostUsd} known / ${usage.status}`):'unavailable'}`,`  ${usage.legend}`,`  Observed tokens: ${usage.available?usage.observedTokens:'unknown'}; final ${usage.finalRequests}; provisional ${usage.provisionalRequests}; unpriced requests ${usage.unpricedRequests}; freshness ${usage.freshness}.`,`  Actual charge: unknown.`];
   if(detail)for(const model of usage.models){
     lines.push('',`  ${model.model} | ${model.provider} | ${model.knownCostNanoUsd?`USD ${model.knownCostUsd} known`:model.unpricedRequests?'no priced subtotal':'known measured zero'}${model.unpricedRequests?` | ${model.unpricedRequests} unpriced`:''}`);
     lines.push(`    input ${model.inputTotal} = ordinary ${model.inputOrdinary} + cacheR ${model.cacheRead} + cacheW ${model.cacheWrite} (1h ${model.cacheWrite1h})`);

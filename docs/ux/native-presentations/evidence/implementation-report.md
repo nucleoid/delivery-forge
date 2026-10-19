@@ -1,17 +1,19 @@
-# Delivery Forge UX-1.2 implementation report — synthetic usage and API-equivalent cost
+# Delivery Forge UX-1.2 implementation report — synthetic usage, safety and bounded durability
 
 Date: 2026-10-19 UTC
 Writer: native GPT-5.6 SOL, sole prototype writer
-Design authority: frozen UX-1, [projection addendum](../projection-completeness-addendum.md), [usage/cost design](../usage-cost-design.md), and [implementation notes](../usage-implementation-notes.md)
-Prior immutable checkpoint: `995ca755ea6a21817957aa1f3d67106c4b069144`
-Final immutable commit: **`37aab4c6529dfcd361cf9f924f5dcca41423af7f`**
-Final tree: `095b2ea4a9140cca3a841be58d8e9c10b28ae030`
+Design authority: frozen UX-1, projection addendum, `10-usage-cost-design.md`, `10a-usage-implementation-handoff.md`
+Prior native-capture checkpoint: `37aab4c6529dfcd361cf9f924f5dcca41423af7f`
+Final telemetry safety/durability commit: **`e9eb721c664440b61352547d694c2c83798e07ed`**
+Final tree: `f51d3abcc6998f0be1f6e4d4f9b8a6c742300cf9`
 Branch: `ux/native-presentations-20261019`
 Remote: none
 
 ## Result
 
 UX-1.2 adds one shared, pure, demo-only `forge.usage/0.1` accounting projection consumed by Codex, Claude Code, Pi and the static companion. It makes no provider, model, billing, host-transcript, telemetry-exporter, network, Forge, Engram, Continuum, Switchyard or GitHub call.
+
+The final targeted repair binds every priced observation to matching provider, backend, tier, effective SKU and immutable synthetic rate identity; deeply validates checkpoint contributions and recomputes admitted prices; preserves all-unpriced cost as null; and adds a bounded explicit-path owned synthetic JSONL demonstration. The JSONL path admits only exact named bundled fixture bytes, caps files at 256 KiB / 256 records, fsyncs append operations, and never silently repairs malformed/truncated input.
 
 The fixtures and all UI surfaces state **SYNTHETIC TOKENS + SYNTHETIC RATES** and **USD API-EQUIVALENT ESTIMATE**. They do not claim an invoice, subscription charge, actual spend, credit consumption or production stream. Actual charge is null/unknown. Unavailable and entirely unpriced cost values remain null, never numeric zero.
 
@@ -30,7 +32,7 @@ Writer inclusive input normalizes to ordinary/read/write without double counting
 
 ## Accounting behavior
 
-`src/usage.mjs` provides bounded pure normalization, exact nano-USD integer arithmetic, immutable synthetic rate snapshots, request revision replacement, dedupe/corroboration handling, and checkpoint serialization.
+`src/usage.mjs` provides bounded pure normalization, exact nano-USD-per-token integer arithmetic, immutable synthetic rate snapshots, request revision replacement, dedupe/corroboration handling, and deeply validated checkpoint serialization.
 
 - Same incurrence partial → final replaces the provisional contribution.
 - Identical duplicate, mirror route and inclusive parent aggregate do not add.
@@ -38,10 +40,12 @@ Writer inclusive input normalizes to ordinary/read/write without double counting
 - Conflicting duplicate, older revision, sequence gap, source-epoch change, malformed input and revoked source remain visible conditions and make coverage partial.
 - Cumulative resume data is retained as a baseline and is not charged again.
 - Serialized checkpoint roundtrip preserves dedupe/contribution state; no transcript is read.
-- Unknown provider/model/SKU/tier never borrows another rate.
+- Unknown or mismatched provider/backend/model/SKU/tier never borrows another rate.
 - Usage freshness/continuity does not mutate workflow source continuity, gates, authorization ceiling, action availability or preview authority.
 
-Production Codex app-server, Claude result/OTel and Pi final-message producers; a durable multi-host ledger; trusted correlation; and real price catalog admission remain deferred to the proposed **“Track per-model tokens and live USD API-equivalent estimates”** issue, whose GitHub number is pending publication. This prototype is not production telemetry acceptance.
+`src/usage-jsonl.mjs` and `scripts/usage-ledger.mjs` provide only a synthetic fixture durability demonstration. There is no generic record import, production collector, database, daemon, transcript reader, or auto-repair. Fresh-process replay preserves the exact `0.044225 / 19,300 / PARTIAL` story; duplicate append does not increase it; partial-to-final replacement and distinct retries survive restart; malformed and truncated tails create explicit uncertainty conditions without mutating the file.
+
+Production Codex app-server, Claude result/OTel and Pi final-message producers; a durable multi-host ledger; trusted correlation; and real price catalog admission remain deferred to the usage issue (seventh in this UX set, not necessarily GitHub issue `#7`). This prototype is not production telemetry acceptance.
 
 ## Host presentation
 
@@ -67,16 +71,20 @@ Final commands exited 0:
 ```text
 git diff --check
 node --check src/usage.mjs
+node --check src/usage-jsonl.mjs
+node --check scripts/usage-ledger.mjs
+node --check scripts/capture-usage-durability.mjs
 node --check hosts/pi/forge-demo-extension.js
 node --check hosts/codex/mcp-server.mjs
 node --check hosts/claude/statusline.mjs
 node scripts/build-companion-data.mjs
 node --test
-node scripts/capture-evidence.mjs
-node scripts/screenshots.mjs
+node scripts/capture-usage-durability.mjs
 ```
 
-Final test result: **63 passed, 0 failed**. Coverage includes all prior 50 tests plus exact arithmetic; inclusive/exclusive mapping; cache retention and reasoning subsets; unknown versus measured zero; malformed/bounded values; revision replacement; duplicate/mirror/parent/retry behavior; cumulative baseline/checkpoint replay; gap/conflict/order/epoch/revocation; unresolved aliases; frozen rate snapshots; gate/authority isolation; 80/120-column output; no false zero; Codex usage selection; Claude compact usage; Pi usage keyboard/bounds; and companion shared-state behavior.
+Final test result: **70 passed, 0 failed**. The prior 63-test checkpoint remains the regression baseline. New coverage includes provider/backend/tier/SKU binding; malformed and forged deep checkpoints; all-unpriced null rendering; fsynced append/reopen; fresh-process replay; duplicate append; partial-to-final replacement plus distinct retry across restart; malformed/truncated-tail uncertainty with byte non-mutation; and rejection of tampered bundled-event envelopes.
+
+Exact stdout parity against immutable `37aab4c` passed for launch, execute, failed-gate expanded, failed-gate usage, and failed-gate compact native demo views. Hashes are in `preset-byte-parity-37aab4c.txt`; source-version metadata was excluded. Therefore the valid preset UI appearance and command grammar did not change.
 
 Historical receipts remain unchanged:
 
@@ -96,25 +104,27 @@ Regenerated deterministic local evidence includes:
 - Eight-state usage-progress walkthrough: `walkthrough-contact-sheet.png`.
 - Companion: `companion-desktop.png`, `companion-mobile-390.png`.
 - Existing failure/repair/review/evidence-selection captures remain.
+- `usage-jsonl-durability.txt` records the bounded durability story and explicit damaged-tail uncertainty.
+- `preset-byte-parity-37aab4c.txt` records exact before/after public-view hashes.
 - `capture-provenance.json` records generator, runtime, operation/argv and hashes.
 
 Every regenerated image was visually inspected. No clipping or horizontal overflow was observed. Host contract images remain explicitly **HARNESS RENDER**; companion images remain **COMPANION DEMO**. None is an installed-host screenshot.
 
 Native source bundle:
 
-- File: `delivery-forge-native-prototypes-37aab4c.zip`
-- Exact source: commit `37aab4c6529dfcd361cf9f924f5dcca41423af7f`
-- SHA-256: **`2469a22fdd291567823d86856edab5e6d8308a2e1cb43ad94ec3d7bacd9fc426`**
-- Contents: committed `README.md`, `package.json`, `data/`, `src/`, `hosts/`, and `scripts/demo.mjs` only.
-- Excludes `.git`, tests, companion, evidence and publication worktrees.
+- File: `delivery-forge-native-prototypes-e9eb721.zip`
+- Exact source: commit `e9eb721c664440b61352547d694c2c83798e07ed`
+- SHA-256: **`b37350f01d46dbb78005a4c13d7be5344e7eff89cd9c0de80a5195a938189c1d`**
+- Contents: committed `README.md`, `package.json`, `data/`, `src/`, `hosts/`, `scripts/demo.mjs`, `scripts/usage-ledger.mjs`, and `scripts/capture-usage-durability.mjs` only.
+- Excludes `.git`, tests, companion, evidence, and publication worktrees.
 - `unzip -t`: no errors.
 
 ## Native and production limitations
 
-Installed Codex 0.153.4, Claude Code 2.1.302 and Pi 0.80.7 rendering remains unverified. Native captures still require separate exact-version/action receipts. `NATIVE DEMO SURFACE` is a package presentation label, not certification.
+Installed Codex 0.153.4, Claude Code 2.1.303 and Pi 0.80.7 rendering was later captured using immutable source `37aab4c`; those receipts remain bound to that tested source SHA. The added telemetry safety/durability behavior at `e9eb721` is Node/harness verified only and was not rerun in installed hosts. `NATIVE DEMO SURFACE` is a package presentation label, not certification. Claude Code 2.1.302 remains the historical preflight target.
 
 No real producer was attached. No provider identity, current real rate, bill, historical effective date, retry spend or production coverage was inferred. No automatic budget stop, model switching, dispatch, authority escalation or controller behavior was added. CPU, memory, elapsed time and actual charge remain unknown.
 
 ## Scope and side effects
 
-Source changes were confined to the isolated prototype repository and generated evidence directory. No Delivery Forge core checkout, host/global config, credential, Android tool, GitHub object, model/provider, live Forge run or external system was touched. The source repository was clean, had no remote, and no push was attempted. No owned helper remained.
+Source changes were confined to an isolated prototype repository and generated evidence directory. No Delivery Forge runtime, host/global configuration, credential, model/provider, live Forge run, or external production system was touched. The prototype repository was clean, had no remote, and no source push was attempted.

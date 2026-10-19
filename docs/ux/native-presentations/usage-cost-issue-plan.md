@@ -21,7 +21,7 @@ Unknown model/rate/category/usage is **unknown**, not0. If some work is priced, 
 | Source | Observed schema/semantics | Accounting constraint |
 |---|---|---|
 | Codex0.153.4 app-server, pinned `3d2ee51…` | `thread/tokenUsage/updated`: threadId/turnId; `tokenUsage.total` and `last`; input/cachedInput/cacheWriteInput/output/reasoningOutput/total counters | Total is cumulative; last is already included. Resume replays previous usage. Notification itself lacks effective model/provider request ID/tier. Join only trusted metadata; ambiguous attribution stays unknown. Context-fill fallback is not priced usage. |
-| Claude2.1.302 statusline | Current-context/latest-response token fields; session estimated `cost.total_cost_usd` | Never sum repeated footer samples or treat context occupancy as cumulative consumption. |
+| Claude2.1.303 actual native statusline / 2.1.302 preflight | Current-context/latest-response token fields; session estimated `cost.total_cost_usd` | Never sum repeated footer samples or treat context occupancy as cumulative consumption. Native prototype proof is compact statusline only. |
 | Claude stream-json/SDK documented result | Main-loop `usage` differs from cumulative inclusive `modelUsage`; model map includes input/output/cache/read/write, optional thinking/canonicalModel/provider/costBasis | Latest cumulative result replaces earlier; resume can include restored history; inclusive parent already includes subagents/compaction. Helper calls may be excluded; scope visible. Thinking inside output. Version-admit optional fields, not assumed SDK installation. |
 | Claude documented OTel API events/metrics | Request/client IDs, model/query_source/input/output/cache, speed/effort; metrics have explicit delta/cumulative temporality | Ordinary input excludes caches; metric temporality/process epoch matters. Errors do not expose every intermediate retry. No exporter/settings activation in demo. |
 | Pi0.80.7, pinned `818d674…` | AssistantMessage provider/api/model, optional responseModel/responseId; usage input/output/cacheRead/cacheWrite/cacheWrite1h?/reasoning? | Pi normalizes input to ordinary/exclusive; totalinput=input+read+write. reasoning⊂output; write1h⊂write. Final-message usage and session totals overlap; all-entry session history includes past/compacted branches. |
@@ -84,12 +84,9 @@ Writer partialoutput1200 costs0.021700 then final replaces it; duplicates/resume
 
 Compact80-column row: `USD API-EQUIVALENT ESTIMATE ~0.0442 | demo.writer | PARTIAL`. Preserve identity/blocker/nextaction;4–5lines, max6when wrapping. Parallel models saymultiple; idle showslast/none, not fake activity.120-column detailtable;80-column stackedmodelcards include ordinary/cache/total/output/reasoning, rateversion, cost, coverage/freshness and phase/actor/request drilldown. Plain text/a11y, no animation dependency.
 
-Codex uses supported native text, Claude actual statusline, Pi widget plus deterministic usage-detailcommand. No invented native panels, paid skillinvocation or provider probe. Three+ nativeframes eachhost must include updated usage state; supplemental pending slots:
-- `codex-native-0.153.4-usage.png`
-- `claude-native-2.1.302-usage.png` (statusline)
-- `pi-native-0.80.7-usage-detail.png`
+Codex uses supported native text, Claude actual statusline, and Pi a widget plus deterministic usage-detail command. No invented native panels, paid skill invocation, or provider probe. The bounded prototype published 14 exact-source-bound frames at source `37aab4c…`, including `codex-native-0.153.4-usage.png`, compact Claude usage within `claude-native-2.1.303-execute.png` and `claude-native-2.1.303-failed-gate.png`, and `pi-native-0.80.7-usage.png`.
 
-Parent binds actual immutable assets after source/visual/native review. Native fixture rendering is not production telemetry acceptance.
+Native fixture rendering is not production telemetry acceptance. Final source `e9eb721…` was not rerun natively; five renderer views instead have exact byte parity.
 
 ## Acceptance matrix
 

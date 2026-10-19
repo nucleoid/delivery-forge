@@ -1,8 +1,8 @@
 # Delivery Forge native presentation prototype
 
-This bundle preserves the frozen UX-1 proposal, a deterministic synthetic demo, and its harness evidence. It is intended for design review and installed-host testing; it is **not** a live Delivery Forge adapter.
+This package preserves the frozen UX-1 design, final synthetic prototype source, deterministic harness evidence, and source-bound installed-host captures. It is an implementation-ready design handoff, **not** a live Delivery Forge adapter or production telemetry certification.
 
-## Contents
+## Start here
 
 - [Capability matrix](capability-matrix.md)
 - [Project state at design freeze](project-state.md)
@@ -12,24 +12,36 @@ This bundle preserves the frozen UX-1 proposal, a deterministic synthetic demo, 
 - [Usage and API-equivalent cost design](usage-cost-design.md)
 - [Usage implementation notes](usage-implementation-notes.md)
 - [Usage issue plan — GitHub number pending](usage-cost-issue-plan.md)
-- [Portable demo source](../../../examples/presentation-demo/README.md)
+- [Portable final demo source](../../../examples/presentation-demo/README.md)
 - [Publication manifest](publication-manifest.md)
-- [Synthetic evidence](evidence/)
-- [Immutable final source ZIP](assets/native-prototype-37aab4c.zip)
+- [Evidence index](evidence/README.md)
+- [Final immutable source ZIP](assets/native-prototype-e9eb721.zip)
 
-## Status
+The implementation issue set is prepared but not yet published. Links remain plain pending text until the seven real GitHub issues are created and their actual URLs are bound.
 
-- Prototype source commit: `37aab4c6529dfcd361cf9f924f5dcca41423af7f`
-- Prototype source tree: `095b2ea4a9140cca3a841be58d8e9c10b28ae030`
-- Deterministic test result at that source: **63 passed, 0 failed**
-- Usage display: synthetic per-model tokens and **USD API-EQUIVALENT ESTIMATE** only; actual invoice charge remains unknown
-- Captures in this bundle: **HARNESS RENDER** and **COMPANION DEMO** only
-- Installed Codex, Claude Code, and Pi rendering: **pending / unverified**
-- Final immutable-source admission review: **pending**
+## Two source identities
 
-Every fixture is synthetic. The demo performs no model call, network request, Forge run, authority grant, repository write, PR publication, integration call, process kill, or deployment. Intent output is preview-only.
+- **Final prototype source:** `e9eb721c664440b61352547d694c2c83798e07ed`, tree `f51d3abcc6998f0be1f6e4d4f9b8a6c742300cf9`; independently **70 passed, 0 failed**. This head adds the four telemetry safety fixes and bounded synthetic JSONL append/fsync/fresh-process replay. It has Node/harness verification only.
+- **Installed-host capture source:** `37aab4c6529dfcd361cf9f924f5dcca41423af7f`; independently **63 passed, 0 failed** in its source tree. Its distributed native-test ZIP contained no tests, so a laptop `node --test` discovered **0 tests**; that zero-test invocation is not a pass receipt.
+- **Parity bridge:** five public renderer views are byte-identical between `37aab4c…` and `e9eb721…`. This establishes retained view content, not installed-host retesting of the final source.
 
-## Reproduce locally
+## Native evidence
+
+Fourteen sanitized frames bind to source `37aab4c…`:
+
+- Codex CLI `0.153.4`: four literal local user-shell transcript frames. No model prompt, MCP tool invocation, skill execution, or custom-footer claim.
+- Claude Code `2.1.303`: four compact status-line frames. Version `2.1.302` was the historical preflight target; no expanded native usage panel or model-driven skill invocation was captured.
+- Pi `0.80.7`: six offline widget/panel frames covering launch, execution, failed gate, usage, evidence selection, and unknown-scenario rejection.
+
+The preliminary Codex isolation attempt used an empty MCP table that merged with existing configuration and began startup; it was interrupted and is **not** counted as a clean run. Final captures explicitly disabled all configured MCP servers and verified that disabled state. No private server names, profile paths, or account metadata are published.
+
+The native frames prove installed-host pixels and bounded keyboard behavior for known synthetic presets only. They do not prove production collectors, model-driven MCP/skill paths, real prices, invoices, actual charges, workflow authority, or final-source native acceptance.
+
+## Safety boundary
+
+Every fixture is synthetic. Money is labelled **USD API-EQUIVALENT ESTIMATE**; actual invoice charge remains unknown. The demo performs no model call, network request, live Forge run, authority grant, repository write, PR publication, integration call, process kill, or deployment. Intent output is preview-only.
+
+## Reproduce the final source locally
 
 ```sh
 cd examples/presentation-demo
@@ -37,10 +49,7 @@ npm install
 npm test
 npm run demo -- failed-gate 80
 npm run demo -- failed-gate 80 --view usage
+npm run capture:usage
 ```
 
-Playwright is pinned as a development dependency solely for the companion browser tests and screenshot generator. The projection, terminal renderers, and host demo packages do not require it.
-
-## Native testing boundary
-
-The host packages are ready for separately authorized, no-provider installed-profile testing. A native screenshot must record the exact host/version/surface/action and must retain `DEMO • SYNTHETIC` plus `NATIVE DEMO SURFACE`. Rendering fixture pixels in an installed host does not prove production state trust, authority, side effects, or live Forge admission.
+Playwright `1.58.2` is pinned as a development dependency solely for companion browser tests and screenshot generation. Projection, terminal rendering, host demo packages, and the bounded synthetic JSONL demonstration do not require it.

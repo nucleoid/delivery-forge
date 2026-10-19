@@ -1,0 +1,15 @@
+Preset public-view byte parity against immutable 37aab4c6529dfcd361cf9f924f5dcca41423af7f
+Generated locally with both trees using Node scripts/demo.mjs; exact stdout SHA-256 compared.
+
+MATCH launch 80 --presentation native
+980a0b7a323e82193925de2fff981da4a79b9fbc113e41adecb1b265a4b30850
+MATCH execute 80 --presentation native
+dff28257939c4a09577822f0b2cd6fe25e1f13b7a997a77cc44b8a37f56bca48
+MATCH failed-gate 80 --presentation native
+5d15c19ec5966867549495f44b494da7ce52afd2f1834052a7f0434f1ebf7b20
+MATCH failed-gate 80 --presentation native --view usage
+6f8ec6158e7661856670cd9dfd32c89976ee174501b4ed1b83206bd3e8d78d6c
+MATCH failed-gate 80 --presentation native --compact
+1ea5c9f122d235ff614a81a669dfcd259ff40228c4745b7b814406628cf9ea5c
+
+No source-version metadata was part of these public views. No installed host was launched.

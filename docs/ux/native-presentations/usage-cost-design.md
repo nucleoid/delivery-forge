@@ -18,7 +18,7 @@ Live means “updated when admitted observations arrive,” not fake spinning co
 
 ## 2. Targeted source verification (no model probes)
 
-Exact source excerpts and hashes were retained during design research but are not included in this sanitized bundle. Rolling official pages were checked 2026-10-19 approximately 10:14–10:18 UTC. Target profiles are Codex 0.153.4, Claude Code 2.1.302 and Pi 0.80.7. This verifies declared semantics, not actual events emitted by an installed host.
+Exact source excerpts and hashes were retained during design research but are not included in this sanitized bundle. Rolling official pages were checked 2026-10-19 approximately 10:14–10:18 UTC. Preflight targets were Codex 0.153.4, Claude Code 2.1.302 and Pi 0.80.7; installed capture observed Claude Code 2.1.303. Source declarations and native fixture rendering do not prove production telemetry events.
 
 ### Codex CLI/app-server0.153.4 — pinned `3d2ee51ca2d5db578f328aa75e20aa22c0197c9a`
 
@@ -39,7 +39,7 @@ For OpenAI Responses semantics, total input includes ordinary+cache-read+cache-w
 
 Native CLI footer/context counters are presentation, not a second additive accounting source. The fixture `!` command makes no model call and contributes **no real token telemetry**.
 
-### Claude Code CLI2.1.302 / stream-json / Agent SDK
+### Claude Code CLI 2.1.303 actual capture / 2.1.302 preflight / stream-json / Agent SDK
 
 Official statusline docs distinguish:
 - `cost.total_cost_usd`: client-side session **estimate**, list or managed pricing; `/clear` resets; not invoice.
@@ -158,7 +158,7 @@ The proposed **“Track per-model tokens and live USD API-equivalent estimates�
 Required tests: inclusive/exclusive mapping; cache-write TTL; reasoning subset; unknown versus measured0; partial→final replacement; duplicate/mirror/parent-child inclusive scope; retries; cumulative snapshots/resume/reset/gap/out-of-order/revoked source; model switch/unresolved aliases; immutable price/as-of repricing; exactdecimal arithmetic; **actual JSONL append/flush/reopen/replay in a fresh process, pause/restart reconciliation, truncated-tail/malformed-record/size-limit handling, completed-run history and bounded export**;80/120/plain layouts; privacy bounds; telemetry failure does not change authorization/gates. Production acceptance additionally proves whole-run producer coverage across planning/context/coordinator/workers/repair/review and failed/cancelled attempts, with explicit partial coverage for unreported external usage.
 
 Maintain3+ meaningful native frames **each host** and include an updated usage row/state (execute partial and later final/partial-known). Add supplemental usage drilldown frames:
-`codex-native-0.153.4-usage.png`, `claude-native-2.1.302-usage.png` (statusline usage state, not invented panel), `pi-native-0.80.7-usage-detail.png`.
+Published native assets are `codex-native-0.153.4-usage.png`, compact usage within `claude-native-2.1.303-execute.png` and `claude-native-2.1.303-failed-gate.png`, and `pi-native-0.80.7-usage.png`. Claude has no separate expanded usage capture because that path would require a model-driven invocation.
 All are pending, synthetic, exact-source-bound. No production stream/billing claim from screenshots.
 
 The bounded prototype implementation guidance is published as [`usage-implementation-notes.md`](usage-implementation-notes.md). Runtime integration and native-host acceptance remain separate work.

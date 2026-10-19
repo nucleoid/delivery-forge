@@ -1,37 +1,50 @@
 # Native presentation prototype publication manifest
 
-Published as a draft documentation/prototype handoff. This manifest describes immutable source provenance and current limitations; it does not claim native-host acceptance.
+Published in draft PR #33. The repository is public. This manifest separates final source, installed-host evidence, and publication receipts; none may be promoted into production-runtime proof.
 
-## Immutable source
+## Final immutable source
 
-- Source commit: `37aab4c6529dfcd361cf9f924f5dcca41423af7f`
-- Source tree: `095b2ea4a9140cca3a841be58d8e9c10b28ae030`
+- Source commit: `e9eb721c664440b61352547d694c2c83798e07ed`
+- Source tree: `f51d3abcc6998f0be1f6e4d4f9b8a6c742300cf9`
 - Source branch at freeze: `ux/native-presentations-20261019`
-- Source test receipt: `node --test` — **63 passed, 0 failed**
-- Native-source archive: [`assets/native-prototype-37aab4c.zip`](assets/native-prototype-37aab4c.zip)
-- Archive size: `40519` bytes
-- Archive SHA-256: `2469a22fdd291567823d86856edab5e6d8308a2e1cb43ad94ec3d7bacd9fc426`
+- Independent source test receipt: `node --test` — **70 passed, 0 failed**
+- Archive: [`assets/native-prototype-e9eb721.zip`](assets/native-prototype-e9eb721.zip)
+- Archive size: `42150` bytes
+- Archive SHA-256: `b37350f01d46dbb78005a4c13d7be5344e7eff89cd9c0de80a5195a938189c1d`
 
-The ZIP contains only the prototype `README.md`, `src/`, `data/`, `hosts/`, `scripts/demo.mjs`, and `package.json`. It has no credentials, absolute paths, private notes, screenshots, research copies, tests, companion assets, or repository metadata.
+The final ZIP contains committed `README.md`, `package.json`, `data/`, `src/`, `hosts/`, `scripts/demo.mjs`, `scripts/usage-ledger.mjs`, and `scripts/capture-usage-durability.mjs`. It excludes repository metadata, tests, companion assets, evidence, credentials, absolute private paths, and publication worktrees.
 
-The earlier `native-prototype-f9b05e6.zip` remains available only as immutable historical evidence. It is superseded by `37aab4c…` and is not the native-test candidate.
+The earlier [`native-prototype-37aab4c.zip`](assets/native-prototype-37aab4c.zip) is retained because it is the exact archive used for installed-host captures. `native-prototype-f9b05e6.zip` is historical and superseded.
+
+## Final-source behavior and limits
+
+Final source adds provider/backend/tier/effective-SKU rate binding, deep checkpoint validation, all-unpriced null rendering, and a bounded explicit-path synthetic JSONL demonstration. The ledger admits only exact bundled fixture records, caps files at 256 KiB / 256 records, fsyncs appends, replays across fresh Node processes, and surfaces malformed/truncated tails as uncertainty without mutating the file.
+
+It has **no live collectors**, generic importer, database, daemon, host transcript reader, current provider rate catalog, invoice integration, or actual-charge field telemetry. Its tested story remains `USD0.044225`, 19,300 observed synthetic tokens, one unpriced request, `PARTIAL`, actual charge unknown.
+
+## Installed-host evidence
+
+All 14 PNGs and [`assets/native-capture-ledger-37aab4c.json`](assets/native-capture-ledger-37aab4c.json) bind to source `37aab4c6529dfcd361cf9f924f5dcca41423af7f`, not final source `e9eb721…`.
+
+- Corrected native asset commit: `889b8eca09e421bf70a416e458943eb36063673e`
+- Public ledger SHA-256: `b08fb3e5132ed7af5a07dd19bc7a42e878ca68a9425cc88d6bfc382379f65e77`
+- Corrected Codex execute PNG SHA-256: `9fd64efe9a083ea7ddbf39493dcf4af1c908097650289a153c2b6e796120fff4`
+- Corrected Pi usage PNG SHA-256: `1213a477bcae882eec198f9539fb466c5d7ea7e09fb5891da2c327990d99602d`
+
+- Codex `0.153.4`: 4 frames, literal local user-shell transcript only.
+- Claude Code `2.1.303`: 4 compact status-line frames; `2.1.302` is retained as historical preflight.
+- Pi `0.80.7`: 6 offline widget/panel frames and keyboard paths.
+
+The native-test ZIP omitted tests, so its laptop `node --test` discovered **0 tests**. The independent source-tree receipt for `37aab4c…` was 63/63. The preliminary Codex MCP isolation mistake is retained as a caveat; only the later explicitly-disabled configuration is admitted. No model-driven MCP or Claude expanded-skill path is claimed.
+
+Five renderer outputs—launch, execute, failed-gate expanded, failed-gate usage, and failed-gate compact—match byte-for-byte between source `37aab4c…` and final source `e9eb721…`. See [the parity receipt](evidence/preset-byte-parity-37aab4c.txt). This is not a native rerun of final source.
 
 ## Public-copy portability changes
 
-The checked-in demo under [`examples/presentation-demo`](../../../examples/presentation-demo/README.md) preserves the immutable operational adapter and projection bytes from the source commit. Two browser-only files replace a machine-specific Playwright import with the package import `playwright`, pinned to `1.58.2` in `devDependencies`. Evidence scripts default to the repository evidence directory and accept `FORGE_EVIDENCE_DIR` as an override. Public documentation uses repository-relative paths and names the pending telemetry issue by title rather than assigning a GitHub number. These publication-only changes do not alter fixture facts, projection, usage accounting, intent checks, terminal rendering, or host adapter behavior.
+The checked-in demo under [`examples/presentation-demo`](../../../examples/presentation-demo/README.md) preserves immutable operational source bytes from `e9eb721…`. Browser-only files use package import `playwright`, pinned to `1.58.2`; evidence scripts use repository-relative output with optional `FORGE_EVIDENCE_DIR`; public docs use repository-relative links. These publication-only changes do not alter fixture facts, projection, usage accounting, JSONL behavior, intent checks, terminal rendering, or host adapter behavior.
 
-## Evidence status
+## Evidence and issue status
 
-[`evidence/`](evidence/) contains deterministic raw text/ANSI captures, static PNGs, capture provenance, and the implementation report. It includes Codex and Pi usage-detail harness captures. All screenshots are labelled **HARNESS RENDER** or **COMPANION DEMO**. None was captured from an installed Codex, Claude Code, or Pi host.
+[Evidence](evidence/README.md) includes the source implementation report, independent design review, durability/parity receipts, deterministic harness/companion captures, and source-bound native PNGs. Harness/companion images remain explicitly distinct from installed-host captures.
 
-Raw RED logs and machine-specific receipts are intentionally excluded. The sanitized history remains in the implementation report: the original repair checkpoint reached **44 passed, 0 failed**; final source `37aab4c…` adds the usage/cost slice and records **63 passed, 0 failed**.
-
-## Pending
-
-- final immutable-source admission review after the R1–R4 and usage/cost changes;
-- installed no-provider rendering and keyboard/layout checks on the pinned host profiles;
-- native capture receipts and screenshots;
-- final telemetry issue number/URL binding and issue publication;
-- any production projection/controller integration.
-
-The pull request carrying this bundle remains draft until those gates are resolved or explicitly descoped.
+Seven detailed issue bodies are ready for publication, including **“Track per-model tokens and live USD API-equivalent estimates.”** No GitHub issues have been created by this packaging branch; real issue numbers and URLs remain pending publication. PR #33 remains draft until corrected native asset bytes, public rendering, and final issue-link binding are reviewed.

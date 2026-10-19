@@ -43,6 +43,6 @@ The presentation contract in this bundle is **proposed and demo-only**. It is an
 
 ## Current limitations
 
-The bundle contains inert synthetic fixtures, pure projection/intent preview code, deterministic harness captures, and companion screenshots. It does not run Forge, issue authority, invoke models, contact integrations, modify source repositories, publish a real PR, or prove installed native rendering. Existing harness PNGs are labelled **HARNESS RENDER** or **COMPANION DEMO**. Native host captures and an independent design/source review remain pending.
+The bundle contains inert synthetic fixtures, pure projection/intent preview code, deterministic harness/companion captures, and 14 separately labelled installed-host captures bound to prototype source `37aab4c…`. Final source `e9eb721…` was independently Node-tested at 70/70 and retains five public renderer views byte-for-byte, but was not rerun in the installed hosts. The bundle does not run Forge, issue authority, invoke models, contact integrations, modify source repositories, publish a real PR, or prove production integration. Harness PNGs remain labelled **HARNESS RENDER** or **COMPANION DEMO** and must not be substituted for native evidence.
 
 Public references: [PR #31](https://github.com/nucleoid/delivery-forge/pull/31), [PR #32](https://github.com/nucleoid/delivery-forge/pull/32), and [issue #17](https://github.com/nucleoid/delivery-forge/issues/17).
