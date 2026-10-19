@@ -20,7 +20,7 @@ Real host collectors, trusted multi-host reconciliation, production history/expo
 - Claude Code `2.1.303`: four compact status-line frames; `2.1.302` was preflight only; no expanded skill invocation.
 - Pi `0.80.7`: six offline widget/panel frames including keyboard selection and negative path.
 
-All 14 frames bind source `37aab4c…`, not final source `e9eb721…`. The native ZIP contained no tests; its zero-test invocation is not a source-suite receipt. Terminal pixel dimensions are recorded, but renderer widths must not be recast as measured native terminal geometry.
+All 14 files bind source `37aab4c…`, not final source `e9eb721…`. Subsequent publication pixel QA rejected the current Codex execute and Pi usage PNGs pending replacement; this source binding is not visual acceptance. The native ZIP contained no tests; its zero-test invocation is not a source-suite receipt. Terminal pixel dimensions are recorded, but renderer widths must not be recast as measured native terminal geometry.
 
 A preliminary Codex empty-MCP-table attempt merged with configured entries and began startup. It was interrupted and excluded. Final admitted captures explicitly disabled every configured server and verified disabled state. No model prompt was submitted; zero all-network initialization is not claimed.
 

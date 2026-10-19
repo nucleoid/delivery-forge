@@ -84,7 +84,7 @@ Writer partialoutput1200 costs0.021700 then final replaces it; duplicates/resume
 
 Compact80-column row: `USD API-EQUIVALENT ESTIMATE ~0.0442 | demo.writer | PARTIAL`. Preserve identity/blocker/nextaction;4–5lines, max6when wrapping. Parallel models saymultiple; idle showslast/none, not fake activity.120-column detailtable;80-column stackedmodelcards include ordinary/cache/total/output/reasoning, rateversion, cost, coverage/freshness and phase/actor/request drilldown. Plain text/a11y, no animation dependency.
 
-Codex uses supported native text, Claude actual statusline, and Pi a widget plus deterministic usage-detail command. No invented native panels, paid skill invocation, or provider probe. The bounded prototype published 14 exact-source-bound frames at source `37aab4c…`, including `codex-native-0.153.4-usage.png`, compact Claude usage within `claude-native-2.1.303-execute.png` and `claude-native-2.1.303-failed-gate.png`, and `pi-native-0.80.7-usage.png`.
+Codex uses supported native text, Claude actual statusline, and Pi a widget plus deterministic usage-detail command. No invented native panels, paid skill invocation, or provider probe. The bounded prototype currently publishes 14 exact-source-bound files at source `37aab4c…`, but only 12 are accepted. `codex-native-0.153.4-usage.png` and compact Claude usage within `claude-native-2.1.303-execute.png` and `claude-native-2.1.303-failed-gate.png` are accepted; `pi-native-0.80.7-usage.png` is rejected pending replacement.
 
 Native fixture rendering is not production telemetry acceptance. Final source `e9eb721…` was not rerun natively; five renderer views instead have exact byte parity.
 

@@ -9,13 +9,13 @@
 
 ## Installed-host captures (`37aab4c…`)
 
-The 14 public PNGs are in [`../assets/`](../assets/) with per-file hashes, dimensions, actions, versions, and provenance in [`native-capture-ledger-37aab4c.json`](../assets/native-capture-ledger-37aab4c.json).
+Fourteen PNG files are currently present in [`../assets/`](../assets/), but only twelve are accepted. `codex-native-0.153.4-execute.png` and `pi-native-0.80.7-usage.png` are rejected pending parent-owned replacement. The current ledger records file provenance only; hashes and dimensions are not pixel-acceptance evidence.
 
-- Codex `0.153.4`: launch, execute, failed gate, usage.
+- Codex `0.153.4`: launch, failed gate, and usage accepted; execute rejected.
 - Claude Code `2.1.303`: launch, execute, failed gate, missing-state fallback.
-- Pi `0.80.7`: launch, execute, failed gate, usage, evidence selection, unknown-scenario rejection.
+- Pi `0.80.7`: launch, execute, failed gate, evidence selection, and unknown-scenario rejection accepted; usage rejected.
 
-These captures prove installed-host presentation of deterministic synthetic presets at source `37aab4c…`. They do not prove installed execution of final source `e9eb721…`, model-driven MCP/skill paths, production telemetry, or actual billing.
+The twelve accepted captures prove installed-host presentation of their deterministic synthetic presets at source `37aab4c…`. The two rejected files do not. None prove installed execution of final source `e9eb721…`, model-driven MCP/skill paths, production telemetry, or actual billing.
 
 ## Harness and companion captures
 

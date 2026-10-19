@@ -27,15 +27,15 @@ The implementation issue set is prepared but not yet published. Links remain pla
 
 ## Native evidence
 
-Fourteen sanitized frames bind to source `37aab4c…`:
+Twelve sanitized frames are accepted and bind to source `37aab4c…`. Two published files are **rejected pending replacement**: `codex-native-0.153.4-execute.png` shows a Windows Terminal file-not-found result rather than the intended execute state, and `pi-native-0.80.7-usage.png` exposes local-path warnings/footer text.
 
-- Codex CLI `0.153.4`: four literal local user-shell transcript frames. No model prompt, MCP tool invocation, skill execution, or custom-footer claim.
+- Codex CLI `0.153.4`: three accepted literal local user-shell transcript frames; the execute frame is rejected pending replacement. No model prompt, MCP tool invocation, skill execution, or custom-footer claim.
 - Claude Code `2.1.303`: four compact status-line frames. Version `2.1.302` was the historical preflight target; no expanded native usage panel or model-driven skill invocation was captured.
-- Pi `0.80.7`: six offline widget/panel frames covering launch, execution, failed gate, usage, evidence selection, and unknown-scenario rejection.
+- Pi `0.80.7`: five accepted offline widget/panel frames; the usage frame is rejected pending replacement.
 
 The preliminary Codex isolation attempt used an empty MCP table that merged with existing configuration and began startup; it was interrupted and is **not** counted as a clean run. Final captures explicitly disabled all configured MCP servers and verified that disabled state. No private server names, profile paths, or account metadata are published.
 
-The native frames prove installed-host pixels and bounded keyboard behavior for known synthetic presets only. They do not prove production collectors, model-driven MCP/skill paths, real prices, invoices, actual charges, workflow authority, or final-source native acceptance.
+Only the twelve accepted native frames prove installed-host pixels and bounded keyboard behavior for their known synthetic presets. File hashes and ledger provenance do not constitute pixel acceptance. The two rejected files prove nothing about their intended states and must not be used as evidence. None of the frames prove production collectors, model-driven MCP/skill paths, real prices, invoices, actual charges, workflow authority, or final-source native acceptance.
 
 ## Safety boundary
 

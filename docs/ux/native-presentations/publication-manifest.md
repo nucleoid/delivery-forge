@@ -24,16 +24,11 @@ It has **no live collectors**, generic importer, database, daemon, host transcri
 
 ## Installed-host evidence
 
-All 14 PNGs and [`assets/native-capture-ledger-37aab4c.json`](assets/native-capture-ledger-37aab4c.json) bind to source `37aab4c6529dfcd361cf9f924f5dcca41423af7f`, not final source `e9eb721…`.
+Fourteen PNG files are present and source-bound to `37aab4c6529dfcd361cf9f924f5dcca41423af7f`, not final source `e9eb721…`, but only twelve are accepted. The `889b8ec…` replacements did not pass pixel QA: `codex-native-0.153.4-execute.png` shows a Windows Terminal file-not-found result rather than the intended execute state, and `pi-native-0.80.7-usage.png` still exposes local-path warnings/footer text. Those two files and the corresponding current ledger entries are rejected pending parent-owned replacement. Do not treat their hashes as proof of visual correctness.
 
-- Corrected native asset commit: `889b8eca09e421bf70a416e458943eb36063673e`
-- Public ledger SHA-256: `b08fb3e5132ed7af5a07dd19bc7a42e878ca68a9425cc88d6bfc382379f65e77`
-- Corrected Codex execute PNG SHA-256: `9fd64efe9a083ea7ddbf39493dcf4af1c908097650289a153c2b6e796120fff4`
-- Corrected Pi usage PNG SHA-256: `1213a477bcae882eec198f9539fb466c5d7ea7e09fb5891da2c327990d99602d`
-
-- Codex `0.153.4`: 4 frames, literal local user-shell transcript only.
+- Codex `0.153.4`: 3 accepted frames, literal local user-shell transcript only; execute rejected.
 - Claude Code `2.1.303`: 4 compact status-line frames; `2.1.302` is retained as historical preflight.
-- Pi `0.80.7`: 6 offline widget/panel frames and keyboard paths.
+- Pi `0.80.7`: 5 accepted offline widget/panel frames and keyboard paths; usage rejected.
 
 The native-test ZIP omitted tests, so its laptop `node --test` discovered **0 tests**. The independent source-tree receipt for `37aab4c…` was 63/63. The preliminary Codex MCP isolation mistake is retained as a caveat; only the later explicitly-disabled configuration is admitted. No model-driven MCP or Claude expanded-skill path is claimed.
 
@@ -47,4 +42,4 @@ The checked-in demo under [`examples/presentation-demo`](../../../examples/prese
 
 [Evidence](evidence/README.md) includes the source implementation report, independent design review, durability/parity receipts, deterministic harness/companion captures, and source-bound native PNGs. Harness/companion images remain explicitly distinct from installed-host captures.
 
-Seven detailed issue bodies are ready for publication, including **“Track per-model tokens and live USD API-equivalent estimates.”** No GitHub issues have been created by this packaging branch; real issue numbers and URLs remain pending publication. PR #33 remains draft until corrected native asset bytes, public rendering, and final issue-link binding are reviewed.
+Seven detailed issue bodies are ready for publication, including **“Track per-model tokens and live USD API-equivalent estimates.”** No GitHub issues have been created by this packaging branch; real issue numbers and URLs remain pending publication. PR #33 remains draft until the two rejected native assets and ledger are replaced, their pixels are reviewed, and final issue links are bound.
