@@ -347,11 +347,14 @@ public sealed class InstalledToolGateProvider
                         capture.Command.LifecycleDiagnostics is { NativeFailure: null })
                     {
                         files.RecordSettledWorkCapture(actualTiming, settledObservedAt);
-                        files.Check();
                     }
-                    else files.ImportActualCleanup(actualTiming);
+                    else files.RecordActualCleanup(actualTiming);
                 }
                 catch (Exception error) { files.PreserveUnknown(); failures.Add(error); }
+                // Timing facts are already recorded. A returned budget/admission
+                // refusal does not make a settled native resource unknown.
+                try { files.Check(); }
+                catch (Exception error) { failures.Add(error); }
             }
             if (failures.Count > 0)
             {

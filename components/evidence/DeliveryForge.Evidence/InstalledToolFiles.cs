@@ -115,6 +115,7 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
         _admission?.CheckCurrent(_runId!);
         lock (_timing) { if (_cleanup is null) CheckWorkCore(); }
         RecordSettledWorkCapture(timing, Stopwatch.GetTimestamp());
+        _ = CleanupRemaining;
     }
     // The concrete executor records the observed settlement before a later
     // admission refusal can throw. This records elapsed-time facts only and
@@ -129,9 +130,13 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
                 throw new EvidenceWriteException("Actual settled WORK capture must join this original once without a child cleanup stamp.");
             if (_cleanup is null || observedAt < _cleanup) _cleanup = observedAt;
         }
-        _ = CleanupRemaining;
     }
     internal void ImportActualCleanup(BoundedCaptureTimingObservation timing)
+    {
+        RecordActualCleanup(timing);
+        _ = CleanupRemaining;
+    }
+    internal void RecordActualCleanup(BoundedCaptureTimingObservation timing)
     {
         lock (_timing)
         {
@@ -140,7 +145,6 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
                 throw new EvidenceWriteException("Actual same-origin timing observation is absent or inconsistent.");
             if (_cleanup is null || cleanup < _cleanup) _cleanup = cleanup;
         }
-        _ = CleanupRemaining;
     }
     internal TimeSpan Remaining
     {
