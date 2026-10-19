@@ -12,5 +12,6 @@ Use only `forge_demo_status` and `forge_demo_preview_intent` from the local demo
 3. Never describe a preview as approval, dispatch, pause, stop, publication, merge, delivery, or deployment.
 4. Fixture replay is a separate `demo.*` action and is never a controller operation.
 5. If any binding/currentness is stale, gapped, unknown, malformed, or unavailable, say reconciliation is required.
+6. For usage, request `forge_demo_status` with `view: "usage"`. Preserve **USD API-EQUIVALENT ESTIMATE**, synthetic token/rate provenance, partial known subtotal, unpriced records, and unknown actual charge. Never add footer/context counters or call the result an invoice.
 
 This skill provides a disciplined transcript. It does not create a Codex footer, task-progress proof, live adapter, or MCP App panel.

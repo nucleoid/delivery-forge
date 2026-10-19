@@ -1,5 +1,5 @@
 import { snapshotsFromCatalog } from '../../src/fixtures.mjs';
-import { renderCompact, renderEvidenceDetail, renderEvidencePanel, renderExpanded } from '../../src/render-text.mjs';
+import { renderCompact, renderEvidenceDetail, renderEvidencePanel, renderExpanded, renderUsageDetail } from '../../src/render-text.mjs';
 
 const ENTRY='forge-demo-state-v1',WIDGET='forge-demo-widget',STATUS='forge-demo-status',MAX_PANEL_ROWS=18;
 const states=snapshotsFromCatalog();
@@ -38,6 +38,11 @@ export function createDetailComponent(snapshot,{tui,keybindings,done,presentatio
   };
 }
 
+export function createUsageComponent(snapshot,{tui,keybindings,done,presentation='native'}){
+  let scroll=0;const request=()=>tui.requestRender();
+  return{render(width){const safeWidth=Math.max(20,Number(width)||80),body=renderUsageDetail(snapshot,{width:safeWidth,presentation}).split('\n'),rows=MAX_PANEL_ROWS-1,max=Math.max(0,body.length-rows);scroll=Math.max(0,Math.min(scroll,max));return[...body.slice(scroll,scroll+rows),'j/k or arrows: scroll | Esc: close'].map(line=>clip(line,safeWidth));},handleInput(data){const up=keybindings.matches(data,'tui.select.up')||data==='k',down=keybindings.matches(data,'tui.select.down')||data==='j';if(up){scroll=Math.max(0,scroll-1);request();}else if(down){scroll++;request();}else if(keybindings.matches(data,'tui.select.cancel'))done(undefined);},invalidate(){},dispose(){scroll=0;}};
+}
+
 export default function forgeDemo(pi){
   let state={cursor:0,scenario:states[0].name,detail:false},activeCtx=null;
   const current=()=>states[state.cursor].snapshot;
@@ -55,6 +60,7 @@ export default function forgeDemo(pi){
     if(cmd==='next')move(1,ctx);else if(cmd==='prev')move(-1,ctx);else if(cmd==='reset'){state={cursor:0,scenario:states[0].name,detail:false};persist();paint(ctx);}
     else if(cmd==='scenario'){const index=states.findIndex(x=>x.name===parts[1]);if(index<0){if(ctx.hasUI)ctx.ui.notify(`Unknown fixture scenario: ${clean(parts[1])}`,'error');return;}state={cursor:index,scenario:states[index].name,detail:false};persist();paint(ctx);}
     else if(cmd==='detail'){if(ctx.mode!=='tui'){fallback();return;}await ctx.ui.custom((tui,_theme,keybindings,done)=>createDetailComponent(current(),{tui,keybindings,done}));}
+    else if(cmd==='usage'){if(ctx.mode!=='tui'){pi.sendMessage({customType:'forge-demo-output',content:renderUsageDetail(current(),{width:80,presentation:'native'}),display:true,details:{demoOnly:true,scenario:state.scenario,sideEffects:0,authorityIssued:false}},{triggerTurn:false});return;}await ctx.ui.custom((tui,_theme,keybindings,done)=>createUsageComponent(current(),{tui,keybindings,done}));}
     else paint(ctx);if(ctx.mode!=='tui'&&cmd!=='detail')fallback();
   }});
   pi.on('session_start',(_event,ctx)=>{activeCtx=ctx;state=restoreFromActiveBranch(ctx);paint(ctx);});

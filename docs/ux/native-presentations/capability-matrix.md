@@ -39,7 +39,7 @@ Capability discovery precedes feature selection: identify exact host+surface+ver
 | Claude Code Desktop / VS Code | Rolling surface-specific docs [A5–A6]; feature minima stated where documented | U; desktop/extension build unknown |
 | Pi | `@earendil-works/pi-coding-agent` **1.3.0 source**, commit `e28e708049650d9b5382bb83ef93be04a0322ffa` [P1] | No `pi` executable on PATH; source D/S; installed U |
 
-Pi's inspected source package is under **earendil-works/pi**, reached from the old badlogic/pi-mono URL. The exact 0.80.7 registry record is also **@earendil-works/pi-coding-agent**, not @mariozechner. Source 1.3.0 remains research context; the pinned 0.80.7 declarations now control laptop compatibility.
+Pi's inspected source package is under **earendil-works/pi**, reached from the old badlogic/pi-mono URL. The exact 0.80.7 registry record is also **@earendil-works/pi-coding-agent**, not @mariozechner. Source 1.3.0 remains research context; the pinned 0.80.7 declarations control target compatibility.
 
 ## Terminal hosts
 

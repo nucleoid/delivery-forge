@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { getScenario, loadCatalog, snapshotsFromCatalog } from '../src/fixtures.mjs';
 import { aggregate, project, reduceEvents, validateSnapshot } from '../src/projector.mjs';
@@ -110,9 +111,9 @@ test('80 and 120-column renderers do not overflow',()=>{
   for(const width of [80,120])for(const {snapshot} of snapshotsFromCatalog())for(const line of renderExpanded(snapshot,{width}).split('\n')) assert.ok(displayWidth(line)<=width,`${width}: ${line}`);
 });
 
-test('compact renderer stays within four lines at 80 and carries honest state',()=>{
+test('compact renderer stays within UX-1.2 five-line target at 80 and carries honest state',()=>{
   for(const name of ['failed-gate','stale-reconnected','cancel-unknown']){
-    const lines=renderCompact(scenario(name),{width:80,ascii:true});assert.ok(lines.length<=4);assert.ok(lines.every(x=>displayWidth(x)<=80));
+    const lines=renderCompact(scenario(name),{width:80,ascii:true});assert.ok(lines.length<=5);assert.ok(lines.every(x=>displayWidth(x)<=80));
   }
 });
 
@@ -193,4 +194,31 @@ test('presentation provenance is explicit without changing projected facts',()=>
   assert.match(harness,/HARNESS RENDER/);assert.match(native,/NATIVE DEMO SURFACE/);
   assert.doesNotMatch(native,/HARNESS RENDER/);
   assert.match(harness,/EVALUATE \/ INCOMPLETE/);assert.match(native,/EVALUATE \/ INCOMPLETE/);
+});
+
+test('malformed action rows and null intent construction fail closed without throwing',()=>{
+  const malformed=structuredClone(scenario('execute'));malformed.actions=[null];
+  assert.match(validateSnapshot(malformed).join(' '),/invalid action row/);
+  const intent=makeIntent(scenario('execute'),'request.pause');
+  assert.doesNotThrow(()=>previewIntent(malformed,intent));
+  assert.deepEqual(previewIntent(malformed,intent),{
+    status:'REJECTED',reason:'invalid snapshot: invalid action row',sideEffects:0,authorityIssued:false
+  });
+  let constructed;
+  assert.doesNotThrow(()=>{constructed=makeIntent(null,'request.pause');});
+  assert.equal(constructed.status,'REJECTED');
+  assert.equal(constructed.sideEffects,0);assert.equal(constructed.authorityIssued,false);
+  assert.equal(previewIntent(null,constructed).status,'REJECTED');
+});
+
+test('demo CLI exposes explicit provenance and optional compact rendering',()=>{
+  const script=path.join(root,'scripts/demo.mjs');
+  const run=(...args)=>spawnSync(process.execPath,[script,...args],{encoding:'utf8',timeout:3000});
+  assert.match(run('failed-gate','80').stdout,/HARNESS RENDER/);
+  const native=run('failed-gate','80','--presentation','native');
+  assert.equal(native.status,0);assert.match(native.stdout,/NATIVE DEMO SURFACE/);assert.doesNotMatch(native.stdout,/HARNESS RENDER/);
+  const compact=run('failed-gate','80','--presentation','native','--compact');
+  assert.equal(compact.status,0);assert.match(compact.stdout,/NATIVE DEMO SURFACE/);assert.ok(compact.stdout.trimEnd().split('\n').length<=5);
+  const usage=run('failed-gate','80','--presentation','native','--view','usage');assert.equal(usage.status,0);assert.match(usage.stdout,/USD API-EQUIVALENT ESTIMATE/);assert.match(usage.stdout,/0\.044225/);
+  assert.notEqual(run('failed-gate','80','--presentation','bogus').status,0);
 });

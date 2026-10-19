@@ -34,10 +34,17 @@ Continuum coordination: unavailable; not connected. No lease was requested or in
 Switchyard: unverified; not measured. No runtime readiness claim
 
 Measurements
-  Elapsed: not measured (not measured)
-  Cost: not measured (not measured)
-  CPU: not measured (not measured)
-  Memory: not measured (not measured)
+  Elapsed: unknown
+  Actual charge: unknown
+  CPU: unknown
+  Memory: unknown
+
+Usage
+USD API-EQUIVALENT ESTIMATE: USD 0.044225 known / PARTIAL
+SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge
+Observed tokens: 19300; final 4; provisional 0; unpriced requests 1; freshness stale.
+Actual charge: unknown.
+condition: mirror obs-writer-mirror retained as corroboration
 
 Full identity: run=demo-014 plan=plan-demo-014-csv-export-r3
 head=c82e4a100000000000000000000000000000003

@@ -2,7 +2,10 @@ import crypto from 'node:crypto';
 import { validateSnapshot } from './projector.mjs';
 
 const ACTIONS = new Set(['request.pause','request.stop','request.resume','request.repair','request.publish-pr']);
+const reject = (reason) => ({status:'REJECTED',reason,sideEffects:0,authorityIssued:false});
 export function makeIntent(snapshot, action, now = '2026-10-19T10:15:00.000Z') {
+  const errors=validateSnapshot(snapshot);
+  if(errors.length) return reject(`invalid snapshot: ${errors[0]}`);
   return {
     schemaVersion:'forge.action/0.1', intentId:`preview-${crypto.createHash('sha256').update(`${snapshot.source.snapshotId}:${action}`).digest('hex').slice(0,12)}`,
     action, runId:snapshot.run.id, expectedSnapshotId:snapshot.source.snapshotId, expectedSequence:snapshot.source.sequence,
@@ -16,7 +19,6 @@ export function makeIntent(snapshot, action, now = '2026-10-19T10:15:00.000Z') {
 }
 
 export function previewIntent(snapshot, intent) {
-  const reject = (reason) => ({status:'REJECTED',reason,sideEffects:0,authorityIssued:false});
   const snapshotErrors=validateSnapshot(snapshot);
   if(snapshotErrors.length) return reject(`invalid snapshot: ${snapshotErrors[0]}`);
   if (!intent || intent.schemaVersion !== 'forge.action/0.1') return reject('unsupported intent schema');

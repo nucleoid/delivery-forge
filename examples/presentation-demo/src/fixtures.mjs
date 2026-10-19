@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { usageForScenario } from './usage.mjs';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 export const fixturePath = path.resolve(here, '../data/fixtures.json');
@@ -59,6 +60,7 @@ export function snapshotsFromCatalog(catalog = loadCatalog()) {
     current.source.observedAt = event.observedAt;
     current.source.receivedAt = current.source.receivedAt || event.observedAt;
     current.gates = expandMacro(current.gates, current);
+    current.usage = { fixtureScenario: event.name };
     return { name: event.name, event: clone(event), snapshot: clone(current) };
   });
 }

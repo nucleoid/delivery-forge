@@ -16,7 +16,7 @@ async function terminalShot(input,name,viewport={width:1100,height:900}){
   await page.locator('pre').evaluate((node,text)=>node.textContent=text,input);
   await page.screenshot({path:path.join(evidence,name),fullPage:true});await page.close();
 }
-for(const [file,image,width] of [['terminal-80.txt','terminal-80.png',1100],['terminal-120.txt','terminal-120.png',1500],['failure.txt','failure.png',1100],['repair.txt','repair.png',1100],['review.txt','review.png',1100],['codex-mcp-protocol.txt','codex-mcp-protocol.png',1100],['claude-statusline-80.txt','claude-statusline-80.png',1100],['pi-detail-list-52.txt','pi-detail-list-52.png',900],['pi-detail-selected-52.txt','pi-detail-selected-52.png',900],['pi-evidence-detail-52.txt','pi-evidence-detail-52.png',900]]) await terminalShot(fs.readFileSync(path.join(evidence,file),'utf8'),image,{width,height:900});
+for(const [file,image,width] of [['terminal-80.txt','terminal-80.png',1100],['terminal-120.txt','terminal-120.png',1500],['failure.txt','failure.png',1100],['repair.txt','repair.png',1100],['review.txt','review.png',1100],['codex-mcp-protocol.txt','codex-mcp-protocol.png',1100],['codex-usage-detail-80.txt','codex-usage-detail-80.png',1100],['claude-statusline-80.txt','claude-statusline-80.png',1100],['pi-detail-list-52.txt','pi-detail-list-52.png',900],['pi-detail-selected-52.txt','pi-detail-selected-52.png',900],['pi-evidence-detail-52.txt','pi-evidence-detail-52.png',900],['pi-usage-detail-80.txt','pi-usage-detail-80.png',1100]]) await terminalShot(fs.readFileSync(path.join(evidence,file),'utf8'),image,{width,height:900});
 
 const page=await browser.newPage({viewportSize:{width:1440,height:1100}});
 await page.goto(pathToFileURL(path.join(root,'companion/index.html')).href);

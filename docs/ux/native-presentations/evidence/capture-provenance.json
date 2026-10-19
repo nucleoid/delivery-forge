@@ -1,5 +1,5 @@
 {
-  "generatedAt": "2026-10-19T09:58:03.303Z",
+  "generatedAt": "2026-10-19T10:36:46.451Z",
   "generator": "scripts/capture-evidence.mjs",
   "runtime": "v24.21.0",
   "commands": [
@@ -94,6 +94,17 @@
       "exitCode": 0
     },
     {
+      "output": "codex-usage-detail-80.txt",
+      "argv": [
+        "node",
+        "hosts/codex/protocol-harness.mjs",
+        "failed-gate",
+        "80",
+        "usage"
+      ],
+      "exitCode": 0
+    },
+    {
       "output": "claude-statusline-80.txt",
       "argv": [
         "node",
@@ -114,31 +125,43 @@
         "presentation=harness"
       ],
       "exitCode": 0
+    },
+    {
+      "output": "pi-usage-detail-80.txt",
+      "argv": [
+        "in-process",
+        "createUsageComponent",
+        "failed-gate",
+        "width=80",
+        "presentation=harness"
+      ],
+      "exitCode": 0
     }
   ],
   "sha256": {
-    "cancel-unknown.ansi": "4cd9a9640352bbd7ccf1d703a489a23cdadf59b25545846b66fbf7135e7afed2",
-    "cancel-unknown.txt": "4cd9a9640352bbd7ccf1d703a489a23cdadf59b25545846b66fbf7135e7afed2",
-    "claude-statusline-80.txt": "32fd30dbf7f8183cefb2ab2daaa3a3a6b1512684a643ce7958420e04f54dd6f6",
-    "codex-mcp-protocol.txt": "521e8ec4ba18ea24a4fb86d8a34dd3ce62c9b32d71347dd83763ccd4d3cdc338",
-    "failure.ansi": "05fb0687fd9dc1c486f9bf881ccc24b6a74cd00b71e61b7cf20f0e420db8d2a0",
-    "failure.txt": "05fb0687fd9dc1c486f9bf881ccc24b6a74cd00b71e61b7cf20f0e420db8d2a0",
-    "head-drift.ansi": "2d08d8d552341e82af79aa5415ecbcf68ee96c0c1ae3e5196c7f070742266d00",
-    "head-drift.txt": "2d08d8d552341e82af79aa5415ecbcf68ee96c0c1ae3e5196c7f070742266d00",
+    "cancel-unknown.ansi": "89bc3fcf0e2f60a521fe378b327e21c93e610aa428ac552f969b6fd182522b15",
+    "cancel-unknown.txt": "89bc3fcf0e2f60a521fe378b327e21c93e610aa428ac552f969b6fd182522b15",
+    "claude-statusline-80.txt": "dfb53daaccb9b8933420b77d75b5ef7bbce3825f9b90c7898b1a7964b058eb63",
+    "codex-mcp-protocol.txt": "c53069d9bc5ffa83de72bf51ceb7b49dbc70833aa8911935fd45189604a690ac",
+    "codex-usage-detail-80.txt": "fa1e47a19c5c89df72d24d50293528e26657133ff7863dbb03b7496f49cd628c",
+    "failure.ansi": "a73b559fba98a9f42016c76be10e1c4c69d924f8748561a686127ef592de050a",
+    "failure.txt": "a73b559fba98a9f42016c76be10e1c4c69d924f8748561a686127ef592de050a",
+    "head-drift.ansi": "9cc9efb67e7b399df320172bd89037ef1b729cb5df709ee17af43f6d139ffa89",
+    "head-drift.txt": "9cc9efb67e7b399df320172bd89037ef1b729cb5df709ee17af43f6d139ffa89",
     "pi-detail-list-52.txt": "4c769af5c8608cc88917bf88a90e4b3c1f895cd9b18ef515e670ba4030a367dd",
     "pi-detail-selected-52.txt": "6067f257c97e4849156bb1ffbdcac7077129711385c85f36e42b883ad59a497c",
     "pi-evidence-detail-52.txt": "765b21f17e443524a5a80475d5fc88ff963af734789952654200f71f6c68a4de",
-    "red-baseline-3a97fe0.txt": "12f7ee800083b5e4ed4fcda1be31dc81f0aa85d676ab2ea67a05a57946481732",
-    "repair.ansi": "e750808670739d317a4fd4781904194047e4f2d33822c20ec9a289b4fa9267a4",
-    "repair.txt": "e750808670739d317a4fd4781904194047e4f2d33822c20ec9a289b4fa9267a4",
-    "review.ansi": "183519052263cd823e4245472dea732ddf85fba7c409238a50f835f53b02641d",
-    "review.txt": "183519052263cd823e4245472dea732ddf85fba7c409238a50f835f53b02641d",
-    "stale.ansi": "33301aaa1576dca5eba946aeab631c56dfeb172311489854d78294a632de2f8f",
-    "stale.txt": "33301aaa1576dca5eba946aeab631c56dfeb172311489854d78294a632de2f8f",
-    "terminal-120.ansi": "510fca0743010f64f20ad5e113f50582483f92cf86f9a7306f8ffce02037ef07",
-    "terminal-120.txt": "510fca0743010f64f20ad5e113f50582483f92cf86f9a7306f8ffce02037ef07",
-    "terminal-80.ansi": "8fd20f04b6777d67e9de35def639c734b093e4ba4c2396887072e4062ab3c8ce",
-    "terminal-80.txt": "8fd20f04b6777d67e9de35def639c734b093e4ba4c2396887072e4062ab3c8ce"
+    "pi-usage-detail-80.txt": "df90e9d4120141a42b6faaad15594773d85b2f1f93f416520eefaed8572a5265",
+    "repair.ansi": "9064b776264c6ec40c8cce4226092676b572c77a2b23e918f93c2cd87885cfec",
+    "repair.txt": "9064b776264c6ec40c8cce4226092676b572c77a2b23e918f93c2cd87885cfec",
+    "review.ansi": "8b3998c883f16234bf18bb5aec2a49bcfa264e090755cd3de3a4e3835c93187a",
+    "review.txt": "8b3998c883f16234bf18bb5aec2a49bcfa264e090755cd3de3a4e3835c93187a",
+    "stale.ansi": "734e28ff8a824b44ddaa21c0346b79acc82821a2d2631ea9d0f0f7ee11643fcb",
+    "stale.txt": "734e28ff8a824b44ddaa21c0346b79acc82821a2d2631ea9d0f0f7ee11643fcb",
+    "terminal-120.ansi": "84a526094518dee5605522fe4955ad9fe7f541aa0e46e7020a882bbd4e241da4",
+    "terminal-120.txt": "84a526094518dee5605522fe4955ad9fe7f541aa0e46e7020a882bbd4e241da4",
+    "terminal-80.ansi": "d842c5d03caef4c02cc8db51f9464d65d65cf5e5fed4f864fe67bdedd9f10fb5",
+    "terminal-80.txt": "d842c5d03caef4c02cc8db51f9464d65d65cf5e5fed4f864fe67bdedd9f10fb5"
   },
   "note": "All captures are deterministic local harness output from shared synthetic fixtures. No installed coding host was launched."
 }

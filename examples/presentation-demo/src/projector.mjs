@@ -1,4 +1,5 @@
 import { cleanText } from './safety.mjs';
+import { usageForScenario } from './usage.mjs';
 
 const OUTCOMES = new Set(['PASS','FAIL','INCOMPLETE','ERROR','NOT_APPLICABLE']);
 const REVIEW_OUTCOMES = new Set(['PASS','FAIL','INCOMPLETE','ERROR']);
@@ -65,6 +66,13 @@ export function validateSnapshot(snapshot) {
     else if(receiptIds.has(gate.receiptId)) errors.push(`duplicate receipt ${cleanText(gate.receiptId,80)}`);else receiptIds.add(gate.receiptId);
     if(gate.outcome==='NOT_APPLICABLE'&&(!gate.notApplicableAllowed||!gate.notApplicableRationale)) errors.push(`invalid N/A for ${id}`);
   }
+  for(const action of list(snapshot.actions)) {
+    if(!object(action)){errors.push('invalid action row');continue;}
+    if(typeof action.id!=='string'||!action.id) errors.push('invalid action id');
+    if(!['intent','read'].includes(action.kind)) errors.push(`invalid action kind for ${cleanText(action.id||'unknown',80)}`);
+    if(typeof action.available!=='boolean') errors.push(`invalid action availability for ${cleanText(action.id||'unknown',80)}`);
+    if(typeof action.reason!=='string'||!action.reason) errors.push(`invalid action rationale for ${cleanText(action.id||'unknown',80)}`);
+  }
   if(snapshot.review&&!REVIEW_OUTCOMES.has(snapshot.review.outcome)) errors.push('invalid review outcome');
   if(list(snapshot.gates).length>100||list(snapshot.actions).length>100) errors.push('array bound exceeded');
   return errors;
@@ -112,7 +120,8 @@ export function project(snapshot) {
   const aggregateResult=errors.length?{outcome:'ERROR',reasons:errors}:aggregateValid(safe);
   const blocked=errors.length>0||safe.source.freshness!=='current'||safe.source.continuity!=='complete'||safe.workflow.cleanup==='unknown';
   const actions=safe.actions.map(action=>consequential(action)&&blocked?{...action,available:false,reason:`Reconciliation required: ${safe.source.freshness}/${safe.source.continuity}; cleanup ${safe.workflow.cleanup}.`}:{...action});
-  return {...safe,validation:{valid:errors.length===0,errors},aggregate:aggregateResult,actions};
+  const usage=typeof snapshot?.usage?.fixtureScenario==='string'?usageForScenario(snapshot.usage.fixtureScenario):usageForScenario('launch');
+  return {...safe,usage,validation:{valid:errors.length===0,errors},aggregate:aggregateResult,actions};
 }
 
 function merge(base,patch){

@@ -1,0 +1,42 @@
+HARNESS RENDER — MCP protocol, not installed Codex
+initialize=forge-demo-text
+tools=forge_demo_status,forge_demo_preview_intent
+
+HARNESS RENDER — usage detail (not an installed host screenshot)
+DEMO • SYNTHETIC TOKENS + SYNTHETIC RATES
+FORGE / demo-014 / EVALUATE / workflow INCOMPLETE
+
+Usage
+USD API-EQUIVALENT ESTIMATE: USD 0.044225 known / PARTIAL
+SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual
+charge
+Observed tokens: 19300; final 4; provisional 0; unpriced requests 1; freshness
+current.
+Actual charge: unknown.
+
+demo.openai.writer | demo.openai | USD 0.031700 known
+input 10500 = ordinary 3500 + cacheR 6000 + cacheW 1000 (1h 0)
+output 2100; reasoning subset 500 known + unknown
+actors worker:demo.writer; requested demo-writer-alias
+rate synthetic.writer.v1; synthetic-standard; as-of 2026-10-19T10:00:00.000Z;
+fixture://rates/writer-v1
+
+demo.anthropic.reviewer | demo.anthropic | USD 0.012525 known
+input 5500 = ordinary 1000 + cacheR 4000 + cacheW 500 (1h 200)
+output 400; reasoning subset 100
+actors reviewer:demo.reviewer; requested demo-reviewer-alias
+rate synthetic.reviewer.v1; synthetic-standard; as-of 2026-10-19T10:00:00.000Z;
+fixture://rates/reviewer-v1
+
+unresolved | demo.unresolved | no priced subtotal | 1 unpriced
+input 700 = ordinary 700 + cacheR 0 + cacheW 0 (1h 0)
+output 100; reasoning subset 0 known + unknown
+actors coordinator:demo.coordinator; requested demo.unresolved.coordinator
+
+Requests / attempts
+EXECUTE worker:demo.writer attemptA r2 provider-final | USD 0.029700
+REVIEW reviewer:demo.reviewer attemptB r1 provider-final | USD 0.012525
+EXECUTE worker:demo.writer retryC r1 provider-final | USD 0.002000
+PLAN coordinator:demo.coordinator attemptD r1 provider-final | UNPRICED:
+effective model and pricing SKU unresolved
+condition: mirror obs-writer-mirror retained as corroboration
