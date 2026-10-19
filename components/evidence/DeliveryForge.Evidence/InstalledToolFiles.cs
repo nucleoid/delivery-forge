@@ -26,23 +26,25 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     {
         ArgumentNullException.ThrowIfNull(actualAdmission);
         if (string.IsNullOrWhiteSpace(actualRunId)) throw new ArgumentException("Actual containing run required.");
-        _admission = actualAdmission; _runId = actualRunId;
+        _admission = actualAdmission as DeliveryForge.Coordination.ICoordinatedSynchronousEffectAdmission
+            ?? throw new EvidenceWriteException("Actual containing admission must retain synchronous file operations independently of lease-state locking.");
+        _runId = actualRunId;
     }
-    private readonly DeliveryForge.Coordination.ICoordinatedEffectAdmission? _admission;
+    private readonly DeliveryForge.Coordination.ICoordinatedSynchronousEffectAdmission? _admission;
     private readonly string? _runId;
-    // Reentrancy applies ONLY to this synchronous thread while the original parent
-    // monitor is held. It never flows to a Task/async continuation or another thread.
+    // Reentrancy applies ONLY to this enrolled synchronous thread. The parent's
+    // lease-state monitor is not held across I/O; this never flows across an await.
     [ThreadStatic] private static InstalledToolFiles? activeEffect;
     internal T Effect<T>(Func<T> action)
     {
         Check();
         if (ReferenceEquals(activeEffect, this) || _admission is null) return action();
-        return _admission.EnterAsync(_runId!, () =>
+        return _admission.EnterSynchronous(_runId!, () =>
         {
             Check(); var prior = activeEffect; activeEffect = this;
-            try { var value = action(); Check(); return Task.FromResult(value); }
+            try { var value = action(); Check(); return value; }
             finally { activeEffect = prior; }
-        }).GetAwaiter().GetResult();
+        });
     }
     internal void Effect(Action action) => Effect(() => { action(); return true; });
     internal void EnsureDirectory(string path) => Effect(() =>
@@ -78,12 +80,14 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     public CancellationToken Token => token;
     public void CheckWork()
     {
-        lock (_timing)
-        {
-            _parent?.CheckWork(); token.ThrowIfCancellationRequested();
-            if (_cleanup is not null || Stopwatch.GetElapsedTime(_started) >= WorkLimit)
-                throw new TimeoutException("Original installed provider WORK endpoint is closed or expired.");
-        }
+        _admission?.CheckCurrent(_runId!);
+        lock (_timing) CheckWorkCore();
+    }
+    private void CheckWorkCore()
+    {
+        _parent?.CheckWork(); token.ThrowIfCancellationRequested();
+        if (_cleanup is not null || Stopwatch.GetElapsedTime(_started) >= WorkLimit)
+            throw new TimeoutException("Original installed provider WORK endpoint is closed or expired.");
     }
     public TimeSpan CleanupRemaining
     {
@@ -107,13 +111,13 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     // notification is sent. Parent WORK/whole and prior cleanup still bound MIN.
     internal void FinishSettledWorkCapture(BoundedCaptureTimingObservation timing)
     {
+        _admission?.CheckCurrent(_runId!);
         lock (_timing)
         {
-            if (_cleanup is not null || timing.StopwatchFrequency != Stopwatch.Frequency ||
+            if (timing.StopwatchFrequency != Stopwatch.Frequency ||
                 timing.OriginalStartedTimestamp != _started || timing.CleanupStartedTimestamp is not null)
                 throw new EvidenceWriteException("Actual settled WORK capture must join this original once without a child cleanup stamp.");
-            CheckWork();
-            _cleanup = Stopwatch.GetTimestamp();
+            if (_cleanup is null) { CheckWorkCore(); _cleanup = Stopwatch.GetTimestamp(); }
         }
         _ = CleanupRemaining;
     }
@@ -130,11 +134,14 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     }
     internal TimeSpan Remaining
     {
-        get { lock (_timing) { Check(); return _cleanup is null ? WorkLimit - Stopwatch.GetElapsedTime(_started) : CleanupRemaining; } }
+        get { Check(); lock (_timing) return _cleanup is null ? WorkLimit - Stopwatch.GetElapsedTime(_started) : CleanupRemaining; }
     }
     internal void Check()
     {
-        lock (_timing) { if (_cleanup is null) CheckWork(); else _ = CleanupRemaining; }
+        // Never acquire the parent monitor while holding this timing lock: native
+        // process admission uses the opposite order when it checks its budget.
+        _admission?.CheckCurrent(_runId!);
+        lock (_timing) { if (_cleanup is null) CheckWorkCore(); else _ = CleanupRemaining; }
     }
     internal bool IsClosing { get { lock (_timing) return _cleanup is not null; } }
     internal object TimingData

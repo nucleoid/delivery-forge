@@ -312,6 +312,26 @@ private static Dictionary<string, string> CaptureInstallationCore(InstalledToolP
                 : actualAdmission.EnterAsync(actualRunId ?? throw new EvidenceWriteException("Missing actual containing run."), StartActual);
             var capture = await actualCapture.ConfigureAwait(false);
             _retainedOriginalCaptures.Add(capture);
+            // Retain and charge the actual observation before decoding or joining
+            // timing can refuse it. Recording facts is not a new external effect.
+            var rawOut = capture.StandardOutputBytes; var rawError = capture.StandardErrorBytes;
+            _capturedBytes += rawOut.LongLength + rawError.LongLength;
+            var command = capture.Command;
+            Exception? decodingFailure = null;
+            if (!capture.CaptureBoundExceeded)
+            {
+                var utf8 = new UTF8Encoding(false, true);
+                try { command = command with { StandardOutput = utf8.GetString(rawOut), StandardError = utf8.GetString(rawError) }; }
+                catch (DecoderFallbackException error) { decodingFailure = error; }
+            }
+            _actual.Add(command, capture);
+            _calls.Add(new(effective, command, capture));
+            files.AdmitCaptureBytes(rawOut.LongLength + rawError.LongLength);
+            if (decodingFailure is not null)
+            {
+                _ = files.CleanupRemaining;
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(decodingFailure).Throw();
+            }
             if ((ReferenceEquals(invocation, _main) || capture.Command.ExitCode != 0 || !capture.Command.OwnedProcessQuiescent) && capture.Timing is { } actualTiming)
             {
                 // A normal Linux WORK retirement can settle every actual resource
@@ -326,29 +346,6 @@ private static Dictionary<string, string> CaptureInstallationCore(InstalledToolP
                     files.FinishSettledWorkCapture(actualTiming);
                 else files.ImportActualCleanup(actualTiming);
             }
-            var command = files.Effect(() =>
-            {
-            var rawOut = capture.StandardOutputBytes; var rawError = capture.StandardErrorBytes;
-            _capturedBytes += rawOut.LongLength + rawError.LongLength;
-            var decodedCommand = capture.Command;
-            if (!capture.CaptureBoundExceeded)
-            {
-                var utf8 = new UTF8Encoding(false, true);
-                try { decodedCommand = decodedCommand with { StandardOutput = utf8.GetString(rawOut), StandardError = utf8.GetString(rawError) }; }
-                catch (DecoderFallbackException)
-                {
-                    // Preserve the real completed owner and exact raw invalid bytes before
-                    // rejecting text; do not lose it behind a synthetic executor exception.
-                    _actual.Add(decodedCommand, capture); _calls.Add(new(effective, decodedCommand, capture));
-                    _ = files.CleanupRemaining;
-                    throw;
-                }
-            }
-            _actual.Add(decodedCommand, capture);
-            _calls.Add(new(effective, decodedCommand, capture));
-            files.AdmitCaptureBytes(rawOut.LongLength + rawError.LongLength);
-            return decodedCommand;
-            });
             if (ReferenceEquals(invocation, _main))
             {
                 var complete = _complete ?? throw new EvidenceWriteException("Original main invocation cannot repeat.");

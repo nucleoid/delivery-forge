@@ -7,3 +7,12 @@ public interface ICoordinatedEffectAdmission
     Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke);
     void RetainUncertain(string runId, string reason);
 }
+
+/// <summary>Enrolls a known synchronous operation without holding the lease-state
+/// monitor for its duration. The original operation remains pending for quiescence.
+/// Implementations still check the same current parent before each subsequent effect.</summary>
+public interface ICoordinatedSynchronousEffectAdmission : ICoordinatedEffectAdmission
+{
+    T EnterSynchronous<T>(string runId, Func<T> invoke);
+    void CheckCurrent(string runId);
+}

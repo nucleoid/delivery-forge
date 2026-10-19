@@ -3,7 +3,7 @@ using DeliveryForge.Coordination;
 namespace DeliveryForge.Tool;
 
 // Internal implementation used by the real parent, with its SAME revocation lock and private current-authority check.
-internal sealed class ParentEffectAdmission(object originalGate, Func<string, bool> current, Action<Exception> revoke) : ICoordinatedEffectAdmission
+internal sealed class ParentEffectAdmission(object originalGate, Func<string, bool> current, Action<Exception> revoke) : ICoordinatedSynchronousEffectAdmission
 {
     sealed class OriginalInvocation { internal bool Entered, Returned; internal Task? Task; internal Task? Observation; internal Exception? Failure; }
     readonly List<OriginalInvocation> originals = [];
@@ -19,6 +19,44 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
             row.Failure ??= row.Task.Exception ?? (Exception)new OperationCanceledException("Original effect Task cancelled.");
             retainedUncertain = true; revoke(row.Failure);
         }
+    }
+    public void CheckCurrent(string runId)
+    {
+        lock (originalGate)
+        {
+            ObserveReturnedFailures();
+            if (retainedUncertain || !current(runId))
+            {
+                var denied = new CoordinationUncertainException("No current original parent effect authority.");
+                revoke(denied); throw denied;
+            }
+        }
+    }
+    public T EnterSynchronous<T>(string runId, Func<T> invoke)
+    {
+        ArgumentNullException.ThrowIfNull(invoke);
+        var completion = new TaskCompletionSource<T>();
+        lock (originalGate)
+        {
+            CheckCurrent(runId);
+            if (originals.Count >= 1024)
+            {
+                var exhausted = new IOException("Finite original parent effect ledger exhausted.");
+                revoke(exhausted); throw exhausted;
+            }
+            // The actual completion exists before leaving admission. Renewal and
+            // revocation can proceed while I/O runs; quiescence sees this pending Task.
+            var row = new OriginalInvocation { Entered = true, Returned = true, Task = completion.Task };
+            originals.Add(row);
+            row.Observation = completion.Task.ContinueWith(_ => { lock (originalGate) ObserveReturnedFailures(); },
+                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+        T result;
+        try { CheckCurrent(runId); result = invoke(); }
+        catch (Exception error) { completion.TrySetException(error); _ = completion.Task.Exception; throw; }
+        completion.SetResult(result);
+        CheckCurrent(runId);
+        return result;
     }
     public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke)
     {

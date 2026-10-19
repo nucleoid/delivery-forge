@@ -42,7 +42,8 @@ internal sealed class InstalledToolInvocation(
             if (profile.Tool == "mutate4csharp") JoinMutation(document.RootElement);
             else JoinCrap(document.RootElement, actual);
             // No forward SDK process is dispatched after the actual main owner enters cleanup.
-            // Synchronous consume is enclosed by the original parent monitor.
+            // The original parent retains the synchronous consume for quiescence;
+            // its lease-state monitor remains available for renewal/revocation.
             InstalledToolFiles.Same(installBefore, captureInstall(), false, files, InstalledToolFiles.ComparisonPhase.InstallationCurrent);
             InstalledToolFiles.Same(gitBefore, captureGit(), false, files, InstalledToolFiles.ComparisonPhase.GitCurrent);
             var current = files.Inventory(invocation.WorkingDirectory, 100000, 1024L * 1024 * 1024, true);

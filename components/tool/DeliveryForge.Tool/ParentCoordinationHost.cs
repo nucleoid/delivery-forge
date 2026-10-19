@@ -14,7 +14,7 @@ public sealed record ParentCoordinationConfiguration(Uri Endpoint, string Projec
     string PrivateKeyPath, string CheckpointRoot, AdmissionFile DeploymentEvidence);
 
 // One original parent, one selected plan/run, one finite local writer lifetime. No takeover/scheduler claim.
-public sealed class ParentCoordinationHost : ICoordinatedEffectAdmission, IOwnedRunQuiescenceSource, IMonotonicClock, IAsyncDisposable
+public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmission, IOwnedRunQuiescenceSource, IMonotonicClock, IAsyncDisposable
 {
     readonly object gate = new();
     readonly ParentCoordinationConfiguration selected;
@@ -194,6 +194,8 @@ public sealed class ParentCoordinationHost : ICoordinatedEffectAdmission, IOwned
 
     public void RetainUncertain(string runId, string reason) { lock (gate) { if (parentRunId != runId) throw new CoordinationUncertainException("Foreign effect uncertainty cannot bind this parent."); effects.RetainUncertain(runId, reason); } }
     public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke) => effects.EnterAsync(runId, invoke);
+    public T EnterSynchronous<T>(string runId, Func<T> invoke) => effects.EnterSynchronous(runId, invoke);
+    public void CheckCurrent(string runId) => effects.CheckCurrent(runId);
 
     async Task RenewLoop()
     {

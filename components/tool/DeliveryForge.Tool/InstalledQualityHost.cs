@@ -43,6 +43,8 @@ internal sealed class InstalledQualityHost
         if (value.PolicyIdentity.Length != 71 || !value.PolicyIdentity.StartsWith("sha256:", StringComparison.Ordinal) || value.PolicyIdentity[7..].Any(c => !char.IsAsciiHexDigitLower(c))) throw new ToolUsageException("Exact protected policy identity required.");
         BoundedFiles.Plain(value.ArtifactRoot, true);
         if (value.Registry is { } registry) registry.Validate();
+        if (value.Registry is not null && value.Gates[^1].Tool != "crap4csharp")
+            throw new ToolUsageException("Protected comparison requires the callable gate last; mutation must finish before its original finalization window starts.");
         foreach (var gate in value.Gates)
         {
             if (gate.GateId.Length is < 1 or > 64 || gate.GateId.Any(c => !char.IsAsciiLetterOrDigit(c) && c != '-') ||
@@ -87,16 +89,20 @@ internal sealed class InstalledQualityHost
     internal bool MatchesRetained(HostBridgeFrame frame, TrustedConfiguration? config, ToolLifetime? life) =>
         ReferenceEquals(life, original) && ReferenceEquals(config, boundConfiguration) && frozen is not null && assignment is not null &&
         frame.RunId == assignment.RunId && ReferenceEquals(frame.Lifetime, original) && frame.Request?.PlanIdentity == assignment.PlanIdentity;
-    async Task CurrentAsync(HostBridgeFrame frame, AgentCompletionReceipt actualCompletion)
+    async Task CurrentAsync(HostBridgeFrame frame, AgentCompletionReceipt actualCompletion, ParentCoordinationHost parent)
     {
         original.Check();
         if (tools is null || tools.HasUncertainOriginals || frozen is null || assignment is null || !ReferenceEquals(frame.Completion, actualCompletion) ||
             !ReferenceEquals(frame.Lifetime, original) || !frame.OwnerCompleted || frame.OwnerStopped || frame.RunId != assignment.RunId ||
             actualCompletion.RunId != assignment.RunId || actualCompletion.Worktree != assignment.Worktree || actualCompletion.RequestIdentity != frame.Request?.RequestIdentity)
             throw new WorkerEnvelopeException("Real completed same-owner quality binding is absent or changed.");
-        _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
-        foreach (var gate in selection.Gates) _ = InstalledHostAdmission.ReadExact(gate.Profile, original, 1048576);
-        if (selection.Registry is { } registry) _ = InstalledHostAdmission.ReadExact(new(registry.OwnerApproval.Path, registry.OwnerApproval.Bytes, registry.OwnerApproval.Sha256), original, 65536);
+        parent.EnterSynchronous(assignment.RunId, () =>
+        {
+            _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
+            foreach (var gate in selection.Gates) _ = InstalledHostAdmission.ReadExact(gate.Profile, original, 1048576);
+            if (selection.Registry is { } registry) _ = InstalledHostAdmission.ReadExact(new(registry.OwnerApproval.Path, registry.OwnerApproval.Bytes, registry.OwnerApproval.Sha256), original, 65536);
+            return true;
+        });
         var actualGit = admittedCurrentness ?? throw new WorkerEnvelopeException("Same-parent currentness Git view is absent."); var observation = await actualGit.ObserveAsync(assignment.Worktree, original.Token).ConfigureAwait(false);
         original.Check();
         if (!observation.IsClean || observation.HeadCommit != actualCompletion.HeadCommit || observation.TreeId != actualCompletion.TreeId)
@@ -112,50 +118,51 @@ internal sealed class InstalledQualityHost
         admittedCurrentness = worktrees.WithParentAdmission(parent, run.RunId);
         var actualTools = new InstalledToolHostScope(original, parent, run.RunId, linuxScope); tools = actualTools;
         var output = Path.Combine(selection.ArtifactRoot, run.RunId);
-        await frame.Enter(() => parent.EnterAsync(run.RunId, async () =>
+        await frame.Enter(async () =>
         {
-            await CurrentAsync(frame, completion).ConfigureAwait(false);
-            return await parent.EnterAsync(run.RunId, () =>
+            await CurrentAsync(frame, completion, parent).ConfigureAwait(false);
+            return parent.EnterSynchronous(run.RunId, () =>
             {
                 BoundedFiles.Plain(output, true); original.Check();
                 if (Directory.Exists(output) || File.Exists(output)) throw new IOException("Quality result namespace already exists; no replay/adoption.");
                 Directory.CreateDirectory(output); original.Check();
-                return Task.FromResult(true);
-            }).ConfigureAwait(false);
-        })).ConfigureAwait(false);
+                return true;
+            });
+        }).ConfigureAwait(false);
         // The actual containing frame enrolls each complete parent-admitted Task before await.
         foreach (var gate in selection.Gates)
         {
-            var result = await frame.Enter(() => parent.EnterAsync(run.RunId, async () =>
+            var result = await frame.Enter(async () =>
             {
-                await CurrentAsync(frame, completion).ConfigureAwait(false);
-                return await parent.EnterAsync(run.RunId, () =>
+                await CurrentAsync(frame, completion, parent).ConfigureAwait(false);
+                var selectedProfile = parent.EnterSynchronous(run.RunId, () =>
                 {
                     _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
                     _ = InstalledHostAdmission.ReadExact(gate.Profile, original, 1048576);
                     var profile = actualTools.LoadProfile(gate.Profile.Path, "sha256:" + gate.Profile.Sha256);
                     if (profile.Fixture || profile.Tool != gate.Tool) throw new ToolUsageException("Exact nonfixture selected producer required; no fixture flag flip.");
                     BoundedFiles.WriteNew(Path.Combine(output, gate.GateId + "-started.json"), JsonSerializer.SerializeToUtf8Bytes(new { run.RunId, run.PlanIdentity, run.BaseCommit, completion.HeadCommit, completion.TreeId, gate.GateId, gate.Profile, Policy = selection.PolicyIdentity }), original);
-                    return actualTools.RunAsync(run.Worktree, run.BaseCommit, selection.PolicyRelativePath, selection.PolicyIdentity,
-                        profile, gate.GateId, new(run.BaseCommit, completion.HeadCommit, completion.TreeId, true), gate.Scope,
-                        gate.ProjectRelativePath, TimeSpan.FromSeconds(gate.MaximumSeconds), output, original.Token,
-                        gate.Tool == "crap4csharp" ? selection.Registry : null);
-                }).ConfigureAwait(false);
-            })).ConfigureAwait(false);
+                    return profile;
+                });
+                return await actualTools.RunAsync(run.Worktree, run.BaseCommit, selection.PolicyRelativePath, selection.PolicyIdentity,
+                    selectedProfile, gate.GateId, new(run.BaseCommit, completion.HeadCommit, completion.TreeId, true), gate.Scope,
+                    gate.ProjectRelativePath, TimeSpan.FromSeconds(gate.MaximumSeconds), output, original.Token,
+                    gate.Tool == "crap4csharp" ? selection.Registry : null).ConfigureAwait(false);
+            }).ConfigureAwait(false);
             results.Add(result);
             gateResults.Add(gate.GateId, result);
-            await frame.Enter(() => parent.EnterAsync(run.RunId, async () =>
+            await frame.Enter(async () =>
             {
-                await CurrentAsync(frame, completion).ConfigureAwait(false);
-                return await parent.EnterAsync(run.RunId, () =>
+                await CurrentAsync(frame, completion, parent).ConfigureAwait(false);
+                return parent.EnterSynchronous(run.RunId, () =>
                 {
                     _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
                     _ = InstalledHostAdmission.ReadExact(gate.Profile, original, 1048576);
                     var bytes = BoundedFiles.Read(result.ReceiptPath, original, 1048576);
                     BoundedFiles.WriteNew(Path.Combine(output, gate.GateId + "-settled.json"), JsonSerializer.SerializeToUtf8Bytes(new { run.RunId, run.PlanIdentity, run.BaseCommit, completion.HeadCommit, completion.TreeId, gate.GateId, Outcome = result.Outcome.ToString(), result.Fixture, result.ProductionCapable, Receipt = new AdmissionFile(result.ReceiptPath, bytes.LongLength, BoundedFiles.Sha(bytes)), BaselineApproved = false, ProductionAuthority = false }), original);
-                    return Task.FromResult(true);
-                }).ConfigureAwait(false);
-            })).ConfigureAwait(false);
+                    return true;
+                });
+            }).ConfigureAwait(false);
             if (result.Outcome != GateOutcome.Pass)
                 return result.Outcome switch
                 {
@@ -168,10 +175,10 @@ internal sealed class InstalledQualityHost
             return ToolResult.Incomplete("PROTECTED_BASELINE_REGISTRY_REQUIRED", "Current installed gates are advisory until an independent owner approves the exact complete protected registry artifact identity.", new { run.RunId, Receipts = results.Select(r => r.ReceiptPath).ToArray() });
         var crapGateId = selection.Gates.Single(g => g.Tool == "crap4csharp").GateId;
         var crapResult = gateResults[crapGateId];
-        var comparison = await frame.Enter(() => parent.EnterAsync(run.RunId, async () =>
+        var comparison = await frame.Enter(async () =>
         {
-            await CurrentAsync(frame, completion).ConfigureAwait(false);
-            return await parent.EnterAsync(run.RunId, () =>
+            await CurrentAsync(frame, completion, parent).ConfigureAwait(false);
+            return parent.EnterSynchronous(run.RunId, () =>
             {
                 var compared = actualTools.CompareBaseline(crapResult);
                 BoundedFiles.WriteNew(Path.Combine(output, "protected-baseline-comparison.json"), JsonSerializer.SerializeToUtf8Bytes(new
@@ -180,9 +187,9 @@ internal sealed class InstalledQualityHost
                     completion.HeadCommit, completion.TreeId, Comparison = compared,
                     CurrentReceipts = results.Select(r => r.ReceiptPath).ToArray(), PublicationAuthority = false
                 }), original);
-                return Task.FromResult(compared);
-            }).ConfigureAwait(false);
-        })).ConfigureAwait(false);
+                return compared;
+            });
+        }).ConfigureAwait(false);
         if (comparison.Outcome == GateOutcome.Fail)
             return new("BLOCKED", "PROTECTED_BASELINE_REGRESSION", comparison.Reason, new { run.RunId, comparison });
         if (comparison.Outcome != GateOutcome.Pass)

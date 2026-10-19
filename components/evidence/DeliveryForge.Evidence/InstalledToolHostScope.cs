@@ -53,12 +53,10 @@ public sealed class InstalledToolHostScope
     public bool HasUncertainOriginals { get { lock (gate) return credits.Unknown || runs.Any(r => r.Entered && (!r.Returned || r.Task is null || !r.Task.IsCompleted)); } }
     public InstalledToolProfile LoadProfile(string path, string approvedSha256)
     {
-        lock (gate)
-        {
-            var files = Files(TimeSpan.FromSeconds(30));
-            var profile = InstalledToolProfile.LoadPinned(path, approvedSha256, files);
-            files.Check(); files.ReleaseKnown(); original.CheckWork(); return profile;
-        }
+        InstalledToolFiles files;
+        lock (gate) files = Files(TimeSpan.FromSeconds(30));
+        var profile = InstalledToolProfile.LoadPinned(path, approvedSha256, files);
+        files.Check(); files.ReleaseKnown(); original.CheckWork(); return profile;
     }
     // Closed real provider path: policy is read from the protected base via the same actual
     // bounded executor. No caller-supplied executor/result or authority DTO is accepted.

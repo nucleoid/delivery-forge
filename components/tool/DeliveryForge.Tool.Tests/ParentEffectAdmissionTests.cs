@@ -7,6 +7,16 @@ namespace DeliveryForge.Tool.Tests;
 public sealed class ParentEffectAdmissionTests
 {
     [Fact]
+    public void Returned_synchronous_effect_has_settled_its_original_observer()
+    {
+        var actual = new ParentEffectAdmission(new object(), run => run == "owned", _ => { });
+        Assert.Equal(7, actual.EnterSynchronous("owned", () => 7));
+        Assert.Equal(1, actual.EnteredCount);
+        Assert.True(actual.AllKnownSettled);
+        Assert.All(actual.OriginalObservers, observer => Assert.True(observer.IsCompletedSuccessfully));
+    }
+
+    [Fact]
     public async Task Actual_pending_effect_is_retained_and_revocation_prevents_second_enrollment()
     {
         var gate = new object(); var current = true; var calls = 0; var pending = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
