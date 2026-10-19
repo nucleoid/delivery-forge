@@ -45,12 +45,16 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
     public TimeSpan Elapsed => Stopwatch.GetElapsedTime(original.OriginalStarted);
     public QuiescenceSourceBinding Binding => new("actual-tool-parent", DomainId, DomainId,
         TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(5), true);
+    internal static bool OriginalCanAdmitEffects(ToolLifetime actual)
+    {
+        actual.Check(); return !actual.HasRetainedUnknown;
+    }
 
     ParentCoordinationHost(ParentCoordinationConfiguration settings, ToolLifetime life,
         ContinuumMcpTransport actualTransport, FileCoordinationCheckpointStore actualStore)
     {
         selected = settings; original = life; transport = actualTransport; checkpoints = actualStore;
-        effects = new(gate, runId => { original.Check(); return !original.HasRetainedUnknown && opened && !closed && !revoked && parentRunId == runId && authority is not null && reducer is not null && reducer.MayDispatch(authority); }, Revoke);
+        effects = new(gate, runId => OriginalCanAdmitEffects(original) && opened && !closed && !revoked && parentRunId == runId && authority is not null && reducer is not null && reducer.MayDispatch(authority), Revoke);
         renewalStop = CancellationTokenSource.CreateLinkedTokenSource(life.Token);
         cancelled = life.Token.Register(() => Revoke(new OperationCanceledException("Original parent cancellation revoked admission.")));
     }
