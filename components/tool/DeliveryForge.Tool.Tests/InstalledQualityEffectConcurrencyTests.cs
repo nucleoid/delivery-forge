@@ -18,7 +18,8 @@ public sealed class InstalledQualityEffectConcurrencyTests
         var files = new InstalledToolFiles(life, TimeSpan.FromSeconds(20), new InstalledToolHostScope.Credits());
         var frame = new InstalledToolFiles.FileFrame(path, false)
         {
-            AcquireEntered = true, AcquireReturned = true,
+            AcquireEntered = true,
+            AcquireReturned = true,
             Stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read)
         };
         Assert.NotEqual(-1, frame.Stream.ReadByte());

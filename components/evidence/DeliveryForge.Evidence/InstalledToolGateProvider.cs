@@ -335,21 +335,21 @@ public sealed class InstalledToolGateProvider
             {
                 try
                 {
-                var actualTiming = capture.Timing ?? throw new EvidenceWriteException("Actual terminal capture timing is absent.");
-                // A normal Linux WORK retirement can settle every actual resource
-                // without entering child cleanup. Close this files phase locally;
-                // do not fabricate a child stamp or close the containing original.
-                if (actualTiming.CleanupStartedTimestamp is null &&
-                    capture.OwnershipKind == BoundedCaptureOwnershipKind.LinuxCreationOwnedScope &&
-                    capture.RootExitObserved && capture.StandardOutputDrainCompleted && capture.StandardErrorDrainCompleted &&
-                    !capture.CaptureBoundExceeded && capture.Command.OwnedProcessQuiescent &&
-                    !capture.Command.TimedOut && !capture.Command.Cancelled && capture.Command.ExitCode is not null &&
-                    capture.Command.LifecycleDiagnostics is { NativeFailure: null })
-                {
-                    files.RecordSettledWorkCapture(actualTiming, settledObservedAt);
-                    files.Check();
-                }
-                else files.ImportActualCleanup(actualTiming);
+                    var actualTiming = capture.Timing ?? throw new EvidenceWriteException("Actual terminal capture timing is absent.");
+                    // A normal Linux WORK retirement can settle every actual resource
+                    // without entering child cleanup. Close this files phase locally;
+                    // do not fabricate a child stamp or close the containing original.
+                    if (actualTiming.CleanupStartedTimestamp is null &&
+                        capture.OwnershipKind == BoundedCaptureOwnershipKind.LinuxCreationOwnedScope &&
+                        capture.RootExitObserved && capture.StandardOutputDrainCompleted && capture.StandardErrorDrainCompleted &&
+                        !capture.CaptureBoundExceeded && capture.Command.OwnedProcessQuiescent &&
+                        !capture.Command.TimedOut && !capture.Command.Cancelled && capture.Command.ExitCode is not null &&
+                        capture.Command.LifecycleDiagnostics is { NativeFailure: null })
+                    {
+                        files.RecordSettledWorkCapture(actualTiming, settledObservedAt);
+                        files.Check();
+                    }
+                    else files.ImportActualCleanup(actualTiming);
                 }
                 catch (Exception error) { files.PreserveUnknown(); failures.Add(error); }
             }
