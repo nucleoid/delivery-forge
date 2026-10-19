@@ -9,13 +9,9 @@
 
 ## Installed-host captures (`37aab4c…`)
 
-Fourteen PNG files are currently present in [`../assets/`](../assets/), but only twelve are accepted. `codex-native-0.153.4-execute.png` and `pi-native-0.80.7-usage.png` are rejected pending parent-owned replacement. The current ledger records file provenance only; hashes and dimensions are not pixel-acceptance evidence.
+All **14 current PNGs** in [assets](../assets/) have passed parent pixel review: Codex four, Claude four, Pi six. Their exact hashes, version, state, source and crop lineage are in the [ledger](../assets/native-capture-ledger-37aab4c.json).
 
-- Codex `0.153.4`: launch, failed gate, and usage accepted; execute rejected.
-- Claude Code `2.1.303`: launch, execute, failed gate, missing-state fallback.
-- Pi `0.80.7`: launch, execute, failed gate, evidence selection, and unknown-scenario rejection accepted; usage rejected.
-
-The twelve accepted captures prove installed-host presentation of their deterministic synthetic presets at source `37aab4c…`. The two rejected files do not. None prove installed execution of final source `e9eb721…`, model-driven MCP/skill paths, production telemetry, or actual billing.
+[Parent review and correction record](parent-pixel-review.md) supersedes earlier rejected-capture notices. The native pictures do not prove installed execution of final source `e9eb721…`, production telemetry, live prices or actual charges.
 
 ## Harness and companion captures
 

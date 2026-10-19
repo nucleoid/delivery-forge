@@ -6,7 +6,8 @@
     "capturesPublished": 14,
     "productionEffects": false,
     "modelPrompts": false,
-    "actualDurableLedgerClaim": false
+    "actualDurableLedgerClaim": false,
+    "parentPixelAcceptance": "All 14 current images personally inspected; replacement Codex execute and Pi usage accepted. Source images in earlier commits are superseded, not accepted."
   },
   "source": {
     "prototypeCommit": "37aab4c6529dfcd361cf9f924f5dcca41423af7f",
@@ -25,12 +26,14 @@
     {
       "publishedAfterCommit": "1d4c5a83124acc0c1047fcbce89fb41eb268e752",
       "file": "codex-native-0.153.4-execute.png",
-      "correction": "Replaced a wrongly selected LAUNCH frame and unsafe crop with a new native EXECUTE capture showing ceiling IMPLEMENT and approximately USD 0.021700. The superseded blob remains in repository history."
+      "correction": "Replaced a wrongly selected LAUNCH frame and unsafe crop with a new native EXECUTE capture showing ceiling IMPLEMENT and approximately USD 0.021700. The superseded blob remains in repository history.",
+      "status": "Historical correction claim rejected by parent pixel review; superseded by parentCorrection below."
     },
     {
       "publishedAfterCommit": "1d4c5a83124acc0c1047fcbce89fb41eb268e752",
       "file": "pi-native-0.80.7-usage.png",
-      "correction": "Re-cropped the original native usage frame to exclude startup warnings and absolute host paths while retaining the complete usage panel and scroll hint. The superseded blob remains in repository history."
+      "correction": "Re-cropped the original native usage frame to exclude startup warnings and absolute host paths while retaining the complete usage panel and scroll hint. The superseded blob remains in repository history.",
+      "status": "Historical correction claim rejected by parent pixel review; superseded by parentCorrection below."
     }
   ],
   "caveats": [
@@ -71,27 +74,28 @@
       "surface": "native user-shell transcript",
       "action": "execute",
       "view": "compact",
-      "capturedUtc": "2026-10-19T11:09:58Z",
+      "capturedUtc": "2026-10-19T11:22:40.5838127Z",
       "dimensions": {
-        "width": 1920,
-        "height": 72
+        "width": 1100,
+        "height": 160
       },
-      "bytes": 12083,
-      "sha256": "9fd64efe9a083ea7ddbf39493dcf4af1c908097650289a153c2b6e796120fff4",
-      "observed": "EXECUTE / INCOMPLETE; ceiling IMPLEMENT; ~USD 0.021700; writer COMPLETE",
-      "provenance": "new literal local user-shell recapture; no model turn; private full-window source SHA-256 ab50b56b29a36c49161c3d0839eda2ba3d0f68536d63b5a3eca699f5942ffa1c",
+      "bytes": 17442,
+      "sha256": "93596eb1dd329b248e8a7893b8206871bb7d1315314eb5629db96bc68cb691c0",
+      "observed": "Parent personally observed native EXECUTE / INCOMPLETE, ceiling IMPLEMENT, API-equivalent ~0.0217, synthetic tokens/rates.",
+      "provenance": "Fresh literal local user-shell execution personally observed by parent; no model prompt. Native source 37aab4c.",
       "crop": {
-        "kind": "truthful terminal/TUI viewport crop",
+        "kind": "physical-screen crop of personally observed fresh native execution",
         "sourcePixels": {
-          "left": 8,
-          "top": 78,
-          "width": 1920,
-          "height": 72
+          "left": 0,
+          "top": 205,
+          "width": 1100,
+          "height": 160
         },
         "accountMetadataExcluded": true,
         "absoluteHostPathsExcluded": true,
         "privateApplicationChromeExcluded": true,
-        "privateFullWindowOriginalRetainedByOperator": true
+        "parentPixelAccepted": true,
+        "fullWindow": "Privately observed through computer snapshot; only the cropped PNG was separately saved."
       }
     },
     {
@@ -319,25 +323,29 @@
       "view": "usage",
       "capturedUtc": "2026-10-19T10:52:51.2298920Z",
       "dimensions": {
-        "width": 1920,
-        "height": 780
+        "width": 1450,
+        "height": 440
       },
-      "bytes": 81607,
-      "sha256": "1213a477bcae882eec198f9539fb466c5d7ea7e09fb5891da2c327990d99602d",
-      "observed": "USD 0.044225 known subtotal / PARTIAL; 19,300 tokens; one unpriced request; complete usage panel and scroll hint visible; keyboard scrolling verified",
+      "bytes": 66285,
+      "sha256": "68593ac1002ec8134b0f0e34d24d2628f60e25d2a320634e085405a1c2e32dbb",
+      "observed": "USD 0.044225 known subtotal / PARTIAL; 19,300 tokens; one unpriced request; usage viewport and scroll hint visible. Additional model rows require scrolling, independently exercised in the original native test.",
       "provenance": "re-crop of the original offline extension frame; no model available or invoked; private full-window source SHA-256 9fc73f3e17c480277c529871af793bc07e077194f31dbaf7abe5055378ab8535",
       "crop": {
         "kind": "truthful terminal/TUI viewport crop",
-        "sourcePixels": {
-          "left": 8,
-          "top": 120,
-          "width": 1920,
-          "height": 780
-        },
         "accountMetadataExcluded": true,
         "absoluteHostPathsExcluded": true,
         "privateApplicationChromeExcluded": true,
-        "privateFullWindowOriginalRetainedByOperator": true
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "parentPixelAccepted": true,
+        "sourcePublishedCommit": "889b8eca09e421bf70a416e458943eb36063673e",
+        "sourcePublishedSha256": "1213a477bcae882eec198f9539fb466c5d7ea7e09fb5891da2c327990d99602d",
+        "boundsWithinSource": {
+          "left": 0,
+          "top": 268,
+          "right": 1450,
+          "bottom": 708
+        },
+        "note": "Truthful crop retaining native widget, usage summary and scroll hint; startup warnings and private footer excluded."
       }
     },
     {
@@ -388,5 +396,16 @@
         "privateFullWindowOriginalRetainedByOperator": true
       }
     }
-  ]
+  ],
+  "parentCorrection": {
+    "supersedes": [
+      "1d4c5a83124acc0c1047fcbce89fb41eb268e752",
+      "889b8eca09e421bf70a416e458943eb36063673e"
+    ],
+    "reason": "Parent pixel review rejected two previous correction claims: Codex execute showed a launcher error, while Pi usage still exposed local paths. Fresh Codex execution and a verified Pi crop replace those assets. Earlier Git history was not rewritten. No credential values were observed in the rejected images.",
+    "nativeSource": "37aab4c6529dfcd361cf9f924f5dcca41423af7f",
+    "modelPrompts": false,
+    "productionForgeEffects": false,
+    "normalTrustAcknowledgement": "The parent accepted the normal host trust prompt only for an inspected empty task-owned directory; no authentication file was copied or inspected."
+  }
 }

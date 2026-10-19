@@ -27,15 +27,11 @@ The implementation issue set is prepared but not yet published. Links remain pla
 
 ## Native evidence
 
-Twelve sanitized frames are accepted and bind to source `37aab4c…`. Two published files are **rejected pending replacement**: `codex-native-0.153.4-execute.png` shows a Windows Terminal file-not-found result rather than the intended execute state, and `pi-native-0.80.7-usage.png` exposes local-path warnings/footer text.
+Fourteen native images are now individually accepted after parent pixel review, all bound to source `37aab4c…`: Codex 0.153.4 ×4, Claude Code 2.1.303 ×4, Pi 0.80.7 ×6. The parent freshly re-executed the Codex execute preset and verified a precise Pi usage crop. See [parent pixel review](evidence/parent-pixel-review.md) and the [current capture ledger](assets/native-capture-ledger-37aab4c.json).
 
-- Codex CLI `0.153.4`: three accepted literal local user-shell transcript frames; the execute frame is rejected pending replacement. No model prompt, MCP tool invocation, skill execution, or custom-footer claim.
-- Claude Code `2.1.303`: four compact status-line frames. Version `2.1.302` was the historical preflight target; no expanded native usage panel or model-driven skill invocation was captured.
-- Pi `0.80.7`: five accepted offline widget/panel frames; the usage frame is rejected pending replacement.
+Codex is a native local user-shell transcript, Claude a compact native statusline, and Pi an offline extension widget/detail panel. No model-driven MCP/skill execution or custom Codex footer is claimed. Claude startup refresh was exercised, not idle streaming. Native viewport resize/persistence and production collectors remain implementation acceptance work.
 
-The preliminary Codex isolation attempt used an empty MCP table that merged with existing configuration and began startup; it was interrupted and is **not** counted as a clean run. Final captures explicitly disabled all configured MCP servers and verified that disabled state. No private server names, profile paths, or account metadata are published.
-
-Only the twelve accepted native frames prove installed-host pixels and bounded keyboard behavior for their known synthetic presets. File hashes and ledger provenance do not constitute pixel acceptance. The two rejected files prove nothing about their intended states and must not be used as evidence. None of the frames prove production collectors, model-driven MCP/skill paths, real prices, invoices, actual charges, workflow authority, or final-source native acceptance.
+Two earlier correction attempts were rejected: one showed an incorrect/error state and two included local paths. Current replacements have been personally inspected. Superseded Git history remains retained; no credential values were observed. The earlier interrupted Codex MCP-startup configuration mistake remains recorded, so no all-network-silence claim is made.
 
 ## Safety boundary
 

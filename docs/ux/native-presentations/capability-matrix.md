@@ -81,7 +81,7 @@ Borrow the hierarchy: one compact progress line → phases → individual eviden
 2. **Claude Code:** executable statusline and session-local settings/plugin. The actual CLI statusline can later be exercised with the fixture file; no `/statusline` generation prompt or skill/model turn. Optional phase/log-only Dynamic Workflow stays supplementary and version-admitted.
 3. **Pi:** actual extension uses pinned 0.80.7 APIs and deterministic commands. It can later be loaded explicitly in the installed CLI to capture widget/detail/recovery; stub tests remain separately labelled.
 4. All render the **same marked synthetic event stream**. Target at least **three meaningful native states per host**, with precise surface captions. Harness/companion renders are supplementary and never silently replace missing installed acceptance. Source review must precede loading, and no authentication/policy bypass or credentials copying is permitted.
-5. Installed rendering was accepted for 12 of the 14 source-`37aab4c…` files listed in the publication manifest. Codex execute and Pi usage are rejected pending replacement. Final source `e9eb721…`, model-driven MCP/skill invocation, production adapters, and live telemetry remain unverified.
+5. Installed rendering is accepted for all 14 current source-`37aab4c…` files after parent pixel review, including the freshly captured Codex execute state and corrected Pi usage viewport. Final source `e9eb721…`, model-driven MCP/skill invocation, production adapters, and live telemetry remain unverified.
 
 ## Primary sources
 
