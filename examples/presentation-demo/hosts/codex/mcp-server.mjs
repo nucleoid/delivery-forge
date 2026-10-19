@@ -52,10 +52,10 @@ export function resetProtocolForTest() { initialized = false; }
 
 export function isDirectExecution(moduleUrl, argvPath, platform=process.platform) {
   if(!argvPath) return false;
-  const paths=platform==='win32'?path.win32:path;
+  const windows=platform==='win32';
+  const paths=windows?path.win32:path.posix;
   const normalize=(value)=>{
-    let decoded=value instanceof URL||String(value).startsWith('file:')?fileURLToPath(value):String(value);
-    if(platform==='win32'&&/^\/[A-Za-z]:\//.test(decoded)) decoded=decoded.slice(1);
+    const decoded=value instanceof URL||String(value).startsWith('file:')?fileURLToPath(value,{windows}):String(value);
     const resolved=paths.resolve(decoded);
     return platform==='win32'?resolved.toLowerCase():resolved;
   };
