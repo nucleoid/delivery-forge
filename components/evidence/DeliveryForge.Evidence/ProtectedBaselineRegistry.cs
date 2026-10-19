@@ -26,14 +26,17 @@ internal sealed class ProtectedBaselineRegistry
     internal string HistoricalPolicyBaseRevision { get; }
     internal string HistoricalPolicyBaseTree { get; }
     internal string ArtifactManifestIdentity { get; }
+    internal CallableProducerIdentity CallableProducer { get; }
     readonly ProtectedBaselineRegistrySelection selection;
     readonly byte[] approvalBytes;
     ProtectedBaselineRegistry(ReviewedBaseline baseline, ProtectedBaselineRegistrySelection selected,
-        string artifactManifestIdentity, byte[] approval, string historicalPolicyBaseRevision, string historicalPolicyBaseTree)
+        string artifactManifestIdentity, byte[] approval, string historicalPolicyBaseRevision, string historicalPolicyBaseTree,
+        CallableProducerIdentity callableProducer)
     {
         Baseline = baseline; selection = selected; RegistryCommit = selected.RegistryCommit;
         ArtifactManifestIdentity = artifactManifestIdentity; approvalBytes = approval;
         HistoricalPolicyBaseRevision = historicalPolicyBaseRevision; HistoricalPolicyBaseTree = historicalPolicyBaseTree;
+        CallableProducer = callableProducer;
     }
     internal void RecheckApproval(InstalledToolFiles files) => files.Effect(() =>
     {
@@ -167,13 +170,14 @@ internal sealed class ProtectedBaselineRegistry
             var mutation = Mutate4CSharpReportV2.ReadData(roles["mutation-report"]);
             if (mutation.ClaimedOutcome != GateOutcome.Pass || mutation.ClaimedExitCode != 0 || mutation.Selected is < 1 or > 100 || mutation.Enumerated != mutation.Selected || mutation.Executed != mutation.Selected || mutation.Killed != mutation.Selected || mutation.CompileInvalid != 0 || mutation.Survived != 0 || mutation.FreshUncovered != 0 || mutation.Omitted != 0 || mutation.Errors != 0)
                 throw Refuse("Complete zero-survivor/nonpartial mutation baseline required, within approved100 cap.");
+            var producer = CallableProducerIdentity.FromBinding(roles["crap-binding"]);
             var metrics = CallableMetrics(roles["crap-report"]);
             if (metrics.Count == 0) throw Refuse("Complete comparable callable metrics required.");
             // This internal authority constructor is reachable only through the complete
             // original protected-Git/artifact/out-of-band owner approval checks above.
             var baseline = new ReviewedBaseline(selected.RegistryIdentity, policy.PolicyIdentity, source,
                 InstalledToolFiles.Identity(roles["crap-report"]), false, new ReadOnlyDictionary<string, decimal>(metrics), authorityVerified: true);
-            var issued = new ProtectedBaselineRegistry(baseline, selected, manifestIdentity, approval, historicalBase, historicalTree);
+            var issued = new ProtectedBaselineRegistry(baseline, selected, manifestIdentity, approval, historicalBase, historicalTree, producer);
             issued.RecheckApproval(files); return issued;
         });
         async Task<CommandResult> Git(string[] args)

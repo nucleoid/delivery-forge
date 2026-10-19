@@ -206,6 +206,8 @@ internal sealed class InstalledToolInvocation(
             !_entered || !_returned || _failure is not null || _report is null || _proof is null || !ReferenceEquals(actual.Execution, _actual) ||
             actual.PolicyIdentity != policy.PolicyIdentity || request.Policy != policy || actual.After != request.ExpectedRepository)
             return NormalizedEvidence.Incomplete("No genuine complete current nonfixture callable report for protected comparison.");
+        if (registry.CallableProducer != CallableProducerIdentity.Current(profile, request))
+            return NormalizedEvidence.Incomplete("Approved baseline producer, package, configuration or scope differs from the current callable gate; explicit compatible baseline approval is required.");
         var metrics = ProtectedBaselineRegistry.CallableMetrics(_report);
         return BaselineComparer.Compare(metrics, registry.Baseline, policy);
     });

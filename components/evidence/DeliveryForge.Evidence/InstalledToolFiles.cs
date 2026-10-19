@@ -198,12 +198,21 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
         if (!frame.AcquireReturned || frame.Stream is null) return;
         try
         {
-            Check(); frame.CloseEntered = true;
+            CheckDisposition(); frame.CloseEntered = true;
             try { frame.Stream.Dispose(); frame.CloseReturned = true; }
             catch (Exception error) { frame.CloseFailure = error; }
         }
         catch (Exception error) { frame.CloseFailure = error; }
-        try { Check(); } catch (Exception error) { frame.PostFailure = error; }
+        try { CheckDisposition(); } catch (Exception error) { frame.PostFailure = error; }
+    }
+
+    // Revocation forbids new effects, not closing a handle already owned by this
+    // original. Keep the same whole/earliest cleanup bounds and ignore cancellation
+    // only for this existing-handle disposition.
+    private void CheckDisposition()
+    {
+        try { lock (_timing) { if (_cleanup is null) CheckWorkCore(); else _ = CleanupRemaining; } }
+        catch { BeginFailureCleanup(); _ = CleanupRemaining; }
     }
 
     private void Require(FileFrame frame)
