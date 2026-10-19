@@ -26,6 +26,7 @@ public sealed class InstalledToolHostScope
         internal Task? Task; internal GateRunResult? Result;
         internal InstalledToolFiles? Files; internal InstalledToolGateProvider.ActualExecutor? Owner;
         internal ResolvedEvidencePolicy? Policy; internal ProtectedBaselineRegistry? Registry;
+        internal InstalledBaselineComparison? Comparison;
     }
     readonly List<OriginalRun> runs = [];
     public InstalledToolHostScope(IOwnedDuplexBudget actualOriginal)
@@ -98,9 +99,21 @@ public sealed class InstalledToolHostScope
                 registry = await ProtectedBaselineRegistry.ResolveAsync(owner, files, repositoryRoot, policy, baselineRegistry, cancellationToken).ConfigureAwait(false);
             }
             var request = new InstalledToolGateRequest(gateId, policy, expected, scope, project, maximum, outputDirectory);
+            if (registry is not null && registry.CallableProducer != CallableProducerIdentity.Current(profile, request))
+                throw new EvidencePolicyException("Approved baseline producer/profile differs from the selected callable gate; compatible owner approval is required before execution.");
             var result = await new InstalledToolGateProvider(repositoryRoot, protectedBaseCommit)
                 .RunOwnedAsync(profile, request, files, owner, cancellationToken).ConfigureAwait(false);
-            lock (gate) { row.Result = result; row.Policy = policy; row.Registry = registry; }
+            InstalledBaselineComparison? comparison = null;
+            if (registry is not null)
+            {
+                // Consume the actual callable artifacts now, inside this gate's
+                // original finalization window, before host receipt/currentness I/O.
+                var binding = owner.MainBinding ?? throw new EvidenceWriteException("Actual callable binding is absent.");
+                var compared = binding.CompareApprovedBaseline(result, registry, policy);
+                comparison = new(compared.Outcome, compared.Reason, registry.RegistryCommit,
+                    registry.Baseline.SourceRevision, registry.Baseline.BaselineIdentity, registry.ArtifactManifestIdentity);
+            }
+            lock (gate) { row.Result = result; row.Policy = policy; row.Registry = registry; row.Comparison = comparison; }
             return result;
         }
     }
@@ -110,17 +123,11 @@ public sealed class InstalledToolHostScope
         lock (gate)
         {
             row = runs.SingleOrDefault(r => ReferenceEquals(r.Result, actual)) ?? throw new EvidenceWriteException("Foreign gate result cannot consume a registry.");
-            if (row.ComparisonEntered || !row.Returned || row.Task is not { IsCompletedSuccessfully: true } || row.Registry is null || row.Policy is null || row.Files is null || row.Owner?.MainBinding is null)
+            if (row.ComparisonEntered || !row.Returned || row.Task is not { IsCompletedSuccessfully: true } || row.Comparison is null)
                 throw new EvidenceWriteException("Actual current completed registry gate required once; no replay.");
             row.ComparisonEntered = true;
+            return row.Comparison;
         }
-        // Scope lock is released before original parent admission, as for RunAsync.
-        return row.Files.Effect(() =>
-        {
-            var compared = row.Owner.MainBinding.CompareApprovedBaseline(actual, row.Registry, row.Policy);
-            return new InstalledBaselineComparison(compared.Outcome, compared.Reason, row.Registry.RegistryCommit,
-                row.Registry.Baseline.SourceRevision, row.Registry.Baseline.BaselineIdentity, row.Registry.ArtifactManifestIdentity);
-        });
     }
 
 }

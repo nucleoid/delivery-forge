@@ -62,6 +62,7 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     {
         if (_credits is not null) _credits.Unknown = true;
         if (_parent is IOwnedBudgetUnknownRetention actual) actual.PreserveUnknown();
+        _admission?.RetainUncertain(_runId!, "Actual installed file/process disposition remains unknown.");
     }
     internal void AdmitCaptureCall() => _credits?.Call();
     internal void AdmitCaptureBytes(long bytes) => _credits?.Capture(bytes);
@@ -198,21 +199,22 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
         if (!frame.AcquireReturned || frame.Stream is null) return;
         try
         {
-            CheckDisposition(); frame.CloseEntered = true;
+            var workFailure = CheckDisposition(); frame.Primary ??= workFailure; frame.CloseEntered = true;
             try { frame.Stream.Dispose(); frame.CloseReturned = true; }
             catch (Exception error) { frame.CloseFailure = error; }
         }
         catch (Exception error) { frame.CloseFailure = error; }
-        try { CheckDisposition(); } catch (Exception error) { frame.PostFailure = error; }
+        try { var workFailure = CheckDisposition(); frame.Primary ??= workFailure; } catch (Exception error) { frame.PostFailure = error; }
     }
 
     // Revocation forbids new effects, not closing a handle already owned by this
     // original. Keep the same whole/earliest cleanup bounds and ignore cancellation
     // only for this existing-handle disposition.
-    private void CheckDisposition()
+    private Exception? CheckDisposition()
     {
         try { lock (_timing) { if (_cleanup is null) CheckWorkCore(); else _ = CleanupRemaining; } }
-        catch { BeginFailureCleanup(); _ = CleanupRemaining; }
+        catch (Exception failure) { BeginFailureCleanup(); _ = CleanupRemaining; return failure; }
+        return null;
     }
 
     internal void Require(FileFrame frame)

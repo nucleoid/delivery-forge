@@ -10,7 +10,9 @@ public interface ICoordinatedEffectAdmission
 
 /// <summary>Enrolls a known synchronous operation without holding the lease-state
 /// monitor for its duration. The original operation remains pending for quiescence.
-/// Implementations still check the same current parent before each subsequent effect.</summary>
+/// Implementations still check the same current parent before each subsequent effect.
+/// A returned synchronous refusal revokes admission but can settle; callers must retain
+/// any unresolved resource through RetainUncertain before returning or throwing.</summary>
 public interface ICoordinatedSynchronousEffectAdmission : ICoordinatedEffectAdmission
 {
     T EnterSynchronous<T>(string runId, Func<T> invoke);

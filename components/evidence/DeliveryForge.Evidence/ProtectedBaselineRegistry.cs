@@ -15,6 +15,8 @@ public sealed record ProtectedBaselineRegistrySelection(string RegistryCommit, s
 {
     // Pure locator/shape validation. This does not issue or approve anything.
     public void Validate() => ProtectedBaselineRegistry.ValidateSelection(this);
+    // Validation of already pinned DATA only; this cannot approve or issue a registry.
+    public static void ValidateApprovalTime(byte[] exactPinnedApproval) => ProtectedBaselineRegistry.ValidateApprovalTime(exactPinnedApproval);
 }
 
 // Only this closed actual-Git/whole-artifact/out-of-band-approval issuer can use
@@ -210,6 +212,10 @@ internal sealed class ProtectedBaselineRegistry
     {
         var now = DateTimeOffset.UtcNow; var from = a.GetProperty("approvedAtUtc").GetDateTimeOffset(); var to = a.GetProperty("expiresAtUtc").GetDateTimeOffset();
         if (from.Offset != TimeSpan.Zero || to.Offset != TimeSpan.Zero || from > now || to <= now || to <= from) throw Refuse("Owner approval is future, expired or not exactUTC.");
+    }
+    internal static void ValidateApprovalTime(byte[] exactPinnedApproval)
+    {
+        using var document = ProducerJson.Read(exactPinnedApproval); ApprovalTime(document.RootElement);
     }
     static void ValidateBinding(byte[] binding, byte[] report, byte[] receipt, string tool, string source, string tree, string historicalBase, ResolvedEvidencePolicy policy)
     {

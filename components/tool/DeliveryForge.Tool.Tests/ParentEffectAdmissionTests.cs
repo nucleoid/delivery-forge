@@ -6,6 +6,24 @@ namespace DeliveryForge.Tool.Tests;
 // Conformance of the actual production gate implementation with local original Tasks. No live service or worker certification.
 public sealed class ParentEffectAdmissionTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Returned_synchronous_refusal_revokes_new_work_but_only_explicit_unknown_prevents_quiescence(bool unknown)
+    {
+        var current = true;
+        var actual = new ParentEffectAdmission(new object(), _ => current, _ => current = false);
+        Assert.Throws<IOException>(() => actual.EnterSynchronous<int>("owned", () =>
+        {
+            if (unknown) actual.RetainUncertain("owned", "Actual unresolved resource disposition.");
+            throw new IOException("Known returned file validation failure.");
+        }));
+        Assert.False(current);
+        Assert.Equal(!unknown, actual.AllKnownSettled);
+        Assert.Throws<CoordinationUncertainException>(() => actual.EnterSynchronous("owned", () => 2));
+        Assert.Equal(1, actual.EnteredCount);
+    }
+
     [Fact]
     public void Returned_synchronous_effect_has_settled_its_original_observer()
     {

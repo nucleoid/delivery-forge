@@ -100,7 +100,11 @@ internal sealed class InstalledQualityHost
         {
             _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
             foreach (var gate in selection.Gates) _ = InstalledHostAdmission.ReadExact(gate.Profile, original, 1048576);
-            if (selection.Registry is { } registry) _ = InstalledHostAdmission.ReadExact(new(registry.OwnerApproval.Path, registry.OwnerApproval.Bytes, registry.OwnerApproval.Sha256), original, 65536);
+            if (selection.Registry is { } registry)
+            {
+                var approval = InstalledHostAdmission.ReadExact(new(registry.OwnerApproval.Path, registry.OwnerApproval.Bytes, registry.OwnerApproval.Sha256), original, 65536);
+                ProtectedBaselineRegistrySelection.ValidateApprovalTime(approval);
+            }
             return true;
         });
         var actualGit = admittedCurrentness ?? throw new WorkerEnvelopeException("Same-parent currentness Git view is absent."); var observation = await actualGit.ObserveAsync(assignment.Worktree, original.Token).ConfigureAwait(false);

@@ -5,10 +5,11 @@ namespace DeliveryForge.Tool;
 // Internal implementation used by the real parent, with its SAME revocation lock and private current-authority check.
 internal sealed class ParentEffectAdmission(object originalGate, Func<string, bool> current, Action<Exception> revoke) : ICoordinatedSynchronousEffectAdmission
 {
-    sealed class OriginalInvocation { internal bool Entered, Returned; internal Task? Task; internal Task? Observation; internal Exception? Failure; }
+    sealed class OriginalInvocation { internal bool Entered, Returned, Synchronous; internal Task? Task; internal Task? Observation; internal Exception? Failure; }
     readonly List<OriginalInvocation> originals = [];
     bool retainedUncertain;
-    internal bool AllKnownSettled { get { lock (originalGate) { ObserveReturnedFailures(); return !retainedUncertain && originals.All(row => row.Returned && row.Task is { IsCompletedSuccessfully: true } && row.Observation is { IsCompletedSuccessfully: true } && row.Failure is null); } } }
+    bool returnedFailure;
+    internal bool AllKnownSettled { get { lock (originalGate) { ObserveReturnedFailures(); return !retainedUncertain && originals.All(row => row.Returned && row.Task is { IsCompleted: true } && row.Observation is { IsCompletedSuccessfully: true } && (row.Synchronous || row.Task.IsCompletedSuccessfully && row.Failure is null)); } } }
     internal IReadOnlyList<Task> OriginalObservers { get { lock (originalGate) return originals.Where(row => row.Observation is not null).Select(row => row.Observation!).ToArray(); } }
     internal int EnteredCount { get { lock (originalGate) return originals.Count; } }
     public void RetainUncertain(string runId, string reason) { lock (originalGate) { retainedUncertain = true; revoke(new CoordinationUncertainException("Original parent effect requires explicit reconciliation.")); } }
@@ -17,7 +18,9 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
         foreach (var row in originals) if (row.Returned && row.Task is not null && (row.Task.IsFaulted || row.Task.IsCanceled))
         {
             row.Failure ??= row.Task.Exception ?? (Exception)new OperationCanceledException("Original effect Task cancelled.");
-            retainedUncertain = true; revoke(row.Failure);
+            returnedFailure = true;
+            if (!row.Synchronous) retainedUncertain = true;
+            revoke(row.Failure);
         }
     }
     public void CheckCurrent(string runId)
@@ -25,7 +28,7 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
         lock (originalGate)
         {
             ObserveReturnedFailures();
-            if (retainedUncertain || !current(runId))
+            if (retainedUncertain || returnedFailure || !current(runId))
             {
                 var denied = new CoordinationUncertainException("No current original parent effect authority.");
                 revoke(denied); throw denied;
@@ -46,7 +49,7 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
             }
             // The actual completion exists before leaving admission. Renewal and
             // revocation can proceed while I/O runs; quiescence sees this pending Task.
-            var row = new OriginalInvocation { Entered = true, Returned = true, Task = completion.Task };
+            var row = new OriginalInvocation { Entered = true, Returned = true, Synchronous = true, Task = completion.Task };
             originals.Add(row);
             row.Observation = completion.Task.ContinueWith(_ => { lock (originalGate) ObserveReturnedFailures(); },
                 CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
@@ -64,7 +67,7 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
         lock (originalGate)
         {
             ObserveReturnedFailures();
-            if (retainedUncertain || !current(runId))
+            if (retainedUncertain || returnedFailure || !current(runId))
             {
                 var denied = new CoordinationUncertainException("No current original parent effect authority."); revoke(denied); throw denied;
             }

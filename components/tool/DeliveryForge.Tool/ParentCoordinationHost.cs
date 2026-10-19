@@ -50,7 +50,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
         ContinuumMcpTransport actualTransport, FileCoordinationCheckpointStore actualStore)
     {
         selected = settings; original = life; transport = actualTransport; checkpoints = actualStore;
-        effects = new(gate, runId => { original.Check(); return opened && !closed && !revoked && parentRunId == runId && authority is not null && reducer is not null && reducer.MayDispatch(authority); }, Revoke);
+        effects = new(gate, runId => { original.Check(); return !original.HasRetainedUnknown && opened && !closed && !revoked && parentRunId == runId && authority is not null && reducer is not null && reducer.MayDispatch(authority); }, Revoke);
         renewalStop = CancellationTokenSource.CreateLinkedTokenSource(life.Token);
         cancelled = life.Token.Register(() => Revoke(new OperationCanceledException("Original parent cancellation revoked admission.")));
     }
@@ -194,7 +194,11 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
 
     public void RetainUncertain(string runId, string reason) { lock (gate) { if (parentRunId != runId) throw new CoordinationUncertainException("Foreign effect uncertainty cannot bind this parent."); effects.RetainUncertain(runId, reason); } }
     public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke) => effects.EnterAsync(runId, invoke);
-    public T EnterSynchronous<T>(string runId, Func<T> invoke) => effects.EnterSynchronous(runId, invoke);
+    public T EnterSynchronous<T>(string runId, Func<T> invoke) => effects.EnterSynchronous(runId, () =>
+    {
+        try { return invoke(); }
+        finally { if (original.HasRetainedUnknown) effects.RetainUncertain(runId, "Original retained an unknown resource during synchronous work."); }
+    });
     public void CheckCurrent(string runId) => effects.CheckCurrent(runId);
 
     async Task RenewLoop()
@@ -248,7 +252,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
             // Quiescence closes admission permanently for this single lifecycle, before the sample escapes the gate.
             revoked = true;
             // Only this coordination observation is excluded; actual effects remain.
-            var quiet = effects.AllKnownSettled &&
+            var quiet = !original.HasRetainedUnknown && effects.AllKnownSettled &&
                 bridge.ObserveCoordinationWorkSettled(parentRunId!);
             return Task.FromResult(new QuiescenceEvidence(owner, Binding.IssuerId, Binding.SourceId, DomainId,
                 Elapsed, Guid.NewGuid().ToString("D"), quiet));
@@ -268,7 +272,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
             if (lossStop is not null) await lossStop.WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
             lock (gate)
             {
-                if (coordinationTasks.Any(task => !task.IsCompletedSuccessfully) || !effects.AllKnownSettled)
+                if (original.HasRetainedUnknown || coordinationTasks.Any(task => !task.IsCompletedSuccessfully) || !effects.AllKnownSettled)
                     throw new CoordinationUncertainException("Original effect/coordination task remains unsettled or failed; owners retained.");
             }
             Task<ReleaseResult>? releasing = null;

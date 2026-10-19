@@ -326,14 +326,15 @@ public sealed class InstalledToolGateProvider
             }
             _actual.Add(command, capture);
             _calls.Add(new(effective, command, capture));
-            files.AdmitCaptureBytes(rawOut.LongLength + rawError.LongLength);
-            if (decodingFailure is not null)
+            var failures = new List<Exception>();
+            if (decodingFailure is not null) failures.Add(decodingFailure);
+            try { files.AdmitCaptureBytes(rawOut.LongLength + rawError.LongLength); }
+            catch (Exception error) { failures.Add(error); }
+            if (ReferenceEquals(invocation, _main) || capture.Command.ExitCode != 0 || !capture.Command.OwnedProcessQuiescent || failures.Count > 0)
             {
-                _ = files.CleanupRemaining;
-                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(decodingFailure).Throw();
-            }
-            if ((ReferenceEquals(invocation, _main) || capture.Command.ExitCode != 0 || !capture.Command.OwnedProcessQuiescent) && capture.Timing is { } actualTiming)
-            {
+                try
+                {
+                var actualTiming = capture.Timing ?? throw new EvidenceWriteException("Actual terminal capture timing is absent.");
                 // A normal Linux WORK retirement can settle every actual resource
                 // without entering child cleanup. Close this files phase locally;
                 // do not fabricate a child stamp or close the containing original.
@@ -345,6 +346,13 @@ public sealed class InstalledToolGateProvider
                     capture.Command.LifecycleDiagnostics is { NativeFailure: null })
                     files.FinishSettledWorkCapture(actualTiming);
                 else files.ImportActualCleanup(actualTiming);
+                }
+                catch (Exception error) { files.PreserveUnknown(); failures.Add(error); }
+            }
+            if (failures.Count > 0)
+            {
+                if (failures.Count == 1) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failures[0]).Throw();
+                throw new AggregateException("Actual capture decoding/credit/timing failures retained.", failures);
             }
             if (ReferenceEquals(invocation, _main))
             {
