@@ -8,5 +8,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+    <!-- Release binaries and portable PDBs must not embed the local checkout path. -->
+    <PathMap Condition="'$(Configuration)' == 'Release' and '$(PathMap)' == ''">$(MSBuildThisFileDirectory)=/_/</PathMap>
   </PropertyGroup>
 </Project>
