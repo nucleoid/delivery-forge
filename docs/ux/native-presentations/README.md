@@ -42,6 +42,7 @@ Every fixture is synthetic. Money is labelled **USD API-EQUIVALENT ESTIMATE**; a
 ```sh
 cd examples/presentation-demo
 npm install
+npx playwright install chromium
 npm test
 npm run demo -- failed-gate 80
 npm run demo -- failed-gate 80 --view usage
