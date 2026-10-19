@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Security.Cryptography;
 using System.Text;
+using System.Text.Json;
 
 namespace DeliveryForge.Evidence;
 
@@ -233,5 +234,98 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     {
         if (!allowNew && before.Count != after.Count || before.Any(p => !after.TryGetValue(p.Key, out var hash) || hash != p.Value))
             throw new EvidenceWriteException("Complete original source/payload membership or bytes changed.");
+    }
+
+    internal enum ComparisonPhase { InstallationProfile, InstallationCurrent, GitCurrent, ConsumerCurrent }
+    internal sealed record MismatchSample(string Kind, string KeySha256);
+    internal sealed record InventoryMismatch(string Phase, int BeforeCount, int AfterCount,
+        int Missing, int Changed, int Added, bool AllowNew, MismatchSample[] Samples, bool Truncated);
+    private const string MismatchKey = "DeliveryForge.InventoryMismatch";
+    private const string MismatchFailureKey = "DeliveryForge.InventoryMismatchDiagnosticFailure";
+
+    internal static InventoryMismatch? Mismatch(Exception failure) =>
+        failure is EvidenceWriteException ? failure.Data[MismatchKey] as InventoryMismatch : null;
+    internal static Exception? MismatchDiagnosticFailure(Exception failure) =>
+        failure is EvidenceWriteException ? failure.Data[MismatchFailureKey] as Exception : null;
+
+    // The original refusal predicate remains authoritative. This overload adds DATA only
+    // from the already captured dictionaries, under their existing original owner's clock.
+    internal static void Same(IReadOnlyDictionary<string, string> before, IReadOnlyDictionary<string, string> after,
+        bool allowNew, InstalledToolFiles owner, ComparisonPhase phase)
+    {
+        if (!allowNew && before.Count != after.Count || before.Any(p => !after.TryGetValue(p.Key, out var hash) || hash != p.Value))
+        {
+            var failure = new EvidenceWriteException("Complete original source/payload membership or bytes changed.");
+            try { failure.Data[MismatchKey] = DescribeMismatch(before, after, allowNew, owner, phase); }
+            catch (Exception independent) { failure.Data[MismatchFailureKey] = independent; }
+            throw failure;
+        }
+    }
+
+    private static InventoryMismatch DescribeMismatch(IReadOnlyDictionary<string, string> before,
+        IReadOnlyDictionary<string, string> after, bool allowNew, InstalledToolFiles owner, ComparisonPhase phase)
+    {
+        owner.Check();
+        var label = phase switch
+        {
+            ComparisonPhase.InstallationProfile => "installation-profile",
+            ComparisonPhase.InstallationCurrent => "installation-current",
+            ComparisonPhase.GitCurrent => "git-current",
+            ComparisonPhase.ConsumerCurrent => "consumer-current",
+            _ => throw new EvidenceWriteException("Unknown comparison diagnostic phase.")
+        };
+        if (before.Count > 100000 || after.Count > 100000)
+            throw new EvidenceWriteException("Comparison diagnostic census exceeds original inventory profile.");
+        var selected = new List<(string Key, string Kind)>(16);
+        var missing = 0; var changed = 0; var added = 0;
+        foreach (var pair in before)
+        {
+            owner.Check();
+            if (!after.TryGetValue(pair.Key, out var value)) { missing++; Select(pair.Key, "Missing"); }
+            else if (value != pair.Value) { changed++; Select(pair.Key, "Changed"); }
+            owner.Check();
+        }
+        foreach (var pair in after)
+        {
+            owner.Check();
+            if (!before.ContainsKey(pair.Key)) { added++; Select(pair.Key, "Added"); }
+            owner.Check();
+        }
+        var samples = new MismatchSample[selected.Count];
+        for (var i = 0; i < selected.Count; i++)
+        {
+            owner.Check();
+            var keyBytes = new UTF8Encoding(false, true).GetBytes(selected[i].Key);
+            owner.Check();
+            var digest = Identity(keyBytes);
+            owner.Check();
+            samples[i] = new(selected[i].Kind, digest);
+        }
+        var result = new InventoryMismatch(label, before.Count, after.Count, missing, changed, added,
+            allowNew, samples, missing + changed + added > samples.Length);
+        owner.Check();
+        var serialized = JsonSerializer.SerializeToUtf8Bytes(result);
+        owner.Check();
+        if (serialized.Length > 8192) throw new EvidenceWriteException("Comparison diagnostic representation exceeds8192 bytes.");
+        return result;
+
+        void Select(string key, string kind)
+        {
+            owner.Check();
+            if (key.Length > 32768) throw new EvidenceWriteException("Comparison diagnostic key exceeds finite profile.");
+            // Permitted additions cannot evict the identities that caused refusal.
+            // All refused categories stay ordinal; only allowNew additions rank last.
+            var at = selected.FindIndex(item =>
+                allowNew && ((kind == "Added") != (item.Kind == "Added"))
+                    ? kind != "Added"
+                    : StringComparer.Ordinal.Compare(key, item.Key) < 0);
+            if (at < 0) at = selected.Count;
+            if (at < 16)
+            {
+                if (selected.Count == 16) selected.RemoveAt(15);
+                selected.Insert(at, (key, kind));
+            }
+            owner.Check();
+        }
     }
 }

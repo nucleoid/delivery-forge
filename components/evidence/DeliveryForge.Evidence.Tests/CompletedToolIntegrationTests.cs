@@ -169,6 +169,161 @@ public sealed class CompletedToolIntegrationTests
     }
 
     [Fact]
+    public void Inventory_failure_exports_closed_phase_counts_and_only_hashed_relative_keys()
+    {
+        const string hidden = "private/secret-λ.cs";
+        var before = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [hidden] = "private-before-value", ["missing.cs"] = "old", ["unchanged.cs"] = "same"
+        };
+        var after = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [hidden] = "private-after-value", ["new.cs"] = "new", ["unchanged.cs"] = "same"
+        };
+        foreach (var phase in Enum.GetValues<InstalledToolFiles.ComparisonPhase>())
+        {
+            var io = new InstalledToolFiles(TimeSpan.FromSeconds(30));
+            var failure = Assert.Throws<EvidenceWriteException>(() => InstalledToolFiles.Same(before, after, false, io, phase));
+            Assert.Equal("Complete original source/payload membership or bytes changed.", failure.Message);
+            var mismatch = Assert.IsType<InstalledToolFiles.InventoryMismatch>(InstalledToolFiles.Mismatch(failure));
+            var expected = phase switch
+            {
+                InstalledToolFiles.ComparisonPhase.InstallationProfile => "installation-profile",
+                InstalledToolFiles.ComparisonPhase.InstallationCurrent => "installation-current",
+                InstalledToolFiles.ComparisonPhase.GitCurrent => "git-current",
+                InstalledToolFiles.ComparisonPhase.ConsumerCurrent => "consumer-current",
+                _ => throw new InvalidOperationException()
+            };
+            Assert.Equal(expected, mismatch.Phase);
+            Assert.Equal(3, mismatch.BeforeCount); Assert.Equal(3, mismatch.AfterCount);
+            Assert.Equal(1, mismatch.Missing); Assert.Equal(1, mismatch.Changed); Assert.Equal(1, mismatch.Added);
+            Assert.False(mismatch.AllowNew); Assert.False(mismatch.Truncated);
+            Assert.Equal(new[] { "Missing", "Added", "Changed" }, mismatch.Samples.Select(s => s.Kind));
+            Assert.Equal(new[] { "missing.cs", "new.cs", hidden }.Select(k => InstalledToolFiles.Identity(Encoding.UTF8.GetBytes(k))),
+                mismatch.Samples.Select(s => s.KeySha256));
+            failure.Data["untrusted"] = "never-export-this-private-data";
+            var raw = InstalledToolInvocation.FailureArtifact(failure, true, false, 1);
+            Assert.True(raw.Length < 8192);
+            var text = Encoding.UTF8.GetString(raw);
+            Assert.DoesNotContain("private-before-value", text); Assert.DoesNotContain("private-after-value", text);
+            Assert.DoesNotContain("secret", text); Assert.DoesNotContain("missing.cs", text);
+            Assert.DoesNotContain("never-export-this-private-data", text);
+            using var json = JsonDocument.Parse(raw);
+            Assert.Equal(expected, json.RootElement.GetProperty("InventoryMismatch").GetProperty("Phase").GetString());
+            Assert.False(json.RootElement.GetProperty("Returned").GetBoolean());
+            Assert.False(json.RootElement.GetProperty("RuntimeAccepted").GetBoolean());
+            Assert.False(json.RootElement.GetProperty("InventoryMismatchUnavailable").GetBoolean());
+        }
+    }
+
+    [Fact]
+    public void Inventory_failure_counts_every_mismatch_but_retains_only_sixteen_stable_hashes()
+    {
+        var before = Enumerable.Range(0, 22).ToDictionary(i => $"file-{i:D2}", _ => "before", StringComparer.Ordinal);
+        var after = Enumerable.Range(0, 20).ToDictionary(i => $"file-{i:D2}", _ => "after", StringComparer.Ordinal);
+        for (var i = 0; i < 3; i++) after.Add($"extra-{i}", "new");
+        var failure = Assert.Throws<EvidenceWriteException>(() => InstalledToolFiles.Same(before, after, false,
+            new InstalledToolFiles(TimeSpan.FromSeconds(30)), InstalledToolFiles.ComparisonPhase.ConsumerCurrent));
+        var mismatch = Assert.IsType<InstalledToolFiles.InventoryMismatch>(InstalledToolFiles.Mismatch(failure));
+        Assert.Equal(22, mismatch.BeforeCount); Assert.Equal(23, mismatch.AfterCount);
+        Assert.Equal(2, mismatch.Missing); Assert.Equal(20, mismatch.Changed); Assert.Equal(3, mismatch.Added);
+        Assert.True(mismatch.Truncated); Assert.Equal(16, mismatch.Samples.Length);
+        var expected = before.Keys.Concat(after.Keys).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).Take(16)
+            .Select(k => InstalledToolFiles.Identity(Encoding.UTF8.GetBytes(k)));
+        Assert.Equal(expected, mismatch.Samples.Select(s => s.KeySha256));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Inventory_diagnostics_keep_the_original_dictionary_key_comparison(bool ignoreCase)
+    {
+        var comparer = ignoreCase ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var before = new Dictionary<string, string>(comparer) { ["Folder/Source.cs"] = "same" };
+        var after = new Dictionary<string, string>(comparer) { ["folder/source.cs"] = "same" };
+        var io = new InstalledToolFiles(TimeSpan.FromSeconds(30));
+        if (ignoreCase)
+        {
+            InstalledToolFiles.Same(before, after, false);
+            InstalledToolFiles.Same(before, after, false, io, InstalledToolFiles.ComparisonPhase.GitCurrent);
+        }
+        else
+        {
+            Assert.Throws<EvidenceWriteException>(() => InstalledToolFiles.Same(before, after, false));
+            var failure = Assert.Throws<EvidenceWriteException>(() => InstalledToolFiles.Same(before, after, false,
+                io, InstalledToolFiles.ComparisonPhase.GitCurrent));
+            var mismatch = Assert.IsType<InstalledToolFiles.InventoryMismatch>(InstalledToolFiles.Mismatch(failure));
+            Assert.Equal(1, mismatch.Missing); Assert.Equal(1, mismatch.Added); Assert.Equal(0, mismatch.Changed);
+        }
+    }
+
+    [Fact]
+    public void Crap_allows_new_real_files_but_still_refuses_changed_preexisting_obj_bytes()
+    {
+        using var temp = new TempDirectory();
+        var directory = Path.Combine(temp.Path, "obj"); Directory.CreateDirectory(directory);
+        var path = Path.Combine(directory, "cache"); File.WriteAllText(path, "original");
+        var io = new InstalledToolFiles(TimeSpan.FromSeconds(30));
+        var before = io.Inventory(temp.Path, 16, 4096, false);
+        File.WriteAllText(Path.Combine(temp.Path, "new-output"), "new");
+        InstalledToolFiles.Same(before, io.Inventory(temp.Path, 16, 4096, false), true,
+            io, InstalledToolFiles.ComparisonPhase.ConsumerCurrent);
+        File.WriteAllText(path, "changed");
+        var failure = Assert.Throws<EvidenceWriteException>(() => InstalledToolFiles.Same(before,
+            io.Inventory(temp.Path, 16, 4096, false), true, io, InstalledToolFiles.ComparisonPhase.ConsumerCurrent));
+        var mismatch = Assert.IsType<InstalledToolFiles.InventoryMismatch>(InstalledToolFiles.Mismatch(failure));
+        Assert.True(mismatch.AllowNew); Assert.Equal(1, mismatch.Changed); Assert.Equal(1, mismatch.Added);
+        var sample = Assert.Single(mismatch.Samples, s => s.Kind == "Changed");
+        Assert.Equal(InstalledToolFiles.Identity(Encoding.UTF8.GetBytes("obj/cache")), sample.KeySha256);
+        Assert.Equal("changed", File.ReadAllText(path));
+    }
+
+    [Fact]
+    public void Cancelled_diagnostic_keeps_original_refusal_and_retains_independent_failure_without_exporting_it()
+    {
+        using var cancelled = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var io = new InstalledToolFiles(TimeSpan.FromSeconds(30), cancelled.Token);
+        cancelled.Cancel();
+        var before = new Dictionary<string, string> { ["private/source"] = "old" };
+        var after = new Dictionary<string, string> { ["private/source"] = "new" };
+        var failure = Assert.Throws<EvidenceWriteException>(() => InstalledToolFiles.Same(before, after, false,
+            io, InstalledToolFiles.ComparisonPhase.ConsumerCurrent));
+        Assert.Equal("Complete original source/payload membership or bytes changed.", failure.Message);
+        Assert.Null(InstalledToolFiles.Mismatch(failure));
+        var independent = Assert.IsType<OperationCanceledException>(InstalledToolFiles.MismatchDiagnosticFailure(failure));
+        Assert.Equal(cancelled.Token, independent.CancellationToken);
+        using var json = JsonDocument.Parse(InstalledToolInvocation.FailureArtifact(failure, true, false, 1));
+        Assert.Equal(JsonValueKind.Null, json.RootElement.GetProperty("InventoryMismatch").ValueKind);
+        Assert.True(json.RootElement.GetProperty("InventoryMismatchUnavailable").GetBoolean());
+        Assert.False(json.RootElement.GetProperty("RuntimeAccepted").GetBoolean());
+    }
+
+    [Fact]
+    public void Allowed_additions_cannot_evict_the_blocking_changed_key_from_bounded_diagnostics()
+    {
+        const string hidden = "z-private/blocked-λ.cs";
+        var before = new Dictionary<string, string>(StringComparer.Ordinal) { [hidden] = "private-before" };
+        var after = new Dictionary<string, string>(StringComparer.Ordinal) { [hidden] = "private-after" };
+        for (var i = 0; i < 20; i++) after.Add($"a-new-{i:D2}", "permitted-new-value");
+        var io = new InstalledToolFiles(TimeSpan.FromSeconds(30));
+        var failure = Assert.Throws<EvidenceWriteException>(() => InstalledToolFiles.Same(before, after, true,
+            io, InstalledToolFiles.ComparisonPhase.ConsumerCurrent));
+        Assert.Equal("Complete original source/payload membership or bytes changed.", failure.Message);
+        var mismatch = Assert.IsType<InstalledToolFiles.InventoryMismatch>(InstalledToolFiles.Mismatch(failure));
+        Assert.Equal(1, mismatch.BeforeCount); Assert.Equal(21, mismatch.AfterCount);
+        Assert.Equal(0, mismatch.Missing); Assert.Equal(1, mismatch.Changed); Assert.Equal(20, mismatch.Added);
+        Assert.True(mismatch.AllowNew); Assert.True(mismatch.Truncated); Assert.Equal(16, mismatch.Samples.Length);
+        Assert.Equal("Changed", mismatch.Samples[0].Kind);
+        var expected = new[] { hidden }.Concat(Enumerable.Range(0, 15).Select(i => $"a-new-{i:D2}"))
+            .Select(key => InstalledToolFiles.Identity(Encoding.UTF8.GetBytes(key)));
+        Assert.Equal(expected, mismatch.Samples.Select(sample => sample.KeySha256));
+        Assert.All(mismatch.Samples.Skip(1), sample => Assert.Equal("Added", sample.Kind));
+        var text = Encoding.UTF8.GetString(InstalledToolInvocation.FailureArtifact(failure, true, false, 1));
+        Assert.DoesNotContain(hidden, text); Assert.DoesNotContain("private-before", text);
+        Assert.DoesNotContain("private-after", text); Assert.DoesNotContain("permitted-new-value", text);
+    }
+
+    [Fact]
     public void Bounded_real_file_read_refuses_before_oversized_allocation_and_preserves_file()
     {
         using var temp = new TempDirectory(); var path = Path.Combine(temp.Path, "evidence");

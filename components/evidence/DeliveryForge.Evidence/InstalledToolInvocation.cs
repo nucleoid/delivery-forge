@@ -38,13 +38,13 @@ internal sealed class InstalledToolInvocation(
             else JoinCrap(document.RootElement, actual);
             // No forward SDK process is dispatched after the actual main owner enters cleanup.
             await Task.CompletedTask.ConfigureAwait(false);
-            InstalledToolFiles.Same(installBefore, captureInstall(), false);
-            InstalledToolFiles.Same(gitBefore, captureGit(), false);
+            InstalledToolFiles.Same(installBefore, captureInstall(), false, files, InstalledToolFiles.ComparisonPhase.InstallationCurrent);
+            InstalledToolFiles.Same(gitBefore, captureGit(), false, files, InstalledToolFiles.ComparisonPhase.GitCurrent);
             var current = files.Inventory(invocation.WorkingDirectory, 100000, 1024L * 1024 * 1024, true);
             // No-state mutation must leave EVERY original and new ordinary file unchanged.
             // Crap's own completed current proof admits fresh build outputs, but cannot change
             // any pre-existing captured file. New-file inventory remains complete receipt DATA.
-            InstalledToolFiles.Same(original, current, profile.Tool == "crap4csharp");
+            InstalledToolFiles.Same(original, current, profile.Tool == "crap4csharp", files, InstalledToolFiles.ComparisonPhase.ConsumerCurrent);
             var resourcesAfter = InstalledToolResourceAdmission.Capture(files);
             if (resourcesAfter.AffinityMask != resourcesBefore.AffinityMask) throw new EvidenceWriteException("Actual resource admission changed during the invocation.");
             var environmentAfter = InstalledToolGateProvider.EnvironmentIdentity();
@@ -271,21 +271,28 @@ internal sealed class InstalledToolInvocation(
         if (_proof is not null) Save("producer-current-binding.json", _proof);
         for (var index = 0; index < _artifacts.Count; index++) Save($"producer-artifact-{index:D2}.bin", _artifacts[index]);
         if (_failure is not null)
-            Save("producer-binding-failure.json", JsonSerializer.SerializeToUtf8Bytes(new
-            {
-                Type = _failure.GetType().FullName,
-                Message = _failure.Message.Length > 2048 ? _failure.Message[..2048] : _failure.Message,
-                Entered = _entered,
-                Returned = _returned,
-                OriginalExit = _actual?.ExitCode,
-                RuntimeAccepted = false
-            }));
+            Save("producer-binding-failure.json", FailureArtifact(_failure, _entered, _returned, _actual?.ExitCode));
         void Save(string leaf, byte[] bytes)
         {
             files.WriteNew(Path.Combine(directory, leaf), bytes);
             hashes[leaf] = InstalledToolFiles.Identity(bytes);
         }
     }
+
+    // The exact projection saved by the actual failure-artifact path. Never serialize
+    // arbitrary Exception.Data or independent diagnostic exception messages.
+    internal static byte[] FailureArtifact(Exception failure, bool entered, bool returned, int? originalExit) =>
+        JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            Type = failure.GetType().FullName,
+            Message = failure.Message.Length > 2048 ? failure.Message[..2048] : failure.Message,
+            Entered = entered,
+            Returned = returned,
+            OriginalExit = originalExit,
+            RuntimeAccepted = false,
+            InventoryMismatch = InstalledToolFiles.Mismatch(failure),
+            InventoryMismatchUnavailable = InstalledToolFiles.MismatchDiagnosticFailure(failure) is not null
+        });
 
     internal NormalizedEvidence Normalize(CommandResult execution, ToolCapability capability)
     {

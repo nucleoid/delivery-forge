@@ -219,7 +219,7 @@ public sealed class InstalledToolGateProvider
         var data = profile.Data;
         var actual = files.Inventory(data.InstallationRoot, 20000, 1024L * 1024 * 1024, false);
         var expected = data.Payload.ToDictionary(p => p.Path, p => p.Bytes + ":" + p.Sha256, InstalledToolFiles.PathComparer);
-        InstalledToolFiles.Same(expected, actual, false);
+        InstalledToolFiles.Same(expected, actual, false, files, InstalledToolFiles.ComparisonPhase.InstallationProfile);
         if (files.FileHash(data.PackagePath, 128 * 1024 * 1024) != data.PackageSha256 ||
             files.FileHash(data.DotNetHostPath, 32 * 1024 * 1024) != data.DotNetHostSha256 ||
             files.FileHash(data.GitExecutablePath, 32 * 1024 * 1024) != data.GitExecutableSha256)
