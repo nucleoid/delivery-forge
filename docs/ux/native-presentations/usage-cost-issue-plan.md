@@ -1,3 +1,5 @@
+> Implementation tracking: [GitHub issue #42](https://github.com/nucleoid/delivery-forge/issues/42). This is the seventh UX issue, not the existing quality-evidence issue #7.
+
 # [UX/Telemetry] Track per-model tokens and live USD API-equivalent estimates
 
 > **Implementation-ready issue plan, pending GitHub issue creation and URL binding.** Synthetic prototype update and future live producer wiring are separate acceptance stages. No production telemetry/billing or native screenshot pass is implied.

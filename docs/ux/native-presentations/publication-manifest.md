@@ -38,4 +38,4 @@ The checked-in demo under [`examples/presentation-demo`](../../../examples/prese
 
 [Evidence](evidence/README.md) includes the source implementation report, independent design review, durability/parity receipts, deterministic harness/companion captures, and source-bound native PNGs. Harness/companion images remain explicitly distinct from installed-host captures.
 
-Seven detailed issue bodies are ready for publication, including **“Track per-model tokens and live USD API-equivalent estimates.”** No GitHub issues have been created by this packaging branch; real issue numbers and URLs remain pending publication. PR #33 remains draft; native asset pixel review is complete and final issue links are being bound.
+Seven detailed issues are published and cross-linked: [#36–#42](issues.md), including [run-wide telemetry #42](https://github.com/nucleoid/delivery-forge/issues/42). Exact issue bodies were read back from GitHub; all14 immutable images were downloaded and hash-verified, and issue38 image rendering was checked in the laptop browser. PR #33 remains draft for owner review; no core runtime PR was changed or merged.

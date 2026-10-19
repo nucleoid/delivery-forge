@@ -11,13 +11,13 @@ This package preserves the frozen UX-1 design, final synthetic prototype source,
 - [Projection completeness addendum](projection-completeness-addendum.md)
 - [Usage and API-equivalent cost design](usage-cost-design.md)
 - [Usage implementation notes](usage-implementation-notes.md)
-- [Usage issue plan — GitHub number pending](usage-cost-issue-plan.md)
+- [Run-wide usage implementation issue #42](https://github.com/nucleoid/delivery-forge/issues/42) · [detailed usage plan](usage-cost-issue-plan.md)
 - [Portable final demo source](../../../examples/presentation-demo/README.md)
 - [Publication manifest](publication-manifest.md)
 - [Evidence index](evidence/README.md)
 - [Final immutable source ZIP](assets/native-prototype-e9eb721.zip)
 
-The implementation issue set is prepared but not yet published. Links remain plain pending text until the seven real GitHub issues are created and their actual URLs are bound.
+The seven implementation issues are published and cross-linked: start at [epic #36](https://github.com/nucleoid/delivery-forge/issues/36) or the [complete issue handoff](issues.md). Each host issue embeds multiple real native screenshots.
 
 ## Two source identities
 
