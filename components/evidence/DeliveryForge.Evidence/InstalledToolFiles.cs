@@ -113,12 +113,21 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     internal void FinishSettledWorkCapture(BoundedCaptureTimingObservation timing)
     {
         _admission?.CheckCurrent(_runId!);
+        lock (_timing) { if (_cleanup is null) CheckWorkCore(); }
+        RecordSettledWorkCapture(timing, Stopwatch.GetTimestamp());
+    }
+    // The concrete executor records the observed settlement before a later
+    // admission refusal can throw. This records elapsed-time facts only and
+    // grants no new WORK or resource authority.
+    internal void RecordSettledWorkCapture(BoundedCaptureTimingObservation timing, long observedAt)
+    {
         lock (_timing)
         {
             if (timing.StopwatchFrequency != Stopwatch.Frequency ||
-                timing.OriginalStartedTimestamp != _started || timing.CleanupStartedTimestamp is not null)
+                timing.OriginalStartedTimestamp != _started || timing.CleanupStartedTimestamp is not null ||
+                observedAt < _phaseStarted || observedAt > Stopwatch.GetTimestamp())
                 throw new EvidenceWriteException("Actual settled WORK capture must join this original once without a child cleanup stamp.");
-            if (_cleanup is null) { CheckWorkCore(); _cleanup = Stopwatch.GetTimestamp(); }
+            if (_cleanup is null || observedAt < _cleanup) _cleanup = observedAt;
         }
         _ = CleanupRemaining;
     }

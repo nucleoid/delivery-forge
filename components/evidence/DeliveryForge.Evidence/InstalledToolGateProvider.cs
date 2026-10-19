@@ -311,6 +311,7 @@ public sealed class InstalledToolGateProvider
                 ? StartActual()
                 : actualAdmission.EnterAsync(actualRunId ?? throw new EvidenceWriteException("Missing actual containing run."), StartActual);
             var capture = await actualCapture.ConfigureAwait(false);
+            var settledObservedAt = System.Diagnostics.Stopwatch.GetTimestamp();
             _retainedOriginalCaptures.Add(capture);
             // Retain and charge the actual observation before decoding or joining
             // timing can refuse it. Recording facts is not a new external effect.
@@ -344,7 +345,10 @@ public sealed class InstalledToolGateProvider
                     !capture.CaptureBoundExceeded && capture.Command.OwnedProcessQuiescent &&
                     !capture.Command.TimedOut && !capture.Command.Cancelled && capture.Command.ExitCode is not null &&
                     capture.Command.LifecycleDiagnostics is { NativeFailure: null })
-                    files.FinishSettledWorkCapture(actualTiming);
+                {
+                    files.RecordSettledWorkCapture(actualTiming, settledObservedAt);
+                    files.Check();
+                }
                 else files.ImportActualCleanup(actualTiming);
                 }
                 catch (Exception error) { files.PreserveUnknown(); failures.Add(error); }

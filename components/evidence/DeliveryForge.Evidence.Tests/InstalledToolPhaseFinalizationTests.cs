@@ -5,6 +5,18 @@ namespace DeliveryForge.Evidence.Tests;
 // is fabricated: real Linux closure remains a separate required integration test.
 public sealed class InstalledToolPhaseFinalizationTests
 {
+    [Fact]
+    public void Recording_settled_capture_facts_does_not_delay_earliest_stamp_until_a_later_check()
+    {
+        var parent = new Parent(); var files = new InstalledToolFiles(parent, TimeSpan.FromSeconds(30), new InstalledToolHostScope.Credits());
+        var observed = Stopwatch.GetTimestamp();
+        parent.WorkOpen = false;
+        files.RecordSettledWorkCapture(new(parent.OriginalStarted, null, Stopwatch.Frequency), observed);
+        Assert.Equal(observed, System.Text.Json.JsonSerializer.SerializeToElement(files.TimingData).GetProperty("CleanupStarted").GetInt64());
+        Assert.Equal(0, parent.FailureNotifications);
+        Assert.Throws<IOException>(parent.CheckWork);
+    }
+
     sealed class Parent : IOwnedDuplexBudget, IOwnedFailureCleanup
     {
         internal bool WorkOpen = true;
