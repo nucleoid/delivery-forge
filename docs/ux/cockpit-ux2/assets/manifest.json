@@ -1,0 +1,175 @@
+{
+  "generatedAt": "2026-10-19T22:06:14.232Z",
+  "generator": "scripts/screenshots-ux2.mjs",
+  "runtime": "v22.17.0",
+  "note": "Terminal images are deterministic renderer output converted from ANSI to HTML and photographed in Chromium; desktop images are static HTML mockups of host chrome around the shared Forge panel. None is an installed-host capture.",
+  "images": [
+    {
+      "file": "tui-cockpit-80-failed-gate.png",
+      "kind": "terminal-simulation",
+      "blocks": [
+        "node scripts/demo.mjs failed-gate 80 --color · 80 columns"
+      ],
+      "sha256": "cab440f27eb505fdf833e151a038e5342293c1cf20294b947da770252d57332f"
+    },
+    {
+      "file": "tui-cockpit-120-review.png",
+      "kind": "terminal-simulation",
+      "blocks": [
+        "node scripts/demo.mjs review 120 --color · 120 columns"
+      ],
+      "sha256": "557d2671c697c78af6d20eaad52003f1419e4eaf02869262e3415f411c099b6e"
+    },
+    {
+      "file": "tui-cockpit-80-recovery.png",
+      "kind": "terminal-simulation",
+      "blocks": [
+        "cancel-unknown · stop requested, cleanup UNKNOWN",
+        "head-drift · review belongs to an earlier head"
+      ],
+      "sha256": "06ff5f50f4e186a4f8c44753243e434d4daac4ef4b057db0eb1d54e5e7f512af"
+    },
+    {
+      "file": "tui-cockpit-80-pr-receipt.png",
+      "kind": "terminal-simulation",
+      "blocks": [
+        "pr-receipt · PR opened, ceiling PR"
+      ],
+      "sha256": "a1859b2ba14793ec9d89124f43d81702ce79c34746e70395c8ee22126abfb491"
+    },
+    {
+      "file": "tui-status-lines.png",
+      "kind": "terminal-simulation",
+      "blocks": [
+        "status line · launch · 80 columns (Claude Code statusLine / Pi widget)",
+        "status line · execute · 80 columns (Claude Code statusLine / Pi widget)",
+        "status line · failed-gate · 80 columns (Claude Code statusLine / Pi widget)",
+        "status line · stale-reconnected · 80 columns (Claude Code statusLine / Pi widget)",
+        "status line · cancel-unknown · 80 columns (Claude Code statusLine / Pi widget)",
+        ""
+      ],
+      "sha256": "4d5d9b300cb54af351d2a7de2085c76d746d0dd49433be9084923ff982758216"
+    },
+    {
+      "file": "tui-evidence-panel.png",
+      "kind": "terminal-simulation",
+      "blocks": [
+        "Pi /forge-demo detail · evidence list · 60 columns · selection on Tests",
+        "Enter · evidence detail · full head and tree hard-wrapped, never truncated"
+      ],
+      "sha256": "bd82724bd417ed158ffd3fca8f413d3c6aedf9ea813ae4784116dcd67d27e92a"
+    },
+    {
+      "file": "tui-usage-panel-80.png",
+      "kind": "terminal-simulation",
+      "blocks": [
+        "node scripts/demo.mjs failed-gate 80 --view usage-panel --color"
+      ],
+      "sha256": "ad8de919dc64d1cb0c2b969e28c2d5e6faf7484ea71a3d5c1419e941daca4796"
+    },
+    {
+      "file": "tui-ascii-fallback-80.png",
+      "kind": "terminal-simulation",
+      "blocks": [
+        "NO_COLOR=1 · --ascii · 80 columns"
+      ],
+      "sha256": "aa5a2056fd794e7262c2bce1e1a90ce5592f86c7972674b5c535d320a7801c5f"
+    },
+    {
+      "file": "tui-walkthrough-contact-sheet.png",
+      "kind": "terminal-simulation",
+      "blocks": [
+        "8 walkthrough states"
+      ],
+      "sha256": "6693c92155c79c38765b3929b29f727da83c8d8c544e912cbd964dbceac047cc"
+    },
+    {
+      "file": "desktop-claude-failed-gate.png",
+      "kind": "desktop-mockup",
+      "page": "claude-desktop.html",
+      "params": "scenario=failed-gate&detail",
+      "name": "Claude Code Desktop · failed gate · Forge pane overview with evidence detail",
+      "sha256": "26ea090a286db011ac890b4dbdc1efb54984019b676df8016388afff8815e4a6"
+    },
+    {
+      "file": "desktop-claude-usage.png",
+      "kind": "desktop-mockup",
+      "page": "claude-desktop.html",
+      "params": "scenario=failed-gate&tab=usage",
+      "name": "Claude Code Desktop · usage tab",
+      "sha256": "749219a878e74536d06fe22791cd982d5d3f8e1612bd57c7280e82a39de42196"
+    },
+    {
+      "file": "desktop-claude-head-drift.png",
+      "kind": "desktop-mockup",
+      "page": "claude-desktop.html",
+      "params": "scenario=head-drift&tab=evidence",
+      "name": "Claude Code Desktop · head drift · evidence tab",
+      "sha256": "01cf73162c65404e0fb91f2d11ba88328166156f667363290eb40eed3ac68d12"
+    },
+    {
+      "file": "desktop-codex-failed-gate.png",
+      "kind": "desktop-mockup",
+      "page": "codex-desktop.html",
+      "params": "scenario=failed-gate&preview",
+      "name": "Codex Desktop · failed gate · inline card + thread tab with intent preview open",
+      "sha256": "dfab2a9052f9352c505ab1e5644e1a6fe129526fff78a4a79a961b77d5b2823b"
+    },
+    {
+      "file": "desktop-codex-pr-receipt.png",
+      "kind": "desktop-mockup",
+      "page": "codex-desktop.html",
+      "params": "scenario=pr-receipt",
+      "name": "Codex Desktop · PR receipt",
+      "sha256": "8679fadf03ab6a017a43282e096e843a4b2ae5e14031dbb4d8cf42c328d9851b"
+    },
+    {
+      "file": "desktop-codex-cancel-unknown.png",
+      "kind": "desktop-mockup",
+      "page": "codex-desktop.html",
+      "params": "scenario=cancel-unknown",
+      "name": "Codex Desktop · stop requested, cleanup unknown",
+      "sha256": "2c7ae5408037b34937dc9d324e9d5ceec80150cb17dacd66b91d29b3c7ca7162"
+    },
+    {
+      "file": "desktop-claude-plan.png",
+      "kind": "desktop-mockup",
+      "page": "claude-desktop.html",
+      "params": "scenario=plan&tab=plan",
+      "name": "Claude Code Desktop · plan tab at PLAN",
+      "sha256": "a9ed095efe60010c6a690131f8ac286aa77b341255b16ec4b829ea522cf21f82"
+    },
+    {
+      "file": "panel-failed-gate-overview.png",
+      "kind": "desktop-mockup",
+      "page": "forge-panel.html",
+      "params": "scenario=failed-gate&detail&preview",
+      "name": "Shared Forge panel · failed gate · overview with evidence detail and intent preview",
+      "sha256": "f6e9f389cd69f1193a894787d5007c294276b8e2f1817b5f5934efb6a6db8436"
+    },
+    {
+      "file": "panel-review-overview.png",
+      "kind": "desktop-mockup",
+      "page": "forge-panel.html",
+      "params": "scenario=review",
+      "name": "Shared Forge panel · review on exact head",
+      "sha256": "6192c45ddb80a4e3902b5ad4f60467d35527681ac78d9fab297c5c3d3df01f1c"
+    },
+    {
+      "file": "panel-cancel-unknown.png",
+      "kind": "desktop-mockup",
+      "page": "forge-panel.html",
+      "params": "scenario=cancel-unknown",
+      "name": "Shared Forge panel · stop requested, cleanup unknown",
+      "sha256": "c6abb106e3c3d7522fe2702e1712df806e8fa12ce11986f3b3f75df97bae7733"
+    },
+    {
+      "file": "panel-usage.png",
+      "kind": "desktop-mockup",
+      "page": "forge-panel.html",
+      "params": "scenario=failed-gate&tab=usage",
+      "name": "Shared Forge panel · usage tab",
+      "sha256": "9ec8f88ea6ea89452e8089452041042f843400038687590783d03b3c9777bb8b"
+    }
+  ]
+}

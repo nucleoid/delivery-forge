@@ -29,7 +29,7 @@ function safeSnapshot(snapshot) {
     source:{snapshotId:cleanText(source.snapshotId||'unavailable'),sequence:Number.isSafeInteger(source.sequence)?source.sequence:0,observedAt:cleanText(source.observedAt||'unavailable'),receivedAt:cleanText(source.receivedAt||'unavailable'),continuity:CONTINUITY.has(source.continuity)?source.continuity:'error',freshness:['current','stale','unknown'].includes(source.freshness)?source.freshness:'unknown',capabilityIdentity:cleanText(source.capabilityIdentity||'unavailable'),realm:cleanText(source.realm||'invalid'),eventErrors:list(source.eventErrors).map(x=>cleanText(x,160)).slice(0,20)},
     requirements:{gateIds:list(requirements.gateIds).map(x=>cleanText(x,80)).slice(0,100),reviewRequired:requirements.reviewRequired===true,policyIdentity:cleanText(requirements.policyIdentity||'unavailable')},
     workflow:{phase:PHASES.has(workflow.phase)?workflow.phase:'LAUNCH',coreState:cleanText(workflow.coreState||'Invalid'),desiredState:cleanText(workflow.desiredState||'UNKNOWN'),observedState:cleanText(workflow.observedState||'UNKNOWN'),cleanup:cleanText(workflow.cleanup||'unknown'),activeOperationCount:Number.isSafeInteger(workflow.activeOperationCount)?workflow.activeOperationCount:null,quiescenceEvidenceRef:workflow.quiescenceEvidenceRef?cleanText(workflow.quiescenceEvidenceRef):null},
-    focus:{title:cleanText(focus.title||'State unavailable'),explanation:cleanText(focus.explanation||'Malformed or unsupported presentation snapshot.'),blockerCode:focus.blockerCode?cleanText(focus.blockerCode):'INVALID_SNAPSHOT',nextActionId:cleanText(focus.nextActionId||''),nextActionReason:cleanText(focus.nextActionReason||'Reconciliation required.')},
+    focus:{title:cleanText(focus.title||'State unavailable'),explanation:cleanText(focus.explanation||'Malformed or unsupported presentation snapshot.'),blockerCode:focus.blockerCode?cleanText(focus.blockerCode):null,nextActionId:cleanText(focus.nextActionId||''),nextActionReason:cleanText(focus.nextActionReason||'Reconciliation required.')},
     gates,attempts,review,actions,integrations,measurements,
     publication:object(value.publication)?value.publication:{},plan:object(value.plan)?value.plan:{}
   };
@@ -117,6 +117,7 @@ export function aggregate(snapshot) {
 
 export function project(snapshot) {
   const errors=validateSnapshot(snapshot),safe=safeSnapshot(snapshot);
+  if(errors.length&&!safe.focus.blockerCode) safe.focus.blockerCode='INVALID_SNAPSHOT';
   const aggregateResult=errors.length?{outcome:'ERROR',reasons:errors}:aggregateValid(safe);
   const blocked=errors.length>0||safe.source.freshness!=='current'||safe.source.continuity!=='complete'||safe.workflow.cleanup==='unknown';
   const actions=safe.actions.map(action=>consequential(action)&&blocked?{...action,available:false,reason:`Reconciliation required: ${safe.source.freshness}/${safe.source.continuity}; cleanup ${safe.workflow.cleanup}.`}:{...action});

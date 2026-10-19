@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Forge in Claude Code Desktop — DESKTOP MOCKUP, not an installed-host capture</title>
+  <link rel="stylesheet" href="forge-cockpit.css">
+  <style>
+    /* Host chrome is drawn for layout only. Neutral greys so the Forge palette stays the only accent system. */
+    :root{color-scheme:dark;--h-bg:#1b1b1f;--h-panel:#222227;--h-raised:#2a2a30;--h-line:#35353c;--h-text:#ececef;--h-muted:#a3a3ad;--h-dim:#6f6f79;--h-accent:#d4a27a;font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--h-text);background:#101014}
+    *{box-sizing:border-box}body{margin:0;min-width:1180px}
+    .window{display:grid;grid-template-rows:38px 1fr 30px;height:100vh;min-height:860px;background:var(--h-bg)}
+    .titlebar{display:flex;align-items:center;gap:18px;padding:0 14px;white-space:nowrap;overflow:hidden;border-bottom:1px solid var(--h-line);background:#161619;font-size:13px}
+    .titlebar .app{font-weight:700;letter-spacing:.02em}
+    .titlebar .tabs{display:flex;gap:4px;margin-left:8px}
+    .titlebar .tabs span{padding:5px 12px;border-radius:7px;color:var(--h-muted)}
+    .titlebar .tabs span.on{background:var(--h-raised);color:var(--h-text);font-weight:600}
+    .titlebar .right{margin-left:auto;display:flex;gap:14px;color:var(--h-muted);font-size:12.5px}
+    .titlebar .right b{color:var(--h-text);font-weight:600}
+    .body{display:grid;grid-template-columns:248px minmax(480px,1fr) 600px;min-height:0;min-width:0}
+    .sidebar{border-right:1px solid var(--h-line);background:#19191d;padding:12px 10px;display:flex;flex-direction:column;gap:8px;font-size:13px}
+    .sidebar .new{border:1px solid var(--h-line);border-radius:8px;padding:8px 10px;color:var(--h-text);font-weight:600;background:var(--h-raised)}
+    .sidebar .group{color:var(--h-dim);font:700 10.5px ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;margin:10px 6px 2px}
+    .sidebar .session{padding:8px 10px;border-radius:8px;color:var(--h-muted);display:flex;flex-direction:column;gap:2px}
+    .sidebar .session.on{background:var(--h-raised);color:var(--h-text)}
+    .sidebar .session small{color:var(--h-dim);font-size:11.5px}
+    .sidebar .session .badge{display:inline-block;font:700 9.5px ui-monospace,monospace;letter-spacing:.06em;border:1px solid var(--h-line);border-radius:4px;padding:2px 5px;margin-left:6px;vertical-align:1px;color:var(--h-muted)}
+    .chat{display:flex;flex-direction:column;min-width:0;overflow:hidden;border-right:1px solid var(--h-line)}
+    .chat header{display:flex;align-items:center;gap:10px;padding:10px 20px;border-bottom:1px solid var(--h-line);font-size:13px;color:var(--h-muted);white-space:nowrap;overflow:hidden}
+    .chat header b{color:var(--h-text);font-weight:600}
+    .chat header .mono{font:12px ui-monospace,monospace}
+    .transcript{flex:1;overflow:auto;padding:22px 28px;display:flex;flex-direction:column;gap:18px}
+    .msg{max-width:720px}
+    .msg.user{align-self:flex-end;background:var(--h-raised);border-radius:14px 14px 4px 14px;padding:10px 14px;max-width:560px}
+    .msg .who{color:var(--h-dim);font:600 11px ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase;margin-bottom:6px}
+    .tool{display:flex;align-items:center;gap:8px;color:var(--h-muted);font:12.5px ui-monospace,monospace;padding:6px 10px;border:1px solid var(--h-line);border-radius:8px;background:var(--h-panel);width:max-content;max-width:100%}
+    .tool .dot{width:8px;height:8px;border-radius:50%;background:#79d7c4;display:inline-block}
+    .msg p{margin:8px 0;line-height:1.55}
+    .msg ul{margin:6px 0 8px;padding-left:20px;line-height:1.5}
+    .tasks{border:1px solid var(--h-line);border-radius:10px;background:var(--h-panel);padding:10px 14px;font-size:13px;display:grid;gap:6px;max-width:560px}
+    .tasks .t{display:flex;gap:10px;align-items:center;color:var(--h-muted)}
+    .tasks .t i{font-style:normal;width:16px;text-align:center;font-weight:700}
+    .tasks .t.done{color:var(--h-dim);text-decoration:line-through}
+    .tasks .t.now{color:var(--h-text)}
+    .nextbox{border:1px solid var(--h-line);border-left:3px solid var(--h-accent);border-radius:10px;background:var(--h-panel);padding:12px 14px;font-size:13px;max-width:640px}
+    .nextbox p{margin:0 0 8px;color:var(--h-muted)}
+    .nextbox .q{color:var(--h-text);font-weight:600;margin-bottom:8px}
+    .nextbox .btns{display:flex;gap:8px}
+    .nextbox .btns span{border:1px solid var(--h-line);border-radius:7px;padding:6px 11px;color:var(--h-text);background:var(--h-raised);font-weight:600}
+    .nextbox .btns span.primary{background:var(--h-accent);color:#1b1b1f;border-color:var(--h-accent)}
+    .composer{border-top:1px solid var(--h-line);padding:12px 20px 14px;display:flex;flex-direction:column;gap:8px}
+    .composer .box{border:1px solid var(--h-line);border-radius:12px;background:var(--h-panel);padding:12px 14px;color:var(--h-dim);min-height:52px}
+    .composer .row{display:flex;gap:14px;color:var(--h-dim);font-size:12px}
+    .composer .row b{color:var(--h-muted);font-weight:600}
+    .pane{display:flex;flex-direction:column;min-height:0;min-width:0;background:var(--h-bg)}
+    .pane header{display:flex;align-items:center;gap:8px;padding:0 10px;height:40px;border-bottom:1px solid var(--h-line);background:#19191d;font-size:12.5px}
+    .pane header .tab{padding:6px 12px;border-radius:7px;color:var(--h-muted)}
+    .pane header .tab.on{background:var(--h-raised);color:var(--h-text);font-weight:600}
+    .pane header .url{margin-left:auto;color:var(--h-dim);font:11.5px ui-monospace,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:300px}
+    .pane .host{flex:1;min-height:0;min-width:0;display:flex}
+    .pane .host>*{flex:1;min-height:0;min-width:0}
+    .caption{display:flex;align-items:center;gap:16px;padding:0 14px;border-top:1px solid var(--h-line);background:#0c0c0f;color:#c9a06a;font:700 11px ui-monospace,monospace;letter-spacing:.06em;white-space:nowrap;overflow:hidden}
+    .caption span{color:var(--h-dim);font-weight:500;letter-spacing:0}
+    .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+  </style>
+</head>
+<body>
+  <div class="window" aria-label="Claude Code Desktop mockup">
+    <div class="titlebar">
+      <span class="app">Claude</span>
+      <div class="tabs"><span>Chat</span><span class="on">Code</span></div>
+      <div class="right"><span>Changes <b>3 files</b></span><span>Browser</span><span>Terminal</span><span>⋮</span></div>
+    </div>
+    <div class="body">
+      <aside class="sidebar" aria-label="Sessions">
+        <div class="new">+ New</div>
+        <div class="group">Today</div>
+        <div class="session on">Forge run: CSV export for report-service<small>report-service · worktree ux/csv-export · Forge demo-014</small></div>
+        <div class="session">Fix flaky export-contract test<small>report-service · 2 files changed</small></div>
+        <div class="session">Review PR 41 against quality gates<small>report-service · PR open · CI pending</small></div>
+        <div class="group">Earlier</div>
+        <div class="session">Reconcile paused run demo-011<small>report-service · stop requested · cleanup UNKNOWN</small></div>
+        <div class="session">Plan: nightly report rollups<small>report-service · plan r2 frozen</small></div>
+      </aside>
+      <main class="chat" aria-label="Chat">
+        <header><b>report-service</b><span class="mono">ux/csv-export</span><span>·</span><span>worktree</span><span>·</span><span>Forge skill <span class="mono">forge-demo:status</span></span></header>
+        <div class="transcript" id="transcript">
+          <div class="msg user"><div class="who">You</div>Run the Forge delivery for the approved CSV export plan (r3). Stop at the first gate that is not clean and show me the evidence before you request anything.</div>
+          <div class="msg">
+            <div class="who">Claude</div>
+            <div class="tool"><span class="dot"></span>forge-demo:status · read the current Forge snapshot · no model call, no side effect</div>
+            <div id="card" style="margin:12px 0"></div>
+            <p id="narrative"></p>
+            <div class="tasks" aria-label="Task list">
+              <div class="t done"><i>✓</i>Review scope and frozen plan r3</div>
+              <div class="t done"><i>✓</i>Execute: one writer, one isolated change</div>
+              <div class="t now"><i>◐</i>Evaluate exact-head gates: mutation evidence INCOMPLETE</div>
+              <div class="t"><i>·</i>Request bounded repair (waiting on you)</div>
+              <div class="t"><i>·</i>Independent review on the exact head</div>
+            </div>
+          </div>
+          <div class="nextbox" aria-label="Next step">
+            <p id="recap"></p>
+            <div class="q">Preview the bounded repair request, or inspect the missing mutation evidence first?</div>
+            <div class="btns"><span class="primary">Inspect evidence</span><span>Preview repair intent</span></div>
+          </div>
+        </div>
+        <div class="composer">
+          <div class="box">Reply, or press Tab to accept: "Show me the raw mutation receipt for attempt 1"</div>
+          <div class="row"><b>auto</b><span>·</span><span>claude-fable-5-1</span><span>·</span><span>Forge pane open</span><span>·</span><span>1 worktree</span></div>
+        </div>
+      </main>
+      <section class="pane" aria-label="Forge pane">
+        <header><span class="tab">Changes</span><span class="tab on">Forge</span><span class="tab">Terminal</span><span class="url">Browser pane · local companion · file://…/forge-cockpit.html</span></header>
+        <div class="host"><div id="forge"></div></div>
+      </section>
+    </div>
+    <div class="caption">DESKTOP MOCKUP · NOT AN INSTALLED-HOST CAPTURE <span>Claude Code Desktop chrome drawn for layout only. The Forge pane is the documented Browser pane showing the local companion; no custom pane API or statusline parity is claimed. Same projection as the terminal cockpit.</span></div>
+  </div>
+  <div id="announce" class="sr-only" aria-live="polite"></div>
+  <script src="../companion/companion-data.js"></script>
+  <script src="forge-cockpit.js"></script>
+  <script>
+    (() => {
+      const params = new URLSearchParams(location.search);
+      const scenario = params.get('scenario') || 'failed-gate', tab = params.get('tab') || 'overview';
+      const states = globalThis.FORGE_DEMO_STATES || [];
+      const s = states.find((x) => x.name === scenario) || states[0];
+      const primary = s.actions.find((a) => a.id === s.focus.nextActionId) || s.actions[0];
+      ForgeCockpit.card(document.getElementById('card'), { scenario, openLabel: 'Open in Forge pane', footer: 'skill output · same projection as the Forge pane · preview only', onOpen: () => ui.setTab('evidence') });
+      document.getElementById('narrative').textContent = `${s.focus.title} ${s.focus.explanation} ${/aggregate is/i.test(s.focus.explanation) ? '' : `Aggregate is ${s.aggregate.outcome}. `}I have not requested repair, pause or publication. ${primary ? `The safest next move is "${primary.label}" (${primary.available ? 'available' : 'unavailable: ' + primary.reason}).` : s.focus.nextActionReason}`;
+      document.getElementById('recap').textContent = `Forge ${s.run.id} is at ${s.workflow.phase} / ${s.aggregate.outcome} on head ${String(s.run.headCommit).slice(0, 7)} with ceiling ${s.run.authorizationCeiling.toUpperCase()}. ${s.usage.available ? `Synthetic API-equivalent estimate so far: USD ${s.usage.knownCostUsd} known (${s.usage.status}); actual charge unknown.` : 'No usage has been admitted yet; actual charge unknown.'} Nothing was committed, published or merged.`;
+      const ui = ForgeCockpit.mount(document.getElementById('forge'), { scenario, tab, detail: params.has('detail'), preview: params.has('preview'), hostLabel: null, hints: '↑/↓ evidence · Enter detail · 1-5 tabs · P preview · /forge-demo:status in chat',
+        onRender: (state) => { document.getElementById('announce').textContent = `${state.workflow.phase}. ${state.aggregate.outcome}. ${state.focus.title}`; } });
+      globalThis.ForgeDesktop = { ui, scenario };
+    })();
+  </script>
+</body>
+</html>

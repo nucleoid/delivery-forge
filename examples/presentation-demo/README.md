@@ -4,6 +4,24 @@
 
 This directory implements the frozen UX-1 design as three deliberately different host packages plus a static companion. It cannot run Delivery Forge, call a model, issue authority, write source, publish, poll CI, contact Engram/Continuum/Switchyard/GitHub, or kill processes. Intent output is always `PREVIEW_ONLY`, `sideEffects: 0`, `authorityIssued: false`.
 
+## UX-2 cockpit (this revision)
+
+The terminal renderer, status line, Pi panels and Codex MCP text now share one UX-2 layout grammar in `src/render-cockpit.mjs`: a framed cockpit with identity rail, phase trail, focus sentence, aligned evidence rows (glyph + uppercase word, never colour alone), control, next action, usage with share-of-known bars, integrations and a full-identity footer. ASCII and NO_COLOR fallbacks are 1:1 in width. Two desktop host mockups under `desktop/` embed the same projection through `desktop/forge-cockpit.js`. See [docs/ux/cockpit-ux2](../../docs/ux/cockpit-ux2/README.md) for the gallery and boundaries.
+
+```sh
+node scripts/demo.mjs failed-gate 80 --color                 # framed cockpit (default view)
+node scripts/demo.mjs review 120 --color
+node scripts/demo.mjs failed-gate 80 --view status            # 4-line status (Claude statusLine / Pi widget)
+node scripts/demo.mjs failed-gate 80 --view usage-panel --color
+node scripts/demo.mjs head-drift 60 --view evidence --select 1
+node scripts/demo.mjs failed-gate 60 --view evidence-detail --select 3
+node scripts/demo.mjs failed-gate 80 --ascii                  # ASCII glyphs and box characters
+node scripts/demo.mjs failed-gate 80 --view expanded          # UX-1 legacy text contract
+npm run screenshots:ux2                                       # regenerates docs/ux/cockpit-ux2/assets
+```
+
+Open `desktop/claude-desktop.html`, `desktop/codex-desktop.html` or `desktop/forge-panel.html` as local files; `?scenario=<name>&tab=overview|evidence|usage|plan|integrations&detail&preview` selects the fixture state. These are desktop mockups, not installed-host captures.
+
 ## Local no-model demos
 
 From this directory:

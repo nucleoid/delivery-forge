@@ -4,6 +4,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getScenario } from '../../src/fixtures.mjs';
 import { renderCompact,renderExpanded,renderUsageDetail } from '../../src/render-text.mjs';
+import { renderCockpit,renderStatusLine,renderUsagePanel } from '../../src/render-cockpit.mjs';
+const HINTS='$forge-demo status · usage · preview <action>';
 import { makeIntent, previewIntent } from '../../src/intents.mjs';
 
 const MAX_LINE = 65536;
@@ -24,14 +26,20 @@ export function handleMessage(message) {
   if (message.method === 'notifications/initialized' || message.method === 'initialized') return null;
   if (!initialized) return err(message.id,-32002,'Not initialized');
   if (message.method === 'tools/list') return ok(message.id,{tools:[
-    {name:'forge_demo_status',description:'Render a DEMO • SYNTHETIC Forge fixture as native text.',inputSchema:{type:'object',additionalProperties:false,properties:{scenario:{type:'string'},width:{type:'integer',minimum:40,maximum:120},presentation:{type:'string',enum:['native','harness']},view:{type:'string',enum:['expanded','compact','usage']}},required:['scenario']}},
+    {name:'forge_demo_status',description:'Render a DEMO • SYNTHETIC Forge fixture as native text. Default view is the UX-2 framed cockpit; status is the 4-line summary; usage is the per-model panel. legacy-* views keep the UX-1 text contract.',inputSchema:{type:'object',additionalProperties:false,properties:{scenario:{type:'string'},width:{type:'integer',minimum:40,maximum:120},presentation:{type:'string',enum:['native','harness']},view:{type:'string',enum:['cockpit','status','usage','legacy-expanded','legacy-compact','legacy-usage']},ascii:{type:'boolean'}},required:['scenario']}},
     {name:'forge_demo_preview_intent',description:'Preview a bound fixture intent. Always sideEffects=0 and authorityIssued=false.',inputSchema:{type:'object',additionalProperties:false,properties:{scenario:{type:'string'},action:{type:'string',enum:['request.pause','request.stop','request.resume','request.repair','request.publish-pr']}},required:['scenario','action']}}
   ]});
   if (message.method === 'tools/call') {
     const name = message.params?.name, args = message.params?.arguments || {};
     try {
       const {snapshot} = getScenario(String(args.scenario || ''));
-      if (name === 'forge_demo_status') {const options={width:Number(args.width)||80,presentation:args.presentation==='harness'?'harness':'native'};const output=args.view==='compact'?renderCompact(snapshot,options).join('\n'):args.view==='usage'?renderUsageDetail(snapshot,options):renderExpanded(snapshot,options);return ok(message.id,text(output));}
+      if (name === 'forge_demo_status') {
+        const options={width:Number(args.width)||80,presentation:args.presentation==='harness'?'harness':'native',ascii:args.ascii===true,color:false,hints:HINTS};
+        const view=args.view||'cockpit';
+        const output=view==='legacy-compact'?renderCompact(snapshot,options).join('\n'):view==='legacy-usage'?renderUsageDetail(snapshot,options):view==='legacy-expanded'?renderExpanded(snapshot,options)
+          :view==='status'?renderStatusLine(snapshot,options).join('\n'):view==='usage'?renderUsagePanel(snapshot,options).join('\n'):renderCockpit(snapshot,options);
+        return ok(message.id,text(output));
+      }
       if (name === 'forge_demo_preview_intent') return ok(message.id,text(JSON.stringify(previewIntent(snapshot,makeIntent(snapshot,String(args.action||''))),null,2)));
       return err(message.id,-32602,'Unknown tool');
     } catch (error) { return err(message.id,-32602,'Invalid tool arguments',{detail:String(error.message).slice(0,300)}); }

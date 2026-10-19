@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getScenario } from '../../src/fixtures.mjs';
-import { renderCompact } from '../../src/render-text.mjs';
+import { renderStatusLine } from '../../src/render-cockpit.mjs';
 import { boundLines } from '../../src/safety.mjs';
 
 const here=path.dirname(fileURLToPath(import.meta.url));
@@ -35,6 +35,7 @@ process.stdin.on('end',()=>{
     if(pointer.schemaVersion!=='forge.statusline-state/0.1'||pointer.mode!=='demo'||typeof pointer.scenario!=='string') throw new Error('invalid explicit state file');
     const {snapshot}=getScenario(pointer.scenario);
     if(snapshot.source.freshness!=='current'||snapshot.source.continuity!=='complete') process.stdout.write(fallback(`state ${snapshot.source.freshness}/${snapshot.source.continuity}; last seq ${snapshot.source.sequence}`));
-    else process.stdout.write(renderCompact(snapshot,{width,ascii:process.env.NO_COLOR==='1',presentation}).join('\n'));
+    // UX-2 status line: 4 lines, ANSI colour unless NO_COLOR, glyph + word for every outcome
+    else process.stdout.write(renderStatusLine(snapshot,{width,ascii:process.env.NO_COLOR==='1',color:process.env.NO_COLOR!=='1'&&process.env.FORGE_COLOR!=='0',presentation}).join('\n'));
   } catch(error) { process.stdout.write(fallback(safeReason(error))); }
 });

@@ -1,0 +1,126 @@
+/* Forge cockpit panel, shared by the Claude Desktop and Codex Desktop mockups.
+   Palette is the UX-1 engineered-calm set: ink, panel, hairline, amber attention, sea-glass PASS, rose FAIL/ERROR, violet authority. */
+.forge{min-width:0;--ink:#101820;--panel:#17232d;--raised:#1d2c37;--line:#30414d;--text:#e8eef2;--muted:#afbec9;--dim:#7d8c97;--amber:#f2ba69;--teal:#79d7c4;--rose:#ff9ca7;--violet:#b9aef5;
+  color:var(--text);background:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;display:flex;flex-direction:column;min-height:0;height:100%;box-sizing:border-box}
+.forge *{box-sizing:border-box}
+.forge .mono{font:12px/1.45 ui-monospace,"Cascadia Mono",Consolas,monospace}
+.forge-rail{display:flex;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid var(--line);background:var(--panel)}
+.forge-rail .wordmark{font-weight:800;letter-spacing:.14em;font-size:12px}
+.forge-rail .identity{color:var(--muted);font:12px ui-monospace,"Cascadia Mono",Consolas,monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.forge-rail .identity b{color:var(--text);font-weight:600}
+.forge-tag{font:700 10px/1 ui-monospace,monospace;letter-spacing:.08em;color:var(--amber);border:1px solid #6e593a;border-radius:4px;padding:4px 6px;white-space:nowrap}
+.forge-trail{display:flex;gap:4px;padding:10px 16px 0;flex-wrap:wrap}
+.forge-trail span{font:11px/1 ui-monospace,monospace;letter-spacing:.04em;color:var(--dim);padding:5px 8px;border-radius:999px;border:1px solid transparent}
+.forge-trail span.done{color:var(--muted)}
+.forge-trail span.current{color:var(--amber);border-color:#6e593a;background:#1f1a14;font-weight:700}
+.forge-trail span.branch{font-style:italic}
+.forge-focus{padding:12px 16px 6px}
+.forge-focus .state{display:flex;align-items:baseline;justify-content:space-between;gap:12px;font:700 12px ui-monospace,monospace;letter-spacing:.06em}
+.forge-focus .state .src{color:var(--muted);font-weight:500}
+.forge-focus .state .src.warn{color:var(--amber);font-weight:700}
+.forge-focus h1{margin:6px 0 4px;font-size:22px;line-height:1.2;font-weight:700;letter-spacing:-.01em}
+.forge-focus p{margin:0;color:var(--muted);font-size:14px}
+.forge-focus .blocker{margin-top:6px;color:var(--dim);font:11px ui-monospace,monospace}
+.o-PASS,.o-NOT_APPLICABLE{color:var(--teal)}.o-NOT_APPLICABLE{color:var(--muted)}.o-INCOMPLETE{color:var(--amber)}.o-FAIL,.o-ERROR{color:var(--rose)}.o-STALE{color:var(--amber)}
+.forge-tabs{display:flex;gap:2px;padding:8px 16px 0;border-bottom:1px solid var(--line)}
+.forge-tabs button{appearance:none;background:transparent;border:0;border-bottom:2px solid transparent;color:var(--muted);font:600 13px system-ui,sans-serif;padding:8px 10px;cursor:pointer;border-radius:6px 6px 0 0}
+.forge-tabs button[aria-selected="true"]{color:var(--text);border-bottom-color:var(--amber)}
+.forge-tabs button:focus-visible{outline:2px solid var(--amber);outline-offset:-2px}
+.forge-tabs .count{display:inline-block;margin-left:6px;min-width:18px;text-align:center;border-radius:999px;background:var(--raised);color:var(--muted);font:700 10px ui-monospace,monospace;padding:2px 5px;vertical-align:1px}
+.forge-body{flex:1;min-height:0;overflow:auto;padding:12px 16px 16px;display:flex;flex-direction:column;gap:12px}
+.forge-section{min-width:0;border:1px solid var(--line);border-radius:10px;background:var(--panel);overflow:hidden}
+.forge-section>header{display:flex;justify-content:space-between;align-items:baseline;padding:8px 12px;border-bottom:1px solid var(--line);font:700 11px ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;color:var(--amber)}
+.forge-section>header .meta{color:var(--dim);font-weight:500;letter-spacing:0;text-transform:none}
+.forge-section.violet>header{color:var(--violet)}
+.gate-table{width:100%;border-collapse:collapse}
+.gate-table tr{border-bottom:1px solid var(--line);cursor:pointer}
+.gate-table tr:last-child{border-bottom:0}
+.gate-table tr[aria-selected="true"]{background:var(--raised);box-shadow:inset 3px 0 0 var(--amber)}
+.gate-table tr:focus-visible{outline:2px solid var(--amber);outline-offset:-2px}
+.gate-table td{padding:8px 10px;vertical-align:top}
+.gate-table td.glyph{width:22px;text-align:center;font:700 14px ui-monospace,monospace}
+.gate-table td.outcome{width:118px;font:700 11px ui-monospace,monospace;letter-spacing:.06em;white-space:nowrap}
+.gate-table td.label{font-weight:600}
+.gate-table td.receipt{color:var(--muted);font:12px ui-monospace,monospace;overflow-wrap:anywhere}
+.gate-table td.receipt .note{display:block;color:var(--dim);font:12px system-ui,sans-serif;margin-top:2px}
+.gate-table td.receipt .note.warn{color:var(--amber)}
+.gate-table tr.review td.label{color:var(--violet)}
+.gate-detail{border-top:1px solid var(--line);background:#0b1218;padding:10px 12px;display:grid;grid-template-columns:96px 1fr;gap:4px 10px;font:12px/1.5 ui-monospace,monospace}
+.gate-detail dt{color:var(--dim)}.gate-detail dd{margin:0;overflow-wrap:anywhere}.gate-detail dd.warn{color:var(--amber)}.gate-detail dd.bad{color:var(--rose)}
+.why{padding:8px 12px;border-top:1px solid var(--line);color:var(--amber);font:12px ui-monospace,monospace}
+.attempts{padding:8px 12px;border-top:1px solid var(--line);color:var(--dim);font:12px ui-monospace,monospace}
+.control{display:flex;flex-wrap:wrap;gap:6px 18px;padding:10px 12px;font:12px ui-monospace,monospace;color:var(--muted)}
+.control b{color:var(--text);font-weight:600}.control .warn b{color:var(--amber)}.control .bad b{color:var(--rose)}
+.control .proof{flex-basis:100%;color:var(--teal)}.control .proof.bad{color:var(--rose)}.control .proof.warn{color:var(--amber)}
+.actions{display:flex;flex-direction:column}
+.action{display:grid;grid-template-columns:20px 1fr auto;gap:4px 10px;padding:10px 12px;border-bottom:1px solid var(--line);align-items:center}
+.action:last-child{border-bottom:0}
+.action .marker{color:var(--amber);font-weight:800}
+.action .label{font-weight:650}.action.secondary .label{color:var(--muted);font-weight:500}
+.action .avail{font:700 10px ui-monospace,monospace;letter-spacing:.08em;padding:3px 6px;border-radius:4px;border:1px solid var(--line);color:var(--teal)}
+.action .avail.no{color:var(--rose);border-color:#5a3a40}
+.action .reason{grid-column:2/4;color:var(--dim);font-size:12px}.action .reason.no{color:var(--rose)}
+.action .kind{grid-column:2/4;color:var(--violet);font:11px ui-monospace,monospace}
+.action-footer{display:flex;align-items:center;gap:10px;padding:10px 12px;border-top:1px solid var(--line);background:var(--raised)}
+.action-footer button{appearance:none;border:0;border-radius:7px;background:var(--amber);color:#101820;font:700 13px system-ui,sans-serif;padding:8px 12px;cursor:pointer}
+.action-footer button[disabled]{opacity:.45;cursor:not-allowed}
+.action-footer button:focus-visible{outline:2px solid var(--text);outline-offset:2px}
+.action-footer span{color:var(--dim);font-size:12px}
+.intent{display:none;margin:0;padding:10px 12px;border-top:1px solid var(--line);background:#0b1218;color:var(--violet);font:11px/1.5 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere}
+.intent.open{display:block}
+.usage-head{display:flex;justify-content:space-between;align-items:baseline;gap:12px;padding:10px 12px}
+.usage-head .label{font:700 11px ui-monospace,monospace;letter-spacing:.08em;color:var(--muted)}
+.usage-head .amount{font-size:22px;font-weight:700;letter-spacing:-.01em}
+.usage-head .amount small{font-size:12px;color:var(--muted);font-weight:500;margin-left:6px}
+.chip{font:700 10px ui-monospace,monospace;letter-spacing:.08em;padding:3px 7px;border-radius:999px;border:1px solid var(--line)}
+.chip.PARTIAL,.chip.INCOMPLETE{color:var(--amber);border-color:#6e593a}.chip.COMPLETE,.chip.PASS{color:var(--teal);border-color:#2f5a52}.chip.UNAVAILABLE{color:var(--muted)}.chip.FAIL,.chip.ERROR{color:var(--rose);border-color:#5a3a40}
+.usage-meta{padding:0 12px 10px;color:var(--dim);font:12px ui-monospace,monospace}
+.model-table{width:100%;border-collapse:collapse;border-top:1px solid var(--line)}
+.model-table td,.model-table th{padding:7px 10px;text-align:left;font:12px ui-monospace,monospace;border-bottom:1px solid var(--line);vertical-align:middle}
+.model-table th{color:var(--dim);font-weight:600;letter-spacing:.04em}
+.model-table tr:last-child td{border-bottom:0}
+.model-table td.num{text-align:right;white-space:nowrap}
+.model-table td.name{font-weight:650;color:var(--text)}
+.model-table td.name small{display:block;color:var(--dim);font-weight:400}
+.bar{display:flex;align-items:center;gap:8px;min-width:110px}
+.bar i{display:block;height:8px;border-radius:3px;background:var(--violet);flex:0 0 auto}
+.bar b{font-weight:600;color:var(--muted)}
+.bar.unpriced{color:var(--amber)}
+.usage-legend{padding:8px 12px;border-top:1px solid var(--line);color:var(--dim);font-size:12px}
+.req-table{width:100%;border-collapse:collapse;border-top:1px solid var(--line)}
+.req-table td{padding:6px 10px;font:12px ui-monospace,monospace;border-bottom:1px solid var(--line);color:var(--muted)}
+.req-table tr:last-child td{border-bottom:0}.req-table td.num{text-align:right;color:var(--text)}.req-table td .warn{color:var(--amber)}
+.plan-grid{display:grid;grid-template-columns:84px 1fr;gap:6px 10px;padding:10px 12px;font-size:13px}
+.plan-grid dt{color:var(--violet);font:700 11px ui-monospace,monospace;letter-spacing:.08em;text-transform:uppercase;padding-top:2px}
+.plan-grid dd{margin:0}.plan-grid dd ul{margin:0;padding-left:18px}.plan-grid dd li{margin:1px 0}
+.plan-note{padding:8px 12px;border-top:1px solid var(--line);color:var(--dim);font-size:12px}
+.integrations{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line)}
+.integration{background:var(--panel);padding:10px 12px}
+.integration b{display:flex;justify-content:space-between;align-items:baseline;font-size:13px}
+.integration b span{font:700 10px ui-monospace,monospace;letter-spacing:.08em}
+.integration p{margin:3px 0 0;color:var(--dim);font-size:12px}
+.measure{padding:8px 12px;border-top:1px solid var(--line);color:var(--dim);font:12px ui-monospace,monospace}
+.forge-foot{border-top:1px solid var(--line);background:var(--panel);padding:8px 16px;display:flex;flex-direction:column;gap:2px}
+.forge-foot .keys{display:flex;justify-content:space-between;gap:12px;color:var(--muted);font:11px ui-monospace,monospace}
+.forge-foot .ids{color:var(--dim);font:10.5px/1.4 ui-monospace,monospace;overflow-wrap:anywhere}
+.forge:focus-visible{outline:2px solid var(--amber);outline-offset:-2px}
+/* compact inline card: what a chat transcript shows before the panel is opened */
+.forge-card{--ink:#101820;--panel:#17232d;--raised:#1d2c37;--line:#30414d;--text:#e8eef2;--muted:#afbec9;--dim:#7d8c97;--amber:#f2ba69;--teal:#79d7c4;--rose:#ff9ca7;--violet:#b9aef5;
+  border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--text);font:13px/1.45 system-ui,sans-serif;overflow:hidden;max-width:620px}
+.forge-card *{box-sizing:border-box}
+.forge-card .row{display:flex;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--line)}
+.forge-card .row:last-child{border-bottom:0}
+.forge-card .wordmark{font-weight:800;letter-spacing:.14em;font-size:11px}
+.forge-card .identity{flex:1;min-width:0;color:var(--muted);font:11.5px ui-monospace,monospace;overflow-wrap:anywhere}
+.forge-card .identity b{color:var(--text);font-weight:600}
+.forge-card .state{font:700 11px ui-monospace,monospace;letter-spacing:.06em}
+.forge-card .title{font-size:15px;font-weight:700;flex:1}
+.forge-card .chips{display:flex;gap:6px;flex-wrap:wrap}
+.forge-card .gate{font:700 10px ui-monospace,monospace;letter-spacing:.04em;padding:3px 7px;border-radius:4px;border:1px solid var(--line);white-space:nowrap}
+.forge-card .gate.STALE{border-style:dashed}
+.forge-card .usage{color:var(--muted);font:11.5px ui-monospace,monospace;flex:1}
+.forge-card .next{flex:1}.forge-card .next b{color:var(--amber)}
+.forge-card .next span{color:var(--dim);font-size:12px;display:block}
+.forge-card .open{appearance:none;border:1px solid var(--line);background:var(--raised);color:var(--text);font:600 12px system-ui,sans-serif;border-radius:6px;padding:6px 10px;cursor:pointer;white-space:nowrap}
+.forge-card .foot{color:var(--dim);font:10.5px ui-monospace,monospace}
+@media (prefers-reduced-motion:reduce){.forge *,.forge-card *{transition:none!important;animation:none!important}}

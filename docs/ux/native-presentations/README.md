@@ -2,6 +2,8 @@
 
 This package preserves the frozen UX-1 design, final synthetic prototype source, deterministic harness evidence, and source-bound installed-host captures. It is an implementation-ready design handoff, **not** a live Delivery Forge adapter or production telemetry certification.
 
+> **UX-2 revision (2026-10-20):** the terminal cockpit, status line, Pi panels and Codex text were redesigned, and Claude Desktop / Codex Desktop mockups were added. Start at [docs/ux/cockpit-ux2](../cockpit-ux2/README.md). The UX-1 material below is retained as the frozen baseline the native captures were taken from.
+
 ## Start here
 
 - [Capability matrix](capability-matrix.md)

@@ -5,7 +5,7 @@ description: Inspect synthetic Delivery Forge UX-1 fixture states through the lo
 
 # Forge Demo (synthetic, read-only)
 
-Use only `forge_demo_status` and `forge_demo_preview_intent` from the local demo MCP endpoint.
+Use only `forge_demo_status` and `forge_demo_preview_intent` from the local demo MCP endpoint. The default `forge_demo_status` view is the UX-2 framed cockpit; `view: "status"` is the four-line summary and `view: "usage"` the per-model usage panel. Pass `ascii: true` when the transcript cannot render box characters.
 
 1. Say **DEMO • SYNTHETIC** before summarizing a state.
 2. Preserve run, plan revision, exact full head in detail, source sequence/currentness, each gate outcome, desired versus observed state, and cleanup certainty.
