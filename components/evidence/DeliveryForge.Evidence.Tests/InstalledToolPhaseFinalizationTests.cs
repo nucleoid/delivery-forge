@@ -26,7 +26,9 @@ public sealed class InstalledToolPhaseFinalizationTests
         files.FinishSettledWorkCapture(observation);
         Assert.True(files.IsClosing); Assert.True(files.CleanupRemaining > TimeSpan.Zero);
         Assert.Equal(0, parent.FailureNotifications); parent.CheckWork();
-        Assert.Throws<EvidenceWriteException>(() => files.FinishSettledWorkCapture(observation));
+        var first = System.Text.Json.JsonSerializer.SerializeToElement(files.TimingData).GetProperty("CleanupStarted").GetInt64();
+        files.FinishSettledWorkCapture(observation);
+        Assert.Equal(first, System.Text.Json.JsonSerializer.SerializeToElement(files.TimingData).GetProperty("CleanupStarted").GetInt64());
         Assert.True(files.IsClosing); Assert.Equal(0, parent.FailureNotifications);
         var next = new InstalledToolFiles(parent, TimeSpan.FromSeconds(30), credits);
         next.CheckWork(); Assert.False(next.IsClosing);
