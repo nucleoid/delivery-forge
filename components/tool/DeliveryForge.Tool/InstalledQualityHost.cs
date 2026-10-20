@@ -20,6 +20,7 @@ internal sealed class InstalledQualityHost
     readonly WorktreeManager worktrees; WorktreeManager? admittedCurrentness; InstalledToolHostScope? tools;
     FrozenPlan? frozen; FrozenWorkerPlan? assignment; TrustedConfiguration? boundConfiguration; bool entered;
     readonly List<GateRunResult> results = [];
+    internal IReadOnlyList<GateRunResult> RetainedResults => results.ToArray();
     readonly Dictionary<string, GateRunResult> gateResults = new(StringComparer.Ordinal);
     internal bool Unknown => tools?.HasUncertainOriginals == true;
     internal InstalledQualityHost(TrustedConfiguration config, AdmissionFile actualConfigurationPin,

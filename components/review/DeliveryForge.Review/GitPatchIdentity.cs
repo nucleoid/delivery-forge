@@ -115,6 +115,16 @@ public static partial class GitPatchIdentity
         throw new ReviewPreflightException(
             "Controlled parent Git evidence is required; worker repository metadata is never an authority fallback.");
 
+    public static async Task<byte[]> ExportVerifiedPatchAsync(ControlledGitEvidenceContext context, PatchIdentity expected, CancellationToken cancellationToken = default)
+    {
+        var current = await ComputeAsync(context, expected.BaseCommit, expected.HeadCommit, expected.PlanIdentity, expected.ArtifactIdentities, cancellationToken).ConfigureAwait(false);
+        if (!ReviewNormalizer.SameIdentity(current, expected)) throw new ReviewPreflightException("Current owned patch differs from the exact review request.");
+        var patch = await ControlledGit(context, DiffArguments.Concat([expected.BaseCommit, expected.HeadCommit, "--"]).ToArray(), cancellationToken).ConfigureAwait(false);
+        if ("sha256:" + Convert.ToHexStringLower(SHA256.HashData(patch.StandardOutput)) != expected.PatchSha256)
+            throw new ReviewPreflightException("Complete exported patch differs from its bound identity.");
+        return patch.StandardOutput;
+    }
+
     public static async Task<PatchIdentity> ComputeAsync(
         ControlledGitEvidenceContext context,
         string baseCommit,

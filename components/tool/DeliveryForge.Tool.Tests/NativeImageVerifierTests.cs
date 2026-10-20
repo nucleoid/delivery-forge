@@ -54,6 +54,17 @@ public sealed class NativeImageVerifierTests : IDisposable
     }
 
     [Fact]
+    public void Cancelled_reviewer_phase_refuses_image_acquisition_without_closing_original_work()
+    {
+        var pin = Pin();
+        using var exclusive = new FileStream(Image, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        using var phase = new CancellationTokenSource(); phase.Cancel();
+        Assert.Throws<OperationCanceledException>(() => BoundedFiles.VerifyNativeImage(pin, life, phase.Token));
+        life.Check(); Assert.False(life.HasRetainedUnknown);
+    }
+
+    [Fact]
     public void Overlimit_pin_refuses_before_opening_even_a_locked_image()
     {
         var pin = Pin() with { Bytes = BoundedFiles.MaximumNativeImageBytes + 1 };

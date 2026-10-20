@@ -130,9 +130,9 @@ public static class BoundedFiles
     internal const long MaximumNativeImageBytes = 512L * 1024 * 1024;
     // Native images have a separate finite extent profile. Retain the existing
     // original read credit and first-close protocol; never allocate the image.
-    internal static void VerifyNativeImage(AdmissionFile pin, ToolLifetime life)
+    internal static void VerifyNativeImage(AdmissionFile pin, ToolLifetime life, CancellationToken token = default)
     {
-        life.Check();
+        life.Check(); token.ThrowIfCancellationRequested();
         if (pin is null || pin.Bytes is < 1 or > MaximumNativeImageBytes || pin.Sha256 is not { Length: 64 } ||
             pin.Sha256.Any(c => !char.IsAsciiHexDigitLower(c)))
             throw new ToolUsageException("Finite exact lowercase native image pin required.");
@@ -153,7 +153,7 @@ public static class BoundedFiles
             var buffer = new byte[65536]; long read = 0;
             while (read < length)
             {
-                life.Check();
+                life.Check(); token.ThrowIfCancellationRequested();
                 var count = frame.Stream.Read(buffer, 0, (int)Math.Min(buffer.Length, length - read));
                 life.Check();
                 if (count == 0) throw new IOException("Native image ended before its complete selected extent.");
@@ -165,7 +165,7 @@ public static class BoundedFiles
             var currentWritten = File.GetLastWriteTimeUtc(path); life.Check();
             if (eof != -1 || after != length || currentLength != length || currentWritten != written)
                 throw new IOException("Native image changed complete extent, EOF or namespace metadata.");
-            var actual = Convert.ToHexStringLower(hash.GetHashAndReset()); life.Check();
+            var actual = Convert.ToHexStringLower(hash.GetHashAndReset()); life.Check(); token.ThrowIfCancellationRequested();
             if (actual != pin.Sha256) throw new IOException("Complete selected native image SHA256 differs.");
         }
         catch (Exception error) { frame.Primary = error; }

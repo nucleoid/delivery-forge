@@ -6,6 +6,8 @@ using DeliveryForge.Execution;
 using DeliveryForge.Execution.Git;
 using DeliveryForge.Execution.Host;
 using DeliveryForge.Planning;
+using DeliveryForge.Review;
+using DeliveryForge.Tool.Claude;
 
 namespace DeliveryForge.Tool;
 
@@ -13,24 +15,33 @@ namespace DeliveryForge.Tool;
 // production authority can be imported through this configuration.
 public sealed record InstalledReviewSelection(string PolicyRelativePath, string EvidencePolicyRelativePath,
     string EvidencePolicyIdentity, AdmissionFile GitImage, string GitVersion, string ArtifactRoot,
-    long MaximumEvidenceBytes = 16 * 1024 * 1024);
+    long MaximumEvidenceBytes = 16 * 1024 * 1024, IndependentClaudeReviewSelection? IndependentReviewer = null);
 
 internal sealed class InstalledReviewHost : IDisposable
 {
     readonly TrustedConfiguration configuration; readonly AdmissionFile configurationPin;
     readonly InstalledReviewSelection selection; readonly ToolLifetime original;
     readonly ProcessCommandExecutor executor;
+    readonly LinuxScopeSelection? linuxScope;
     readonly List<BoundedCommandCaptureResult> captures = [];
     FrozenPlan? frozen; FrozenWorkerPlan? assignment; TrustedConfiguration? boundConfiguration;
     ProductionReviewSourceOwner? sourceOwner; ProductionReviewBootstrap? bootstrap;
+    ClaudeIndependentReviewer? independentReviewer;
     bool entered, disposed, uncertain;
-    internal bool Unknown => uncertain || sourceOwner?.Uncertain == true;
+    internal bool Unknown => uncertain || sourceOwner?.Uncertain == true || independentReviewer?.Unknown == true;
+    internal bool HasIndependentReviewer => selection.IndependentReviewer is not null;
+    internal Task<bool> StopIndependentAsync(HostBridgeFrame frame)
+    {
+        if (!ReferenceEquals(frame.Lifetime, original) || frame.RunId != assignment?.RunId) throw new WorkerEnvelopeException("Only the retained original may stop its independent reviewer.");
+        return independentReviewer?.StopAsync() ?? Task.FromResult(true);
+    }
 
     internal InstalledReviewHost(TrustedConfiguration config, AdmissionFile actualConfigurationPin,
-        ToolLifetime actualOriginal, ProcessCommandExecutor actualExecutor)
+        ToolLifetime actualOriginal, ProcessCommandExecutor actualExecutor, LinuxScopeSelection? selectedLinuxScope = null)
     {
         configuration = config; configurationPin = actualConfigurationPin;
         original = actualOriginal; executor = actualExecutor;
+        linuxScope = selectedLinuxScope;
         selection = config.InstalledReview ?? throw new ToolUsageException("No trusted installed review selection.");
         ValidateSelection(selection);
         if (!Same(config.GitExecutable, selection.GitImage.Path))
@@ -49,6 +60,13 @@ internal sealed class InstalledReviewHost : IDisposable
             !Digest(value.EvidencePolicyIdentity[7..]))
             throw new ToolUsageException("Finite exact Git image, version, protected policy and review bounds required.");
         BoundedFiles.Plain(value.GitImage.Path); BoundedFiles.Plain(value.ArtifactRoot, true);
+        if (value.IndependentReviewer is { } reviewer)
+        {
+            if (reviewer.Image is null || reviewer.Image.Bytes is < 1 or > BoundedFiles.MaximumNativeImageBytes || !Digest(reviewer.Image.Sha256) ||
+                string.IsNullOrWhiteSpace(reviewer.Version) || reviewer.Version.Length > 256 || reviewer.Version.Any(char.IsControl) || reviewer.MaximumSeconds is < 1 or > 600)
+                throw new ToolUsageException("Finite exact native independent reviewer image/version/budget required.");
+            BoundedFiles.Plain(reviewer.Image.Path);
+        }
     }
 
     internal void Bind(FrozenPlan plan, FrozenWorkerPlan actualAssignment, TrustedConfiguration config, ToolLifetime life)
@@ -69,8 +87,49 @@ internal sealed class InstalledReviewHost : IDisposable
         }
         BoundedFiles.Separate(selection.ArtifactRoot, configurationPin.Path);
         BoundedFiles.Separate(selection.ArtifactRoot, selection.GitImage.Path);
+        if (selection.IndependentReviewer is { } reviewer)
+            foreach (var root in new[] { actualAssignment.ParentCheckout, actualAssignment.Worktree, actualAssignment.ResultDirectory, selection.ArtifactRoot }) BoundedFiles.Separate(root, reviewer.Image.Path);
         if (configuration.InstalledQuality is { } quality) BoundedFiles.Separate(selection.ArtifactRoot, quality.ArtifactRoot);
         frozen = plan; assignment = actualAssignment; boundConfiguration = config;
+    }
+
+    internal async Task<ToolResult> RunIndependentAsync(HostBridgeFrame frame, ParentCoordinationHost parent, string? actualAuthorFamily,
+        Func<bool> actualNativeCompletedAndQuiet, IReadOnlyList<GateRunResult> actualQualityResults)
+    {
+        if (selection.IndependentReviewer is null) return ToolResult.Incomplete("INDEPENDENT_REVIEWER_REQUIRED", "No actual independent runtime reviewer was selected.");
+        if (bootstrap is null || sourceOwner is null || assignment is null || frozen is null || frame.Completion is not { } completion ||
+            !ReferenceEquals(frame.Lifetime, original) || !frame.OwnerCompleted || frame.OwnerStopped || !actualNativeCompletedAndQuiet())
+            throw new WorkerEnvelopeException("Same original immutable source preparation and completed author required.");
+        if (actualAuthorFamily != "gpt") return ToolResult.Incomplete("ACTUAL_AUTHOR_FAMILY_REQUIRED", "The completed native author did not expose unambiguous opposite-family provenance.");
+        if (independentReviewer is not null) throw new ToolUsageException("Actual independent reviewer cannot replay.");
+        sourceOwner.Check();
+        async Task<(PatchIdentity Patch, byte[] FrozenPlan)> PrepareEvidence(CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested(); sourceOwner.Check();
+            var identities = new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["plan-contract"] = frozen.ContractIdentity,
+                ["rich-plan"] = frozen.Identity,
+                ["evidence-policy"] = bootstrap.RootContext.EvidencePolicyIdentity,
+                ["trusted-configuration"] = "sha256:" + configurationPin.Sha256
+            };
+            var qualityEvidence = new List<JsonElement>();
+            foreach (var gate in actualQualityResults)
+            {
+                var bytes = parent.EnterSynchronous(assignment.RunId, () => { token.ThrowIfCancellationRequested(); sourceOwner.Check(); return BoundedFiles.Read(gate.ReceiptPath, original); });
+                token.ThrowIfCancellationRequested();
+                identities.Add("quality-receipt:" + gate.ReceiptPath, "sha256:" + BoundedFiles.Sha(bytes));
+                using var doc = JsonDocument.Parse(bytes); qualityEvidence.Add(doc.RootElement.Clone());
+            }
+            var patch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, assignment.BaseCommit, completion.HeadCommit, frozen.ContractIdentity, identities, token).ConfigureAwait(false);
+            var planAndEvidence = JsonSerializer.SerializeToUtf8Bytes(new { FrozenPlan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), QualityEvidence = qualityEvidence, MissingQualityEvidence = actualQualityResults.Count == 0 }, BoundedFiles.Json);
+            token.ThrowIfCancellationRequested(); sourceOwner.Check(); return (patch, planAndEvidence);
+        }
+        independentReviewer = new(selection.IndependentReviewer, original, executor, parent, assignment.RunId, assignment.Worktree, bootstrap,
+            () => ReferenceEquals(frame.Completion, completion) && frame.OwnerCompleted && !frame.OwnerStopped && frame.Primary is null && frame.Post is null && actualNativeCompletedAndQuiet(),
+            () => parent.EnterSynchronous(assignment.RunId, () => { sourceOwner.Check(); _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536); return true; }), linuxScope);
+        return await parent.EnterAsync(assignment.RunId, () => independentReviewer.RunAsync(actualAuthorFamily,
+            Path.Combine(selection.ArtifactRoot, assignment.RunId), PrepareEvidence)).ConfigureAwait(false);
     }
 
     internal bool MatchesRetained(HostBridgeFrame frame, TrustedConfiguration? config, ToolLifetime? life) =>

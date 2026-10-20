@@ -1,0 +1,65 @@
+using System.Text.Json;
+using DeliveryForge.Contracts.Serialization;
+using DeliveryForge.Review;
+
+namespace DeliveryForge.Tool.Claude;
+
+// Parsed native DATA only. These helpers cannot issue capabilities or receipts.
+internal static class ClaudeIndependentReviewData
+{
+    internal static readonly string[] ProviderOverrides = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_SIMPLE"];
+    internal static void RequireSubscriptionEnvironment(Func<string, string?> read)
+    {
+        foreach (var name in ProviderOverrides)
+            if (read(name) is { } value && !string.IsNullOrWhiteSpace(value) && value is not ("0" or "false" or "False"))
+                throw new ToolUsageException("First-party subscription route is not assured while an API/provider override is present: " + name);
+    }
+    internal static void RequireSubscription(byte[] bytes)
+    {
+        _ = CanonicalJson.Canonicalize(bytes); using var doc = JsonDocument.Parse(bytes); var value = doc.RootElement;
+        if (!value.TryGetProperty("loggedIn", out var logged) || logged.ValueKind != JsonValueKind.True ||
+            !value.TryGetProperty("authMethod", out var method) || method.GetString() != "claude.ai" ||
+            !value.TryGetProperty("apiProvider", out var provider) || provider.GetString() != "firstParty")
+            throw new ToolUsageException("Actual reviewer must use its existing first-party Claude subscription login.");
+    }
+    internal static string RequireModel(JsonElement init)
+    {
+        var model = ClaudeStreamState.Text(init, "model");
+        if (model.Length > 256 || !model.StartsWith("claude-", StringComparison.Ordinal) || model.Any(char.IsControl))
+            throw new IOException("Actual first-party reviewer model family is unavailable or ambiguous.");
+        return model;
+    }
+    internal static (string RawVerdict, string Verdict, IReadOnlyList<ReviewFinding> Findings) ParseReport(string text)
+    {
+        if (text.Length is < 1 or > 32768) throw new IOException("Complete reviewer report exceeds its finite profile.");
+        var bytes = System.Text.Encoding.UTF8.GetBytes(text); _ = CanonicalJson.Canonicalize(bytes);
+        using var doc = JsonDocument.Parse(bytes); var root = doc.RootElement;
+        if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Any(p => p.Name is not ("verdict" or "findings")))
+            throw new IOException("Reviewer must return the complete strict report object.");
+        var raw = ClaudeStreamState.Text(root, "verdict");
+        var verdict = raw switch { "ship" => "PASS", "needs-attention" or "do-not-ship" => "FAIL", _ => throw new IOException("Unknown actual reviewer verdict.") };
+        var findings = root.GetProperty("findings");
+        if (findings.ValueKind != JsonValueKind.Array || findings.GetArrayLength() > 128) throw new IOException("Complete finite findings array required.");
+        var result = new List<ReviewFinding>();
+        foreach (var row in findings.EnumerateArray())
+        {
+            if (row.ValueKind != JsonValueKind.Object || row.EnumerateObject().Any(p => p.Name is not ("code" or "severity" or "message" or "location"))) throw new IOException("Unknown reviewer finding member.");
+            var severity = ClaudeStreamState.Text(row, "severity");
+            if (severity is not ("critical" or "high" or "medium" or "low")) throw new IOException("Unknown reviewer severity.");
+            result.Add(new(ClaudeStreamState.Text(row, "code"), severity, ClaudeStreamState.Text(row, "message"), ClaudeStreamState.Text(row, "location")));
+        }
+        return (raw, verdict, result);
+    }
+    internal static (long Tokens, decimal Cost) Usage(JsonElement result)
+    {
+        var usage = result.GetProperty("usage"); long tokens = 0;
+        foreach (var name in new[] { "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens" })
+        {
+            if (!usage.TryGetProperty(name, out var value) || !value.TryGetInt64(out var count) || count < 0) throw new IOException("Complete actual reviewer token usage is missing.");
+            tokens = checked(tokens + count);
+        }
+        if (!result.TryGetProperty("total_cost_usd", out var cost) || !cost.TryGetDecimal(out var amount) || amount < 0)
+            throw new IOException("Actual reviewer cost observation is missing.");
+        return (tokens, amount);
+    }
+}

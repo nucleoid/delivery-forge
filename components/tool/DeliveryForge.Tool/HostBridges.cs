@@ -42,6 +42,9 @@ public abstract class NamedHostAdapter : IHostToolSessionPort, IAgentControlPort
     }
     public IReadOnlyList<HostPortCall> ActualCalls { get { lock (calls) return calls.ToArray(); } }
     public bool HasUnknownCalls(string runId) => unsettledStarts.ContainsKey(runId) || ActualCalls.Any(x => x.RunId == runId && x.Unknown);
+    internal string? CompletedImplementationFamily(AgentCompletionReceipt completion) =>
+        realm == HostObservationRealm.ActualHost && tools is DeliveryForge.Tool.Codex.CodexAppServerPort codex && ObserveBoundNativeQuiescence(completion.RunId)
+            ? codex.CompletedImplementationFamily(completion) : null;
     internal bool ObserveBoundNativeQuiescence(string runId)
     {
         // Only this closed internal concrete fixture can supply genuine native
@@ -186,12 +189,13 @@ internal sealed class RetainedHostTask<T>(ToolLifetime original)
 
 public sealed class HostBridgeFrame
 {
-    internal HostBridgeFrame(string runId, ToolLifetime life, ExecutionCoordinator owner, Func<bool> externalUnknown, bool ownsOriginal) { RunId = runId; Lifetime = life; Owner = owner; ExternalUnknown = externalUnknown; OwnsOriginal = ownsOriginal; Worker = new(life); Quality = new(life); Review = new(life); }
+    internal HostBridgeFrame(string runId, ToolLifetime life, ExecutionCoordinator owner, Func<bool> externalUnknown, bool ownsOriginal) { RunId = runId; Lifetime = life; Owner = owner; ExternalUnknown = externalUnknown; OwnsOriginal = ownsOriginal; Worker = new(life); Quality = new(life); Review = new(life); IndependentReview = new(life); }
     readonly Func<bool> ExternalUnknown; readonly bool OwnsOriginal;
     internal readonly object ReconciliationGate = new();
     internal RetainedHostTask<ToolResult> Worker { get; }
     internal RetainedHostTask<ToolResult> Quality { get; }
     internal RetainedHostTask<ToolResult> Review { get; }
+    internal RetainedHostTask<ToolResult> IndependentReview { get; }
     readonly List<(QuiescenceResult Pause, RetainedHostTask<ResumeResult> Control)> resumeControls = [];
     QuiescenceResult? actualPause;
     internal QuiescenceResult? ActualPause { get { lock (ReconciliationGate) return actualPause; } }
@@ -233,7 +237,7 @@ public sealed class HostBridgeFrame
     public AgentCompletionReceipt? Completion { get; internal set; }
     public bool OwnerCompleted { get; internal set; }
     public bool OwnerStopped { get; internal set; }
-    public bool Unknown => Worker.Unknown || Quality.Unknown || Review.Unknown || ResumeControls.Any(control => control.Unknown) || RouteActive || InvocationUnknown || EnteredTasks.Any(t => !t.IsCompleted) || Owner.HasPendingControlOperations(RunId) || ExternalUnknown() || (Accepted is not null && !OwnerCompleted && !OwnerStopped);
+    public bool Unknown => Worker.Unknown || Quality.Unknown || Review.Unknown || IndependentReview.Unknown || ResumeControls.Any(control => control.Unknown) || RouteActive || InvocationUnknown || EnteredTasks.Any(t => !t.IsCompleted) || Owner.HasPendingControlOperations(RunId) || ExternalUnknown() || (Accepted is not null && !OwnerCompleted && !OwnerStopped);
     internal async Task<T> Enter<T>(Func<Task<T>> invoke)
     {
         Lifetime.Check(); T value = default!; Exception? primary = null; Exception? post = null; var operation = AdmitOperation();
@@ -295,7 +299,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
         // CurrentAsync/EnterAsync admission. Every actual containing phase and
         // child/control remains an obligation; only this observation route is
         // excluded. In particular an unreturned phase invocation is not quiet.
-        if (actual.Worker.Unknown || actual.Quality.Unknown || actual.Review.Unknown || actual.ResumeControls.Any(control => control.Unknown) || actual.InvocationUnknown || actual.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(runId) || !adapter.ObserveBoundNativeQuiescence(runId) || !coordinator.ObserveOriginalProcessesSettled(runId)) return false;
+        if (actual.Worker.Unknown || actual.Quality.Unknown || actual.Review.Unknown || actual.IndependentReview.Unknown || actual.ResumeControls.Any(control => control.Unknown) || actual.InvocationUnknown || actual.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(runId) || !adapter.ObserveBoundNativeQuiescence(runId) || !coordinator.ObserveOriginalProcessesSettled(runId)) return false;
         return actual.OwnerCompleted || actual.OwnerStopped || actual.Accepted is null && !adapter.ActualCalls.Any(call => call.RunId == runId && call.Kind == "Start");
     }
     readonly ConcurrentDictionary<string, HostBridgeFrame> frames = new(StringComparer.Ordinal);
@@ -351,6 +355,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
                     () => NativeCompletedAndQuiet(frame)));
                 reviewPreparation = await frame.Review.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
             }
+            ToolResult? qualityResult = null;
             if (installedQuality is not null)
             {
                 foreach (var enteredControl in frame.ResumeControls)
@@ -363,9 +368,19 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
                 if (frame.Primary is not null || frame.Post is not null || coordination is null || adapter.Realm == HostObservationRealm.ContractFixture || frame.InvocationUnknown || frame.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(plan.RunId) || !adapter.ObserveBoundNativeQuiescence(plan.RunId) || !coordinator.ObserveOriginalProcessesSettled(plan.RunId))
                     throw new WorkerEnvelopeException("Installed quality requires the genuine original completed native worker and current parent owner.");
                 frame.Quality.Start(frame.Lifetime, () => installedQuality.RunCompletedAsync(frame, coordination));
-                var quality = await frame.Quality.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
-                return reviewPreparation is null ? quality : quality with { Data = new { Quality = quality.Data, ReviewPreparation = reviewPreparation } };
+                qualityResult = await frame.Quality.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
             }
+            if (installedReview?.HasIndependentReviewer == true)
+            {
+                if (coordination is null || !NativeCompletedAndQuiet(frame) || frame.Quality.Unknown || installedQuality?.Unknown == true || frame.EnteredTasks.Any(task => !task.IsCompleted)) throw new WorkerEnvelopeException("Actual independent review requires its same original completed author and settled quality originals.");
+                var completion = frame.Completion ?? throw new WorkerEnvelopeException("Actual original completion is absent.");
+                frame.IndependentReview.Start(frame.Lifetime, () => installedReview.RunIndependentAsync(frame, coordination, adapter.CompletedImplementationFamily(completion),
+                    () => NativeCompletedAndQuiet(frame) && !frame.Quality.Unknown && installedQuality?.Unknown != true, installedQuality?.RetainedResults ?? Array.Empty<DeliveryForge.Evidence.GateRunResult>()));
+                var reviewed = await frame.IndependentReview.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
+                if (qualityResult is null) return reviewed;
+                return qualityResult with { Data = new { Quality = qualityResult.Data, Review = reviewed, ReviewPreparation = reviewPreparation } };
+            }
+            if (qualityResult is not null) return reviewPreparation is null ? qualityResult : qualityResult with { Data = new { Quality = qualityResult.Data, ReviewPreparation = reviewPreparation } };
             if (reviewPreparation is not null) return reviewPreparation;
             return new("COMPLETE", adapter.Realm == HostObservationRealm.ContractFixture ? "CONTRACT_FIXTURE_COMPLETE" : "OWNER_COMPLETED_REQUIRES_PROFILE_AUDIT", "Actual owner completion recorded; quality/review/publication and installed certification remain separate.", new { committed.RunId, committed.Sequence, committed.Sha256, Realm = adapter.Realm.ToString() });
         }
@@ -384,13 +399,14 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
         {
             // Stop is the existing owner's actual control, not a new agent kill or
             // timeout refund. It ignores caller cancellation only within cleanup.
+            var reviewerClosed = installedReview is null || await frame.EnterCleanup(_ => installedReview.StopIndependentAsync(frame)).ConfigureAwait(false);
             var result = await frame.EnterCleanup(left => coordinator.StopAsync(runId, left, CancellationToken.None)).ConfigureAwait(false);
             if (result.Quiescent)
             {
                 lock (frame.ReconciliationGate) frame.OwnerStopped = true;
                 if (frame.Accepted is AgentAcceptedReceipt a) adapter.MarkOwnerCompleted(new(a.AdapterId, a.AdapterVersion, a.RunId, a.RequestIdentity, a.RuntimeRunIdentity, a.RuntimeTaskIdentity));
             }
-            return new(result.Quiescent ? "COMPLETE" : "INCOMPLETE", "OWNER_STOP", "Actual same-owner stop observation recorded; unknown original tasks still prevent frame disposal.", new { runId, result.Quiescent, frame.Unknown });
+            return new(result.Quiescent && reviewerClosed ? "COMPLETE" : "INCOMPLETE", "OWNER_STOP", "Actual same-owner stop observation recorded; unknown original tasks still prevent frame disposal.", new { runId, result.Quiescent, ReviewerClosed = reviewerClosed, frame.Unknown });
         }
         catch (Exception error) { frame.Primary ??= error; return ToolResult.Incomplete("STOP_RETAINED", "Stop failed or exceeded the SAME original cleanup endpoint; originals retained.", new { runId, frame.Unknown, Type = error.GetType().FullName }); }
         finally { frame.LeaveRoute(); frame.CloseWhenSettled(); }

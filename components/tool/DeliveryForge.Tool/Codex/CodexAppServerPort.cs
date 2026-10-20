@@ -25,6 +25,20 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     public HostObservationRealm Realm => HostObservationRealm.ActualHost;
     public IReadOnlyList<Task> OriginalTasks { get { lock (tasks) return tasks.ToArray(); } }
     public OwnedDuplexProcess? OriginalProcess => process; // reference only, never a PID adoption API.
+    string? observedModel, observedProvider; bool observedChatgptAccount; volatile bool accountReadRefused; long accountReadId;
+    internal string? CompletedImplementationFamily(AgentCompletionReceipt completion)
+    {
+        lock (gate)
+        {
+            var retirement = process?.OriginalRetirementTask;
+            if (request is null || binding is null || completion.RunId != request.RunId || completion.RequestIdentity != request.RequestIdentity ||
+                completion.RuntimeRunIdentity != binding.RuntimeRunIdentity || completion.RuntimeTaskIdentity != binding.RuntimeTaskIdentity ||
+                !observedChatgptAccount || observedProvider != "openai" || observedModel is not { Length: > 4 and <= 256 } || observedModel.Any(char.IsControl) || !observedModel.StartsWith("gpt-", StringComparison.Ordinal) ||
+                retirement is null || !retirement.IsCompletedSuccessfully || !retirement.Result.KnownClosed || retirement.Result.ExitCode != 0 || process!.HasUnknownIo)
+                return null;
+            return "gpt";
+        }
+    }
     public CodexAppServerPort(CodexAppServerSelection selection, WorktreeManager actualGit, AgentAdapterProfile acceptedProfile, LinuxScopeSelection? linuxScope = null)
     {
         this.linuxScope = linuxScope;
@@ -39,6 +53,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     async Task<JsonElement> Rpc(string method, object parameters, CancellationToken token)
     {
         original.Check(); var id = Interlocked.Increment(ref nextId); if (id > 64) throw new IOException("Fixed Codex RPC allowance exceeded."); var reply = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously); if (!pending.TryAdd(id, reply)) throw new IOException("Codex duplicate private request ID.");
+        if (method == "account/read") Volatile.Write(ref accountReadId, id);
         await Keep(protocol!.WriteAsync(new { id, method, @params = parameters }, token)).ConfigureAwait(false);
         return await Keep(reply.Task).WaitAsync(original.Remaining, token).ConfigureAwait(false);
     }
@@ -49,7 +64,9 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             while (true)
             {
                 using var doc = await protocol!.ReadAsync(token).ConfigureAwait(false); if (doc is null) { if (!shutdown) throw new IOException("Unexpected app-server EOF."); return; }
-                var message = doc.RootElement; CodexJsonlProtocol.RequireEnvelope(message); lock (trace) { if (trace.Count >= 4096) throw new IOException("Codex event trace exceeded."); trace.Add(message.Clone()); }
+                var message = doc.RootElement; CodexJsonlProtocol.RequireEnvelope(message);
+                if (!message.TryGetProperty("method", out _) && message.TryGetProperty("id", out var accountId) && accountId.ValueKind == JsonValueKind.Number && accountId.TryGetInt64(out var observedId) && observedId == Volatile.Read(ref accountReadId)) message = CodexAccountReadData.Redact(message);
+                lock (trace) { if (trace.Count >= 4096) throw new IOException("Codex event trace exceeded."); trace.Add(message.Clone()); }
                 if (message.TryGetProperty("method", out var method))
                 {
                     if (message.TryGetProperty("id", out var serverId))
@@ -66,7 +83,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                     continue;
                 }
                 var responseId = message.GetProperty("id"); if (!responseId.TryGetInt64(out var number) || !pending.TryRemove(number, out var waiter)) throw new IOException("Foreign/duplicate Codex response ID.");
-                if (message.TryGetProperty("error", out var error)) { waiter.TrySetException(new IOException("Actual app-server response error: " + error.GetRawText())); continue; }
+                if (message.TryGetProperty("error", out var error)) { if (number == Volatile.Read(ref accountReadId)) accountReadRefused = true; waiter.TrySetException(new IOException("Actual app-server response error: " + error.GetRawText())); continue; }
                 waiter.TrySetResult(message.GetProperty("result").Clone());
             }
         }
@@ -87,6 +104,16 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             // Omit model/provider/approval overrides: preserve actual configured
             // model, existing sign-in and host policy. No experimental fields.
             var started = await Rpc("thread/start", new { cwd = actual.Worktree }, token).ConfigureAwait(false); threadId = Text(started.GetProperty("thread"), "id");
+            if (started.TryGetProperty("model", out var model) && model.ValueKind == JsonValueKind.String) observedModel = model.GetString();
+            if (started.TryGetProperty("modelProvider", out var provider) && provider.ValueKind == JsonValueKind.String) observedProvider = provider.GetString();
+            // Optional read-only provenance. Unsupported/account-unavailable
+            // metadata never becomes a family proof or changes worker dispatch.
+            try
+            {
+                var account = await Rpc("account/read", new { refreshToken = false }, token).ConfigureAwait(false);
+                observedChatgptAccount = account.GetProperty("account") is { ValueKind: JsonValueKind.Object } actualAccount && actualAccount.GetProperty("type").GetString() == "chatgpt";
+            }
+            catch (IOException) when (accountReadRefused && pumpFailure is null) { observedChatgptAccount = false; }
             var turn = await Rpc("turn/start", HostAssignmentPrompt.CodexTurnStart(actual, instructions!, threadId), token).ConfigureAwait(false); turnId = Text(turn.GetProperty("turn"), "id");
             lock (gate) { terminalWait = new(TaskCreationOptions.RunContinuationsAsynchronously); if (terminals.TryGetValue(turnId, out var early)) { if (Text(early.GetProperty("params"), "threadId") != threadId) throw new IOException("Early terminal has foreign actual thread."); terminalWait.TrySetResult(early); } binding = new(actual.AdapterId, actual.AdapterVersion, actual.RunId, actual.RequestIdentity, threadId, turnId); }
             original.Check(); return new(actual.SchemaVersion, actual.RunId, actual.RequestIdentity, actual.PlanIdentity, actual.BaseCommit, actual.Worktree, actual.AdapterId, actual.AdapterVersion, threadId, turnId, DateTimeOffset.UtcNow, Profile.Capabilities);

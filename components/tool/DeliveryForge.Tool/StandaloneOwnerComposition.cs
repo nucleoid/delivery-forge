@@ -36,7 +36,7 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         NamedHostAdapter adapter = config.Adapter switch { "codex.cli" => new CodexHostAdapter(actualNativePort), "claude-code.cli" => new ClaudeHostAdapter(actualNativePort), "pi.cli" => new PiHostAdapter(actualNativePort), _ => throw new ToolUsageException("No real standalone transport for selected optional host.") };
         processes = new ProcessControl(); var store = new RunStore(BoundedFiles.Plain(actualStoreRoot, true)); coordinator = new(store, worktrees, processes, adapter); bridge = new(coordinator, adapter, requireCoordination: true);
         if (config.InstalledQuality is not null) bridge.BindInstalledQuality(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing quality requires the actual pinned root configuration."), actualOriginal, worktrees, selectedLinuxScope));
-        if (config.InstalledReview is not null) bridge.BindInstalledReview(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing review requires the actual pinned root configuration."), actualOriginal, executor));
+        if (config.InstalledReview is not null) bridge.BindInstalledReview(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing review requires the actual pinned root configuration."), actualOriginal, executor, selectedLinuxScope));
         Application = new(bridge, assignments: new LocalWorkerAssignmentPort(actualOriginal, workerPaths), actualExecutor: executor, actualOriginal: actualOriginal, actualConfigurationPin: actualConfigurationPin);
         actualOriginal.Check();
     }
