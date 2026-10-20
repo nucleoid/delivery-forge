@@ -10,6 +10,27 @@ if (mode == "orphan-child")
     using (var file = new FileStream(Path.Combine(directory, nonce + "-child-returned"), FileMode.CreateNew, FileAccess.Write, FileShare.Read)) file.WriteByte(1);
     return 0;
 }
+if (mode == "orphan-child-release")
+{
+    using (var file = new FileStream(Path.Combine(directory, nonce + "-child-entered"), FileMode.CreateNew, FileAccess.Write, FileShare.Read)) file.WriteByte(1);
+    Console.Out.Close(); Console.Error.Close(); Console.In.Close();
+    // This control's child cannot spend its four-second future effect while
+    // the test is still establishing actual root exit/owned membership.
+    var release = Path.Combine(directory, nonce + "-child-release");
+    var waiting = Stopwatch.GetTimestamp();
+    while (!File.Exists(release)) { if (Stopwatch.GetElapsedTime(waiting) > TimeSpan.FromSeconds(30)) return 66; await Task.Delay(5); }
+    if (await File.ReadAllTextAsync(release) != nonce) return 70;
+    var futureMarker = Task.Delay(4000);
+    var armed = Path.Combine(directory, nonce + "-child-armed");
+    using (var file = new FileStream(armed + ".tmp", FileMode.CreateNew, FileAccess.Write, FileShare.Read))
+    {
+        file.Write(System.Text.Encoding.UTF8.GetBytes(nonce)); file.Flush(true);
+    }
+    File.Move(armed + ".tmp", armed); // Only publish the complete closed acknowledgement.
+    await futureMarker;
+    using (var file = new FileStream(Path.Combine(directory, nonce + "-child-returned"), FileMode.CreateNew, FileAccess.Write, FileShare.Read)) file.WriteByte(1);
+    return 0;
+}
 if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) return 68;
 if (mode is "parent-contract" or "parent-contract-hold") Console.Out.NewLine = "\n";
 using (var actual = Process.GetCurrentProcess())
@@ -43,5 +64,14 @@ if (mode == "orphan-parent")
     using var child = Process.Start(info) ?? throw new IOException("Actual fixture child did not start.");
     var bound = Stopwatch.GetTimestamp(); while (!File.Exists(Path.Combine(directory, nonce + "-child-entered"))) { if (Stopwatch.GetElapsedTime(bound) > TimeSpan.FromSeconds(3)) return 66; await Task.Delay(5); }
     return 0; // Ordinary descendant intentionally outlives this root, with closed pipes.
+}
+if (mode == "orphan-parent-release")
+{
+    var image = Environment.ProcessPath ?? throw new IOException("Actual fixture apphost required.");
+    var info = new ProcessStartInfo(image) { UseShellExecute = false, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+    foreach (var arg in new[] { "orphan-child-release", directory, nonce }) info.ArgumentList.Add(arg);
+    using var child = Process.Start(info) ?? throw new IOException("Actual fixture child did not start.");
+    var bound = Stopwatch.GetTimestamp(); while (!File.Exists(Path.Combine(directory, nonce + "-child-entered"))) { if (Stopwatch.GetElapsedTime(bound) > TimeSpan.FromSeconds(3)) return 66; await Task.Delay(5); }
+    return 0; // The independent test releases this live descendant after observing root exit.
 }
 return 67;

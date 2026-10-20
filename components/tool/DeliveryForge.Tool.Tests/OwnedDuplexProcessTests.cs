@@ -113,23 +113,43 @@ public sealed class OwnedDuplexProcessTests
     {
         var gitImage = Environment.GetEnvironmentVariable("DELIVERY_FORGE_DUPLEX_TEST_GIT") ?? throw new IOException("Explicit actual Git image required for post-retirement verification.");
         Assert.True(Path.IsPathFullyQualified(gitImage) && File.Exists(gitImage));
-        using var affinity = new Affinity(); await using var run = new Run("orphan-parent"); await run.Ready();
+        using var affinity = new Affinity(); await using var run = new Run("orphan-parent-release"); await run.Ready();
         var originalStarted = run.Original.OriginalStarted; var whole = run.Original.WholeLimit; var work = run.Original.WorkLimit;
-        Assert.Equal(0, await run.Session.Output.ReadAsync(new byte[1], 0, 1, run.Original.Token));
-        Assert.True(File.Exists(Path.Combine(run.DirectoryPath, run.Nonce + "-child-entered")));
+        // Root completion is a native observation. An inherited pipe writer in
+        // the surviving descendant can keep stdout open until actual retirement.
         DuplexNativeObservation before;
         do { run.Original.Check(); before = run.Session.ObserveActualNative(); if (!before.RootExited) await Task.Delay(5, run.Original.Token); } while (!before.RootExited);
         Assert.True(before.Known); Assert.Equal(0, before.ExitCode); Assert.True(before.ActiveProcesses > 0);
+        Assert.True(File.Exists(Path.Combine(run.DirectoryPath, run.Nonce + "-child-entered")));
         var retiring = Stopwatch.GetTimestamp(); var first = run.Session.RetireAsync(false);
-        Assert.Same(first, run.Session.RetireAsync(false)); var closed = await first;
+        Assert.Same(first, run.Session.RetireAsync(false));
+        // RetireCore has entered its unchanged grace before the first await.
+        // Only now release the actual waiting child: its four-second future
+        // effect cannot already be consumed by root-exit/observation latency.
+        var release = Path.Combine(run.DirectoryPath, run.Nonce + "-child-release");
+        BoundedFiles.WriteNew(release + ".tmp", Encoding.UTF8.GetBytes(run.Nonce), run.Original);
+        run.Original.Check(); File.Move(release + ".tmp", release); run.Original.Check();
+        var armed = Path.Combine(run.DirectoryPath, run.Nonce + "-child-armed");
+        while (!File.Exists(armed))
+        {
+            run.Original.Check();
+            if (first.IsCompleted) { await first; throw new IOException("Actual held child retired before acknowledging its released future marker."); }
+            await Task.Delay(5, run.Original.Token);
+        }
+        Assert.Equal(run.Nonce, Encoding.UTF8.GetString(BoundedFiles.Read(armed, run.Original, 64)));
+        var armedObserved = Stopwatch.GetTimestamp();
+        var closed = await first;
         Assert.True(Stopwatch.GetElapsedTime(retiring) >= TimeSpan.FromSeconds(2), "The actual live descendant must outlast the unchanged two-second root grace.");
         HostTransportRetirement.RequireSuccessful(closed); AssertPhysicalScope(closed);
         Assert.True(closed.InputCloseReturned && closed.OutputEof && closed.ErrorEof); Assert.False(run.Session.HasUnknownIo);
         Assert.All(run.Session.ActualIo, row => Assert.False(row.Unknown)); run.Original.Check();
         Assert.Equal(originalStarted, run.Original.OriginalStarted); Assert.Equal(whole, run.Original.WholeLimit); Assert.Equal(work, run.Original.WorkLimit);
-        // Observe beyond the real child's four-second marker. Root exit/EOF alone
-        // cannot pass while that original descendant still has future effects.
-        await Task.Delay(2500, run.Original.Token); run.Original.Check();
+        // The child's timer was started before its complete acknowledgement.
+        // Observe more than four real seconds AFTER that acknowledgement;
+        // root exit/EOF alone cannot pass while it still has this future effect.
+        var markerWindow = TimeSpan.FromSeconds(4.5) - Stopwatch.GetElapsedTime(armedObserved);
+        if (markerWindow > TimeSpan.Zero) await Task.Delay(markerWindow, run.Original.Token);
+        run.Original.Check(); Assert.True(Stopwatch.GetElapsedTime(armedObserved) > TimeSpan.FromSeconds(4));
         Assert.False(File.Exists(Path.Combine(run.DirectoryPath, run.Nonce + "-child-returned")));
         var repository = Path.Combine(run.DirectoryPath, "post-retirement-git"); run.Original.Check(); Directory.CreateDirectory(repository); run.Original.Check();
         var executor = ActualOrdinaryCapture.Select(run.Original);
