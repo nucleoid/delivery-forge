@@ -110,7 +110,7 @@ MCP App surfaces follow the public `openai/mcp-extensions` spec: an **inline** c
 
 **Installed-host evidence for the UX-2 renderer, captured 2026-10-20 on a Windows 11 laptop.** Every image in this section is labelled **NATIVE**: a cropped screen capture of the real host rendering the UX-2 output, driven only by local input (`!` user-shell lines in Codex, a session-scoped `statusLine` in Claude Code, `/forge-demo` commands and panel keys in Pi). No prompt was sent to any model for a published frame. Host version, surface, source commit, fixture, command, capture time, dimensions and SHA-256 for each file are in the [UX-2 capture ledger](assets/native-capture-ledger-dcfafae.json), together with the host launch lines, the MCP-disabled receipt, one defect the captures exposed, two incidents during capture and the caveats. All 13 images were accepted by parent pixel review on 2026-10-20 ([review comment on PR #45](https://github.com/nucleoid/delivery-forge/pull/45#issuecomment-6280208245)): correct state, readable labels, colour intact on Pi, no private paths or account data, no false green.
 
-**Versions.** By owner decision this revision captures the latest installed version of each TUI rather than the UX-1 pinned profiles, which supersedes the "no host upgrade" line in [epic #36](https://github.com/nucleoid/delivery-forge/issues/36) for UX-2; the owner may still override on the PR. The capability matrix still lists the UX-1 pins and is not updated here.
+**Versions.** By owner decision this revision captures the latest installed version of each TUI rather than the UX-1 pinned profiles, which supersedes the "no host upgrade" line in [epic #36](https://github.com/nucleoid/delivery-forge/issues/36) for UX-2; the owner may still override on the PR. The [capability matrix](../native-presentations/capability-matrix.md#target-profile-admission) now admits these versions as the UX-2 target profiles, with the UX-1 pins kept as its historical row.
 
 | Host | UX-1 pinned | Captured | Frames |
 |---|---|---|---|
@@ -163,7 +163,7 @@ The first native widget frame exposed a UX-2 defect: with a real host theme the 
 ### What this changes about the claims above
 
 - The three "not re-captured on the installed host for UX-2" notes in the host-wiring table are superseded by this section.
-- Admission of 0.162.1 and 1.3.0 in the capability matrix, and any UX-1 ledger cross-reference, remain follow-up documentation work.
+- Admission of 0.162.1, 2.1.303 and 1.3.0 in the [capability matrix](../native-presentations/capability-matrix.md#target-profile-admission) is done, citing this ledger as the installed-rendering evidence. A UX-1 ledger cross-reference remains follow-up documentation work.
 
 ## Honesty rules carried over unchanged
 
@@ -187,6 +187,6 @@ npm run screenshots:ux2           # writes assets/*.png and assets/manifest.json
 
 ## Not done in this revision
 
-- Installed-host captures of Codex, Claude Code and Pi with the UX-2 renderer exist and passed parent pixel review (see [Native captures](#native-captures)). The capability matrix still lists the UX-1 pins; recording 0.162.1 and 1.3.0 there, and the formal acceptance of each native surface, remain work items #38, #39, #40 and #41.
+- Installed-host captures of Codex, Claude Code and Pi with the UX-2 renderer exist and passed parent pixel review (see [Native captures](#native-captures)). The [capability matrix](../native-presentations/capability-matrix.md#target-profile-admission) admits 0.162.1, 2.1.303 and 1.3.0 as the UX-2 profiles; the formal acceptance of each native surface remains work items #38, #39, #40 and #41.
 - No embedding test in Claude Code Desktop or the Codex desktop app. The mockups show where the panel would live according to public documentation; admission of each desktop surface still needs its own capability and version check.
 - The companion web app and the mobile layout from UX-1 were intentionally left as they were; the user asked for the TUI and the two desktop experiences.
