@@ -22,6 +22,10 @@ internal sealed class InstalledQualityHost
     readonly List<GateRunResult> results = [];
     internal IReadOnlyList<GateRunResult> RetainedResults => results.ToArray();
     readonly Dictionary<string, GateRunResult> gateResults = new(StringComparer.Ordinal);
+    readonly Dictionary<string, AdmissionFile> gateReceiptPins = new(StringComparer.Ordinal);
+    HostBridgeFrame? protectedCompletedFrame;
+    AgentCompletionReceipt? protectedCompletedWorker;
+    internal bool HasLocalRealCompletion(HostBridgeFrame frame) => ReferenceEquals(protectedCompletedFrame, frame);
     internal bool Unknown => tools?.HasUncertainOriginals == true;
     internal InstalledQualityHost(TrustedConfiguration config, AdmissionFile actualConfigurationPin,
         ToolLifetime actualOriginal, WorktreeManager actualWorktrees, LinuxScopeSelection? selectedLinuxScope = null)
@@ -164,6 +168,7 @@ internal sealed class InstalledQualityHost
                     _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
                     _ = InstalledHostAdmission.ReadExact(gate.Profile, original, 1048576);
                     var bytes = BoundedFiles.Read(result.ReceiptPath, original, 1048576);
+                    gateReceiptPins.Add(gate.GateId, new(result.ReceiptPath, bytes.LongLength, BoundedFiles.Sha(bytes)));
                     BoundedFiles.WriteNew(Path.Combine(output, gate.GateId + "-settled.json"), JsonSerializer.SerializeToUtf8Bytes(new { run.RunId, run.PlanIdentity, run.BaseCommit, completion.HeadCommit, completion.TreeId, gate.GateId, Outcome = result.Outcome.ToString(), result.Fixture, result.ProductionCapable, Receipt = new AdmissionFile(result.ReceiptPath, bytes.LongLength, BoundedFiles.Sha(bytes)), BaselineApproved = false, ProductionAuthority = false }), original);
                     return true;
                 });
@@ -205,6 +210,21 @@ internal sealed class InstalledQualityHost
             return new("BLOCKED", "PROTECTED_BASELINE_REGRESSION", comparison.Reason, new { run.RunId, comparison });
         if (comparison.Outcome != GateOutcome.Pass)
             return ToolResult.Incomplete("PROTECTED_BASELINE_INCOMPLETE", comparison.Reason, new { run.RunId, comparison });
+        protectedCompletedFrame = frame; protectedCompletedWorker = completion;
         return ToolResult.Incomplete("PROTECTED_QUALITY_PASSED_INDEPENDENT_REVIEW_REQUIRED", "Actual installed gates and owner-approved protected baseline comparison passed; independent review and later publication authorization remain separate.", new { run.RunId, comparison, PublicationAuthority = false });
+    }
+
+    internal async Task<IReadOnlyList<DeliveryForge.Contracts.Validation.ValidatedContract>?> LocalRealEvidenceAsync(HostBridgeFrame frame, ParentCoordinationHost parent)
+    {
+        if (!ReferenceEquals(protectedCompletedFrame, frame) || protectedCompletedWorker is null || selection.Registry is null) return null;
+        await CurrentAsync(frame, protectedCompletedWorker, parent).ConfigureAwait(false);
+        if (results.Count != selection.Gates.Count || results.Any(row => row.Outcome != GateOutcome.Pass || row.Fixture || !row.ProductionCapable || row.SourceChanged))
+            throw new WorkerEnvelopeException("Local-real requires every actual nonfixture production-capable gate and protected comparison.");
+        return parent.EnterSynchronous(frame.RunId, () =>
+        {
+            var receipts = selection.Gates.Select(gate => DeliveryForge.Contracts.Validation.ContractValidator.ParseAndValidate(
+                InstalledHostAdmission.ReadExact(gateReceiptPins[gate.GateId], original, 1048576))).ToArray();
+            original.Check(); return Array.AsReadOnly(receipts);
+        });
     }
 }

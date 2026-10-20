@@ -189,13 +189,14 @@ internal sealed class RetainedHostTask<T>(ToolLifetime original)
 
 public sealed class HostBridgeFrame
 {
-    internal HostBridgeFrame(string runId, ToolLifetime life, ExecutionCoordinator owner, Func<bool> externalUnknown, bool ownsOriginal) { RunId = runId; Lifetime = life; Owner = owner; ExternalUnknown = externalUnknown; OwnsOriginal = ownsOriginal; Worker = new(life); Quality = new(life); Review = new(life); IndependentReview = new(life); }
+    internal HostBridgeFrame(string runId, ToolLifetime life, ExecutionCoordinator owner, Func<bool> externalUnknown, bool ownsOriginal) { RunId = runId; Lifetime = life; Owner = owner; ExternalUnknown = externalUnknown; OwnsOriginal = ownsOriginal; Worker = new(life); Quality = new(life); Review = new(life); IndependentReview = new(life); LocalReal = new(life); }
     readonly Func<bool> ExternalUnknown; readonly bool OwnsOriginal;
     internal readonly object ReconciliationGate = new();
     internal RetainedHostTask<ToolResult> Worker { get; }
     internal RetainedHostTask<ToolResult> Quality { get; }
     internal RetainedHostTask<ToolResult> Review { get; }
     internal RetainedHostTask<ToolResult> IndependentReview { get; }
+    internal RetainedHostTask<ToolResult> LocalReal { get; }
     readonly List<(QuiescenceResult Pause, RetainedHostTask<ResumeResult> Control)> resumeControls = [];
     QuiescenceResult? actualPause;
     internal QuiescenceResult? ActualPause { get { lock (ReconciliationGate) return actualPause; } }
@@ -237,7 +238,7 @@ public sealed class HostBridgeFrame
     public AgentCompletionReceipt? Completion { get; internal set; }
     public bool OwnerCompleted { get; internal set; }
     public bool OwnerStopped { get; internal set; }
-    public bool Unknown => Worker.Unknown || Quality.Unknown || Review.Unknown || IndependentReview.Unknown || ResumeControls.Any(control => control.Unknown) || RouteActive || InvocationUnknown || EnteredTasks.Any(t => !t.IsCompleted) || Owner.HasPendingControlOperations(RunId) || ExternalUnknown() || (Accepted is not null && !OwnerCompleted && !OwnerStopped);
+    public bool Unknown => Worker.Unknown || Quality.Unknown || Review.Unknown || IndependentReview.Unknown || LocalReal.Unknown || ResumeControls.Any(control => control.Unknown) || RouteActive || InvocationUnknown || EnteredTasks.Any(t => !t.IsCompleted) || Owner.HasPendingControlOperations(RunId) || ExternalUnknown() || (Accepted is not null && !OwnerCompleted && !OwnerStopped);
     internal async Task<T> Enter<T>(Func<Task<T>> invoke)
     {
         Lifetime.Check(); T value = default!; Exception? primary = null; Exception? post = null; var operation = AdmitOperation();
@@ -266,8 +267,14 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
     ParentCoordinationHost? coordination;
     InstalledQualityHost? installedQuality;
     InstalledReviewHost? installedReview;
+    LocalRealGoldenOwner? localRealGolden;
     internal bool HasInstalledQuality => installedQuality is not null;
     internal bool HasInstalledReview => installedReview is not null;
+    internal bool HasLocalRealGolden => localRealGolden is not null;
+    internal void BindLocalRealGolden(LocalRealGoldenOwner actual)
+    {
+        lock (registration) { if (localRealGolden is not null || frames.Count != 0) throw new ToolUsageException("Local-real binds the idle actual bridge once."); localRealGolden = actual; }
+    }
     internal void BindInstalledReview(InstalledReviewHost actual)
     {
         lock (registration) { if (installedReview is not null || frames.Count != 0) throw new ToolUsageException("Installed review binds the idle actual bridge once."); installedReview = actual; }
@@ -291,6 +298,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
         coordination.BindSelection(plan, assignment, config, original);
         installedQuality?.Bind(plan, assignment, config, original);
         installedReview?.Bind(plan, assignment, config, original);
+        localRealGolden?.Bind(plan, assignment, config, original);
     }
     internal bool ObserveCoordinationWorkSettled(string runId)
     {
@@ -299,7 +307,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
         // CurrentAsync/EnterAsync admission. Every actual containing phase and
         // child/control remains an obligation; only this observation route is
         // excluded. In particular an unreturned phase invocation is not quiet.
-        if (actual.Worker.Unknown || actual.Quality.Unknown || actual.Review.Unknown || actual.IndependentReview.Unknown || actual.ResumeControls.Any(control => control.Unknown) || actual.InvocationUnknown || actual.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(runId) || !adapter.ObserveBoundNativeQuiescence(runId) || !coordinator.ObserveOriginalProcessesSettled(runId)) return false;
+        if (actual.Worker.Unknown || actual.Quality.Unknown || actual.Review.Unknown || actual.IndependentReview.Unknown || actual.LocalReal.Unknown || actual.ResumeControls.Any(control => control.Unknown) || actual.InvocationUnknown || actual.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(runId) || !adapter.ObserveBoundNativeQuiescence(runId) || !coordinator.ObserveOriginalProcessesSettled(runId)) return false;
         return actual.OwnerCompleted || actual.OwnerStopped || actual.Accepted is null && !adapter.ActualCalls.Any(call => call.RunId == runId && call.Kind == "Start");
     }
     readonly ConcurrentDictionary<string, HostBridgeFrame> frames = new(StringComparer.Ordinal);
@@ -370,6 +378,8 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
                 frame.Quality.Start(frame.Lifetime, () => installedQuality.RunCompletedAsync(frame, coordination));
                 qualityResult = await frame.Quality.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
             }
+            if (localRealGolden is not null && installedQuality?.HasLocalRealCompletion(frame) != true)
+                return qualityResult ?? ToolResult.Incomplete("LOCAL_REAL_PROTECTED_BASELINE_REQUIRED", "Actual protected quality and independently approved baseline completion are required before local-real review/publication.");
             if (installedReview?.HasIndependentReviewer == true)
             {
                 if (coordination is null || !NativeCompletedAndQuiet(frame) || frame.Quality.Unknown || installedQuality?.Unknown == true || frame.EnteredTasks.Any(task => !task.IsCompleted)) throw new WorkerEnvelopeException("Actual independent review requires its same original completed author and settled quality originals.");
@@ -377,9 +387,15 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
                 frame.IndependentReview.Start(frame.Lifetime, () => installedReview.RunIndependentAsync(frame, coordination, adapter.CompletedImplementationFamily(completion),
                     () => NativeCompletedAndQuiet(frame) && !frame.Quality.Unknown && installedQuality?.Unknown != true, installedQuality?.RetainedResults ?? Array.Empty<DeliveryForge.Evidence.GateRunResult>()));
                 var reviewed = await frame.IndependentReview.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
+                if (localRealGolden is not null)
+                {
+                    frame.LocalReal.Start(frame.Lifetime, () => localRealGolden.RunAsync(frame, coordination, installedQuality, installedReview, () => NativeCompletedAndQuiet(frame), coordinator.StoreRootPath));
+                    return await frame.LocalReal.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
+                }
                 if (qualityResult is null) return reviewed;
                 return qualityResult with { Data = new { Quality = qualityResult.Data, Review = reviewed, ReviewPreparation = reviewPreparation } };
             }
+            if (localRealGolden is not null) return ToolResult.Incomplete("LOCAL_REAL_ACCEPTED_REVIEW_REQUIRED", "Explicit local-real selection requires the actual same-original independent reviewer and protected quality; no fixture fallback.");
             if (qualityResult is not null) return reviewPreparation is null ? qualityResult : qualityResult with { Data = new { Quality = qualityResult.Data, ReviewPreparation = reviewPreparation } };
             if (reviewPreparation is not null) return reviewPreparation;
             return new("COMPLETE", adapter.Realm == HostObservationRealm.ContractFixture ? "CONTRACT_FIXTURE_COMPLETE" : "OWNER_COMPLETED_REQUIRES_PROFILE_AUDIT", "Actual owner completion recorded; quality/review/publication and installed certification remain separate.", new { committed.RunId, committed.Sequence, committed.Sha256, Realm = adapter.Realm.ToString() });

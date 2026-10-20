@@ -40,6 +40,8 @@ internal sealed class StandaloneEntrypoint
             BoundedFiles.Separate(review.ArtifactRoot, configPath);
             if (config.InstalledQuality is { } otherQuality) BoundedFiles.Separate(review.ArtifactRoot, otherQuality.ArtifactRoot);
         }
+        if (config.LocalRealGolden is { } golden)
+            foreach (var path in new[] { config.RepositoryRoot, work, result, store, configPath }) BoundedFiles.Separate(path, golden.ArtifactRoot);
     }
     async Task<int> Run(string[] args)
     {

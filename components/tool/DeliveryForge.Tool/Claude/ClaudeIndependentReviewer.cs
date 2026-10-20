@@ -22,6 +22,27 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
     ProcessCommandExecutor executor, ParentCoordinationHost parent, string runId, string sourceRoot,
     ProductionReviewBootstrap bootstrap, Func<bool> sameCompletedWorker, Action verifyProtectedConfiguration, LinuxScopeSelection? linuxScope)
 {
+    // Created only after the existing private issuer accepted the exact genuine
+    // execution. Saved receipt JSON cannot reconstruct this original binding.
+    internal sealed class AcceptedLocalRevision
+    {
+        internal readonly ToolLifetime Original;
+        internal readonly PatchIdentity Patch;
+        internal readonly ValidatedContract Receipt;
+        internal readonly ReviewTransitionReceiver Receiver;
+        private AcceptedLocalRevision(ToolLifetime original, PatchIdentity patch, ValidatedContract receipt, ReviewTransitionReceiver receiver)
+        { Original = original; Patch = patch; Receipt = receipt; Receiver = receiver; }
+        internal static AcceptedLocalRevision Issue(ToolLifetime original, ProductionReviewBootstrap bootstrap,
+            ValidatedContract receipt, NormalizedReview review, ReviewAcceptanceContext context)
+        {
+            // IssueAcceptance itself requires the live private normalized
+            // execution provenance; even an internal caller cannot replace it
+            // with public receipt/patch DTOs. The receiver is never imported.
+            bootstrap.Host.IssueAcceptance(receipt, review, context, ReviewEvidenceRole.Independent);
+            return new(original, review.Identity, receipt, bootstrap.Host.CreateTransitionReceiver(context));
+        }
+    }
+    internal AcceptedLocalRevision? AcceptedRevision { get; private set; }
     readonly List<JsonElement> events = [];
     readonly List<Task> tasks = [];
     readonly TaskCompletionSource<bool> initialized = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -266,7 +287,9 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             Save(Path.Combine(artifactDirectory, "independent-review-receipt.json"), receiptBytes);
             Current();
             if (normalized.Outcome == ReviewOutcome.Pass && normalized.ProductionAccepted)
-                bootstrap.Host.IssueAcceptance(receipt, normalized, acceptance, ReviewEvidenceRole.Independent);
+            {
+                AcceptedRevision = AcceptedLocalRevision.Issue(original, bootstrap, receipt, normalized, acceptance);
+            }
             return normalized.Outcome switch
             {
                 ReviewOutcome.Pass when normalized.ProductionAccepted => new("COMPLETE", "ACTUAL_INDEPENDENT_REVIEW_PASSED", "Actual opposite-family review bound to the unchanged immutable source; quality/publication remain separate.", new { runId, receipt.Identity, NativeArtifactHash = rawHash, Model = model, PublicationAuthority = false }),

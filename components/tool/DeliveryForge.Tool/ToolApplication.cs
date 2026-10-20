@@ -42,7 +42,7 @@ public sealed class ToolApplication(OwnerHostBridge? host = null, IIssueContentP
         using var locallyOwnedLifetime = actualOriginal is null ? life : null;
         life.Check();
         var config = TrustedConfiguration.LoadSelected(configPath, life, actualConfigurationPin);
-        if ((config.InstalledQuality is not null || config.InstalledReview is not null) && actualOriginal is not null && actualConfigurationPin is not null)
+        if ((config.InstalledQuality is not null || config.InstalledReview is not null || config.LocalRealGolden is not null) && actualOriginal is not null && actualConfigurationPin is not null)
         {
             // Reload verifies the exact current admitted bytes; retain the same
             // actual selected configuration object rather than adopt saved DATA.
@@ -132,6 +132,7 @@ public sealed class ToolApplication(OwnerHostBridge? host = null, IIssueContentP
         if (host is null || assignments is null) return ToolResult.Incomplete(host is null ? "HOST_BRIDGE_UNAVAILABLE" : "OWNED_ASSIGNMENT_REQUIRED", "A real host bridge and parent-owned FrozenWorkerPlan assignment are required; no assignment is reconstructed from JSON.", new { imported.Plan.Identity, Adapter = config.Adapter });
         if (config.InstalledQuality is not null && !host.HasInstalledQuality) return ToolResult.Incomplete("CONTAINING_QUALITY_OWNER_REQUIRED", "Selected installed quality requires the actual closed standalone owner composition; the selection cannot be ignored by an embedding.");
         if (config.InstalledReview is not null && !host.HasInstalledReview) return ToolResult.Incomplete("CONTAINING_REVIEW_OWNER_REQUIRED", "Selected installed review requires the actual closed standalone owner composition.");
+        if (config.LocalRealGolden is not null && !host.HasLocalRealGolden) return ToolResult.Incomplete("CONTAINING_LOCAL_REAL_OWNER_REQUIRED", "Local-real selection requires the same actual standalone owner composition; no supplied outcome claims are accepted.");
         var request = new ParentAssignmentRequest(imported.Plan, config, command.Get("run-dir"), command.Get("result-dir"));
         var assignment = await SelectAssignmentAsync(request, life).ConfigureAwait(false);
         RequireAssignment(assignment, request); life.Check();

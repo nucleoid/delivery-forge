@@ -27,6 +27,7 @@ internal sealed class InstalledReviewHost : IDisposable
     FrozenPlan? frozen; FrozenWorkerPlan? assignment; TrustedConfiguration? boundConfiguration;
     ProductionReviewSourceOwner? sourceOwner; ProductionReviewBootstrap? bootstrap;
     ClaudeIndependentReviewer? independentReviewer;
+    DeliveryForge.Contracts.Validation.ValidatedContract? protectedEvidencePolicy;
     bool entered, disposed, uncertain;
     internal bool Unknown => uncertain || sourceOwner?.Uncertain == true || independentReviewer?.Unknown == true;
     internal bool HasIndependentReviewer => selection.IndependentReviewer is not null;
@@ -226,6 +227,7 @@ internal sealed class InstalledReviewHost : IDisposable
         var evidence = DeliveryForge.Contracts.Validation.ContractValidator.ParseAndValidate(evidenceBytes);
         if (evidence.SchemaName != "evidence-policy" || evidence.Identity != selection.EvidencePolicyIdentity)
             throw new ToolUsageException("Actual protected-base evidence policy differs from the selected identity.");
+        protectedEvidencePolicy = evidence;
         sourceOwner = new(executor, original, parent, run.RunId, run.Worktree, gitDirectory, commonDirectory,
             selection.GitImage.Path, selection.GitImage.Bytes, selection.GitImage.Sha256, selection.GitVersion,
             run.BaseCommit, completion.HeadCommit, () =>
@@ -262,6 +264,20 @@ internal sealed class InstalledReviewHost : IDisposable
         if (disposed) return;
         if (Unknown) { original.RetainUnknown(); return; }
         bootstrap?.Dispose(); disposed = true;
+    }
+    internal async Task<(ClaudeIndependentReviewer.AcceptedLocalRevision Accepted, DeliveryForge.Contracts.Validation.ValidatedContract Policy)?> LocalRealEvidenceAsync(HostBridgeFrame frame, ParentCoordinationHost parent)
+    {
+        var accepted = independentReviewer?.AcceptedRevision;
+        if (accepted is null || protectedEvidencePolicy is null) return null;
+        if (disposed || Unknown || sourceOwner is null || bootstrap is null || assignment is null || frozen is null ||
+            !ReferenceEquals(frame.Lifetime, original) || !ReferenceEquals(accepted.Original, original) || frame.RunId != assignment.RunId ||
+            frame.Completion is not { } completion || !frame.OwnerCompleted || frame.OwnerStopped || frame.Primary is not null || frame.Post is not null ||
+            accepted.Patch.HeadCommit != completion.HeadCommit || accepted.Patch.HeadTree != completion.TreeId || accepted.Patch.PlanIdentity != assignment.PlanIdentity)
+            throw new WorkerEnvelopeException("Actual accepted local-real review original/source binding changed.");
+        parent.EnterSynchronous(frame.RunId, () => { sourceOwner.Check(); _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536); return true; });
+        _ = await GitPatchIdentity.ExportVerifiedPatchAsync(bootstrap.ObjectView, accepted.Patch, original.Token).ConfigureAwait(false);
+        original.Check(); sourceOwner.Check();
+        return (accepted, protectedEvidencePolicy);
     }
     static bool Digest(string value) => value is { Length: 64 } && value.All(char.IsAsciiHexDigitLower);
     static bool Settled(BoundedCommandCaptureResult capture) => capture.Command.OwnedProcessQuiescent &&
