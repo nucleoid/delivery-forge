@@ -169,7 +169,8 @@ public sealed class ProductionReviewPreparationTests : IDisposable
         var depthFailure = await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, baseCommit, headCommit,
             frozenPlan.Identity, new Dictionary<string, string>(), bound.Token));
         Assert.Equal("Owned source traversal exceeds64 directory levels.", depthFailure.Message);
-        Directory.Move(emptyRoot, Path.Combine(fixture.GitDirectory, "retained-empty-depth-control"));
+        // Preserve the refused deep tree. Index validation precedes traversal,
+        // so the next control does not need to move this Windows directory tree.
         // Retain the accepted raw index before a real bounded-read refusal control.
         var indexPath = Path.Combine(fixture.GitDirectory, "index");
         await File.WriteAllBytesAsync(Path.Combine(fixture.GitDirectory, "source-builder-accepted-index"), await File.ReadAllBytesAsync(indexPath, bound.Token), bound.Token);
