@@ -153,6 +153,9 @@ internal sealed class InstalledReviewHost : IDisposable
             throw new ToolUsageException("Review preparation requires the retained completed native worker once.");
         entered = true;
         var run = assignment;
+        // Obtained only from this frame's actual provisioning/writer owner,
+        // before any worker-controlled Git/config/status discovery can run.
+        var provisioned = frame.Owner.RequireOriginalWorktreeBinding(run.RunId, original);
         void Current()
         {
             original.Check();
@@ -171,6 +174,25 @@ internal sealed class InstalledReviewHost : IDisposable
         async Task<string> Git(params string[] arguments)
         {
             Current();
+            provisioned.Check();
+            var filterProbe = arguments.SequenceEqual(new[] { "config", "--includes", "--name-only", "--get-regexp", "^filter\\." });
+            var filters = new HashSet<string>(StringComparer.Ordinal);
+            if (arguments[0] == "status")
+            {
+                var keys = await Git("config", "--includes", "--name-only", "--get-regexp", "^filter\\.").ConfigureAwait(false);
+                foreach (var key in keys.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(value => value.TrimEnd('\r')))
+                {
+                    var split = key.LastIndexOf('.');
+                    if (!key.StartsWith("filter.", StringComparison.OrdinalIgnoreCase) || split <= 7 || key.Any(char.IsControl))
+                        throw new WorktreeBoundaryException("Review filter configuration is ambiguous.");
+                    var name = key[7..split];
+                    if (name.Length > 256 || name.Contains('='))
+                        throw new WorktreeBoundaryException("Review filters exceed their finite profile.");
+                    filters.Add(name);
+                    if (filters.Count > 128) throw new WorktreeBoundaryException("Review filters exceed128 names.");
+                }
+                provisioned.Check();
+            }
             if (captures.Count >= 8) throw new IOException("Finite review source-discovery call bound exceeded.");
             var environment = new Dictionary<string, string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
             foreach (DictionaryEntry item in Environment.GetEnvironmentVariables())
@@ -180,10 +202,17 @@ internal sealed class InstalledReviewHost : IDisposable
             environment["GIT_CONFIG_NOSYSTEM"] = "1"; environment["GIT_CONFIG_GLOBAL"] = nul;
             environment["GIT_CONFIG_SYSTEM"] = nul; environment["GIT_TERMINAL_PROMPT"] = "0";
             environment["GIT_NO_REPLACE_OBJECTS"] = "1"; environment["GIT_NO_LAZY_FETCH"] = "1";
+            environment["GIT_GRAFT_FILE"] = nul;
+            environment["GIT_COMMON_DIR"] = provisioned.CommonDirectory;
+            environment["GIT_OBJECT_DIRECTORY"] = provisioned.ObjectsPath;
+            environment["GIT_INDEX_FILE"] = provisioned.IndexPath;
             environment["LC_ALL"] = "C"; environment["LANG"] = "C";
+            var disabledFilters = filters.SelectMany(name => new[] { "process=", "smudge=", "clean=", "required=false" }
+                .SelectMany(setting => new[] { "-c", "filter." + name + "." + setting })).ToArray();
             var invocation = new CommandInvocation(selection.GitImage.Path,
-                ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
-                    "-c", "core.hooksPath=" + nul, .. arguments], run.Worktree, environment)
+                ["--no-optional-locks", "--git-dir=" + provisioned.GitDirectory, "--work-tree=" + provisioned.Worktree,
+                    "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.attributesFile=" + nul,
+                    "-c", "diff.external=", "-c", "core.hooksPath=" + nul, .. disabledFilters, .. arguments], provisioned.Worktree, environment)
             { EnvironmentIsComplete = true };
             BoundedCommandCaptureResult capture;
             Task<BoundedCommandCaptureResult>? actualCapture = null; var dispatchEntered = false;
@@ -191,6 +220,7 @@ internal sealed class InstalledReviewHost : IDisposable
             {
                 capture = await parent.EnterAsync(run.RunId, () =>
                 {
+                    provisioned.Check();
                     dispatchEntered = true;
                     actualCapture = executor.ExecuteBoundedCaptureAsync(invocation,
                         original.Remaining < TimeSpan.FromSeconds(30) ? original.Remaining : TimeSpan.FromSeconds(30),
@@ -217,15 +247,16 @@ internal sealed class InstalledReviewHost : IDisposable
             {
                 uncertain = true; original.RetainUnknown(); parent.RetainUncertain(run.RunId, "Review discovery retains its original native scope or streams.");
             }
-            if (!settled || capture.CaptureBoundExceeded || capture.Command.TimedOut || capture.Command.Cancelled || capture.Command.ExitCode != 0)
+            if (!settled || capture.CaptureBoundExceeded || capture.Command.TimedOut || capture.Command.Cancelled ||
+                capture.Command.ExitCode != 0 && !(filterProbe && capture.Command.ExitCode == 1))
                 throw new IOException("Actual review source discovery failed or remained incomplete.");
             Current();
             return new UTF8Encoding(false, true).GetString(capture.StandardOutputBytes);
         }
 
         Current();
-        var gitDirectory = (await Git("rev-parse", "--absolute-git-dir").ConfigureAwait(false)).Trim();
-        var commonDirectory = (await Git("rev-parse", "--path-format=absolute", "--git-common-dir").ConfigureAwait(false)).Trim();
+        var gitDirectory = provisioned.GitDirectory;
+        var commonDirectory = provisioned.CommonDirectory;
         BoundedFiles.Plain(gitDirectory); BoundedFiles.Plain(commonDirectory);
         var head = (await Git("rev-parse", "HEAD^{commit}").ConfigureAwait(false)).Trim();
         var tree = (await Git("rev-parse", "HEAD^{tree}").ConfigureAwait(false)).Trim();
@@ -242,7 +273,7 @@ internal sealed class InstalledReviewHost : IDisposable
             run.BaseCommit, completion.HeadCommit, () =>
                 ReferenceEquals(frame.Completion, completion) && frame.OwnerCompleted && !frame.OwnerStopped &&
                 frame.Primary is null && frame.Post is null && actualNativeCompletedAndQuiet(),
-            frozen.ContractIdentity, evidence.Identity, selection.PolicyRelativePath, selection.MaximumEvidenceBytes);
+            frozen.ContractIdentity, evidence.Identity, selection.PolicyRelativePath, selection.MaximumEvidenceBytes, provisioned);
         var preparedBootstrap = await ReviewAuthorityHost.CreateProductionFromOwnedSourceAsync(sourceOwner, frozen.PlanContractBytes,
             evidence.CanonicalBytes.ToArray(), selection.PolicyRelativePath, selection.MaximumEvidenceBytes, original.Token).ConfigureAwait(false);
         bootstrap = preparedBootstrap;

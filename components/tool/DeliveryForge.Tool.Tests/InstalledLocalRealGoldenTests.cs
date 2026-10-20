@@ -149,10 +149,6 @@ public sealed class InstalledLocalRealGoldenTests
         Assert.Equal(authorModel, authorStart.GetProperty("result").GetProperty("model").GetString());
         Assert.Equal("openai", authorStart.GetProperty("result").GetProperty("modelProvider").GetString());
         Assert.Equal(author.GetProperty("ThreadId").GetString(), authorStart.GetProperty("result").GetProperty("thread").GetProperty("id").GetString());
-        var workerGit = new WorktreeManager(config.GitExecutable, executor, original);
-        var committed = await workerGit.ObserveAsync(standalone.WorkerPaths.Worktree, original.Token);
-        Assert.True(committed.IsClean); Assert.Equal(committed.HeadCommit, row.GetProperty("HeadCommit").GetString());
-        Assert.Equal(committed.TreeId, row.GetProperty("HeadTree").GetString());
         var reviewRoot = Path.Combine(config.InstalledReview!.ArtifactRoot, actualSelection.RunId);
         var nativeBytes = BoundedFiles.Read(Path.Combine(reviewRoot, "independent-review-native.json"), original, 8 * 1024 * 1024);
         using var nativeReview = JsonDocument.Parse(nativeBytes); var native = nativeReview.RootElement;
@@ -181,6 +177,56 @@ public sealed class InstalledLocalRealGoldenTests
             Assert.True(retirement.GetProperty("InputCloseReturned").GetBoolean()); Assert.True(retirement.GetProperty("DispositionReturned").GetBoolean());
             Assert.Empty(retirement.GetProperty("Failures").EnumerateArray());
         }
+        // All actual author/reviewer scopes above are already closed. This is
+        // independent read-only Git observation, never adoption of their writer
+        // or opaque same-process provisioning binding.
+        _ = InstalledHostAdmission.ReadExact(config.InstalledReview.GitImage, original, 64 * 1024 * 1024);
+        var gitEnvironment = Environment.GetEnvironmentVariables().Cast<DictionaryEntry>()
+            .Where(e => !((string)e.Key).StartsWith("GIT_", StringComparison.OrdinalIgnoreCase))
+            .ToDictionary(e => (string)e.Key, e => (string)e.Value!, OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        foreach (var pair in ActualOrdinaryCapture.ResourceEnvironment()) gitEnvironment[pair.Key] = pair.Value;
+        var nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+        gitEnvironment["GIT_CONFIG_NOSYSTEM"] = "1"; gitEnvironment["GIT_CONFIG_GLOBAL"] = nullDevice; gitEnvironment["GIT_CONFIG_SYSTEM"] = nullDevice;
+        gitEnvironment["GIT_NO_REPLACE_OBJECTS"] = "1"; gitEnvironment["GIT_NO_LAZY_FETCH"] = "1"; gitEnvironment["GIT_TERMINAL_PROMPT"] = "0";
+        gitEnvironment["GIT_GRAFT_FILE"] = nullDevice; gitEnvironment["GIT_ATTR_NOSYSTEM"] = "1";
+        async Task<byte[]> GitDataAt(string directory, bool allowNoMatches, IReadOnlyList<string> filterOverrides, params string[] arguments)
+        {
+            var left = original.Remaining; if (left > TimeSpan.FromSeconds(30)) left = TimeSpan.FromSeconds(30);
+            var capture = await executor.ExecuteBoundedCaptureAsync(new(config.GitExecutable,
+                ["--no-replace-objects", "--work-tree=" + directory,
+                    "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "--no-optional-locks",
+                    "-c", "core.hooksPath=" + nullDevice, "-c", "core.attributesFile=" + nullDevice,
+                    "-c", "diff.external=", .. filterOverrides, .. arguments],
+                directory, gitEnvironment) { EnvironmentIsComplete = true }, left, 1048576, original.Token, new OwnedWorkPhaseBudget(original));
+            ActualOrdinaryCapture.Require(capture);
+            Assert.True(capture.Command.ExitCode == 0 || allowNoMatches && capture.Command.ExitCode == 1);
+            return capture.StandardOutputBytes;
+        }
+        Task<byte[]> GitData(params string[] arguments) => GitDataAt(config.RepositoryRoot, false, [], arguments);
+        var workerRoot = BoundedFiles.Plain(standalone.WorkerPaths.Worktree, true);
+        var workerTop = new UTF8Encoding(false, true).GetString(await GitDataAt(workerRoot, false, [], "rev-parse", "--show-toplevel")).Trim();
+        Assert.Equal(Path.GetFullPath(workerRoot), Path.GetFullPath(workerTop));
+        var filterKeys = new UTF8Encoding(false, true).GetString(await GitDataAt(workerRoot, true, [], "config", "--includes", "--name-only", "--get-regexp", "^filter\\."));
+        var filterNames = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var key in filterKeys.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(value => value.TrimEnd('\r')))
+        {
+            var split = key.LastIndexOf('.');
+            if (!key.StartsWith("filter.", StringComparison.OrdinalIgnoreCase) || split <= 7 || key.Any(char.IsControl))
+                throw new IOException("Read-only worker filter configuration is ambiguous.");
+            var name = key[7..split];
+            if (name.Length > 256 || name.Contains('=') || !filterNames.Contains(name) && filterNames.Count >= 128)
+                throw new IOException("Read-only worker filters exceed the finite profile.");
+            filterNames.Add(name);
+        }
+        var disabledFilters = filterNames.SelectMany(name => new[] { "process=", "smudge=", "clean=", "required=false" }
+            .SelectMany(setting => new[] { "-c", "filter." + name + "." + setting })).ToArray();
+        var status = await GitDataAt(workerRoot, false, disabledFilters, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching");
+        Assert.Empty(status);
+        var head = new UTF8Encoding(false, true).GetString(await GitDataAt(workerRoot, false, [], "rev-parse", "--verify", "HEAD^{commit}")).Trim();
+        var tree = new UTF8Encoding(false, true).GetString(await GitDataAt(workerRoot, false, [], "rev-parse", "--verify", "HEAD^{tree}")).Trim();
+        var committed = new CommittedRevision(head, tree);
+        Assert.Equal(committed.HeadCommit, row.GetProperty("HeadCommit").GetString());
+        Assert.Equal(committed.TreeId, row.GetProperty("HeadTree").GetString());
         var reviewReceipt = ContractValidator.ParseAndValidate(BoundedFiles.Read(Path.Combine(reviewRoot, "independent-review-receipt.json"), original, 1048576));
         Assert.Equal(row.GetProperty("IndependentReview").GetString(), reviewReceipt.Identity);
         using var reviewed = JsonDocument.Parse(reviewReceipt.CanonicalBytes); var review = reviewed.RootElement;
@@ -195,23 +241,6 @@ public sealed class InstalledLocalRealGoldenTests
         Assert.Equal(committed.HeadCommit, preparation.RootElement.GetProperty("HeadCommit").GetString());
         Assert.Equal(committed.TreeId, preparation.RootElement.GetProperty("TreeId").GetString());
 
-        // Read the independently selected protected commit through the actual
-        // bounded Git owner; compare selected identity/approval, not a PASS flag.
-        var gitEnvironment = Environment.GetEnvironmentVariables().Cast<DictionaryEntry>()
-            .Where(e => !((string)e.Key).StartsWith("GIT_", StringComparison.OrdinalIgnoreCase))
-            .ToDictionary(e => (string)e.Key, e => (string)e.Value!, OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
-        foreach (var pair in ActualOrdinaryCapture.ResourceEnvironment()) gitEnvironment[pair.Key] = pair.Value;
-        var nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
-        gitEnvironment["GIT_CONFIG_NOSYSTEM"] = "1"; gitEnvironment["GIT_CONFIG_GLOBAL"] = nullDevice; gitEnvironment["GIT_CONFIG_SYSTEM"] = nullDevice;
-        gitEnvironment["GIT_NO_REPLACE_OBJECTS"] = "1"; gitEnvironment["GIT_NO_LAZY_FETCH"] = "1"; gitEnvironment["GIT_TERMINAL_PROMPT"] = "0";
-        async Task<byte[]> GitData(params string[] arguments)
-        {
-            var left = original.Remaining; if (left > TimeSpan.FromSeconds(30)) left = TimeSpan.FromSeconds(30);
-            var capture = await executor.ExecuteBoundedCaptureAsync(new(config.GitExecutable,
-                ["--no-replace-objects", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "--no-optional-locks", .. arguments],
-                config.RepositoryRoot, gitEnvironment) { EnvironmentIsComplete = true }, left, 1048576, original.Token, new OwnedWorkPhaseBudget(original));
-            ActualOrdinaryCapture.Require(capture); Assert.Equal(0, capture.Command.ExitCode); return capture.StandardOutputBytes;
-        }
         Assert.Equal(registrySelection.RegistryCommit, Encoding.UTF8.GetString(await GitData("rev-parse", "--verify", registrySelection.RegistryCommit + "^{commit}")).Trim());
         Assert.Equal(registrySelection.ProtectedTip, Encoding.UTF8.GetString(await GitData("rev-parse", "--verify", registrySelection.ProtectedReference + "^{commit}")).Trim());
         _ = await GitData("merge-base", "--is-ancestor", registrySelection.RegistryCommit, registrySelection.ProtectedTip);

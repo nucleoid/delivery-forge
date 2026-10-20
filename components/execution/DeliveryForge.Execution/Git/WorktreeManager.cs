@@ -14,7 +14,7 @@ public sealed record WorktreeObservation(
     string RootPath, string HeadCommit, string TreeId, bool IsClean,
     IReadOnlyList<string> StatusEntries, FileSnapshot Snapshot);
 
-public sealed class WorktreeManager
+public sealed partial class WorktreeManager
 {
     static readonly List<WriterLease> RetainedWriterBirths = [];
     private readonly string _gitExecutable;
@@ -53,6 +53,7 @@ public sealed class WorktreeManager
     {
         _gitExecutable = source._gitExecutable; _originalExecutor = source._originalExecutor; _originalBudget = source._originalBudget;
         actualOwnedGitInvocations = source.actualOwnedGitInvocations; _effectAdmission = admission; _effectRunId = runId;
+        ownedGit = source.ownedGit;
     }
     sealed class InvocationCounter { internal long Value; }
     InvocationCounter actualOwnedGitInvocations = new();
@@ -62,7 +63,8 @@ public sealed class WorktreeManager
     WorktreeManager OwnedCleanupObservationView()
     {
         if (_originalBudget is null || _originalExecutor is null) return this; // Existing legacy fixture realm only.
-        var view = new WorktreeManager(_gitExecutable, _originalExecutor, new OwnedCleanupPhaseBudget(_originalBudget)); view.actualOwnedGitInvocations = actualOwnedGitInvocations; return view;
+        var view = new WorktreeManager(_gitExecutable, _originalExecutor, new OwnedCleanupPhaseBudget(_originalBudget));
+        view.actualOwnedGitInvocations = actualOwnedGitInvocations; view.ownedGit = ownedGit; view.cleanupObservation = true; return view;
     }
     public Task<WorktreeObservation> ObserveOwnedCleanupAsync(string worktree, CancellationToken token = default) => OwnedCleanupObservationView().ObserveAsync(worktree, token);
     public Task EnsureDescendsFromOwnedCleanupAsync(string worktree, string baseCommit, string head, CancellationToken token = default) => OwnedCleanupObservationView().EnsureDescendsFromAsync(worktree, baseCommit, head, token);
@@ -88,6 +90,7 @@ public sealed class WorktreeManager
         RejectParentOrNested(parent, target);
         RejectSymlinkAncestors(worktree);
         if (!Directory.Exists(worktree)) throw new WorktreeBoundaryException("Assigned worktree does not exist.");
+        if (_originalBudget is not null) _ = RequireOriginalBinding(worktree);
         var observedRoot = CanonicalPath((await GitAsync(worktree, cancellationToken, "rev-parse", "--show-toplevel").ConfigureAwait(false)).Trim());
         if (!string.Equals(target, observedRoot, PathComparison()))
             throw new WorktreeBoundaryException("Assigned path is not the exact Git worktree root.");
@@ -113,14 +116,38 @@ public sealed class WorktreeManager
         ValidateDestination(parentCheckout, destination);
         if (Directory.Exists(destination) && Directory.EnumerateFileSystemEntries(destination).Any())
             throw new WorktreeBoundaryException("Worker destination must not contain existing files.");
+        string? common = null;
+        if (_originalBudget is not null)
+        {
+            if (_effectAdmission is not DeliveryForge.Coordination.ICoordinatedSynchronousEffectAdmission)
+                throw new WorktreeBoundaryException("Original provisioning requires its actual synchronous parent.");
+            common = (await GitAsync(parentCheckout, cancellationToken, "rev-parse", "--path-format=absolute", "--git-common-dir").ConfigureAwait(false)).Trim();
+            RejectSymlinkAncestors(common);
+        }
         await GitAsync(parentCheckout, cancellationToken, "worktree", "add", "--detach", destination, baseCommit).ConfigureAwait(false);
+        if (common is not null)
+        {
+            var registered = await GitAsync(parentCheckout, cancellationToken, "worktree", "list", "--porcelain", "-z").ConfigureAwait(false);
+            var paths = registered.Split('\0').Where(value => value.StartsWith("worktree ", StringComparison.Ordinal)).Select(value => value[9..]).ToArray();
+            if (paths.Any(path => !Path.IsPathFullyQualified(path)) || paths.Count(path => IsSameDirectory(path, destination)) != 1)
+                throw new WorktreeBoundaryException("Actual parent did not uniquely register the provisioned destination.");
+            _ = CaptureProvisionedBinding(destination, common);
+        }
         var actual = (await GitAsync(destination, cancellationToken, "rev-parse", "HEAD").ConfigureAwait(false)).Trim();
         if (actual != baseCommit) throw new WorktreeBoundaryException("Provisioned worktree does not match the frozen base commit.");
     }
 
     public WriterLease AcquireWriter(string worktree, string runId, string writerToken)
     {
-        if (_effectAdmission is null) return AcquireWriterCore(worktree, runId, writerToken);
+        if (_effectAdmission is null)
+        {
+            if (_originalBudget is not null)
+            {
+                _originalBudget.CheckWork();
+                throw new WorktreeBoundaryException("Original writer birth requires its actual synchronous parent view.");
+            }
+            return AcquireWriterCore(worktree, runId, writerToken);
+        }
         if (_effectAdmission is not DeliveryForge.Coordination.ICoordinatedSynchronousEffectAdmission parent || runId != _effectRunId)
             throw new WorktreeBoundaryException("Writer birth requires the same synchronous original parent.");
         _originalBudget!.CheckWork(); parent.CheckCurrent(runId);
@@ -147,7 +174,8 @@ public sealed class WorktreeManager
     }
     WriterLease AcquireWriterCore(string worktree, string runId, string writerToken, Action<WriterLease>? captureBirth = null)
     {
-        var path = WriterLockPath(worktree);
+        var binding = _originalBudget is null ? null : RequireOriginalBinding(worktree);
+        var path = binding?.WriterPath ?? WriterLockPath(worktree);
         try
         {
             var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
@@ -157,6 +185,7 @@ public sealed class WorktreeManager
             writer.Write($"{runId}\n{writerToken}\n");
             writer.Flush();
             stream.Flush(true);
+            binding?.Attach(lease);
             return lease;
         }
         catch (IOException exception)
@@ -167,6 +196,7 @@ public sealed class WorktreeManager
 
     public WriterLease RecoverWriter(string worktree, string runId, string writerToken)
     {
+        if (_originalBudget is not null) throw new WorktreeBoundaryException("An original production writer cannot be recovered from current marker/lock data.");
         var path = WriterLockPath(worktree);
         FileStream? stream = null;
         try
@@ -229,6 +259,7 @@ public sealed class WorktreeManager
 
     public async Task<WorktreeObservation> ObserveAsync(string worktree, CancellationToken cancellationToken = default)
     {
+        if (_originalBudget is not null) _ = RequireOriginalBinding(worktree);
         var root = CanonicalPath(worktree);
         var observedRoot = CanonicalPath((await GitAsync(worktree, cancellationToken, "rev-parse", "--show-toplevel").ConfigureAwait(false)).Trim());
         if (!string.Equals(root, observedRoot, PathComparison()))
@@ -250,6 +281,7 @@ public sealed class WorktreeManager
 
     public async Task EnsureDescendsFromAsync(string worktree, string baseCommit, string headCommit, CancellationToken cancellationToken = default)
     {
+        if (_originalBudget is not null) _ = RequireOriginalBinding(worktree);
         var result = await GitExitCodeAsync(worktree, cancellationToken, "merge-base", "--is-ancestor", baseCommit, headCommit).ConfigureAwait(false);
         if (result != 0) throw new WorktreeBoundaryException("Completed head is not a descendant of the frozen base commit.");
     }
@@ -311,6 +343,8 @@ public sealed class WorktreeManager
     private async Task<(int ExitCode, string Stdout, string Stderr)> RunGitCoreAsync(
         string cwd, CancellationToken cancellationToken, bool disableFilters, params string[] arguments)
     {
+        ownedGit.TryGetValue(Path.GetFullPath(cwd), out var binding);
+        binding?.Check(cleanupObservation); // Before even the effective-config probe.
         var filterNames = new HashSet<string>(StringComparer.Ordinal);
         if (disableFilters)
         {
@@ -342,6 +376,14 @@ public sealed class WorktreeManager
         start.Environment["GIT_GRAFT_FILE"] = disabledHooks;
         start.Environment["GIT_NO_LAZY_FETCH"] = "1";
         start.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        if (binding is not null)
+        {
+            start.ArgumentList.Add("--git-dir=" + binding.GitDirectory);
+            start.ArgumentList.Add("--work-tree=" + binding.Worktree);
+            start.Environment["GIT_COMMON_DIR"] = binding.CommonDirectory;
+            start.Environment["GIT_OBJECT_DIRECTORY"] = binding.ObjectsPath;
+            start.Environment["GIT_INDEX_FILE"] = binding.IndexPath;
+        }
         start.ArgumentList.Add("-c"); start.ArgumentList.Add("core.hooksPath=" + disabledHooks);
         start.ArgumentList.Add("-c"); start.ArgumentList.Add("core.fsmonitor=false");
         // Checkout/status use literal repository bytes, never external content-filter processes.
@@ -363,10 +405,12 @@ public sealed class WorktreeManager
             Task<BoundedCommandCaptureResult> Birth()
             {
                 actualBudget.CheckWork();
+                binding?.Check(cleanupObservation);
                 Interlocked.Increment(ref actualOwnedGitInvocations.Value);
                 return actualExecutor.ExecuteBoundedCaptureAsync(new(_gitExecutable, start.ArgumentList.ToArray(), cwd, env) { EnvironmentIsComplete = true }, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, cancellationToken, new OwnedWorkPhaseBudget(actualBudget));
             }
-            var actual = await (_effectAdmission is null ? Birth() : _effectAdmission.EnterAsync(_effectRunId!, Birth)).ConfigureAwait(false);
+            var actual = await (binding is not null && !cleanupObservation ? binding.EnterAsync(Birth) :
+                _effectAdmission is null ? Birth() : _effectAdmission.EnterAsync(_effectRunId!, Birth)).ConfigureAwait(false);
             actualBudget.CheckWork(); var command = actual.Command; var facts = command.LifecycleDiagnostics;
             if (actual.CaptureBoundExceeded || command.TimedOut || command.Cancelled || !command.OwnedProcessQuiescent || !actual.RootExitObserved || !actual.StandardOutputDrainCompleted || !actual.StandardErrorDrainCompleted || facts?.NativeFailure is not null || facts?.OwnedTree is not { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 } || OperatingSystem.IsLinux() && actual.OwnershipKind != BoundedCaptureOwnershipKind.LinuxCreationOwnedScope || command.ExitCode is null)
                 throw new WorktreeBoundaryException("Actual original Git capture/group/stream closure is incomplete or failed.");
@@ -520,6 +564,8 @@ public sealed class WriterLease : IDisposable
     private readonly FileStream _stream;
     private readonly object _lifetime = new();
     private bool _disposed;
+    private bool _firstCloseReturned;
+    internal bool FirstCloseReturned { get { lock (_lifetime) return _firstCloseReturned; } }
 
     internal WriterLease(string path, FileStream stream, string runId, string writerToken)
     {
@@ -570,6 +616,7 @@ public sealed class WriterLease : IDisposable
             if (_disposed) return;
             _disposed = true;
             _stream.Dispose();
+            _firstCloseReturned = true;
         }
     }
 }

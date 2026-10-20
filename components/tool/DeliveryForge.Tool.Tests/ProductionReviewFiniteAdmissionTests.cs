@@ -5,6 +5,7 @@ using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Contracts.Validation;
 using DeliveryForge.Evidence;
 using DeliveryForge.Execution.Host;
+using DeliveryForge.Execution.Git;
 
 namespace DeliveryForge.Tool.Tests;
 
@@ -41,6 +42,7 @@ public sealed class ProductionReviewFiniteAdmissionTests
             Assert.True(capture.Command.LifecycleDiagnostics?.OwnedTree is { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 });
             return Encoding.UTF8.GetString(capture.StandardOutputBytes).Trim();
         }
+        var passed = false;
         try
         {
             await Git(repository, "init", "-q", "-b", "main");
@@ -55,7 +57,10 @@ public sealed class ProductionReviewFiniteAdmissionTests
                 await Git(repository, "-c", "user.name=SourceBuilder", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", $"history-{index}");
             }
             var baseCommit = await Git(repository, "rev-parse", "HEAD");
-            await Git(repository, "worktree", "add", "--detach", worker, baseCommit);
+            var manager = new WorktreeManager(git, executor, original).WithParentAdmission(parent, "owned");
+            await manager.PrepareAsync(repository, worker, baseCommit, TestContext.Current.CancellationToken);
+            using var writer = manager.AcquireWriter(worker, "owned", "actual-source-builder-writer");
+            var provisioned = manager.RequireOriginalBinding(worker);
             await File.WriteAllTextAsync(Path.Combine(worker, "subject.txt"), "candidate\n", TestContext.Current.CancellationToken);
             await Git(worker, "add", "--", "subject.txt");
             await Git(worker, "-c", "user.name=SourceBuilder", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "candidate");
@@ -79,23 +84,25 @@ public sealed class ProductionReviewFiniteAdmissionTests
             var image = await File.ReadAllBytesAsync(git, TestContext.Current.CancellationToken);
             var owner = new ProductionReviewSourceOwner(executor, original, parent, "owned", worker, workerGit, commonGit,
                 git, image.Length, Convert.ToHexStringLower(SHA256.HashData(image)), await Git(worker, "--version"),
-                baseCommit, head, () => true, planIdentity, evidenceIdentity, "review.json", 1048576);
+                baseCommit, head, () => true, planIdentity, evidenceIdentity, "review.json", 1048576, provisioned);
             using var bootstrap = await ReviewAuthorityHost.CreateProductionFromOwnedSourceAsync(owner, planBytes, evidenceBytes,
                 "review.json", 1048576, TestContext.Current.CancellationToken);
             Assert.Equal(baseCommit, bootstrap.Policy.SourceRevision); Assert.Equal(head, bootstrap.ObjectView.FrozenHeadCommit);
             Assert.True(current); Assert.False(owner.Uncertain); Assert.False(original.HasExplicitUnknown);
             Assert.InRange(parent.EnteredCount, 1, 1023); Assert.True(parent.AllKnownSettled);
             TestContext.Current.TestOutputHelper!.WriteLine($"Actual linked object files={objectFiles}; finite parent effects={parent.EnteredCount}/1024.");
+            passed = true;
         }
         finally
         {
-            if (!original.HasExplicitUnknown)
+            if (passed && !original.HasExplicitUnknown)
             {
                 _ = original.CleanupRemaining;
                 foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
                 { _ = original.CleanupRemaining; File.SetAttributes(file, File.GetAttributes(file) & ~FileAttributes.ReadOnly); }
                 _ = original.CleanupRemaining; Directory.Delete(root, recursive: true); _ = original.CleanupRemaining;
             }
+            else TestContext.Current.TestOutputHelper!.WriteLine("Retained actual source-preparation failure namespace: " + root);
         }
     }
 

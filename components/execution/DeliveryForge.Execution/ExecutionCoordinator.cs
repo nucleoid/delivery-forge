@@ -63,6 +63,17 @@ public sealed class ExecutionCoordinator : IDisposable
     public bool ObserveOriginalProcessesSettled(string runId) => !_disposed && !HasPendingControlOperations(runId) &&
         _processes.GetOwnedIdentities(runId).Count == 0;
 
+    internal WorktreeManager.OwnedGitBinding RequireOriginalWorktreeBinding(string runId, DeliveryForge.Evidence.IOwnedDuplexBudget sameOriginal)
+    {
+        ThrowIfDisposed();
+        if (!ReferenceEquals(original, sameOriginal) || originalRun != runId || _coordinationAdmission is null ||
+            !_writers.TryGetValue(runId, out var writer) || writer.ObserveCurrentNamespaceIdentity().Outcome != WriterNamespaceIdentityOutcome.Match)
+            throw new WorktreeBoundaryException("No current actual original writer/provisioning binding.");
+        var binding = _worktrees.RequireOriginalBinding(runId, sameOriginal, _coordinationAdmission);
+        if (!binding.OwnsWriter(writer)) throw new WorktreeBoundaryException("Provisioning does not retain this exact original writer.");
+        return binding;
+    }
+
     internal Task ReleaseCompletedWriterAsync(string runId, AgentCompletionReceipt actualCompletion, Func<bool> originalQuiet, CancellationToken token) =>
         RunExclusiveAsync(runId, async () =>
         {
@@ -600,6 +611,12 @@ public sealed class ExecutionCoordinator : IDisposable
 
     private bool TryEnsureWriterOwnership(AgentRequest request)
     {
+        if (original is not null)
+        {
+            var binding = _worktrees.RequireOriginalBinding(request.Worktree, cleanup: cleanupStore.Value is not null);
+            return binding.RunId == request.RunId && _writers.TryGetValue(request.RunId, out var originalWriter) &&
+                binding.OwnsWriter(originalWriter) && originalWriter.WriterToken == request.WriterToken && originalWriter.ObserveCurrentNamespaceIdentity().Outcome == WriterNamespaceIdentityOutcome.Match;
+        }
         if (_writers.TryGetValue(request.RunId, out var current))
             return current.WriterToken == request.WriterToken;
         try

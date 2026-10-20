@@ -8,22 +8,19 @@ namespace DeliveryForge.Execution.Tests.Repositories;
 public sealed class OriginalWriterBirthTests
 {
     [Fact]
-    public void Admission_postrefusal_disposes_captured_actual_writer_and_preserves_durable_failure_lock()
+    public void Missing_original_provisioning_refuses_before_writer_birth()
     {
         using var directory = new TemporaryDirectory(); Directory.CreateDirectory(Path.Combine(directory.Path, ".git"));
-        // Actual file-owner control only: no native Git/agent invocation or
-        // assigned-worktree acceptance is claimed by this synthetic metadata.
+        // Synthetic current metadata must not manufacture original provisioning
+        // authority or a writer; the actual post-birth control uses PrepareAsync.
         var git = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator).Where(Path.IsPathFullyQualified)
             .Select(path => Path.Combine(path, OperatingSystem.IsWindows() ? "git.exe" : "git")).First(File.Exists);
         var original = new Original(); var parent = new Parent();
         var manager = new WorktreeManager(git, new ProcessCommandExecutor(), original).WithParentAdmission(parent, "owned");
-        Assert.Throws<IOException>(() => manager.AcquireWriter(directory.Path, "owned", "actual-held-writer"));
-        Assert.NotNull(parent.ActualWriter);
-        Assert.Equal(WriterNamespaceIdentityOutcome.Unknown, parent.ActualWriter.ObserveCurrentNamespaceIdentity().Outcome);
-        var lockPath = Path.Combine(directory.Path, ".git", "delivery-forge-writer.lock");
-        Assert.Equal("owned\nactual-held-writer\n", File.ReadAllText(lockPath));
-        using var exclusive = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
-        Assert.True(original.CleanupChecks > 0); Assert.Equal(0, manager.ActualOwnedGitInvocations);
+        Assert.Throws<WorktreeBoundaryException>(() => manager.AcquireWriter(directory.Path, "owned", "must-not-be-born"));
+        Assert.Null(parent.ActualWriter);
+        Assert.False(File.Exists(Path.Combine(directory.Path, ".git", "delivery-forge-writer.lock")));
+        Assert.Equal(0, original.CleanupChecks); Assert.Equal(0, manager.ActualOwnedGitInvocations);
     }
     sealed class Original : IOwnedDuplexBudget
     {

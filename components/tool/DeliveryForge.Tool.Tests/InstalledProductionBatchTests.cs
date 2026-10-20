@@ -67,7 +67,7 @@ public sealed class InstalledProductionBatchTests
             var actualRunId = Assert.Single(runs);
             var history = await execution.RecoverAsync(actualRunId, original.Token);
             Assert.Contains(history.Records, record => record.Kind == "worker-prepared");
-            var completion = execution.ReadPayload<DeliveryForge.Execution.Host.AgentCompletionReceipt>(Assert.Single(history.Records.Where(record => record.Kind == "worker-completed")));
+            var completion = execution.ReadPayload<DeliveryForge.Execution.Host.AgentCompletionReceipt>(Assert.Single(history.Records, record => record.Kind == "worker-completed"));
             Assert.Equal(observations[^1].CompletedHeads[node.NodeId], completion.HeadCommit);
             var nodeFixture = fixture with
             {

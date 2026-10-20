@@ -7,6 +7,7 @@ using DeliveryForge.Contracts.Validation;
 using DeliveryForge.Coordination;
 using DeliveryForge.Evidence;
 using DeliveryForge.Review;
+using DeliveryForge.Execution.Git;
 
 namespace DeliveryForge.Execution.Host;
 
@@ -21,6 +22,7 @@ public sealed class ProductionReviewSourceOwner
     readonly Func<bool> nativeCompletedAndQuiet;
     readonly long gitBytes;
     readonly string gitSha256;
+    readonly WorktreeManager.OwnedGitBinding? provisionedBinding;
     string? controlled;
     bool entered, uncertain;
     int activeCaptures;
@@ -28,7 +30,8 @@ public sealed class ProductionReviewSourceOwner
         ICoordinatedSynchronousEffectAdmission parent, string runId, string sourceRoot, string workerGitDirectory,
         string commonGitDirectory, string trustedGitExecutable, long trustedGitBytes, string trustedGitSha256,
         string expectedGitVersion, string baseCommit, string headCommit, Func<bool> actualNativeCompletedAndQuiet,
-        string expectedPlanIdentity, string expectedEvidencePolicyIdentity, string expectedPolicyRelativePath, long maximumEvidenceBytes)
+        string expectedPlanIdentity, string expectedEvidencePolicyIdentity, string expectedPolicyRelativePath, long maximumEvidenceBytes,
+        WorktreeManager.OwnedGitBinding? actualProvisionedBinding = null)
     {
         this.executor = executor ?? throw new ArgumentNullException(nameof(executor));
         this.original = original ?? throw new ArgumentNullException(nameof(original));
@@ -40,6 +43,13 @@ public sealed class ProductionReviewSourceOwner
         BaseCommit = baseCommit; HeadCommit = headCommit;
         PlanIdentity = expectedPlanIdentity; EvidencePolicyIdentity = expectedEvidencePolicyIdentity;
         PolicyRelativePath = expectedPolicyRelativePath; SelectedMaximumBytes = maximumEvidenceBytes;
+        provisionedBinding = actualProvisionedBinding;
+        if (provisionedBinding is not null)
+        {
+            provisionedBinding.RequireOriginal(original, parent, runId);
+            if (!SamePath(provisionedBinding.Worktree, sourceRoot) || !SamePath(provisionedBinding.GitDirectory, workerGitDirectory) || !SamePath(provisionedBinding.CommonDirectory, commonGitDirectory))
+                throw new ReviewPreflightException("Review source roles differ from original parent provisioning.");
+        }
         if (string.IsNullOrWhiteSpace(runId) || !ObjectId(baseCommit) || !ObjectId(headCommit) ||
             trustedGitBytes is < 1 or > 67108864 || trustedGitSha256.Length != 64 ||
             trustedGitSha256.Any(c => !char.IsAsciiHexDigitLower(c)) || !expectedGitVersion.StartsWith("git version ", StringComparison.Ordinal) ||
@@ -48,6 +58,8 @@ public sealed class ProductionReviewSourceOwner
         foreach (var path in new[] { sourceRoot, workerGitDirectory, commonGitDirectory, trustedGitExecutable }) Plain(path);
         VerifyImage();
     }
+    static bool SamePath(string left, string right) => string.Equals(Path.GetFullPath(left), Path.GetFullPath(right),
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
     internal string RunId { get; }
     internal string SourceRoot { get; }
     internal string WorkerGitDirectory { get; }
@@ -60,14 +72,14 @@ public sealed class ProductionReviewSourceOwner
     internal string EvidencePolicyIdentity { get; }
     internal string PolicyRelativePath { get; }
     internal long SelectedMaximumBytes { get; }
-    internal bool Uncertain => uncertain;
-    internal bool MayCleanOwnedFiles => !uncertain && Volatile.Read(ref activeCaptures) == 0;
+    internal bool Uncertain => uncertain || provisionedBinding?.Uncertain == true;
+    internal bool MayCleanOwnedFiles => !Uncertain && Volatile.Read(ref activeCaptures) == 0;
     internal CancellationToken OriginalToken => original.Token;
     internal void Check()
     {
         original.CheckWork();
         parent.CheckCurrent(RunId);
-        if (uncertain || !nativeCompletedAndQuiet()) throw new ReviewPreflightException("Original completed native worker is no longer quiet.", residualProcessUncertain: uncertain);
+        if (Uncertain || !nativeCompletedAndQuiet()) throw new ReviewPreflightException("Original completed native worker is no longer quiet.", residualProcessUncertain: Uncertain);
     }
     void VerifyImage()
     {
@@ -236,6 +248,7 @@ public sealed class ProductionReviewSourceOwner
             {
                 capture = await EnterAsync(() =>
                 {
+                    CheckMetadataBinding();
                     var allowance = Remaining();
                     dispatchEntered = true;
                     Interlocked.Increment(ref activeCaptures);
@@ -319,6 +332,7 @@ public sealed class ProductionReviewSourceOwner
     internal void CheckMetadataBinding()
     {
         Check();
+        if (provisionedBinding is not null) { provisionedBinding.Check(); return; }
         parent.EnterSynchronous(RunId, () =>
         {
             static bool Same(string a, string b) => string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);

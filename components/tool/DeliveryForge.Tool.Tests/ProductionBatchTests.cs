@@ -69,7 +69,7 @@ public sealed class ProductionBatchTests
     }
 
     [Fact]
-    public void Pause_after_selection_fences_actual_invocation_and_preserves_existing_task_identity()
+    public async Task Pause_after_selection_fences_actual_invocation_and_preserves_existing_task_identity()
     {
         var queue = new ProductionBatchQueue([Node("a"), Node("b")], Fairness);
         Assert.NotNull(queue.SelectCandidate(ResourceBudget.Measure(Slots, Policy())));
@@ -79,7 +79,7 @@ public sealed class ProductionBatchTests
         control.Pause();
         Assert.Throws<ToolUsageException>(() => { _ = control.EnterNodeStart(() => { calls++; return Task.FromResult(2); }); });
         Assert.Equal(1, calls); Assert.False(actual.Task.IsCompleted);
-        actual.SetResult(1); Assert.Equal(1, actual.Task.GetAwaiter().GetResult());
+        actual.SetResult(1); Assert.Equal(1, await actual.Task);
         control.Stop(); Assert.True(control.Stopped);
     }
 
@@ -207,7 +207,7 @@ public sealed class ProductionBatchTests
              new("required", [], "commit:" + context.Commit), new("unrelated", [], "Independent work, not a semantic dependency")],
             [new("test", new("dotnet", [PlanCommandArgument.Literal("test")]), "PASS")],
             new("additive", "none", "none", "none", "none", "none", "receipt", "revert", ["inspect diagnostics"]), [], IntakePlanner.Assess(request, evidence)), "actual-batch-dag", now);
-        Assert.True(frozen.DownstreamReady, root); Assert.NotEqual(frozen.WorkItem, "selected-root");
+        Assert.True(frozen.DownstreamReady, root); Assert.NotEqual("selected-root", frozen.WorkItem);
         var dependencies = ProductionBatchOwner.ReadFrozenPrerequisites(frozen, "selected-root");
         Assert.Equal(context.Commit, Assert.Single(dependencies).Value); Assert.True(dependencies.ContainsKey("required"));
         Assert.Empty(ProductionBatchOwner.ReadFrozenPrerequisites(frozen, "unrelated"));

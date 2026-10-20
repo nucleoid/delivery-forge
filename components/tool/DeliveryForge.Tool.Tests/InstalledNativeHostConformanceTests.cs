@@ -18,6 +18,10 @@ public sealed class InstalledNativeHostConformanceTests
     sealed class Frame : IAsyncDisposable
     {
         static readonly List<Frame> Unknown = [];
+        internal readonly string RunId = "probe-" + Guid.NewGuid().ToString("N");
+        internal bool BindingCurrent = true;
+        internal WorktreeManager ProvisioningGit = null!;
+        internal ParentEffectAdmission Parent = null!;
         internal readonly ToolLifetime Original = new(TimeSpan.FromSeconds(600), TestContext.Current.CancellationToken);
         internal readonly List<Task> ActualCalls = []; internal Fixture Selected = null!; internal IHostToolSessionPort Port = null!; internal WorktreeManager Git = null!; internal ProcessCommandExecutor Executor = null!; internal WriterLease? Lease; internal AgentRequest Request = null!;
         internal DuplexRetirement? Retirement; internal bool LeaseCloseEntered, LeaseClosed, DispositionEntered, AcceptanceAssertionsReturned; internal Exception? Failure, Post; internal NativeFailureSnapshotWriter? FailureSnapshot;
@@ -31,14 +35,20 @@ public sealed class InstalledNativeHostConformanceTests
             var fixtureKey = "DELIVERY_FORGE_NATIVE_CONFORMANCE_" + (adapter == "codex.cli" ? "CODEX" : adapter == "claude-code.cli" ? "CLAUDE" : "PI") + (stop ? "_STOP" : "_COMPLETE");
             var path = Environment.GetEnvironmentVariable(fixtureKey) ?? throw new IOException("Fresh Root-admitted real native conformance fixture required; no model/CLI fallback.");
             var rawFixture = BoundedFiles.Read(path, frame.Original, 65536); var expectedFixtureHash = Environment.GetEnvironmentVariable(fixtureKey + "_SHA256") ?? throw new IOException("Independent complete fixture hash required."); Assert.Equal(expectedFixtureHash, BoundedFiles.Sha(rawFixture)); _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(rawFixture); frame.Original.Check(); frame.Selected = JsonSerializer.Deserialize<Fixture>(rawFixture, BoundedFiles.Json) ?? throw new IOException("Actual probe fixture null."); var f = frame.Selected;
-            if (f.Kind != "RootPreparedNativeConformanceFixture-v1" || f.CaseKind != (stop ? "stop" : "completion") || f.PlanBundle is null || f.Expectations is null || f.Adapter != adapter || f.Host is null || string.IsNullOrWhiteSpace(f.Host.Version) || f.Host.Version == "unverified" || f.Host.Version.Length > 256 || f.RelativePath is null || f.RelativePath.Length is < 1 or > 256 || f.RelativePath.Contains('\\') || Path.IsPathFullyQualified(f.RelativePath) || f.RelativePath.Split('/').Any(v => v is "" or "." or "..") || f.ExpectedText is null || f.ExpectedText.Length is < 1 or > 4096 || f.ExpectedText.Contains('\0')) throw new IOException("Exact finite independently prepared real-host task fixture required.");
+            if (f.Kind != "RootAdmittedNativeConformanceProvisioningFixture-v2" || f.CaseKind != (stop ? "stop" : "completion") || f.PlanBundle is null || f.Expectations is null || f.Adapter != adapter || f.Host is null || string.IsNullOrWhiteSpace(f.Host.Version) || f.Host.Version == "unverified" || f.Host.Version.Length > 256 || f.RelativePath is null || f.RelativePath.Length is < 1 or > 256 || f.RelativePath.Contains('\\') || Path.IsPathFullyQualified(f.RelativePath) || f.RelativePath.Split('/').Any(v => v is "" or "." or "..") || f.ExpectedText is null || f.ExpectedText.Length is < 1 or > 4096 || f.ExpectedText.Contains('\0')) throw new IOException("Exact finite independently prepared real-host task fixture required.");
             BoundedFiles.Plain(f.ParentCheckout, true); BoundedFiles.Plain(f.Worktree, true); BoundedFiles.Plain(f.ResultDirectory, true); BoundedFiles.Separate(f.ParentCheckout, f.Worktree); BoundedFiles.Separate(f.Worktree, f.ResultDirectory);
+            if (Directory.Exists(f.Worktree) || File.Exists(f.Worktree))
+                throw new IOException("Native conformance v2 requires the exact independently admitted absent destination; existing metadata cannot be adopted.");
             BoundedFiles.VerifyNativeImage(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256), frame.Original);
             LinuxScopeSelection? scope = null; if (OperatingSystem.IsLinux())
             {
                 var pin = f.LinuxScopeProfile ?? throw new IOException("Actual independently prepared Linux profile required."); var raw = BoundedFiles.Read(pin.Path, frame.Original, 65536); Assert.Equal(pin.Bytes, raw.LongLength); Assert.Equal(pin.Sha256, BoundedFiles.Sha(raw)); scope = JsonSerializer.Deserialize<LinuxScopeSelection>(raw, BoundedFiles.Json) ?? throw new IOException("Null actual Linux selection.");
             }
             var executor = OperatingSystem.IsLinux() ? new ProcessCommandExecutor(scope!, frame.Original) : new ProcessCommandExecutor(); frame.Executor = executor; frame.Git = new(f.Git, executor, frame.Original);
+            // A private finite test parent owns actual provisioning/captures;
+            // it issues no production host/profile or coordination authority.
+            frame.Parent = new(new object(), run => frame.BindingCurrent && run == frame.RunId, _ => frame.BindingCurrent = false);
+            frame.ProvisioningGit = frame.Git.WithParentAdmission(frame.Parent, frame.RunId);
             // UNVERIFIED remains UNVERIFIED throughout this probe. Canonical
             // owner acceptance MUST refuse it until independent actual audit.
             var profile = new AgentAdapterProfile(adapter, f.Host.Version, new[] { AgentCapability.Launch, AgentCapability.CompletionEvidence, AgentCapability.Stop, AgentCapability.EvidenceExport }.Select(c => new AgentCapabilityEvidence(c, AgentCapabilityStatus.Unverified, "actual installed transport UNDER TEST", "source-defined genuine probe, not conformance authority")).ToArray());
@@ -53,14 +63,19 @@ public sealed class InstalledNativeHostConformanceTests
         }
         internal async Task<AgentAcceptedReceipt> Start(bool stopProbe)
         {
-            var f = Selected; var before = await Call(() => Git.ObserveAsync(f.Worktree, TestContext.Current.CancellationToken)); Assert.Equal(f.BaseCommit, before.HeadCommit); Assert.True(before.IsClean); Original.Check();
+            var f = Selected; Original.Check();
             var planBytes = BoundedFiles.Read(f.PlanBundle.Path, Original, 524288); Assert.Equal(f.PlanBundle.Bytes, planBytes.LongLength); Assert.Equal(f.PlanBundle.Sha256, BoundedFiles.Sha(planBytes));
             var importLimit = Original.Remaining < TimeSpan.FromSeconds(120) ? Original.Remaining : TimeSpan.FromSeconds(120);
             var imported = await Call(() => PlanImporter.ImportAndReconcileOwnedAsync(planBytes, new(f.ParentCheckout, f.MutableReference, f.Git), f.Expectations, importLimit, Executor, Original, cancellationToken: TestContext.Current.CancellationToken));
             var plan = imported.Plan ?? throw new IOException("Actual conformance rich-plan import refused."); Assert.True(imported.DownstreamReady); Assert.Equal(f.BaseCommit, plan.BaseCommit); Assert.Equal(f.Repository, plan.Repository);
             using var material = JsonDocument.Parse(plan.CanonicalBytes); Assert.Contains(material.RootElement.GetProperty("plan").GetProperty("changeMap").EnumerateArray(), row => row.GetProperty("path").GetString() == f.RelativePath);
-            var run = "probe-" + Guid.NewGuid().ToString("N"); var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
-            Lease = Git.AcquireWriter(f.Worktree, run, token); Original.Check();
+            // Preserve the selected task/source/destination. Never rename or
+            // replace a precreated fixture worktree to manufacture provisioning.
+            await Call(async () => { await ProvisioningGit.PrepareAsync(f.ParentCheckout, f.Worktree, f.BaseCommit, TestContext.Current.CancellationToken); return true; });
+            var before = await Call(() => Git.ObserveAsync(f.Worktree, TestContext.Current.CancellationToken));
+            Assert.Equal(f.BaseCommit, before.HeadCommit); Assert.True(before.IsClean); Original.Check();
+            var run = RunId; var token = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
+            Lease = ProvisioningGit.AcquireWriter(f.Worktree, run, token); Original.Check();
             var assignment = new FrozenWorkerPlan(run, plan.ContractIdentity, f.BaseCommit, f.Repository, f.ParentCheckout, f.Worktree, f.ResultDirectory, token, [f.RelativePath], [], f.Adapter, f.Host.Version, [AgentCapability.Launch, AgentCapability.CompletionEvidence]); Request = WorkerEnvelope.PrepareWorker(assignment);
             var instructions = HostInstructionContext.FromFrozenPlan(plan, assignment);
             ((IHostInstructionPort)Port).BindInstructions(instructions);
