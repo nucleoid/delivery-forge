@@ -194,7 +194,7 @@ public sealed partial class RunStore
             return pointer.RootElement.GetProperty("fileName").GetString() == Path.GetFileName(latest.Path) &&
                    pointer.RootElement.GetProperty("sha256").GetString() == latest.Sha256;
         }
-        catch (Exception exception) when (exception is IOException or JsonException or KeyNotFoundException or InvalidOperationException)
+        catch (Exception exception) when (!HasUnsettledOriginalFiles && (exception is IOException or JsonException or KeyNotFoundException or InvalidOperationException))
         {
             return false;
         }
@@ -225,16 +225,7 @@ public sealed partial class RunStore
             else { for (var offset = 0; offset < bytes.Length; offset += 65536) { cancellationToken.ThrowIfCancellationRequested(); var part = bytes.Slice(offset, Math.Min(65536, bytes.Length - offset)); Effect(() => { stream!.Write(part.Span); return true; }); } Effect(() => { stream!.Flush(true); return true; }); }
         }
         catch (Exception error) { primary = error; }
-        if (stream is not null)
-        {
-            try
-            {
-                if (original is not null) { if (primary is not null) _ = original.CleanupRemaining; else CheckOriginal(); }
-                stream.Dispose();
-                if (original is not null) { if (primary is not null) _ = original.CleanupRemaining; else CheckOriginal(); }
-            }
-            catch (Exception error) { close = error; RetainFile(stream); }
-        }
+        if (stream is not null) close = CloseOriginalFile(stream, ref primary);
         if (primary is not null && close is not null) throw new AggregateException("Original store write and first disposition failed.", primary, close);
         if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
         if (close is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(close).Throw();

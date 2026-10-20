@@ -42,11 +42,21 @@ public sealed class ProtectedQualityCompletionBoundaryTests
         Assert.All(data.Gates, row => Assert.False(row.ProductionCapable));
         using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var config = new TrustedConfiguration("DATA/repository", data.Root, "refs/heads/main", "DATA", InstalledQuality: data.Selection);
-        var host = new InstalledQualityHost(config, new(Path.Combine(data.Root, "unissued-config.json"), 1, new('b', 64)),
-            original, new WorktreeManager());
-        // Passing a pure tuple validator cannot populate the private actual-worker,
-        // current-execution and closed-protected-issuer state required by this API.
-        Assert.Null(await host.LocalRealEvidenceAsync(null!, null!));
+        var configurationPin = new AdmissionFile(Path.Combine(data.Root, "unissued-config.json"), 1, new('b', 64));
+        if (OperatingSystem.IsWindows())
+        {
+            var host = new InstalledQualityHost(config, configurationPin, original, new WorktreeManager());
+            // Passing a pure tuple validator cannot populate the private actual-worker,
+            // current-execution and closed-protected-issuer state required by this API.
+            Assert.Null(await host.LocalRealEvidenceAsync(null!, null!));
+        }
+        else
+        {
+            // Public DATA/refusal CI has no selected Linux native scope. Verify that
+            // refusal instead of inventing a scope to reach the private completion API.
+            Assert.Throws<PlatformNotSupportedException>(() =>
+                new InstalledQualityHost(config, configurationPin, original, new WorktreeManager()));
+        }
         Assert.False(Directory.Exists(data.Selection.ArtifactRoot));
         Assert.False(Directory.Exists(data.Selection.Registry!.ArtifactRoot));
     }

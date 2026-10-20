@@ -302,12 +302,17 @@ public sealed class InstalledToolGateProvider
                 Arguments = invocation.FileName == "git" ? ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "--no-optional-locks", .. invocation.Arguments] : invocation.Arguments,
                 Environment = effectiveEnvironment
             };
+            // Deterministic policy refusal is known before effect entry; it
+            // must not create an entered/unreturned native invocation row.
+            InstalledToolProfile.RequireInstalledGraphDeploymentEnvironment(installedTool, effectiveEnvironment.Keys);
             var selectedBudget = ReferenceEquals(invocation, _main) ? (IOwnedDuplexBudget)files : new NestedBudget(files, files.IsClosing);
             Task<BoundedCommandCaptureResult> StartActual()
             {
                 // Read the actual inherited environment again inside admission,
                 // immediately before this native birth. LoadPinned is not an
                 // approval of later ambient or invocation-level helper overrides.
+                // A change racing the precheck remains conservatively retained by
+                // admission; no exception/Task classification weakens that rule.
                 InstalledToolProfile.RequireInstalledGraphDeploymentEnvironment(installedTool, effectiveEnvironment.Keys);
                 return OperatingSystem.IsLinux()
                     ? _owner.ExecuteBoundedCaptureAsync(effective, limit, ProducerJson.MaximumBytes, cancellationToken,

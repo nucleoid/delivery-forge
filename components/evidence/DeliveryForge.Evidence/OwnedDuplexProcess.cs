@@ -23,7 +23,7 @@ public sealed record DuplexRetirement(bool KnownClosed, bool RootExited, uint Ac
 public sealed class OwnedDuplexProcess
 {
     static readonly ConcurrentDictionary<OwnedDuplexProcess, byte> Retained = new();
-    readonly IOwnedDuplexBudget budget; readonly List<DuplexIoObservation> io = []; readonly object gate = new();
+    readonly IOwnedDuplexBudget budget; readonly bool commandCapture; readonly List<DuplexIoObservation> io = []; readonly object gate = new();
     Stream? input, output, error; Action<bool>? closeInput; readonly int errorLimit; bool errorQuotaExceeded; Func<bool, DuplexNativeObservation>? observe; Action<bool>? terminate; Func<bool, bool>? dispose;
     DuplexNativeObservation lastObservation = new(false, false, uint.MaxValue, null, "No actual native observation returned.");
     Func<bool>? creationOwnedScope;
@@ -41,15 +41,17 @@ public sealed class OwnedDuplexProcess
     public Stream Input { get; }
     public Stream Output { get; }
     public byte[] StandardError { get { lock (errorBytes) return errorBytes.ToArray(); } }
-    OwnedDuplexProcess(IOwnedDuplexBudget budget, int errorLimit) { this.budget = budget; this.errorLimit = errorLimit; Input = new Facade(this, false); Output = new Facade(this, true); Retained.TryAdd(this, 0); }
-    public static OwnedDuplexProcess Open(CommandInvocation invocation, IOwnedDuplexBudget original, LinuxScopeSelection? linuxScope = null) => OpenCore(invocation, original, linuxScope, 1048576);
-    internal static OwnedDuplexProcess OpenCapture(CommandInvocation invocation, IOwnedDuplexBudget original, LinuxScopeSelection linuxScope, int quota) => OpenCore(invocation, original, linuxScope, quota);
-    static OwnedDuplexProcess OpenCore(CommandInvocation invocation, IOwnedDuplexBudget original, LinuxScopeSelection? linuxScope, int errorLimit)
+    OwnedDuplexProcess(IOwnedDuplexBudget budget, int errorLimit, bool commandCapture) { this.budget = budget; this.errorLimit = errorLimit; this.commandCapture = commandCapture; Input = new Facade(this, false); Output = new Facade(this, true); Retained.TryAdd(this, 0); }
+    public static OwnedDuplexProcess Open(CommandInvocation invocation, IOwnedDuplexBudget original, LinuxScopeSelection? linuxScope = null) => OpenCore(invocation, original, linuxScope, 1048576, commandCapture: false);
+    // Only the ordinary capture consumer treats a fully quiescent child exit as
+    // command outcome DATA. Public duplex workers/reviewers retain failure semantics.
+    internal static OwnedDuplexProcess OpenCapture(CommandInvocation invocation, IOwnedDuplexBudget original, LinuxScopeSelection? linuxScope, int quota) => OpenCore(invocation, original, linuxScope, quota, commandCapture: true);
+    static OwnedDuplexProcess OpenCore(CommandInvocation invocation, IOwnedDuplexBudget original, LinuxScopeSelection? linuxScope, int errorLimit, bool commandCapture)
     {
         ArgumentNullException.ThrowIfNull(original); original.CheckWork();
         if (original.WholeLimit <= TimeSpan.Zero || original.WholeLimit > TimeSpan.FromSeconds(1200) || original.WorkLimit <= TimeSpan.Zero || original.WorkLimit > TimeSpan.FromSeconds(1100) || original.WorkLimit >= original.WholeLimit || original.OriginalStarted <= 0 || Stopwatch.GetTimestamp() < original.OriginalStarted) throw new ArgumentOutOfRangeException(nameof(original));
         if (!Path.IsPathFullyQualified(invocation.FileName) || invocation.Arguments.Count > 64 || invocation.Arguments.Any(x => x.Length > 8192 || x.Contains('\0'))) throw new ArgumentException("Exact finite explicit duplex image/argv required.");
-        if (errorLimit is <= 0 or > 16777216) throw new ArgumentOutOfRangeException(nameof(errorLimit)); var session = new OwnedDuplexProcess(original, errorLimit);
+        if (errorLimit is <= 0 or > 16777216) throw new ArgumentOutOfRangeException(nameof(errorLimit)); var session = new OwnedDuplexProcess(original, errorLimit, commandCapture);
         try
         {
             if (OperatingSystem.IsWindows()) WindowsCommandLifetime.OpenDuplex(invocation, original, session);
@@ -125,7 +127,12 @@ public sealed class OwnedDuplexProcess
             var native = ObserveOriginal(cleanup);
             var graceful = Stopwatch.GetTimestamp();
             while (native.Known && (!native.RootExited || native.ActiveProcesses != 0) && inputCloseReturned && Stopwatch.GetElapsedTime(graceful) < TimeSpan.FromSeconds(2)) { Admission(); await Task.Delay(OperatingSystem.IsLinux() ? 100 : 5).ConfigureAwait(false); native = ObserveOriginal(cleanup); }
-            if (native.Known && native.RootExited && native.ExitCode != 0) { cleanup = true; Admission(); }
+            // An ordinary command may report a failing gate through a nonzero
+            // exit. Only its known already-quiescent root is outcome DATA; IO,
+            // deadline, unknown, active-descendant and first-close failures still
+            // enter the same original failure cleanup below.
+            var settledCommandExit = commandCapture && native.Known && native.RootExited && native.ActiveProcesses == 0 && native.ExitCode is not null;
+            if (native.Known && native.RootExited && native.ExitCode != 0 && !settledCommandExit) { cleanup = true; Admission(); }
             if (!native.Known || !native.RootExited || native.ActiveProcesses != 0)
             {
                 // Retiring known owned descendants after an exit-zero root is

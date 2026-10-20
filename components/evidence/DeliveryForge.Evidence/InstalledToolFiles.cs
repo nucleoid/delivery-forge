@@ -147,7 +147,7 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
             if (timing.StopwatchFrequency != Stopwatch.Frequency ||
                 timing.OriginalStartedTimestamp != _started || timing.CleanupStartedTimestamp is not null ||
                 observedAt < _phaseStarted || observedAt > Stopwatch.GetTimestamp())
-                throw new EvidenceWriteException("Actual settled WORK capture must join this original once without a child cleanup stamp.");
+                throw new EvidenceWriteException("Actual settled WORK capture must match this original without a child cleanup stamp.");
             if (_cleanup is null || observedAt < _cleanup) _cleanup = observedAt;
         }
     }
@@ -276,8 +276,8 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     }
 
     // Revocation forbids new effects, not closing a handle already owned by this
-    // original. Keep the same whole/earliest cleanup bounds and ignore cancellation
-    // only for this existing-handle disposition.
+    // original. Preserve cancellation/revocation as the primary failure and
+    // enter the same whole/earliest cleanup bounds so it cannot skip first close.
     private Exception? CheckDisposition()
     {
         try { lock (_timing) { if (_cleanup is null) CheckWorkCore(); else _ = CleanupRemaining; } }

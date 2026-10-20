@@ -145,6 +145,27 @@ public sealed class WorkflowTransitionTests
             evidence));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Schema_valid_local_only_receipt_cannot_establish_publication(bool merged)
+    {
+        var from = merged ? WorkflowState.MergeAuthorized : WorkflowState.PrAuthorized;
+        var to = merged ? WorkflowState.Merged : WorkflowState.PrPublished;
+        var evidence = FullEvidence(merged);
+        // The unchanged isolated authority proves the refusal comes from the
+        // receipt boundary, rather than an earlier missing-review prerequisite.
+        WorkflowTransition.EnsureAllowedForIsolatedTest(from, to, evidence);
+        var local = MutatedFixture("publication-receipt.json", node =>
+        {
+            node["action"] = merged ? "MERGED" : "PR_PUBLISHED";
+            node["remoteRef"] = "local-ref:refs/heads/local-real/unit";
+        });
+        Assert.Equal("publication-receipt", local.SchemaName);
+        AssertMessage("Local-only publication DATA", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
+            from, to, evidence with { PublicationReceipt = local }));
+    }
+
     [Fact]
     public void Receipts_must_match_kind_outcome_action_and_exact_head()
     {

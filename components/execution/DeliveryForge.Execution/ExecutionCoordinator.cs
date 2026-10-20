@@ -44,6 +44,7 @@ public sealed class ExecutionCoordinator : IDisposable
     private readonly IAgentControlPort _agentControl;
     private readonly IExecutionFactSource _factSource;
     private readonly ConcurrentDictionary<string, WriterLease> _writers = new(StringComparer.Ordinal);
+    private static readonly List<(ExecutionCoordinator Owner, WriterLease Lease)> UnsettledWriterDispositions = [];
     private readonly ConcurrentDictionary<Task, string> _pendingControls = new();
     private bool _disposed;
     private ICoordinatedEffectAdmission? _coordinationAdmission;
@@ -62,7 +63,13 @@ public sealed class ExecutionCoordinator : IDisposable
     public bool ObserveOriginalProcessesSettled(string runId) => !_disposed && !HasPendingControlOperations(runId) &&
         _processes.GetOwnedIdentities(runId).Count == 0;
 
-    internal async Task ReleaseCompletedWriterAsync(string runId, AgentCompletionReceipt actualCompletion, Func<bool> originalQuiet, CancellationToken token)
+    internal Task ReleaseCompletedWriterAsync(string runId, AgentCompletionReceipt actualCompletion, Func<bool> originalQuiet, CancellationToken token) =>
+        RunExclusiveAsync(runId, async () =>
+        {
+            await ReleaseCompletedWriterCoreAsync(runId, actualCompletion, originalQuiet, token).ConfigureAwait(false);
+            return true;
+        }, token);
+    async Task ReleaseCompletedWriterCoreAsync(string runId, AgentCompletionReceipt actualCompletion, Func<bool> originalQuiet, CancellationToken token)
     {
         if (original is null || runId != originalRun || _coordinationAdmission is not ICoordinatedSynchronousEffectAdmission parent) throw new WorkerEnvelopeException("No actual scheduled owner.");
         original.CheckWork(); parent.CheckCurrent(runId);
@@ -76,13 +83,20 @@ public sealed class ExecutionCoordinator : IDisposable
             original.CheckWork();
             if (!originalQuiet() || !ObserveOriginalProcessesSettled(runId) || !_writers.TryGetValue(runId, out var writer)) throw new WorkerEnvelopeException("Original writer/closure changed.");
             if (writer.ObserveCurrentNamespaceIdentity().Outcome != WriterNamespaceIdentityOutcome.Match) throw new WorkerEnvelopeException("Original writer namespace is no longer current.");
-            writer.Dispose(); original.CheckWork();
+            DisposeOriginalWriter(runId, writer);
             if (!((ICollection<KeyValuePair<string, WriterLease>>)_writers).Remove(new(runId, writer))) throw new WorkerEnvelopeException("Actual writer identity changed during disposition.");
+            original.CheckWork();
             return true;
         });
         original.CheckWork(); parent.CheckCurrent(runId);
     }
-    internal async Task ReleaseStoppedWriterAsync(string runId, Func<bool> actualStopped)
+    internal Task ReleaseStoppedWriterAsync(string runId, Func<bool> actualStopped) =>
+        RunExclusiveAsync(runId, async () =>
+        {
+            await ReleaseStoppedWriterCoreAsync(runId, actualStopped).ConfigureAwait(false);
+            return true;
+        }, CancellationToken.None, cleanup: true);
+    async Task ReleaseStoppedWriterCoreAsync(string runId, Func<bool> actualStopped)
     {
         if (original is null || originalRun != runId || !actualStopped() || !ObserveOriginalProcessesSettled(runId)) throw new WorkerEnvelopeException("Same original stopped observation required.");
         _ = original.CleanupRemaining;
@@ -93,8 +107,24 @@ public sealed class ExecutionCoordinator : IDisposable
         _ = original.CleanupRemaining;
         if (!actualStopped() || !ObserveOriginalProcessesSettled(runId) || !_writers.TryGetValue(runId, out var writer)) throw new WorkerEnvelopeException("Stopped writer/closure changed.");
         if (writer.ObserveCurrentNamespaceIdentity().Outcome != WriterNamespaceIdentityOutcome.Match) throw new WorkerEnvelopeException("Stopped writer namespace is no longer current.");
-        writer.Dispose(); _ = original.CleanupRemaining;
+        DisposeOriginalWriter(runId, writer);
         if (!((ICollection<KeyValuePair<string, WriterLease>>)_writers).Remove(new(runId, writer))) throw new WorkerEnvelopeException("Actual stopped writer identity changed.");
+        _ = original.CleanupRemaining;
+    }
+
+    internal void DisposeOriginalWriter(string runId, WriterLease writer)
+    {
+        try { writer.Dispose(); }
+        catch (Exception failure)
+        {
+            // The lease's first attempt is sticky. Keep the actual owner even if
+            // the coordinator is disposed; never retry an unknown first close.
+            lock (UnsettledWriterDispositions) UnsettledWriterDispositions.Add((this, writer));
+            if (original is DeliveryForge.Evidence.IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown();
+            try { _coordinationAdmission?.RetainUncertain(runId, "Actual writer first disposition did not return."); }
+            catch (Exception observation) { throw new AggregateException("Writer disposition and original uncertainty observation failed.", failure, observation); }
+            throw;
+        }
     }
 
 
@@ -682,7 +712,13 @@ public sealed class ExecutionCoordinator : IDisposable
     {
         if (original is not null && runId != originalRun) throw new WorkerEnvelopeException("Original scheduler cannot adopt another run.");
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cleanup ? default : original?.Token ?? default);
-        if (original is not null) { if (cleanup) linked.CancelAfter(original.CleanupRemaining); else { original.CheckWork(); linked.CancelAfter(original.WorkLimit - System.Diagnostics.Stopwatch.GetElapsedTime(original.OriginalStarted)); } }
+        if (original is not null)
+        {
+            if (!cleanup) original.CheckWork();
+            var remaining = cleanup ? original.CleanupRemaining : original.WorkLimit - System.Diagnostics.Stopwatch.GetElapsedTime(original.OriginalStarted);
+            if (remaining <= TimeSpan.Zero) throw new TimeoutException("Original coordinator deadline expired before flow-lock admission.");
+            linked.CancelAfter(remaining);
+        }
         var flowLock = FlowLocks.GetOrAdd(runId, _ => new SemaphoreSlim(1, 1));
         await flowLock.WaitAsync(linked.Token).ConfigureAwait(false);
         var prior = cleanupStore.Value;

@@ -13,6 +13,18 @@ internal delegate Task<GitProcessResult> OwnedReviewGit(string gitDirectory, IRe
 public sealed class ControlledGitEvidenceContext : IDisposable
 {
     private readonly Action? _dispose;
+    private readonly HashSet<string> retainedScratch = new(StringComparer.Ordinal);
+    public IReadOnlyList<string> RetainedScratchPaths { get { lock (retainedScratch) return retainedScratch.ToArray(); } }
+    internal void RegisterScratch(params string[] paths)
+    {
+        lock (retainedScratch)
+        {
+            if (retainedScratch.Count + paths.Length > 128)
+                throw new ReviewPreflightException("Finite original patch scratch profile exceeded; existing paths retained.");
+            foreach (var path in paths) retainedScratch.Add(path);
+        }
+    }
+    internal void ScratchRetired(string path) { lock (retainedScratch) retainedScratch.Remove(path); }
 
     internal ControlledGitEvidenceContext(
         string sourceRoot,
@@ -83,7 +95,12 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         return (T)OwnedSynchronous(() => invoke())!;
     }
 
-    public void Dispose() => _dispose?.Invoke();
+    public void Dispose()
+    {
+        // A failed reconstruction/retirement retains the actual controlled view
+        // and exact scratch paths. Do not erase evidence through a using-finally.
+        if (RetainedScratchPaths.Count == 0) _dispose?.Invoke();
+    }
 }
 
 public static partial class GitPatchIdentity
@@ -384,7 +401,7 @@ public static partial class GitPatchIdentity
         hash.AppendData(SHA256.HashData(bytes));
     }
 
-    private static async Task VerifyPatchReconstructsBothDirectionsAsync(
+    internal static async Task VerifyPatchReconstructsBothDirectionsAsync(
         ControlledGitEvidenceContext context,
         byte[] patch,
         string baseCommit,
@@ -393,9 +410,13 @@ public static partial class GitPatchIdentity
         string expectedHeadTree,
         CancellationToken cancellationToken)
     {
-        var reverseIndex = Path.Combine(Path.GetTempPath(), $"delivery-forge-review-index-{Guid.NewGuid():N}");
-        var forwardIndex = Path.Combine(Path.GetTempPath(), $"delivery-forge-review-index-{Guid.NewGuid():N}");
+        var scratchRoot = context.SourceRealm == ReviewAuthorityRealm.Production ? context.ControlledGitDirectory : Path.GetTempPath();
+        var reverseIndex = Path.Combine(scratchRoot, $"delivery-forge-review-index-{Guid.NewGuid():N}");
+        var forwardIndex = Path.Combine(scratchRoot, $"delivery-forge-review-index-{Guid.NewGuid():N}");
+        var paths = new[] { reverseIndex, reverseIndex + ".lock", forwardIndex, forwardIndex + ".lock" };
+        if (context.SourceRealm == ReviewAuthorityRealm.Production) context.RegisterScratch(paths);
         var verified = false;
+        Exception? primary = null;
         try
         {
             var reverseEnvironment = new Dictionary<string, string> { ["GIT_INDEX_FILE"] = reverseIndex };
@@ -427,27 +448,39 @@ public static partial class GitPatchIdentity
                 throw new ReviewPreflightException("Binary patch does not reconstruct the exact controlled head tree.");
             verified = true;
         }
-        catch (Exception failure) when (context.SourceRealm == ReviewAuthorityRealm.Production)
+        catch (Exception failure)
         {
-            failure.Data["ProductionReviewReverseIndex"] = reverseIndex;
-            failure.Data["ProductionReviewForwardIndex"] = forwardIndex;
+            primary = failure;
+            if (context.SourceRealm == ReviewAuthorityRealm.Production)
+                failure.Data["RetainedProductionReviewScratch"] = context.RetainedScratchPaths.ToArray();
             throw;
         }
         finally
         {
-            foreach (var indexPath in context.SourceRealm != ReviewAuthorityRealm.Production || verified && context.MayCleanOwnedFiles?.Invoke() == true
-                ? new[] { reverseIndex, forwardIndex } : Array.Empty<string>())
+            try
             {
                 if (context.SourceRealm == ReviewAuthorityRealm.Production)
                 {
-                    if (context.DeleteOwnedScratch is null) throw new ReviewPreflightException("Original source scratch retirement owner is absent.");
-                    context.DeleteOwnedScratch(indexPath); context.DeleteOwnedScratch(indexPath + ".lock");
+                    // Failed verification deliberately keeps its bounded evidence.
+                    if (verified)
+                    {
+                        if (context.MayCleanOwnedFiles?.Invoke() != true || context.DeleteOwnedScratch is null)
+                            throw new ReviewPreflightException("Original patch scratch remains retained; retirement is not authorized.");
+                        foreach (var path in paths)
+                        {
+                            context.DeleteOwnedScratch(path);
+                            context.ScratchRetired(path);
+                        }
+                    }
                 }
                 else
-                {
-                    if (File.Exists(indexPath)) File.Delete(indexPath);
-                    if (File.Exists(indexPath + ".lock")) File.Delete(indexPath + ".lock");
-                }
+                    foreach (var path in paths) if (File.Exists(path)) File.Delete(path);
+            }
+            catch (Exception retirement)
+            {
+                retirement.Data["RetainedProductionReviewScratch"] = context.RetainedScratchPaths.ToArray();
+                if (primary is null) throw;
+                primary.Data["PatchScratchRetirementFailure"] = retirement;
             }
         }
     }

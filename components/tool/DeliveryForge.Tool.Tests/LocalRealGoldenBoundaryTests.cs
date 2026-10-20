@@ -43,6 +43,31 @@ public sealed class LocalRealGoldenBoundaryTests
         Assert.Throws<ObjectDisposedException>(original.Check);
     }
 
+    [Fact]
+    public void First_closed_journal_file_with_failed_postcheck_retains_durable_uncertainty_and_primary()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-first-journal-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        var admission = new ParentEffectAdmission(new object(), _ => true, _ => { });
+        var primary = new IOException("Injected actual post-write refusal."); var checks = 0;
+        void Current() { original.Check(); if (++checks == 2) throw primary; }
+        var journal = new LocalRealGoldenOwner.LocalJournal(root, original, admission, "unit-journal", Current);
+        var intent = new PublicationIntent("unit-key", "unit-journal", "unit-revision", PublicationAction.CreateOrUpdatePr,
+            new("local-real/no-network", "refs/heads/unit", "refs/heads/base"), new('a', 40), new('b', 40), new('c', 40), PublicationIntentState.Prepared);
+        var failure = Assert.Throws<IOException>(() => { _ = journal.AppendAdmittedAsync(intent, original.Token); });
+        Assert.Same(primary, failure);
+        var file = Assert.Single(Directory.GetFiles(root));
+        Assert.Equal("00-intent.json", Path.GetFileName(file));
+        // This exclusive open proves the actual first file is already closed.
+        using (var read = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.None))
+        using (var document = JsonDocument.Parse(read)) Assert.Equal("unit-key", document.RootElement.GetProperty("IdempotencyKey").GetString());
+        Assert.False(admission.AllKnownSettled); // durable admission remains uncertain
+        Assert.False(original.HasRetainedUnknown); // no invented native/file uncertainty
+        Assert.ThrowsAny<Exception>(() => admission.EnterSynchronous("unit-journal", () => true));
+        Assert.Single(Directory.GetFiles(root));
+    }
+
     [Fact(Timeout = 10_000)]
     public async Task Actual_self_admitted_journal_prefix_leaves_revocation_free_and_refuses_later_file_birth()
     {

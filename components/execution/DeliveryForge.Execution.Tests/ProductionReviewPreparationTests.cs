@@ -18,6 +18,7 @@ public sealed class ProductionReviewPreparationTests : IDisposable
 {
     readonly string root = Path.Combine(Path.GetTempPath(), "forge-review-admission-test-" + Guid.NewGuid().ToString("N"));
     readonly RefusingParent parent = new();
+    readonly Original original = new();
     bool quiet = true;
     string Image => Path.Combine(root, "inert-image.data");
     public ProductionReviewPreparationTests()
@@ -25,7 +26,7 @@ public sealed class ProductionReviewPreparationTests : IDisposable
         Directory.CreateDirectory(Path.Combine(root, ".git"));
         File.WriteAllText(Image, "inert owned source admission control");
     }
-    ProductionReviewSourceOwner Owner() => new(new ProcessCommandExecutor(), new Original(), parent, "run-control", root,
+    ProductionReviewSourceOwner Owner() => new(new ProcessCommandExecutor(), original, parent, "run-control", root,
         Path.Combine(root, ".git"), Path.Combine(root, ".git"), Image, new FileInfo(Image).Length,
         Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(Image))), "git version control", new string('a', 40), new string('b', 40), () => quiet,
         "sha256:" + new string('a', 64), "sha256:" + new string('b', 64), ".forge/review-policy.json", 1024);
@@ -92,6 +93,35 @@ public sealed class ProductionReviewPreparationTests : IDisposable
         var write = await Assert.ThrowsAsync<InvalidOperationException>(() => owner.WriteFileAsync(target, [1, 2, 3], CancellationToken.None));
         Assert.Equal("File birth admission revoked.", write.Message);
         Assert.False(File.Exists(target)); Assert.False(owner.Uncertain);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Parent_postbirth_refusal_closes_the_exact_stream_and_preserves_created_bytes(bool write)
+    {
+        var owner = Owner(); parent.AllowAsync = true;
+        parent.AfterSynchronous = value => { if (value is FileStream) parent.Revoked = true; };
+        var path = write ? Path.Combine(root, "created-before-refusal") : Image;
+        if (write) await Assert.ThrowsAsync<IOException>(() => owner.WriteFileAsync(path, [1, 2, 3], CancellationToken.None));
+        else await Assert.ThrowsAsync<IOException>(() => owner.ReadFileAsync(path, 1024, CancellationToken.None));
+        using var exclusive = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        Assert.False(owner.Uncertain); Assert.True(owner.MayCleanOwnedFiles); Assert.False(original.Unknown);
+        Assert.True(original.CleanupChecks > 0);
+        if (write) Assert.Equal(0, exclusive.Length);
+    }
+
+    [Fact]
+    public void Actual_unreturned_first_disposition_is_retained_and_forbids_namespace_cleanup()
+    {
+        var owner = Owner();
+        var resource = new FaultAfterCloseStream(Path.Combine(root, "first-close-failure"));
+        Exception? primary = new IOException("Controlled forward refusal.");
+        var close = owner.CloseResource(resource, ref primary);
+        Assert.NotNull(close); Assert.Equal(1, resource.CloseAttempts);
+        Assert.True(owner.Uncertain); Assert.False(owner.MayCleanOwnedFiles); Assert.True(original.Unknown);
+        Assert.Equal(1, parent.UnknownObservations);
+        // The injected first-close failure is sticky; the production owner never retries.
     }
 
     public static bool WindowsCreationOwnedProfile => OperatingSystem.IsWindows();
@@ -186,11 +216,17 @@ public sealed class ProductionReviewPreparationTests : IDisposable
     sealed class RefusingParent : ICoordinatedSynchronousEffectAdmission
     {
         internal int Entries;
-        internal bool AllowAsync, DenySynchronous;
+        internal bool AllowAsync, DenySynchronous, Revoked;
+        internal int UnknownObservations;
+        internal Action<object?>? AfterSynchronous;
         public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke) { Entries++; return AllowAsync ? invoke() : throw new InvalidOperationException("Negative control must not reach native admission."); }
-        public void RetainUncertain(string runId, string reason) => throw new InvalidOperationException("No native owner was created in this control.");
-        public T EnterSynchronous<T>(string runId, Func<T> invoke) => DenySynchronous ? throw new InvalidOperationException("File birth admission revoked.") : invoke();
-        public void CheckCurrent(string runId) { }
+        public void RetainUncertain(string runId, string reason) { UnknownObservations++; throw new IOException(reason); }
+        public T EnterSynchronous<T>(string runId, Func<T> invoke)
+        {
+            if (DenySynchronous) throw new InvalidOperationException("File birth admission revoked.");
+            CheckCurrent(runId); var value = invoke(); AfterSynchronous?.Invoke(value); CheckCurrent(runId); return value;
+        }
+        public void CheckCurrent(string runId) { if (Revoked) throw new IOException("File birth postcheck revoked."); }
     }
     sealed class SourceBuilderParent : ICoordinatedSynchronousEffectAdmission
     {
@@ -200,13 +236,24 @@ public sealed class ProductionReviewPreparationTests : IDisposable
         public T EnterSynchronous<T>(string runId, Func<T> invoke) => invoke();
         public void CheckCurrent(string runId) { }
     }
-    sealed class Original : IOwnedDuplexBudget
+    sealed class Original : IOwnedDuplexBudget, IOwnedBudgetUnknownRetention
     {
+        internal bool Unknown; internal int CleanupChecks;
         public long OriginalStarted { get; } = Stopwatch.GetTimestamp();
         public TimeSpan WholeLimit => TimeSpan.FromSeconds(1200);
         public TimeSpan WorkLimit => TimeSpan.FromSeconds(1100);
-        public TimeSpan CleanupRemaining => TimeSpan.FromSeconds(60);
+        public TimeSpan CleanupRemaining { get { CleanupChecks++; return TimeSpan.FromSeconds(60); } }
         public CancellationToken Token => CancellationToken.None;
         public void CheckWork() { if (Stopwatch.GetElapsedTime(OriginalStarted) >= WorkLimit) throw new TimeoutException(); }
+        public void PreserveUnknown() => Unknown = true;
+    }
+    sealed class FaultAfterCloseStream(string path) : FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None)
+    {
+        internal int CloseAttempts;
+        protected override void Dispose(bool disposing)
+        {
+            CloseAttempts++; base.Dispose(disposing);
+            if (disposing) throw new IOException("Actual test first-close return refused after underlying close.");
+        }
     }
 }

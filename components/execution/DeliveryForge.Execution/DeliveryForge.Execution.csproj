@@ -11,6 +11,7 @@
   <ItemGroup>
     <InternalsVisibleTo Include="DeliveryForge.Tool" />
     <InternalsVisibleTo Include="DeliveryForge.Execution.Tests" />
+    <InternalsVisibleTo Include="DeliveryForge.Tool.Tests" />
     <ProjectReference Include="../../coordination/DeliveryForge.Coordination/DeliveryForge.Coordination.csproj" />
   </ItemGroup>
 </Project>

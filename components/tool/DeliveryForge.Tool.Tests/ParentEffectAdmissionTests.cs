@@ -46,6 +46,29 @@ public sealed class ParentEffectAdmissionTests
         Assert.False(actual.IsCompleted);
     }
 
+    [Fact(Timeout = 15000)]
+    public async Task Reviewer_existing_phase_bounds_actual_pending_handoff_without_new_birth_or_unknown()
+    {
+        using var fixture = new RenewalFixture(TestContext.Current.CancellationToken);
+        var phaseStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        var phaseLimit = TimeSpan.FromSeconds(1);
+        var pending = fixture.Begin(); var calls = 0;
+        var waiting = Task.Run(() =>
+        {
+            DeliveryForge.Tool.Claude.ClaudeIndependentReviewer.CheckPhaseAdmission(fixture.Admission, "owned", phaseStarted, phaseLimit);
+            _ = fixture.Admission.EnterAsync("owned", () => { Interlocked.Increment(ref calls); return Task.FromResult(7); });
+        }, TestContext.Current.CancellationToken);
+        await WaitForWaiters(pending, 1, waiting);
+        await Assert.ThrowsAnyAsync<TimeoutException>(() => waiting.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        Assert.True(fixture.Revoked); Assert.False(pending.Installed); Assert.Equal(0, calls);
+        Assert.Equal(0, fixture.Admission.EnteredCount); Assert.Equal(0, pending.WaitingCount);
+        Assert.True(fixture.Original.Remaining > TimeSpan.FromSeconds(5));
+        Assert.False(fixture.Original.HasExplicitUnknown);
+        Assert.True(fixture.Admission.AllKnownSettled);
+        // Actual production handoff and existing phase restriction, not a model,
+        // server-renewal success, reviewer receipt, or native containment proof.
+    }
+
     [Fact]
     public void Bounded_nested_fast_check_keeps_atomic_birth_and_actual_task_identity()
     {

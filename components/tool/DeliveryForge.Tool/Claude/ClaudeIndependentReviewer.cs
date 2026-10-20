@@ -1,5 +1,4 @@
 using System.Diagnostics;
-using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -19,7 +18,7 @@ public sealed record IndependentClaudeReviewSelection(AdmissionFile Image, strin
 // accepted execution. Only this owner joins native correspondence and retirement
 // before using the existing issuer barriers.
 internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection selection, ToolLifetime original,
-    ProcessCommandExecutor executor, ParentCoordinationHost parent, string runId, string sourceRoot,
+    ProcessCommandExecutor executor, ParentCoordinationHost parent, string runId, ClaudeReviewerWorkingDirectory actualWorkingDirectory,
     ProductionReviewBootstrap bootstrap, Func<bool> sameCompletedWorker, Action verifyProtectedConfiguration, LinuxScopeSelection? linuxScope)
 {
     // Created only after the existing private issuer accepted the exact genuine
@@ -88,11 +87,24 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
     }
     void Current()
     {
-        original.Check(); parent.CheckCurrent(runId);
+        original.Check();
+        var maximum = TimeSpan.FromSeconds(selection.MaximumSeconds);
+        var policyMaximum = bootstrap.Policy.Budget.MaximumDuration;
+        CheckPhaseAdmission(parent, runId, phaseStarted, maximum < policyMaximum ? maximum : policyMaximum);
         if (stopping) throw new OperationCanceledException("Same original reviewer is stopping.");
         phaseCancellation?.Token.ThrowIfCancellationRequested();
         if (uncertain || !sameCompletedWorker()) throw new WorkerEnvelopeException("Actual original completed author changed during independent review.");
     }
+    internal static void CheckPhaseAdmission(DeliveryForge.Coordination.ICoordinatedEffectAdmission actualParent,
+        string runId, long existingPhaseStarted, TimeSpan existingPhaseLimit)
+    {
+        // The phase origin was created by RunAsync before its existing CTS. Carry
+        // the same restriction through every pending renewal, never a fresh clock.
+        if (existingPhaseStarted != 0 && actualParent is DeliveryForge.Coordination.ICoordinatedBoundedCurrentness bounded)
+            bounded.CheckCurrent(runId, existingPhaseStarted, existingPhaseLimit);
+        else actualParent.CheckCurrent(runId);
+    }
+
     TimeSpan Remaining(long started)
     {
         Current(); var phase = TimeSpan.FromSeconds(selection.MaximumSeconds) - Stopwatch.GetElapsedTime(started);
@@ -121,8 +133,10 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             capture = await parent.EnterAsync(runId, () =>
             {
                 var left = Remaining(phaseStarted); if (left > TimeSpan.FromSeconds(30)) left = TimeSpan.FromSeconds(30);
+                actualWorkingDirectory.Check();
                 lock (tasks) { Current(); row.Entered = true; }
-                var actual = executor.ExecuteBoundedCaptureAsync(new(selection.Image.Path, arguments, sourceRoot),
+                var actual = executor.ExecuteBoundedCaptureAsync(new(selection.Image.Path,
+                    ClaudeIndependentReviewData.IsolatedObservationArguments(arguments), actualWorkingDirectory.Path),
                     left, 65536, phaseCancellation!.Token, new OwnedWorkPhaseBudget(original));
                 lock (tasks) { row.Actual = Keep(actual); row.Returned = true; }
                 return actual;
@@ -256,9 +270,10 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             VerifyImage(); verifyProtectedConfiguration();
             process = parent.EnterSynchronous(runId, () =>
             {
+                actualWorkingDirectory.Check();
                 lock (tasks) { _ = Remaining(started); nativeBirthEntered = true; }
                 var actual = OwnedDuplexProcess.Open(new(selection.Image.Path,
-                    ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--no-session-persistence", "--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob", "--permission-mode", "dontAsk", "--max-budget-usd", bootstrap.Policy.Budget.MaximumCost.ToString(CultureInfo.InvariantCulture)], sourceRoot, environment), original, linuxScope);
+                    ClaudeIndependentReviewData.IsolatedReviewArguments(bootstrap.Policy.Budget.MaximumCost), actualWorkingDirectory.Path, environment), original, linuxScope);
                 lock (tasks) { process = actual; nativeBirthReturned = true; }
                 return actual;
             });
@@ -284,6 +299,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             // Recompute the complete same-source evidence AFTER actual native
             // retirement before issuing any live capability or execution.
             _ = await GitPatchIdentity.ExportVerifiedPatchAsync(bootstrap.ObjectView, patch, phaseStop.Token).ConfigureAwait(false);
+            parent.EnterSynchronous(runId, () => { Current(); actualWorkingDirectory.Check(); return true; });
             Current(); VerifyImage(); verifyProtectedConfiguration(); Current();
             var budget = ledger.Settle(reservation!, new(Stopwatch.GetElapsedTime(started), usage.Tokens, usage.Cost));
             if (budget.Reason.Contains("exhausted", StringComparison.OrdinalIgnoreCase)) return ToolResult.Incomplete("INDEPENDENT_REVIEW_BUDGET", budget.Reason);

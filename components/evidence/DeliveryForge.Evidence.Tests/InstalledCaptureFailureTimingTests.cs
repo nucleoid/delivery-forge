@@ -14,15 +14,22 @@ public sealed class InstalledCaptureFailureTimingTests
         Directory.CreateDirectory(root);
         var files = new InstalledToolFiles(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var owner = new InstalledToolGateProvider.ActualExecutor(files, new Dictionary<string, string>(), shell);
-        await Assert.ThrowsAnyAsync<Exception>(() => owner.ExecuteAsync(new(shell,
-            ["-NoProfile", "-NonInteractive", "-Command", "[Console]::OpenStandardOutput().WriteByte(255); exit 1"], root),
-            TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+        Exception? failure = null;
+        try
+        {
+            await owner.ExecuteAsync(new(shell,
+                ["-NoProfile", "-NonInteractive", "-Command", "$raw = [Console]::OpenStandardOutput(); try { $raw.WriteByte(255); $raw.Flush() } finally { $raw.Dispose() }; exit 1"], root),
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        }
+        catch (Exception error) { failure = error; }
         var actual = Assert.Single(owner.Calls);
         Assert.True(actual.Capture.RootExitObserved && actual.Capture.StandardOutputDrainCompleted && actual.Capture.StandardErrorDrainCompleted);
         Assert.True(actual.Result.OwnedProcessQuiescent);
         Assert.Equal(new byte[] { 255 }, actual.Capture.StandardOutputBytes);
         File.WriteAllBytes(Path.Combine(root, "actual-stdout.bin"), actual.Capture.StandardOutputBytes);
         File.WriteAllText(Path.Combine(root, "timing.json"), JsonSerializer.Serialize(new { Child = actual.Capture.Timing, Files = files.TimingData }));
+        Assert.NotNull(failure);
+        Assert.Contains("DecoderFallbackException", failure.ToString(), StringComparison.Ordinal);
         Assert.NotNull(actual.Capture.Timing?.CleanupStartedTimestamp);
         Assert.Equal(actual.Capture.Timing!.CleanupStartedTimestamp!.Value,
             JsonSerializer.SerializeToElement(files.TimingData).GetProperty("CleanupStarted").GetInt64());

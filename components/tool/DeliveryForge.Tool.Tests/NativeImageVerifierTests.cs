@@ -57,7 +57,7 @@ public sealed class NativeImageVerifierTests : IDisposable
     [Fact]
     public void Retained_Windows_image_keeps_exact_identity_and_denies_mutation_until_original_first_close()
     {
-        if (!OperatingSystem.IsWindows()) return;
+        if (!OperatingSystem.IsWindows()) Assert.Skip("Actual Windows image-sharing semantics; this case does not certify Linux.");
         var pin = Pin();
         using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var held = BoundedFiles.RetainVerifiedNativeImage(pin, life, TestContext.Current.CancellationToken);
@@ -78,7 +78,7 @@ public sealed class NativeImageVerifierTests : IDisposable
     [Fact]
     public void Retained_Windows_image_refuses_preexisting_writer_and_writable_view_even_after_originating_handles_close()
     {
-        if (!OperatingSystem.IsWindows()) return;
+        if (!OperatingSystem.IsWindows()) Assert.Skip("Actual Windows image-sharing semantics; this case does not certify Linux.");
         var pin = Pin();
         using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var writer = new FileStream(Image, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);

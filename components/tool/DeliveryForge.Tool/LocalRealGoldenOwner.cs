@@ -154,11 +154,31 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
         }
         public Task AppendReceiptAdmittedAsync(ValidatedContract receipt, CancellationToken token)
         { Write("receipt", receipt.CanonicalBytes.ToArray(), token); return Task.CompletedTask; }
-        void Write(string kind, byte[] bytes, CancellationToken token) => parent.EnterSynchronous(runId, () =>
+        void Write(string kind, byte[] bytes, CancellationToken token)
         {
-            token.ThrowIfCancellationRequested(); current();
-            if (sequence >= 8 || bytes.Length > 1048576) throw new IOException("Finite local fake journal profile exceeded.");
-            BoundedFiles.WriteNew(Path.Combine(root, $"{sequence++:D2}-{kind}.json"), bytes, original); current(); return true;
-        });
+            var writeEntered = false;
+            try
+            {
+                parent.EnterSynchronous(runId, () =>
+                {
+                    token.ThrowIfCancellationRequested(); current();
+                    if (sequence >= 8 || bytes.Length > 1048576) throw new IOException("Finite local fake journal profile exceeded.");
+                    var path = Path.Combine(root, $"{sequence++:D2}-{kind}.json");
+                    writeEntered = true;
+                    BoundedFiles.WriteNew(path, bytes, original); current(); return true;
+                });
+            }
+            catch (Exception primary)
+            {
+                // BoundedFiles owns the actual first-close protocol. Retain the
+                // unresolved durable journal even when that file is known closed.
+                if (writeEntered)
+                {
+                    try { parent.RetainUncertain(runId, "Local fake journal write entered but did not complete admission; durable evidence retained, no replay."); }
+                    catch (Exception retention) { primary.Data["LocalFakeJournalRetentionFailure"] = retention; }
+                }
+                throw;
+            }
+        }
     }
 }

@@ -82,14 +82,16 @@ internal static class LocalRealFakePublication
                 ["headCommit"] = intent.HeadCommit,
                 ["treeId"] = intent.TreeId,
                 ["action"] = "PR_PUBLISHED",
-                ["remoteRef"] = target.SourceRef,
+                ["remoteRef"] = "local-ref:" + target.SourceRef,
                 ["resultId"] = mutation.ResultId,
                 ["createdAt"] = intent.CreatedAt.UtcDateTime.ToString("O", CultureInfo.InvariantCulture)
             };
             node["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(node.ToJsonString()));
             var receipt = ContractValidator.ParseAndValidate(Encoding.UTF8.GetBytes(node.ToJsonString()));
             await Verify().ConfigureAwait(false);
-            WorkflowTransition.EnsureAllowed(WorkflowState.PrAuthorized, WorkflowState.PrPublished, evidence with { PublicationReceipt = receipt }, receiver);
+            // The genuine review/PR-authorization barriers above remain production
+            // checks. This local readback is DATA, never a production PrPublished transition.
+            RequireLocalReadbackReceipt(receipt, intent, mutation.ResultId);
             await journal.AppendReceiptAdmittedAsync(receipt, original.Token).ConfigureAwait(false);
             await Append(intent with { State = PublicationIntentState.Confirmed, ResultId = mutation.ResultId, ReceiptIdentity = receipt.Identity }).ConfigureAwait(false);
             await Verify().ConfigureAwait(false);
@@ -97,11 +99,30 @@ internal static class LocalRealFakePublication
                 "Actual production review/gate barriers with local fake publication only; no remote mutation or production publication authority.",
                 PublicationAction.CreateOrUpdatePr, PublicationRealm.Fixture, receipt);
         }
-        catch
+        catch (Exception primary)
         {
-            if (sent) parent.RetainUncertain(runId, "Local fake publication did not complete its same-original journal/readback; no replay.");
+            if (sent)
+            {
+                try { parent.RetainUncertain(runId, "Local fake publication did not complete its same-original journal/readback; no replay."); }
+                catch (Exception retention) { primary.Data["LocalFakePublicationRetentionFailure"] = retention; }
+            }
             throw;
         }
+    }
+
+    internal static void RequireLocalReadbackReceipt(ValidatedContract receipt, PublicationIntent intent, string resultId)
+    {
+        using var document = System.Text.Json.JsonDocument.Parse(receipt.CanonicalBytes);
+        var row = document.RootElement;
+        if (receipt.SchemaName != "publication-receipt" ||
+            row.GetProperty("action").GetString() != "PR_PUBLISHED" ||
+            row.GetProperty("remoteRef").GetString() != "local-ref:" + intent.Target.SourceRef ||
+            row.GetProperty("baseCommit").GetString() != intent.BaseCommit ||
+            row.GetProperty("headCommit").GetString() != intent.HeadCommit ||
+            row.GetProperty("treeId").GetString() != intent.TreeId ||
+            row.GetProperty("resultId").GetString() != resultId ||
+            !resultId.StartsWith("local-fake-", StringComparison.Ordinal))
+            throw new IOException("Exact local-only publication DATA readback required.");
     }
 
     private sealed class LocalOnlyAdapter : IGitHostAdapter

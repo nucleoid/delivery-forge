@@ -48,6 +48,30 @@ jobs:
         with:
           dotnet-version: 10.0.401
       - run: dotnet restore DeliveryForge.slnx --locked-mode
+      - name: Restore locked source-only actual .NET fixture dependencies
+        shell: pwsh
+        run: |
+          # Actual isolated scenarios restore only from this cache. Their fixture pins
+          # Test.Sdk 17.14.1 independently of the solution's 18.0.1 package graph.
+          $fixtureSource = Join-Path $env:GITHUB_WORKSPACE 'components/end-to-end/DeliveryForge.EndToEnd.Tests/Fixtures/RealDotNet'
+          $fixtureRoot = Join-Path $env:RUNNER_TEMP ('delivery-forge-locked-fixture-' + [guid]::NewGuid().ToString('N'))
+          if (Test-Path -LiteralPath $fixtureRoot) { throw 'Fresh fixture source destination required' }
+          # Only the complete checked-in source fixture is copied; no bin/obj/cache.
+          $fixtureFiles = @(
+            'Directory.Build.props', 'Directory.Packages.props', 'global.json', 'evidence-policy-source.json', 'runtime.gitignore.txt',
+            'Subject/Subject.csproj', 'Subject/packages.lock.json', 'Subject/Calculator.red.cs.txt', 'Subject/Calculator.green.cs.txt',
+            'Subject.Tests/Subject.Tests.csproj', 'Subject.Tests/packages.lock.json', 'Subject.Tests/CalculatorTests.cs'
+          )
+          foreach ($relative in $fixtureFiles) {
+            $inputFile = Join-Path $fixtureSource $relative
+            if ((Get-Item -LiteralPath $inputFile).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Source fixture file must be plain' }
+            $outputFile = Join-Path $fixtureRoot $relative
+            [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($outputFile))
+            Copy-Item -LiteralPath $inputFile -Destination $outputFile
+          }
+          $fixtureCache = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.nuget/packages' }
+          dotnet restore (Join-Path $fixtureRoot 'Subject.Tests/Subject.Tests.csproj') --locked-mode --packages $fixtureCache --disable-parallel --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build actual owned lifecycle helper and bind fixture inputs
         shell: pwsh
         run: |

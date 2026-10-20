@@ -9,6 +9,31 @@ namespace DeliveryForge.Publication.Tests;
 public sealed class LocalRealFakePublicationTests
 {
     [Theory]
+    [InlineData("none")]
+    [InlineData("unmarked")]
+    [InlineData("foreign-head")]
+    [InlineData("foreign-result")]
+    [InlineData("merge")]
+    public void Local_readback_rule_accepts_only_exact_marked_fake_data(string change)
+    {
+        var fixture = new PublicationFixture();
+        var intent = new PublicationIntent("unit-key", "unit-run", "unit-revision", PublicationAction.CreateOrUpdatePr,
+            new("local-real/no-network", "refs/heads/local-real/unit", "refs/heads/base"),
+            fixture.Patch.BaseCommit, fixture.Patch.HeadCommit, fixture.Patch.HeadTree, PublicationIntentState.Sent);
+        var node = System.Text.Json.Nodes.JsonNode.Parse(fixture.PublicationReceipt("PR_PUBLISHED").CanonicalBytes)!.AsObject();
+        node["remoteRef"] = "local-ref:" + intent.Target.SourceRef;
+        node["resultId"] = "local-fake-unit";
+        if (change == "unmarked") node["remoteRef"] = intent.Target.SourceRef;
+        if (change == "foreign-head") node["headCommit"] = new string('f', 40);
+        if (change == "foreign-result") node["resultId"] = "local-fake-other";
+        if (change == "merge") node["action"] = "MERGED";
+        var receipt = PublicationFixture.Contract(node.ToJsonString());
+        if (change == "none") LocalRealFakePublication.RequireLocalReadbackReceipt(receipt, intent, "local-fake-unit");
+        else Assert.Throws<IOException>(() => LocalRealFakePublication.RequireLocalReadbackReceipt(receipt, intent, "local-fake-unit"));
+        // This is a local DATA rule, not a production reviewer/publication issuer.
+    }
+
+    [Theory]
     [InlineData("fixture-review")]
     [InlineData("missing-gates")]
     [InlineData("failed-gate")]

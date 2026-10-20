@@ -130,7 +130,7 @@ internal sealed class HistoricalQualityHost
                 });
                 return true;
             });
-            if (result.Fixture || result.SourceChanged || !result.Execution.OwnedProcessQuiescent || result.Outcome != GateOutcome.Pass)
+            if (!InstalledQualityHost.IsExactCurrentGatePass(result, gate, selection.Quality.PolicyIdentity, expected))
                 return ToolResult.Incomplete("HISTORICAL_QUALITY_NONPASS", "Actual historical gates did not both pass; original artifacts remain evidence and no baseline is approved.", new { run.RunId, expected, Gates = references.ToArray(), BaselineApproved = false });
         }
         return parent.EnterSynchronous(run.RunId, () =>

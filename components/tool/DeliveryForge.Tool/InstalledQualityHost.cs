@@ -242,7 +242,15 @@ internal sealed class InstalledQualityHost
     }
 
     // DATA consistency only; this cannot issue a baseline or accept caller results.
-    // The sole production caller first verifies its private same-frame actual completion.
+    // Shared exact gate DATA predicate. Protected completion additionally requires
+    // the private same-frame actual completion checked by its caller below.
+    internal static bool IsExactCurrentGatePass(GateRunResult row, InstalledQualityGateSelection gate,
+        string policyIdentity, RepositoryIdentity expected) =>
+        expected.IsClean && row.Outcome == GateOutcome.Pass && !row.Fixture && !row.SourceChanged &&
+        row.PolicyIdentity == policyIdentity && row.Before == expected && row.After == expected &&
+        row.Scope == gate.Scope && row.Execution.ExitCode == 0 && !row.Execution.TimedOut &&
+        !row.Execution.Cancelled && row.Execution.OwnedProcessQuiescent;
+
     internal static void ValidateProtectedQualityTuple(InstalledQualitySelection selected, InstalledBaselineComparison? comparison,
         RepositoryIdentity expected, IReadOnlyList<GateRunResult> current)
     {
@@ -250,10 +258,7 @@ internal sealed class InstalledQualityHost
             comparison.RegistryCommit != registry.RegistryCommit || comparison.RegistryIdentity != registry.RegistryIdentity ||
             comparison.BaselineSourceRevision != expected.BaseCommit || !expected.IsClean ||
             current.Count != selected.Gates.Count || current.Count != 2 ||
-            current.Where((row, index) => row.Outcome != GateOutcome.Pass || row.Fixture || row.SourceChanged ||
-                row.PolicyIdentity != selected.PolicyIdentity || row.Before != expected || row.After != expected ||
-                row.Scope != selected.Gates[index].Scope || row.Execution.ExitCode != 0 || row.Execution.TimedOut ||
-                row.Execution.Cancelled || !row.Execution.OwnedProcessQuiescent).Any())
+            current.Where((row, index) => !IsExactCurrentGatePass(row, selected.Gates[index], selected.PolicyIdentity, expected)).Any())
             throw new WorkerEnvelopeException("Local-real requires exact current nonfixture gate PASS tuples and the actual protected baseline comparison.");
     }
 }

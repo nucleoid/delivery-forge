@@ -23,8 +23,12 @@ public result flags cannot pass those barriers.
 Publication is a fixed private in-memory fake with a local durable intent and
 readback journal. There is no URL, adapter, remote-target or live-publication
 factory parameter. It never calls a GitHub adapter or merge operation. The
-receipt explicitly records fake publication, zero remote writes and no
-production publication authority. Existing fixture `PublicationService` and
+outer local-real chain receipt explicitly records fake publication, zero remote
+writes and no production publication authority. Its canonical journal receipt
+uses the reserved `local-ref:` prefix: it remains schema-valid v1 DATA, but the
+workflow publication receipt guard refuses it for `PrPublished` and `Merged`.
+The fake readback uses a local-only rule after the genuine review/PR-authorization
+barriers, and never advances the production publication state. Existing fixture `PublicationService` and
 its safety checks are unchanged. The new phase consumes the same original
 work/cleanup endpoints and is retained with the worker frame if unresolved.
 

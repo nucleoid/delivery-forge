@@ -126,7 +126,15 @@ internal sealed class InstalledReviewHost : IDisposable
             var planAndEvidence = JsonSerializer.SerializeToUtf8Bytes(new { FrozenPlan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), QualityEvidence = qualityEvidence, MissingQualityEvidence = actualQualityResults.Count == 0 }, BoundedFiles.Json);
             token.ThrowIfCancellationRequested(); sourceOwner.Check(); return (patch, planAndEvidence);
         }
-        independentReviewer = new(selection.IndependentReviewer, original, executor, parent, assignment.RunId, assignment.Worktree, bootstrap,
+        var reviewerDirectory = parent.EnterSynchronous(assignment.RunId, () =>
+        {
+            sourceOwner.Check(); original.Check();
+            _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
+            if (!actualNativeCompletedAndQuiet()) throw new WorkerEnvelopeException("Actual author must be closed before private reviewer CWD creation.");
+            return ClaudeReviewerWorkingDirectory.Create(original, assignment.RunId, selection.ArtifactRoot,
+                assignment.ParentCheckout, assignment.Worktree, assignment.ResultDirectory);
+        });
+        independentReviewer = new(selection.IndependentReviewer, original, executor, parent, assignment.RunId, reviewerDirectory, bootstrap,
             () => ReferenceEquals(frame.Completion, completion) && frame.OwnerCompleted && !frame.OwnerStopped && frame.Primary is null && frame.Post is null && actualNativeCompletedAndQuiet(),
             () => parent.EnterSynchronous(assignment.RunId, () => { sourceOwner.Check(); _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536); return true; }), linuxScope);
         return await parent.EnterAsync(assignment.RunId, () => independentReviewer.RunAsync(actualAuthorFamily,

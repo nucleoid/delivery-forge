@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Review;
@@ -7,6 +8,17 @@ namespace DeliveryForge.Tool.Claude;
 // Parsed native DATA only. These helpers cannot issue capabilities or receipts.
 internal static class ClaudeIndependentReviewData
 {
+    // Global options apply to observation commands too. No model/auth or
+    // settings-file override is added; only the selected user source is read.
+    internal static string[] IsolatedObservationArguments(string[] arguments)
+    {
+        if (!arguments.SequenceEqual(new[] { "--version" }) && !arguments.SequenceEqual(new[] { "auth", "status" }))
+            throw new ToolUsageException("Only the existing read-only reviewer observations are supported.");
+        return ["--safe-mode", "--setting-sources", "user", .. arguments];
+    }
+    internal static string[] IsolatedReviewArguments(decimal maximumCost) =>
+        ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--no-session-persistence", "--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob", "--permission-mode", "dontAsk", "--max-budget-usd", maximumCost.ToString(CultureInfo.InvariantCulture)];
+
     internal static readonly string[] ProviderOverrides = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_SIMPLE"];
     internal static void RequireSubscriptionEnvironment(Func<string, string?> read)
     {

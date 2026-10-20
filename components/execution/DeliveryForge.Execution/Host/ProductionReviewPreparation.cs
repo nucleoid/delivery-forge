@@ -14,6 +14,7 @@ namespace DeliveryForge.Execution.Host;
 // describe that bridge's retained owners; public configuration cannot mint one.
 public sealed class ProductionReviewSourceOwner
 {
+    static readonly List<(ProductionReviewSourceOwner Owner, IDisposable Resource)> UnsettledResources = [];
     readonly ProcessCommandExecutor executor;
     readonly IOwnedDuplexBudget original;
     readonly ICoordinatedSynchronousEffectAdmission parent;
@@ -67,11 +68,11 @@ public sealed class ProductionReviewSourceOwner
         original.CheckWork();
         parent.CheckCurrent(RunId);
         if (uncertain || !nativeCompletedAndQuiet()) throw new ReviewPreflightException("Original completed native worker is no longer quiet.", residualProcessUncertain: uncertain);
-        CheckMetadataBinding();
     }
     void VerifyImage()
     {
         Check();
+        CheckMetadataBinding();
         parent.EnterSynchronous(RunId, () =>
         {
             Plain(GitExecutable);
@@ -91,22 +92,61 @@ public sealed class ProductionReviewSourceOwner
         Check(); return parent.EnterSynchronous(RunId, () => { original.CheckWork(); return operation(); });
     }
     internal object? EnterSynchronousObject(Func<object?> operation) => EnterSynchronous(operation);
+    internal Exception? CloseResource(IDisposable resource, ref Exception? primary)
+    {
+        if (primary is null) { try { Check(); } catch (Exception error) { primary = error; } }
+        var returned = false;
+        try
+        {
+            if (primary is not null) _ = original.CleanupRemaining;
+            resource.Dispose(); returned = true;
+            if (primary is not null) _ = original.CleanupRemaining; else Check();
+            return null;
+        }
+        catch (Exception failure)
+        {
+            if (!returned)
+            {
+                lock (UnsettledResources) UnsettledResources.Add((this, resource));
+                uncertain = true;
+                if (original is IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown();
+                try { parent.RetainUncertain(RunId, "Actual review file/enumerator first disposition did not return."); }
+                catch (Exception observation) { return new AggregateException("Review first disposition and uncertainty observation failed.", failure, observation); }
+            }
+            return failure;
+        }
+    }
+    internal static void ThrowFailures(Exception? primary, Exception? close)
+    {
+        if (primary is not null && close is not null) throw new AggregateException("Original review operation and first disposition failed.", primary, close);
+        if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+        if (close is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(close).Throw();
+    }
     internal async Task<byte[]> ReadFileAsync(string path, int maximum, CancellationToken token)
     {
         var result = await EnterAsync(async () =>
         {
-            await using var file = EnterSynchronous(() => { Plain(path); return new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.Asynchronous); });
-            if (file.Length > maximum) throw new ReviewPreflightException("Owned source/index exceeds its byte bound.");
-            using var bytes = new MemoryStream(); var buffer = new byte[65536];
-            while (true)
+            FileStream? file = null; byte[]? resultBytes = null; Exception? primary = null;
+            try
             {
-                Check(); token.ThrowIfCancellationRequested();
-                var count = await file.ReadAsync(buffer.AsMemory(), token).ConfigureAwait(false);
-                if (count == 0) break;
-                if (bytes.Length + count > maximum) throw new ReviewPreflightException("Owned source/index grew past its byte bound.");
-                bytes.Write(buffer, 0, count);
+                EnterSynchronous(() => { Plain(path); return file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.Asynchronous); });
+                var opened = file ?? throw new IOException("Owned file birth returned no stream.");
+                if (opened.Length > maximum) throw new ReviewPreflightException("Owned source/index exceeds its byte bound.");
+                using var bytes = new MemoryStream(); var buffer = new byte[65536];
+                while (true)
+                {
+                    Check(); token.ThrowIfCancellationRequested();
+                    var count = await opened.ReadAsync(buffer.AsMemory(), token).ConfigureAwait(false);
+                    if (count == 0) break;
+                    if (bytes.Length + count > maximum) throw new ReviewPreflightException("Owned source/index grew past its byte bound.");
+                    bytes.Write(buffer, 0, count);
+                }
+                Check(); resultBytes = bytes.ToArray();
             }
-            Check(); return bytes.ToArray();
+            catch (Exception failure) { primary = failure; }
+            var close = file is null ? null : CloseResource(file, ref primary);
+            ThrowFailures(primary, close);
+            return resultBytes ?? throw new IOException("Owned source read returned no bytes.");
         }).ConfigureAwait(false);
         Check(); return result;
     }
@@ -114,16 +154,24 @@ public sealed class ProductionReviewSourceOwner
     {
         await EnterAsync(async () =>
         {
-            await using var file = EnterSynchronous(() => { Plain(path); return new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous); });
-            Check(); await file.WriteAsync(bytes, token).ConfigureAwait(false);
-            Check(); await file.FlushAsync(token).ConfigureAwait(false);
-            Check(); return true;
+            FileStream? file = null; Exception? primary = null;
+            try
+            {
+                EnterSynchronous(() => { Plain(path); return file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous); });
+                var opened = file ?? throw new IOException("Owned file birth returned no stream.");
+                Check(); await opened.WriteAsync(bytes, token).ConfigureAwait(false);
+                Check(); await opened.FlushAsync(token).ConfigureAwait(false);
+                Check();
+            }
+            catch (Exception failure) { primary = failure; }
+            var close = file is null ? null : CloseResource(file, ref primary);
+            ThrowFailures(primary, close); return true;
         }).ConfigureAwait(false);
         Check();
     }
     internal void Begin(string directory)
     {
-        Check(); if (entered) throw new ReviewPreflightException("Production source preparation cannot replay.");
+        Check(); CheckMetadataBinding(); if (entered) throw new ReviewPreflightException("Production source preparation cannot replay.");
         entered = true; controlled = directory;
     }
     internal async Task<GitProcessResult> GitAsync(string gitDirectory, IReadOnlyList<string> arguments,
@@ -268,30 +316,41 @@ public sealed class ProductionReviewSourceOwner
     }
     internal static bool ObjectId(string value) => value.Length is 40 or 64 && value.All(char.IsAsciiHexDigitLower);
     static bool Identity(string value) => value.Length == 71 && value.StartsWith("sha256:", StringComparison.Ordinal) && value[7..].All(char.IsAsciiHexDigitLower);
-    void CheckMetadataBinding()
+    internal void CheckMetadataBinding()
     {
-        static bool Same(string a, string b) => string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
-        string Text(string path) => parent.EnterSynchronous(RunId, () =>
+        Check();
+        parent.EnterSynchronous(RunId, () =>
         {
-            Plain(path); using var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            if (file.Length > 4096) throw new ReviewPreflightException("Owned Git metadata link exceeds4096 bytes.");
-            var bytes = new byte[4097]; var count = 0;
-            while (count < bytes.Length) { var next = file.Read(bytes, count, bytes.Length - count); if (next == 0) break; count += next; }
-            if (count > 4096) throw new ReviewPreflightException("Owned Git metadata link grew past4096 bytes.");
-            original.CheckWork();
-            return new UTF8Encoding(false, true).GetString(bytes, 0, count).TrimEnd('\r', '\n');
+            static bool Same(string a, string b) => string.Equals(Path.GetFullPath(a), Path.GetFullPath(b), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
+            string Text(string path)
+            {
+                FileStream? file = null; string? text = null; Exception? primary = null;
+                try
+                {
+                    Plain(path); file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    if (file.Length > 4096) throw new ReviewPreflightException("Owned Git metadata link exceeds4096 bytes.");
+                    var bytes = new byte[4097]; var count = 0;
+                    while (count < bytes.Length) { Check(); var next = file.Read(bytes, count, bytes.Length - count); if (next == 0) break; count += next; }
+                    if (count > 4096) throw new ReviewPreflightException("Owned Git metadata link grew past4096 bytes.");
+                    Check(); text = new UTF8Encoding(false, true).GetString(bytes, 0, count).TrimEnd('\r', '\n');
+                }
+                catch (Exception failure) { primary = failure; }
+                var close = file is null ? null : CloseResource(file, ref primary);
+                ThrowFailures(primary, close); return text!;
+            }
+            var metadata = Path.Combine(SourceRoot, ".git"); Plain(metadata);
+            if (Directory.Exists(metadata))
+            {
+                if (!Same(metadata, WorkerGitDirectory) || !Same(metadata, CommonGitDirectory)) throw new ReviewPreflightException("Standalone Git authority differs from owned paths.");
+                return true;
+            }
+            var link = Text(metadata);
+            if (!link.StartsWith("gitdir: ", StringComparison.Ordinal) || !Same(Path.GetFullPath(link[8..], SourceRoot), WorkerGitDirectory) ||
+                !Same(Path.GetFullPath(Text(Path.Combine(WorkerGitDirectory, "gitdir")), WorkerGitDirectory), metadata) ||
+                !Same(Path.GetFullPath(Text(Path.Combine(WorkerGitDirectory, "commondir")), WorkerGitDirectory), CommonGitDirectory))
+                throw new ReviewPreflightException("Owned worktree metadata/common-directory association changed.");
+            return true;
         });
-        var metadata = Path.Combine(SourceRoot, ".git"); Plain(metadata);
-        if (Directory.Exists(metadata))
-        {
-            if (!Same(metadata, WorkerGitDirectory) || !Same(metadata, CommonGitDirectory)) throw new ReviewPreflightException("Standalone Git authority differs from owned paths.");
-            return;
-        }
-        var link = Text(metadata);
-        if (!link.StartsWith("gitdir: ", StringComparison.Ordinal) || !Same(Path.GetFullPath(link[8..], SourceRoot), WorkerGitDirectory) ||
-            !Same(Path.GetFullPath(Text(Path.Combine(WorkerGitDirectory, "gitdir")), WorkerGitDirectory), metadata) ||
-            !Same(Path.GetFullPath(Text(Path.Combine(WorkerGitDirectory, "commondir")), WorkerGitDirectory), CommonGitDirectory))
-            throw new ReviewPreflightException("Owned worktree metadata/common-directory association changed.");
     }
     internal static void Plain(string path)
     {
@@ -363,20 +422,27 @@ public sealed partial class ReviewAuthorityHost
                 {
                     owner.Check(); ProductionReviewSourceOwner.Plain(directory);
                     if (depth > 64) throw new ReviewPreflightException("Owned object inventory exceeds64 directory levels.");
-                    using var iterator = owner.EnterSynchronous(() => Directory.EnumerateFileSystemEntries(directory).GetEnumerator());
-                    while (owner.EnterSynchronous(iterator.MoveNext))
+                    IEnumerator<string>? iterator = null; Exception? primary = null;
+                    try
                     {
-                        var path = iterator.Current;
-                        owner.Check(); cancellationToken.ThrowIfCancellationRequested(); ProductionReviewSourceOwner.Plain(path);
-                        if (++entries > 4096) throw new ReviewPreflightException("Owned object inventory exceeds4096 entries.");
-                        var relative = Path.GetRelativePath(workerObjects, path); var destination = Path.Combine(controlled, "objects", relative);
-                        if (owner.EnterSynchronous(() => Directory.Exists(path))) { if (copy) owner.EnterSynchronous(() => Directory.CreateDirectory(destination)); await Inventory(path, copy, depth + 1).ConfigureAwait(false); continue; }
-                        var bytes = await owner.ReadFileAsync(path, 16777216, cancellationToken).ConfigureAwait(false);
-                        copiedBytes += bytes.Length; if (copiedBytes > 134217728) throw new ReviewPreflightException("Owned object inventory exceeds128MiB.");
-                        var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
-                        if (copy) { copied.Add(relative, hash); await owner.WriteFileAsync(destination, bytes, cancellationToken).ConfigureAwait(false); }
-                        else if (!copied.Remove(relative, out var expected) || hash != expected) throw new ReviewPreflightException("Source objects changed during owned copy.");
+                        owner.EnterSynchronous(() => iterator = Directory.EnumerateFileSystemEntries(directory).GetEnumerator());
+                        while (owner.EnterSynchronous(iterator!.MoveNext))
+                        {
+                            var path = iterator.Current;
+                            owner.Check(); cancellationToken.ThrowIfCancellationRequested(); ProductionReviewSourceOwner.Plain(path);
+                            if (++entries > 4096) throw new ReviewPreflightException("Owned object inventory exceeds4096 entries.");
+                            var relative = Path.GetRelativePath(workerObjects, path); var destination = Path.Combine(controlled, "objects", relative);
+                            if (owner.EnterSynchronous(() => Directory.Exists(path))) { if (copy) owner.EnterSynchronous(() => Directory.CreateDirectory(destination)); await Inventory(path, copy, depth + 1).ConfigureAwait(false); continue; }
+                            var bytes = await owner.ReadFileAsync(path, 16777216, cancellationToken).ConfigureAwait(false);
+                            copiedBytes += bytes.Length; if (copiedBytes > 134217728) throw new ReviewPreflightException("Owned object inventory exceeds128MiB.");
+                            var hash = Convert.ToHexStringLower(SHA256.HashData(bytes));
+                            if (copy) { copied.Add(relative, hash); await owner.WriteFileAsync(destination, bytes, cancellationToken).ConfigureAwait(false); }
+                            else if (!copied.Remove(relative, out var expected) || hash != expected) throw new ReviewPreflightException("Source objects changed during owned copy.");
+                        }
                     }
+                    catch (Exception failure) { primary = failure; }
+                    var close = iterator is null ? null : owner.CloseResource(iterator, ref primary);
+                    ProductionReviewSourceOwner.ThrowFailures(primary, close);
                 }
                 await Inventory(workerObjects, true).ConfigureAwait(false); entries = 0; copiedBytes = 0;
                 await Inventory(workerObjects, false).ConfigureAwait(false);
@@ -398,7 +464,7 @@ public sealed partial class ReviewAuthorityHost
                 var root = new ReviewAuthorityRootContext(owner.RunId, plan.Identity, evidencePolicy.Identity, policy.ContentIdentity, policy.SourceRevision,
                     policy.AuthorityKind, rootId, owner.SourceRoot, owner.BaseCommit, view.ProtectedObjectViewIdentity);
                 var host = new ReviewAuthorityHost(ReviewAuthorityRealm.Production, rootId, null, new(rootId, root), root, issuer);
-                owner.Check(); return new ProductionReviewBootstrap(host, view, source, policy, root);
+                owner.CheckMetadataBinding(); owner.Check(); return new ProductionReviewBootstrap(host, view, source, policy, root);
             }).ConfigureAwait(false);
         }
         catch (Exception failure)
