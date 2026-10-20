@@ -82,6 +82,7 @@ public sealed class InstalledToolProfile
             throw new EvidenceWriteException("Strict producer child commands must use the exact approved dotnet host.");
         if (data.Environment.Keys.Distinct(StringComparer.OrdinalIgnoreCase).Count() != data.Environment.Count)
             throw new EvidenceWriteException("Case-aliased environment overrides are ambiguous.");
+        RequireInstalledGraphDeploymentEnvironment(data.Tool, data.Environment.Keys);
         foreach (var rootKey in new[] { "DOTNET_ROOT_X64", "DOTNET_ROOT_X86", "DOTNET_ROOT_ARM64" })
         {
             var effective = data.Environment.FirstOrDefault(p => string.Equals(p.Key, rootKey, StringComparison.OrdinalIgnoreCase)).Value ?? Environment.GetEnvironmentVariable(rootKey);
@@ -103,6 +104,18 @@ public sealed class InstalledToolProfile
         if (data.Limitations.Length > 32 || data.Limitations.Any(s => s.Length is < 1 or > 1024))
             throw new EvidenceWriteException("Invalid profile limitations.");
     }
+
+    internal static void RequireInstalledGraphDeploymentEnvironment(string? tool, IEnumerable<string> overrides)
+    {
+        if (tool == "mutate4csharp" &&
+            (overrides.Any(IsGraphDeploymentOverride) ||
+             Environment.GetEnvironmentVariables().Keys.Cast<string>().Any(IsGraphDeploymentOverride)))
+            throw new EvidenceWriteException("Installed mutation requires the default packaged graph deployment; graph manifest override keys must be absent.");
+    }
+
+    private static bool IsGraphDeploymentOverride(string name) =>
+        name.Equals("MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST", StringComparison.OrdinalIgnoreCase) ||
+        name.Equals("MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST_SHA256", StringComparison.OrdinalIgnoreCase);
 
     internal static void Relative(string path)
     {

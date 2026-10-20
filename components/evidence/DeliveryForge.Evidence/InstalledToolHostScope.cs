@@ -76,7 +76,7 @@ public sealed class InstalledToolHostScope
         {
             if (runs.Count >= 8 || runs.Any(r => r.Task is { IsFaulted: true } or { IsCanceled: true })) throw new EvidenceWriteException("Containing installed route exhausted or a prior original failed; no retry.");
             files = Files(maximum);
-            owner = new InstalledToolGateProvider.ActualExecutor(files, profile.Data.Environment, profile.Data.GitExecutablePath, admission, runId, linuxScope);
+            owner = new InstalledToolGateProvider.ActualExecutor(files, profile.Data.Environment, profile.Data.GitExecutablePath, admission, runId, linuxScope, installedTool: profile.Tool);
             retained.Add(owner);
             row = new OriginalRun { Entered = true, Files = files, Owner = owner }; runs.Add(row);
         }

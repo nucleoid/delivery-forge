@@ -49,7 +49,7 @@ public sealed class InstalledToolGateProvider
 
         if (Inside(request.OutputDirectory, _root)) throw new EvidenceWriteException("Owned artifacts must be external to the consumer.");
         var files = actualFiles ?? new InstalledToolFiles(request.Timeout, cancellationToken);
-        var owner = actualOwner ?? new ActualExecutor(files, profile.Data.Environment, profile.Data.GitExecutablePath);
+        var owner = actualOwner ?? new ActualExecutor(files, profile.Data.Environment, profile.Data.GitExecutablePath, installedTool: profile.Tool);
         try
         {
             var resourcesBefore = InstalledToolResourceAdmission.Capture(files);
@@ -266,7 +266,7 @@ public sealed class InstalledToolGateProvider
     }
 
     // This class has no injectable owner and retains each exact creator result, not a copied DTO.
-    internal sealed class ActualExecutor(InstalledToolFiles files, IReadOnlyDictionary<string, string> environment, string gitExecutable, ICoordinatedEffectAdmission? actualAdmission = null, string? actualRunId = null, LinuxScopeSelection? selectedLinuxScope = null) : ICommandExecutor
+    internal sealed class ActualExecutor(InstalledToolFiles files, IReadOnlyDictionary<string, string> environment, string gitExecutable, ICoordinatedEffectAdmission? actualAdmission = null, string? actualRunId = null, LinuxScopeSelection? selectedLinuxScope = null, string? installedTool = null) : ICommandExecutor
     {
         private readonly ProcessCommandExecutor _owner = new();
         internal bool OwnsScopedFiles(InstalledToolFiles actualFiles) =>
@@ -303,10 +303,17 @@ public sealed class InstalledToolGateProvider
                 Environment = effectiveEnvironment
             };
             var selectedBudget = ReferenceEquals(invocation, _main) ? (IOwnedDuplexBudget)files : new NestedBudget(files, files.IsClosing);
-            Task<BoundedCommandCaptureResult> StartActual() => OperatingSystem.IsLinux()
-                ? _owner.ExecuteBoundedCaptureAsync(effective, limit, ProducerJson.MaximumBytes, cancellationToken,
-                    selectedBudget, selectedLinuxScope ?? throw new EvidenceWriteException("Explicit containing Linux scope required before process birth."))
-                : _owner.ExecuteBoundedCaptureAsync(effective, limit, ProducerJson.MaximumBytes, cancellationToken, selectedBudget);
+            Task<BoundedCommandCaptureResult> StartActual()
+            {
+                // Read the actual inherited environment again inside admission,
+                // immediately before this native birth. LoadPinned is not an
+                // approval of later ambient or invocation-level helper overrides.
+                InstalledToolProfile.RequireInstalledGraphDeploymentEnvironment(installedTool, effectiveEnvironment.Keys);
+                return OperatingSystem.IsLinux()
+                    ? _owner.ExecuteBoundedCaptureAsync(effective, limit, ProducerJson.MaximumBytes, cancellationToken,
+                        selectedBudget, selectedLinuxScope ?? throw new EvidenceWriteException("Explicit containing Linux scope required before process birth."))
+                    : _owner.ExecuteBoundedCaptureAsync(effective, limit, ProducerJson.MaximumBytes, cancellationToken, selectedBudget);
+            }
             var actualCapture = actualAdmission is null
                 ? StartActual()
                 : actualAdmission.EnterAsync(actualRunId ?? throw new EvidenceWriteException("Missing actual containing run."), StartActual);

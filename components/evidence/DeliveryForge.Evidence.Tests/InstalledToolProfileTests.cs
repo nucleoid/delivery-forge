@@ -4,9 +4,100 @@ using System.Text.Json.Nodes;
 
 namespace DeliveryForge.Evidence.Tests;
 
+[CollectionDefinition("Installed tool profile process environment", DisableParallelization = true)]
+public sealed class InstalledToolProfileEnvironmentCollection { }
+
 // UNEXECUTED source cases; the fake text payloads below are never launched.
+[Collection("Installed tool profile process environment")]
 public sealed class InstalledToolProfileTests
 {
+    [Theory]
+    [InlineData("MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST", "")]
+    [InlineData("MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST", "outside/deployment.json")]
+    [InlineData("MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST_SHA256", "")]
+    [InlineData("MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST_SHA256", "parent-selected-digest")]
+    [InlineData("mutate4csharp_graph_capture_manifest", "outside/deployment.json")]
+    [InlineData("mutate4csharp_graph_capture_manifest_sha256", "parent-selected-digest")]
+    public void Parent_pinned_profile_cannot_select_graph_helpers_outside_the_installed_payload(string key, string value)
+    {
+        using var fixture = new ProfileFiles();
+        Assert.True(fixture.Load().Fixture); // Actual unchanged file/profile positive first.
+        foreach (var fixtureFlag in new[] { true, false })
+        {
+            var json = JsonNode.Parse(fixture.Bytes)!.AsObject();
+            json["Fixture"] = fixtureFlag;
+            json["Environment"]![key] = value;
+            var bytes = Encoding.UTF8.GetBytes(json.ToJsonString());
+            fixture.WriteProfile(bytes);
+            var refusal = Assert.Throws<EvidenceWriteException>(() =>
+                InstalledToolProfile.LoadPinned(fixture.ProfilePath, InstalledToolFiles.Identity(bytes)));
+            Assert.Contains("graph manifest override keys must be absent", refusal.Message, StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST")]
+    [InlineData("MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST_SHA256")]
+    [InlineData("mutate4csharp_graph_capture_manifest")]
+    public void Inherited_graph_selection_cannot_escape_an_unchanged_pinned_installation_profile(string key)
+    {
+        using var fixture = new ProfileFiles();
+        Assert.True(fixture.Load().Fixture);
+        var previous = Environment.GetEnvironmentVariable(key);
+        try
+        {
+            // Serialized profile bytes and their parent-approved identity stay
+            // unchanged; the actual inherited host environment is the poison.
+            Environment.SetEnvironmentVariable(key, "outside-installed-payload");
+            var refusal = Assert.Throws<EvidenceWriteException>(() => fixture.Load());
+            Assert.Contains("graph manifest override keys must be absent", refusal.Message, StringComparison.Ordinal);
+            Assert.Equal(fixture.Bytes, File.ReadAllBytes(fixture.ProfilePath));
+        }
+        finally { Environment.SetEnvironmentVariable(key, previous); }
+        Assert.True(fixture.Load().Fixture);
+    }
+
+    [Fact]
+    public void Graph_selection_refusal_is_specific_to_the_installed_mutation_profile()
+    {
+        using var fixture = new ProfileFiles();
+        Assert.True(fixture.Load().Fixture);
+        var json = JsonNode.Parse(fixture.Bytes)!.AsObject();
+        json["Tool"] = "crap4csharp"; json["Format"] = "1.0"; json["ConfigurationRelativePath"] = "crap-policy.json";
+        json["Environment"]!["MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST"] = "unused-by-this-tool";
+        var bytes = Encoding.UTF8.GetBytes(json.ToJsonString()); fixture.WriteProfile(bytes);
+        Assert.Equal("crap4csharp", InstalledToolProfile.LoadPinned(fixture.ProfilePath, InstalledToolFiles.Identity(bytes)).Tool);
+    }
+
+    [Theory]
+    [InlineData("MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST", true)]
+    [InlineData("MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST_SHA256", true)]
+    [InlineData("MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST", false)]
+    [InlineData("MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST_SHA256", false)]
+    public async Task Later_ambient_or_invocation_graph_selection_refuses_before_actual_native_birth(string key, bool ambient)
+    {
+        using var fixture = new ProfileFiles();
+        var profile = fixture.Load();
+        Assert.True(profile.Fixture);
+        var files = new InstalledToolFiles(TimeSpan.FromSeconds(10));
+        var owner = new InstalledToolGateProvider.ActualExecutor(files, profile.Data.Environment,
+            profile.Data.GitExecutablePath, installedTool: profile.Tool);
+        var extra = new Dictionary<string, string>();
+        var previous = Environment.GetEnvironmentVariable(key);
+        try
+        {
+            if (ambient) Environment.SetEnvironmentVariable(key, "later-outside-installed-payload");
+            else extra.Add(key, ""); // Presence alone is unsafe, even an empty per-call override.
+            var refusal = await Assert.ThrowsAsync<EvidenceWriteException>(() => owner.ExecuteAsync(
+                new CommandInvocation(profile.Data.DotNetHostPath, ["--version"], fixture.Install, extra),
+                TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+            Assert.Contains("graph manifest override keys must be absent", refusal.Message, StringComparison.Ordinal);
+            Assert.Empty(owner.Calls);
+            Assert.Equal(fixture.Bytes, File.ReadAllBytes(fixture.ProfilePath));
+        }
+        finally { if (ambient) Environment.SetEnvironmentVariable(key, previous); }
+    }
+
     [Fact]
     public void Approved_package_version_and_observed_informational_version_remain_distinct()
     {
