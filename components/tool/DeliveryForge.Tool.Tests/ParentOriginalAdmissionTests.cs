@@ -8,6 +8,41 @@ namespace DeliveryForge.Tool.Tests;
 // No live lease, native result, deployment or production authority is invented.
 public sealed class ParentOriginalAdmissionTests
 {
+    sealed class CancelAtDisposition(ToolLifetime life, CancellationTokenSource cancellation) : IOwnedDuplexBudget, IOwnedFailureCleanup, IOwnedBudgetUnknownRetention
+    {
+        readonly OwnedWorkPhaseBudget phase = new(life);
+        int reads;
+        internal bool Triggered => reads != 0;
+        public long OriginalStarted => life.OriginalStarted;
+        public TimeSpan WholeLimit => life.WholeLimit;
+        public TimeSpan WorkLimit => life.WorkLimit;
+        public CancellationToken Token => life.Token;
+        public void CheckWork() => phase.CheckWork();
+        public TimeSpan CleanupRemaining
+        {
+            get { if (Interlocked.Increment(ref reads) == 1) cancellation.Cancel(); return phase.CleanupRemaining; }
+        }
+        public void BeginFailureCleanup() => phase.BeginFailureCleanup();
+        public void PreserveUnknown() => phase.PreserveUnknown();
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Actual_successful_child_cancelled_at_first_disposition_still_closes_within_original_cleanup()
+    {
+        if (!OperatingSystem.IsWindows()) Assert.Skip("Actual Windows success-loop to native-disposition boundary.");
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), cancellation.Token);
+        var budget = new CancelAtDisposition(life, cancellation);
+        var shell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
+        var capture = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(new(shell,
+            ["-NoProfile", "-NonInteractive", "-Command", "Write-Output 'settled'; exit 0"], Path.GetTempPath()),
+            TimeSpan.FromSeconds(10), 4096, life.Token, budget);
+        Assert.True(budget.Triggered);
+        Assert.True(capture.RootExitObserved && capture.StandardOutputDrainCompleted && capture.StandardErrorDrainCompleted);
+        Assert.True(capture.Command.OwnedProcessQuiescent);
+        Assert.False(life.HasExplicitUnknown);
+    }
+
     [Fact]
     public void Revoked_admission_blocks_forward_work_but_not_existing_native_disposition_within_work()
     {
@@ -77,16 +112,17 @@ public sealed class ParentOriginalAdmissionTests
     }
 
     [Fact(Timeout = 30000)]
-    public async Task Actual_unsettled_Windows_creator_frame_propagates_explicit_unknown_to_its_containing_budget()
+    public async Task Actual_refused_Windows_creation_closes_entered_resources_without_explicit_unknown()
     {
         if (!OperatingSystem.IsWindows()) Assert.Skip("Actual Windows attempted creation and retained native frame.");
         using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var root = Path.Combine(Path.GetTempPath(), "forge-retained-creator-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
         var capture = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(new(Path.Combine(root, "missing.exe"), [], root),
             TimeSpan.FromSeconds(10), 4096, life.Token, new OwnedWorkPhaseBudget(life));
-        Assert.Equal(CommandStartupState.AttemptedUnknown, capture.Command.LifecycleDiagnostics!.Startup!.Creation);
+        Assert.Equal("Refused", capture.Command.LifecycleDiagnostics!.Startup!.Creation.ToString());
         Assert.False(capture.Command.OwnedProcessQuiescent);
-        Assert.True(life.HasExplicitUnknown);
+        Assert.False(capture.RootExitObserved);
+        Assert.False(life.HasExplicitUnknown);
     }
 
     [Fact(Timeout = 30000)]
