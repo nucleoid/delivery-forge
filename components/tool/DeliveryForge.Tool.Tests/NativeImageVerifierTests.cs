@@ -26,10 +26,10 @@ public sealed class NativeImageVerifierTests : IDisposable
         }
         var pin = Pin();
         using var life = new ToolLifetime(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
-        BoundedFiles.VerifyNativeImage(pin, life);
+        BoundedFiles.VerifyNativeImage(pin, life, TestContext.Current.CancellationToken);
         using (var changed = new FileStream(Image, FileMode.Open, FileAccess.Write, FileShare.None))
         { changed.Position = changed.Length - 1; changed.WriteByte(42); }
-        Assert.Throws<IOException>(() => BoundedFiles.VerifyNativeImage(pin, life));
+        Assert.Throws<IOException>(() => BoundedFiles.VerifyNativeImage(pin, life, TestContext.Current.CancellationToken));
         Assert.False(life.HasRetainedUnknown);
         // A failed complete hash must still close the actual original file handle.
         using var exclusive = new FileStream(Image, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
@@ -43,14 +43,14 @@ public sealed class NativeImageVerifierTests : IDisposable
     {
         var pin = Pin();
         using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
-        BoundedFiles.VerifyNativeImage(pin, life);
+        BoundedFiles.VerifyNativeImage(pin, life, TestContext.Current.CancellationToken);
         using (var altered = new FileStream(Image, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
         {
             if (change == "grow") altered.SetLength(altered.Length + 1);
             else if (change == "shrink") altered.SetLength(altered.Length - 1);
             else altered.WriteByte(0);
         }
-        Assert.Throws<IOException>(() => BoundedFiles.VerifyNativeImage(pin, life));
+        Assert.Throws<IOException>(() => BoundedFiles.VerifyNativeImage(pin, life, TestContext.Current.CancellationToken));
         Assert.False(life.HasRetainedUnknown);
         using var exclusive = new FileStream(Image, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
     }
@@ -61,7 +61,7 @@ public sealed class NativeImageVerifierTests : IDisposable
         if (!OperatingSystem.IsWindows()) return;
         var pin = Pin();
         using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
-        var held = BoundedFiles.RetainVerifiedNativeImage(pin, life);
+        var held = BoundedFiles.RetainVerifiedNativeImage(pin, life, TestContext.Current.CancellationToken);
         try
         {
             for (var observation = 0; observation < 6; observation++) held.Check();
@@ -83,7 +83,7 @@ public sealed class NativeImageVerifierTests : IDisposable
         var pin = Pin();
         using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var writer = new FileStream(Image, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
-        Assert.Throws<IOException>(() => BoundedFiles.RetainVerifiedNativeImage(pin, life));
+        Assert.Throws<IOException>(() => BoundedFiles.RetainVerifiedNativeImage(pin, life, TestContext.Current.CancellationToken));
         // That refused acquisition entered its real constructor and therefore
         // remains UNKNOWN; do not reuse its original as a fresh allowance.
         using var mapLife = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
@@ -94,7 +94,7 @@ public sealed class NativeImageVerifierTests : IDisposable
         writer.Dispose(); mapping.Dispose();
         Assert.False(GetHandleInformation(fileHandle, out _)); Assert.Equal(6, Marshal.GetLastPInvokeError());
         Assert.False(GetHandleInformation(mapHandle, out _)); Assert.Equal(6, Marshal.GetLastPInvokeError());
-        Assert.Throws<IOException>(() => BoundedFiles.RetainVerifiedNativeImage(pin, mapLife));
+        Assert.Throws<IOException>(() => BoundedFiles.RetainVerifiedNativeImage(pin, mapLife, TestContext.Current.CancellationToken));
         // Prove that the surviving view really remains writable, rather than
         // accepting a disposed mapping as the negative control.
         view.Write(0, (byte)41); view.Flush();
@@ -123,7 +123,7 @@ public sealed class NativeImageVerifierTests : IDisposable
         var pin = Pin() with { Bytes = BoundedFiles.MaximumNativeImageBytes + 1 };
         using var exclusive = new FileStream(Image, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
         using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
-        Assert.Throws<ToolUsageException>(() => BoundedFiles.VerifyNativeImage(pin, life));
+        Assert.Throws<ToolUsageException>(() => BoundedFiles.VerifyNativeImage(pin, life, TestContext.Current.CancellationToken));
         Assert.False(life.HasRetainedUnknown);
     }
 
@@ -132,10 +132,10 @@ public sealed class NativeImageVerifierTests : IDisposable
     {
         var pin = Pin();
         using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
-        BoundedFiles.VerifyNativeImage(pin, life);
+        BoundedFiles.VerifyNativeImage(pin, life, TestContext.Current.CancellationToken);
         var link = Path.Combine(root, "redirected-image.data");
         File.CreateSymbolicLink(link, Image);
-        Assert.Throws<IOException>(() => BoundedFiles.VerifyNativeImage(pin with { Path = link }, life));
+        Assert.Throws<IOException>(() => BoundedFiles.VerifyNativeImage(pin with { Path = link }, life, TestContext.Current.CancellationToken));
         Assert.Equal("inert image bytes\n", File.ReadAllText(Image));
         Assert.False(life.HasRetainedUnknown);
     }
