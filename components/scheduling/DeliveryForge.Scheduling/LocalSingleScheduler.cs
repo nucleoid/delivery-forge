@@ -15,7 +15,7 @@ public sealed class LocalDispatchReservation
 }
 
 // One process-local parent lane, not distributed ownership. No native agent is launched here.
-public sealed class LocalSingleScheduler
+public sealed partial class LocalSingleScheduler
 {
     private static readonly ConcurrentDictionary<string, byte> ObservedClosedRuns = new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private static readonly SemaphoreSlim LocalParentLane = new(1, 1);
@@ -99,7 +99,7 @@ public sealed class LocalSingleScheduler
 
     public async Task RelinquishPausedAsync(CancellationToken cancellationToken = default)
     {
-        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             if (_uncertain || !_nativeQuiescenceKnown || !_prepared || !_laneHeld || Volatile.Read(ref _paused) == 0 ||
@@ -114,7 +114,7 @@ public sealed class LocalSingleScheduler
 
     public async Task<LocalDispatchReservation> RecoverPausedAsync(CancellationToken cancellationToken = default)
     {
-        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             EnsureControls();
@@ -148,7 +148,7 @@ public sealed class LocalSingleScheduler
                 _startedAtUtc = saved.StartedAtUtc;
                 _expiresAtUtc = saved.ExpiresAtUtc;
                 _timeBudget = LocalRunTimeBudget.Adopt(_demand.TimeLimit, _startedAtUtc, _expiresAtUtc, DateTimeOffset.UtcNow);
-                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                using var deadline = OriginalDeadline(cancellationToken);
                 deadline.CancelAfter(Remaining());
                 await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
                 var observed = await _execution.ReconcilePausedAsync(_worker.RunId, _controlTimeout, deadline.Token).ConfigureAwait(false);
@@ -174,7 +174,7 @@ public sealed class LocalSingleScheduler
     {
         Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _stopped, 1);
-        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         var cleanupLaneHeld = false;
         try
         {
@@ -185,7 +185,8 @@ public sealed class LocalSingleScheduler
             cleanupLaneHeld = true;
             ObservedClosedRuns.TryRemove(ClosedNamespaceKey(_worker.RunId), out _);
             ObservedClosedRuns.TryRemove(ClosedNamespaceKey(JournalRunId), out _);
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var deadline = OriginalDeadline(cancellationToken);
+            if (original is not null) throw new SchedulingException("Cold cleanup cannot replace the retained original scheduling owner.");
             deadline.CancelAfter(TimeSpan.FromMinutes(2)); // Cleanup remains possible after the original dispatch lifetime expires.
             var journal = await _store.RecoverAsync(JournalRunId, deadline.Token).ConfigureAwait(false);
             var record = journal.Records.LastOrDefault(item => item.Kind == "local-scheduler-checkpoint")
@@ -241,7 +242,7 @@ public sealed class LocalSingleScheduler
     {
         Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _stopped, 1);
-        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             if (!_laneHeld) return true;
@@ -261,7 +262,7 @@ public sealed class LocalSingleScheduler
 
     public async Task<LocalDispatchReservation> ReserveAsync(CancellationToken cancellationToken = default)
     {
-        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             EnsureControls();
@@ -270,8 +271,8 @@ public sealed class LocalSingleScheduler
             _laneHeld = true;
             try
             {
-                using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                deadline.CancelAfter(_demand.TimeLimit);
+                using var deadline = OriginalDeadline(cancellationToken);
+                deadline.CancelAfter(original is null ? _demand.TimeLimit : Min(_demand.TimeLimit, OriginalRemaining()));
                 if ((await _store.RecoverAsync(_worker.RunId, deadline.Token).ConfigureAwait(false)).Records.Count != 0 ||
                     (await _store.RecoverAsync(JournalRunId, deadline.Token).ConfigureAwait(false)).Records.Count != 0)
                     throw new SchedulingException("Existing manifests/checkpoints are recovery data; they cannot create new live reservations.");
@@ -300,14 +301,14 @@ public sealed class LocalSingleScheduler
 
     public async Task<AgentRequest> ProvisionAndPrepareAsync(LocalDispatchReservation reservation, CancellationToken cancellationToken = default)
     {
-        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         var transitionStarted = false;
         try
         {
             EnsureControls();
             if (!ReferenceEquals(reservation, _ticket) || !_laneHeld || _resources is null || _prepared) throw new SchedulingException("Provisioning requires this live parent's unused reservation.");
             transitionStarted = true;
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var deadline = OriginalDeadline(cancellationToken);
             deadline.CancelAfter(Remaining());
             await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
             EnsureControls();
@@ -335,7 +336,7 @@ public sealed class LocalSingleScheduler
 
     public async Task<AgentRequest> ResumeAsync(LocalDispatchReservation reservation, CancellationToken cancellationToken = default)
     {
-        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         var enteredValidResume = false;
         try
         {
@@ -344,7 +345,7 @@ public sealed class LocalSingleScheduler
                 throw new SchedulingException("Resume requires this live parent's paused ticket; checkpoint data cannot recreate it.");
             enteredValidResume = true;
             var controlGeneration = Interlocked.Read(ref _controlGeneration);
-            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            using var deadline = OriginalDeadline(cancellationToken);
             deadline.CancelAfter(Remaining());
             await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
             EnsureResumeGeneration(controlGeneration);
@@ -375,7 +376,7 @@ public sealed class LocalSingleScheduler
     {
         Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _paused, 1);
-        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             if (_prepared)
@@ -394,7 +395,7 @@ public sealed class LocalSingleScheduler
     {
         Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _stopped, 1);
-        await _serial.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             if (!_laneHeld) return true;
@@ -446,12 +447,14 @@ public sealed class LocalSingleScheduler
 
     private TimeSpan Remaining()
     {
-        return (_timeBudget ?? throw new SchedulingException("No positively observed local lifetime has been adopted."))
+        var remaining = (_timeBudget ?? throw new SchedulingException("No positively observed local lifetime has been adopted."))
             .Remaining(Stopwatch.GetElapsedTime(_allocatedAt), DateTimeOffset.UtcNow);
+        return original is null ? remaining : Min(remaining, OriginalRemaining());
     }
     private string JournalRunId => _worker.RunId + "-scheduler";
     private void EnsureControls()
     {
+        CheckOriginal();
         if (_relinquished || _uncertain || Volatile.Read(ref _paused) != 0 || Volatile.Read(ref _stopped) != 0) throw new SchedulingException("Paused/stopped/uncertain/relinquished parent cannot grant new dispatch.");
     }
     private async Task PersistAsync(string phase, CancellationToken cancellationToken)

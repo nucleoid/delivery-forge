@@ -1,0 +1,77 @@
+using System.Diagnostics;
+using DeliveryForge.Coordination;
+using DeliveryForge.Evidence;
+
+namespace DeliveryForge.Scheduling;
+
+public sealed partial class LocalSingleScheduler
+{
+    IOwnedDuplexBudget? original;
+    ICoordinatedSynchronousEffectAdmission? parent;
+    Func<Task?>? actualPipeline;
+    Func<bool>? actualSettled;
+    internal bool HasRetainedReservation => _laneHeld || _ticket is not null || _resources is not null;
+    internal void BindOriginal(IOwnedDuplexBudget owner, ICoordinatedSynchronousEffectAdmission admission, Func<Task?> pipeline, Func<bool> settled)
+    {
+        if (original is not null || _laneHeld || _ticket is not null || _timeBudget is not null) throw new SchedulingException("Original scheduling binds once before reservation.");
+        owner.CheckWork(); admission.CheckCurrent(_worker.RunId);
+        original = owner; parent = admission; actualPipeline = pipeline; actualSettled = settled;
+    }
+    void CheckOriginal() { original?.CheckWork(); parent?.CheckCurrent(_worker.RunId); }
+    TimeSpan OriginalRemaining() { CheckOriginal(); return original!.WorkLimit - Stopwatch.GetElapsedTime(original.OriginalStarted); }
+    static TimeSpan Min(TimeSpan left, TimeSpan right) => left < right ? left : right;
+    CancellationTokenSource OriginalDeadline(CancellationToken caller)
+    {
+        var linked = CancellationTokenSource.CreateLinkedTokenSource(caller, original?.Token ?? default);
+        if (original is not null) linked.CancelAfter(OriginalRemaining());
+        return linked;
+    }
+    async Task WaitSerialAsync(CancellationToken token)
+    {
+        using var linked = OriginalDeadline(token);
+        await _serial.WaitAsync(linked.Token).ConfigureAwait(false);
+        try { CheckOriginal(); } catch { _serial.Release(); throw; }
+    }
+    // Private same-process terminal observation. Never stop an already completed
+    // native worker, and never release from a saved terminal checkpoint.
+    internal async Task CompleteObservedAsync(LocalDispatchReservation ticket, Func<Task> releaseActualWriter, CancellationToken token)
+    {
+        await WaitSerialAsync(token).ConfigureAwait(false);
+        var terminalEntered = false;
+        try
+        {
+            CheckOriginal();
+            if (original is null || !ReferenceEquals(ticket, _ticket) || !_laneHeld || !_prepared || _uncertain || !_nativeQuiescenceKnown ||
+                actualPipeline?.Invoke() is not { IsCompletedSuccessfully: true } || actualSettled?.Invoke() != true || _execution.HasPendingControlOperations(_worker.RunId))
+                throw new SchedulingException("Only the exact settled original pipeline can release its actual completed reservation.");
+            terminalEntered = true;
+            await PersistAsync("completed", token).ConfigureAwait(false);
+            CheckOriginal();
+            if (actualSettled!.Invoke() != true) throw new SchedulingException("Original settlement changed before writer disposition.");
+            await releaseActualWriter().ConfigureAwait(false);
+            CheckOriginal(); MarkObservedClosed(); Release();
+        }
+        catch { if (terminalEntered) _uncertain = true; throw; }
+        finally { _serial.Release(); }
+    }
+    internal async Task ReleaseStoppedObservedAsync(LocalDispatchReservation ticket, Func<bool> actualStopped, Func<Task> releaseActualWriter)
+    {
+        if (original is null) throw new SchedulingException("No retained original cleanup owner.");
+        using var deadline = new CancellationTokenSource(original.CleanupRemaining);
+        await _serial.WaitAsync(deadline.Token).ConfigureAwait(false);
+        try
+        {
+            _ = original.CleanupRemaining;
+            if (!ReferenceEquals(ticket, _ticket) || !_laneHeld || actualPipeline?.Invoke() is not { IsCompleted: true } || !actualStopped())
+                throw new SchedulingException("Cleanup release requires the exact settled pipeline and fresh same-owner stopped closure.");
+            await releaseActualWriter().ConfigureAwait(false);
+            _ = original.CleanupRemaining;
+            if (!actualStopped()) throw new SchedulingException("Stopped closure changed during cleanup.");
+            // No forward checkpoint write or new dispatch authority under cleanup.
+            // A fresh process must still reconcile the retained journal itself.
+            MarkObservedClosed(); Release();
+        }
+        catch { _uncertain = true; throw; }
+        finally { _serial.Release(); }
+    }
+}

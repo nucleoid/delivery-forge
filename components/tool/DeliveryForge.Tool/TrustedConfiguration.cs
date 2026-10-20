@@ -3,7 +3,7 @@ namespace DeliveryForge.Tool;
 // Configuration selects trusted inputs; it never contains capability/accepted receipt flags.
 public sealed record TrustedConfiguration(string Repository, string RepositoryRoot, string MutableReference, string GitExecutable,
     string Adapter = "codex.cli", string AdapterVersion = "unverified", string MaximumCeiling = "plan", int OperationSeconds = 120,
-    string? ExpectedBundleIdentity = null, string? ExpectedContractIdentity = null, string? ExpectedWorkItem = null, string? ExpectedPlanCeiling = null, string? PolicyFile = null, AdmissionFile? StandaloneRoot = null, ParentCoordinationConfiguration? Coordination = null, InstalledQualitySelection? InstalledQuality = null, InstalledReviewSelection? InstalledReview = null, LocalRealGoldenSelection? LocalRealGolden = null)
+    string? ExpectedBundleIdentity = null, string? ExpectedContractIdentity = null, string? ExpectedWorkItem = null, string? ExpectedPlanCeiling = null, string? PolicyFile = null, AdmissionFile? StandaloneRoot = null, ParentCoordinationConfiguration? Coordination = null, InstalledQualitySelection? InstalledQuality = null, InstalledReviewSelection? InstalledReview = null, LocalRealGoldenSelection? LocalRealGolden = null, LocalSingleSchedulingSelection? LocalSingle = null)
 {
     public static TrustedConfiguration Load(string path, ToolLifetime life)
     {

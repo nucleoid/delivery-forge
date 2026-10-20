@@ -7,6 +7,14 @@ public sealed class StandaloneResources
 {
     static readonly List<StandaloneResources> Unknown = [];
     readonly ToolLifetime original; Process? actual; IntPtr before, two; bool acquisitionEntered, entryEntered, acquired, changed, closeEntered, closed, restoreEntered, restored;
+    int measuredCpu; long measuredMemoryMiB;
+    internal DeliveryForge.Scheduling.ResourceSlots MeasureScheduling(ToolLifetime owner)
+    {
+        original.Check();
+        if (!ReferenceEquals(owner, original) || Primary is not null || !changed || restoreEntered || closeEntered || actual is null || ReadActualAffinity(actual) != two || measuredCpu != 2 || measuredMemoryMiB <= 0)
+            throw new ToolUsageException("Scheduling requires the same live measured caller resources.");
+        original.Check(); return new(1, measuredCpu, measuredMemoryMiB, 1, 1, 1);
+    }
     public bool Restored => restored && closed;
     public Exception? Primary { get; private set; }
     public Exception? Post { get; private set; }
@@ -29,6 +37,7 @@ public sealed class StandaloneResources
         entryEntered = true;
         foreach (var pair in new[] { ("DOTNET_PROCESSOR_COUNT", "2"), ("DOTNET_GCHeapHardLimit", "0x100000000"), ("DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER", "1"), ("MSBUILDDISABLENODEREUSE", "1") }) { original.Check(); var actualValue = Environment.GetEnvironmentVariable(pair.Item1); original.Check(); if (actualValue != pair.Item2) throw new ToolUsageException("Launch through the admitted prebirth resource shim: " + pair.Item1); }
         original.Check(); var available = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes; original.Check(); var cpu = Environment.ProcessorCount; original.Check(); if (cpu != 2 || available <= 0 || available > 4294967296L) throw new ToolUsageException("Actual prebirth managed CPU/heap profile is not established.");
+        measuredCpu = cpu; measuredMemoryMiB = available / (1024 * 1024);
         if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Caller affinity profile is Windows/Linux only.");
         try { original.Check(); acquisitionEntered = true; actual = Process.GetCurrentProcess(); acquired = true; original.Check(); before = ReadActualAffinity(actual); original.Check(); var mask = unchecked((ulong)before.ToInt64()); if (BitOperations.PopCount(mask) < 2) throw new ToolUsageException("At least two actual inherited CPU bits are required."); var first = mask & (~mask + 1); var rest = mask & ~first; two = unchecked((IntPtr)(long)(first | (rest & (~rest + 1)))); original.Check(); changed = true; WriteActualAffinity(actual, two); original.Check(); if (ReadActualAffinity(actual) != two) throw new IOException("Actual caller two-bit affinity set/readback failed."); original.Check(); }
         catch (Exception error) { Primary = error; original.RetainUnknown(); throw; }

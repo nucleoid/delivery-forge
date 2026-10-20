@@ -23,8 +23,23 @@ public sealed record AgentResumeRecord(string RequestIdentity, AgentControlResul
 public sealed class ExecutionCoordinator : IDisposable
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> FlowLocks = new(StringComparer.Ordinal);
-    private readonly RunStore _store;
-    private readonly WorktreeManager _worktrees;
+    private RunStore forwardStore;
+    private readonly AsyncLocal<RunStore?> cleanupStore = new();
+    private RunStore _store => cleanupStore.Value ?? forwardStore;
+    private WorktreeManager _worktrees;
+    private DeliveryForge.Evidence.IOwnedDuplexBudget? original;
+    private string? originalRun;
+    internal RunStore BindOriginalScheduling(DeliveryForge.Evidence.IOwnedDuplexBudget owner, ICoordinatedSynchronousEffectAdmission parent, string runId, WorktreeManager admittedWorktrees)
+    {
+        lock (_writers)
+        {
+            ThrowIfDisposed();
+            if (original is not null || !ReferenceEquals(parent, _coordinationAdmission) || !_writers.IsEmpty || !_pendingControls.IsEmpty) throw new WorkerEnvelopeException("Scheduling binds the same idle original coordinator once.");
+            owner.CheckWork(); parent.CheckCurrent(runId);
+            forwardStore = _store.WithOriginalAdmission(owner, parent, runId); _worktrees = admittedWorktrees; original = owner; originalRun = runId;
+            return _store;
+        }
+    }
     private readonly ProcessControl _processes;
     private readonly IAgentControlPort _agentControl;
     private readonly IExecutionFactSource _factSource;
@@ -47,6 +62,41 @@ public sealed class ExecutionCoordinator : IDisposable
     public bool ObserveOriginalProcessesSettled(string runId) => !_disposed && !HasPendingControlOperations(runId) &&
         _processes.GetOwnedIdentities(runId).Count == 0;
 
+    internal async Task ReleaseCompletedWriterAsync(string runId, AgentCompletionReceipt actualCompletion, Func<bool> originalQuiet, CancellationToken token)
+    {
+        if (original is null || runId != originalRun || _coordinationAdmission is not ICoordinatedSynchronousEffectAdmission parent) throw new WorkerEnvelopeException("No actual scheduled owner.");
+        original.CheckWork(); parent.CheckCurrent(runId);
+        if (!originalQuiet() || !ObserveOriginalProcessesSettled(runId)) throw new WorkerEnvelopeException("Original completion is not settled.");
+        var recovered = await _store.RecoverAsync(runId, token).ConfigureAwait(false);
+        var completed = recovered.Records.LastOrDefault(record => record.Kind == "worker-completed") ?? throw new WorkerEnvelopeException("Actual completed worker record absent.");
+        if (!System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(_store.ReadPayload<AgentCompletionReceipt>(completed)).AsSpan().SequenceEqual(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(actualCompletion))) throw new WorkerEnvelopeException("Completed original receipt differs.");
+        var prepared = GetPrepared(recovered); EnsureWriterOwnership(prepared.Request);
+        parent.EnterSynchronous(runId, () =>
+        {
+            original.CheckWork();
+            if (!originalQuiet() || !ObserveOriginalProcessesSettled(runId) || !_writers.TryGetValue(runId, out var writer)) throw new WorkerEnvelopeException("Original writer/closure changed.");
+            if (writer.ObserveCurrentNamespaceIdentity().Outcome != WriterNamespaceIdentityOutcome.Match) throw new WorkerEnvelopeException("Original writer namespace is no longer current.");
+            writer.Dispose(); original.CheckWork();
+            if (!((ICollection<KeyValuePair<string, WriterLease>>)_writers).Remove(new(runId, writer))) throw new WorkerEnvelopeException("Actual writer identity changed during disposition.");
+            return true;
+        });
+        original.CheckWork(); parent.CheckCurrent(runId);
+    }
+    internal async Task ReleaseStoppedWriterAsync(string runId, Func<bool> actualStopped)
+    {
+        if (original is null || originalRun != runId || !actualStopped() || !ObserveOriginalProcessesSettled(runId)) throw new WorkerEnvelopeException("Same original stopped observation required.");
+        _ = original.CleanupRemaining;
+        var recovered = await forwardStore.WithOriginalCleanup().RecoverAsync(runId).ConfigureAwait(false);
+        var stopped = recovered.Records.LastOrDefault(record => record.Kind == "stopped") ?? throw new WorkerEnvelopeException("Actual stopped record absent.");
+        if (!_store.ReadPayload<QuiescenceRecord>(stopped).Quiescent) throw new WorkerEnvelopeException("Actual stopped record is not quiescent.");
+        EnsureWriterOwnership(GetPrepared(recovered).Request);
+        _ = original.CleanupRemaining;
+        if (!actualStopped() || !ObserveOriginalProcessesSettled(runId) || !_writers.TryGetValue(runId, out var writer)) throw new WorkerEnvelopeException("Stopped writer/closure changed.");
+        if (writer.ObserveCurrentNamespaceIdentity().Outcome != WriterNamespaceIdentityOutcome.Match) throw new WorkerEnvelopeException("Stopped writer namespace is no longer current.");
+        writer.Dispose(); _ = original.CleanupRemaining;
+        if (!((ICollection<KeyValuePair<string, WriterLease>>)_writers).Remove(new(runId, writer))) throw new WorkerEnvelopeException("Actual stopped writer identity changed.");
+    }
+
 
     public ExecutionCoordinator(
         RunStore store,
@@ -55,7 +105,7 @@ public sealed class ExecutionCoordinator : IDisposable
         IAgentControlPort? agentControl = null,
         IExecutionFactSource? factSource = null)
     {
-        _store = store;
+        forwardStore = store;
         _worktrees = worktrees;
         _processes = processes;
         _agentControl = agentControl ?? new UnsupportedAgentControlPort();
@@ -196,7 +246,7 @@ public sealed class ExecutionCoordinator : IDisposable
     public Task<QuiescenceResult> StopAsync(
         string runId, TimeSpan deadline, CancellationToken cancellationToken = default) =>
         RunExclusiveAsync(runId,
-            () => QuiesceAndRecordAsync(runId, WorkflowState.Stopped, "stopped", deadline, cancellationToken), cancellationToken);
+            () => QuiesceAndRecordAsync(runId, WorkflowState.Stopped, "stopped", deadline, cancellationToken), cancellationToken, cleanup: true);
 
     public Task<ResumeResult> ResumeAsync(string runId, CancellationToken cancellationToken = default) =>
         ResumeAsync(runId, TimeSpan.FromSeconds(30), cancellationToken);
@@ -217,7 +267,7 @@ public sealed class ExecutionCoordinator : IDisposable
     }
 
     public Task<QuiescenceResult> ReconcileStopAsync(string runId, TimeSpan deadline, CancellationToken cancellationToken = default) =>
-        RunExclusiveAsync(runId, () => QuiesceAndRecordAsync(runId, WorkflowState.Stopped, "stopped", deadline, cancellationToken, reconcileTerminal: true), cancellationToken);
+        RunExclusiveAsync(runId, () => QuiesceAndRecordAsync(runId, WorkflowState.Stopped, "stopped", deadline, cancellationToken, reconcileTerminal: true), cancellationToken, cleanup: true);
 
     // This cold cleanup entry cannot turn an active or unknown journal into terminal authority.
     public Task<QuiescenceResult> ReconcileTerminalStopAsync(string runId, TimeSpan deadline, CancellationToken cancellationToken = default) =>
@@ -627,13 +677,23 @@ public sealed class ExecutionCoordinator : IDisposable
         return authorization;
     }
 
-    private static async Task<T> RunExclusiveAsync<T>(
-        string runId, Func<Task<T>> action, CancellationToken cancellationToken)
+    private async Task<T> RunExclusiveAsync<T>(
+        string runId, Func<Task<T>> action, CancellationToken cancellationToken, bool cleanup = false)
     {
+        if (original is not null && runId != originalRun) throw new WorkerEnvelopeException("Original scheduler cannot adopt another run.");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cleanup ? default : original?.Token ?? default);
+        if (original is not null) { if (cleanup) linked.CancelAfter(original.CleanupRemaining); else { original.CheckWork(); linked.CancelAfter(original.WorkLimit - System.Diagnostics.Stopwatch.GetElapsedTime(original.OriginalStarted)); } }
         var flowLock = FlowLocks.GetOrAdd(runId, _ => new SemaphoreSlim(1, 1));
-        await flowLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try { return await action().ConfigureAwait(false); }
-        finally { flowLock.Release(); }
+        await flowLock.WaitAsync(linked.Token).ConfigureAwait(false);
+        var prior = cleanupStore.Value;
+        try
+        {
+            if (original is not null && cleanup) cleanupStore.Value = forwardStore.WithOriginalCleanup(); else original?.CheckWork();
+            var value = await action().ConfigureAwait(false);
+            if (original is not null && cleanup) _ = original.CleanupRemaining; else original?.CheckWork();
+            return value;
+        }
+        finally { cleanupStore.Value = prior; flowLock.Release(); }
     }
 
     public void Dispose()

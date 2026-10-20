@@ -5,13 +5,22 @@ namespace DeliveryForge.Planning;
 
 public sealed partial class GitRepositoryContextReader
 {
+    DeliveryForge.Coordination.ICoordinatedEffectAdmission? parentAdmission;
+    string? parentRun;
+    public GitRepositoryContextReader WithParentAdmission(DeliveryForge.Coordination.ICoordinatedEffectAdmission parent, string runId)
+    {
+        if (_actualOriginal is null || _actualExecutor is null || _importProfile || parentAdmission is not null || string.IsNullOrWhiteSpace(runId)) throw new PlanningException("Actual original reader binds once before dispatch.");
+        _actualOriginal.CheckWork();
+        return new(_gitExecutable, _actualExecutor, _actualOriginal) { parentAdmission = parent, parentRun = runId };
+    }
     async Task<GitResult> RunOriginalGit(ProcessStartInfo start, CancellationToken caller, bool allowFailure)
     {
         if (_ownedGitUnknown) throw new PlanningException("Prior original Git operation remains unknown; no replay.");
         _actualOriginal!.CheckWork(); if (_importProfile) { _importLifetime!.Check(); _importView!.Verify(); }
         var env = start.Environment.ToDictionary(x => x.Key, x => x.Value ?? "", OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         DeliveryForge.Evidence.BoundedCommandCaptureResult actual;
-        try { actual = await _actualExecutor!.ExecuteBoundedCaptureAsync(new(start.FileName, start.ArgumentList.ToArray(), start.WorkingDirectory, env) { EnvironmentIsComplete = true }, GitOperationTimeout, MaximumGitOutputBytes, caller, new OwnedWorkPhaseBudget(_actualOriginal)).ConfigureAwait(false); }
+        Task<BoundedCommandCaptureResult> Birth() => _actualExecutor!.ExecuteBoundedCaptureAsync(new(start.FileName, start.ArgumentList.ToArray(), start.WorkingDirectory, env) { EnvironmentIsComplete = true }, GitOperationTimeout, MaximumGitOutputBytes, caller, new OwnedWorkPhaseBudget(_actualOriginal!));
+        try { actual = await (parentAdmission is null ? Birth() : parentAdmission.EnterAsync(parentRun!, Birth)).ConfigureAwait(false); }
         catch { _ownedGitUnknown = true; throw; }
         _actualOriginal.CheckWork(); if (_importProfile) { _importLifetime!.Check(); _importView!.Verify(); }
         var result = actual.Command; var facts = result.LifecycleDiagnostics;

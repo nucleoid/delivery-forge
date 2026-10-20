@@ -3,6 +3,7 @@ using DeliveryForge.Planning;
 using System.Collections.Concurrent;
 using DeliveryForge.Execution;
 using DeliveryForge.Execution.Host;
+using DeliveryForge.Scheduling;
 namespace DeliveryForge.Tool;
 
 public enum HostObservationRealm { ContractFixture, ActualHost }
@@ -189,7 +190,7 @@ internal sealed class RetainedHostTask<T>(ToolLifetime original)
 
 public sealed class HostBridgeFrame
 {
-    internal HostBridgeFrame(string runId, ToolLifetime life, ExecutionCoordinator owner, Func<bool> externalUnknown, bool ownsOriginal) { RunId = runId; Lifetime = life; Owner = owner; ExternalUnknown = externalUnknown; OwnsOriginal = ownsOriginal; Worker = new(life); Quality = new(life); Review = new(life); IndependentReview = new(life); LocalReal = new(life); }
+    internal HostBridgeFrame(string runId, ToolLifetime life, ExecutionCoordinator owner, Func<bool> externalUnknown, bool ownsOriginal) { RunId = runId; Lifetime = life; Owner = owner; ExternalUnknown = externalUnknown; OwnsOriginal = ownsOriginal; Worker = new(life); Quality = new(life); Review = new(life); IndependentReview = new(life); LocalReal = new(life); SchedulingCompletion = new(life); }
     readonly Func<bool> ExternalUnknown; readonly bool OwnsOriginal;
     internal readonly object ReconciliationGate = new();
     internal RetainedHostTask<ToolResult> Worker { get; }
@@ -197,6 +198,11 @@ public sealed class HostBridgeFrame
     internal RetainedHostTask<ToolResult> Review { get; }
     internal RetainedHostTask<ToolResult> IndependentReview { get; }
     internal RetainedHostTask<ToolResult> LocalReal { get; }
+    internal RetainedHostTask<bool> SchedulingCompletion { get; }
+    internal LocalSingleScheduler? Scheduler;
+    internal LocalDispatchReservation? Reservation;
+    internal volatile bool SchedulingCleanupEntered;
+    internal volatile Task? SchedulingCleanup;
     readonly List<(QuiescenceResult Pause, RetainedHostTask<ResumeResult> Control)> resumeControls = [];
     QuiescenceResult? actualPause;
     internal QuiescenceResult? ActualPause { get { lock (ReconciliationGate) return actualPause; } }
@@ -238,7 +244,7 @@ public sealed class HostBridgeFrame
     public AgentCompletionReceipt? Completion { get; internal set; }
     public bool OwnerCompleted { get; internal set; }
     public bool OwnerStopped { get; internal set; }
-    public bool Unknown => Worker.Unknown || Quality.Unknown || Review.Unknown || IndependentReview.Unknown || LocalReal.Unknown || ResumeControls.Any(control => control.Unknown) || RouteActive || InvocationUnknown || EnteredTasks.Any(t => !t.IsCompleted) || Owner.HasPendingControlOperations(RunId) || ExternalUnknown() || (Accepted is not null && !OwnerCompleted && !OwnerStopped);
+    public bool Unknown => SchedulingCleanupEntered && (SchedulingCleanup is null || !SchedulingCleanup.IsCompleted) || Scheduler?.HasRetainedReservation == true || SchedulingCompletion.Unknown || Worker.Unknown || Quality.Unknown || Review.Unknown || IndependentReview.Unknown || LocalReal.Unknown || ResumeControls.Any(control => control.Unknown) || RouteActive || InvocationUnknown || EnteredTasks.Any(t => !t.IsCompleted) || Owner.HasPendingControlOperations(RunId) || ExternalUnknown() || (Accepted is not null && !OwnerCompleted && !OwnerStopped);
     internal async Task<T> Enter<T>(Func<Task<T>> invoke)
     {
         Lifetime.Check(); T value = default!; Exception? primary = null; Exception? post = null; var operation = AdmitOperation();
@@ -268,6 +274,12 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
     InstalledQualityHost? installedQuality;
     InstalledReviewHost? installedReview;
     LocalRealGoldenOwner? localRealGolden;
+    Func<FrozenPlan, FrozenWorkerPlan, ParentCoordinationHost, LocalSingleScheduler>? localSingleFactory;
+    FrozenPlan? schedulingPlan;
+    internal void BindLocalSingleFactory(Func<FrozenPlan, FrozenWorkerPlan, ParentCoordinationHost, LocalSingleScheduler> factory)
+    {
+        lock (registration) { if (localSingleFactory is not null || frames.Count != 0) throw new ToolUsageException("LocalSingle binds once before dispatch."); localSingleFactory = factory; }
+    }
     internal bool HasInstalledQuality => installedQuality is not null;
     internal bool HasInstalledReview => installedReview is not null;
     internal bool HasLocalRealGolden => localRealGolden is not null;
@@ -296,11 +308,15 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
     {
         if (coordination is null) { if (config.Coordination is not null || requireCoordination) throw new ToolUsageException("Configured production coordination owner is unavailable."); return; }
         coordination.BindSelection(plan, assignment, config, original);
+        if (config.LocalSingle is not null && localSingleFactory is null) throw new ToolUsageException("Actual LocalSingle composition required; selection cannot be ignored.");
+        if (localSingleFactory is not null) schedulingPlan = plan;
         installedQuality?.Bind(plan, assignment, config, original);
         installedReview?.Bind(plan, assignment, config, original);
         localRealGolden?.Bind(plan, assignment, config, original);
     }
     internal bool ObserveCoordinationWorkSettled(string runId)
+        => frames.TryGetValue(runId, out var frame) && !frame.SchedulingCompletion.Unknown && frame.Scheduler?.HasRetainedReservation != true && ObservePipelineSettled(runId);
+    bool ObservePipelineSettled(string runId)
     {
         if (!frames.TryGetValue(runId, out var actual)) return false;
         // This is the synchronous parent quiescence sample, not quality's
@@ -330,21 +346,56 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
         {
             frame.Worker.Start(original, () => ImplementRetainedCoreAsync(plan, frame));
             var actualResult = await frame.Worker.ObserveAsync(original).ConfigureAwait(false);
+            if (frame.Scheduler is { } scheduler && frame.Reservation is { } reservation && frame.Primary is null && frame.Post is null && NativeCompletedAndQuiet(frame))
+            {
+                frame.SchedulingCompletion.Start(original, async () =>
+                {
+                    await scheduler.CompleteObservedAsync(reservation,
+                        () => coordinator.ReleaseCompletedWriterAsync(plan.RunId, frame.Completion!, () => ObservePipelineSettled(plan.RunId) && NativeCompletedAndQuiet(frame), original.Token), original.Token).ConfigureAwait(false);
+                    return true;
+                });
+                await frame.SchedulingCompletion.ObserveAsync(original).ConfigureAwait(false);
+            }
             return RetainedResult(frame, actualResult);
         }
-        finally { if (!frame.Worker.Started) frame.LeaveRoute(); frame.CloseWhenSettled(); }
+        finally { if (!frame.Worker.Started) frame.LeaveRoute(); await FinishStoppedSchedulingAsync(frame).ConfigureAwait(false); frame.CloseWhenSettled(); }
+    }
+    async Task FinishStoppedSchedulingAsync(HostBridgeFrame frame)
+    {
+        if (frame.Scheduler is not { HasRetainedReservation: true } scheduler || frame.Reservation is not { } ticket || !frame.OwnerStopped || !ObservePipelineSettled(frame.RunId)) return;
+        try
+        {
+            bool enter;
+            lock (frame.ReconciliationGate) { enter = !frame.SchedulingCleanupEntered; frame.SchedulingCleanupEntered = true; }
+            if (enter) frame.SchedulingCleanup = scheduler.ReleaseStoppedObservedAsync(ticket,
+                () => frame.OwnerStopped && ObservePipelineSettled(frame.RunId),
+                () => coordinator.ReleaseStoppedWriterAsync(frame.RunId, () => frame.OwnerStopped && ObservePipelineSettled(frame.RunId)));
+            var actual = frame.SchedulingCleanup ?? throw new IOException("Original scheduler cleanup invocation has not returned its task.");
+            await actual.WaitAsync(frame.Lifetime.CleanupRemaining).ConfigureAwait(false); _ = frame.Lifetime.CleanupRemaining;
+        }
+        catch (Exception error) { frame.Primary ??= error; frame.Lifetime.RetainBridgeUnknown(frame); }
     }
     async Task<ToolResult> ImplementRetainedCoreAsync(FrozenWorkerPlan plan, HostBridgeFrame frame)
     {
         try
         {
             if (coordination is not null) await coordination.AcquireAsync(plan.RunId).ConfigureAwait(false);
-            var prepared = await frame.Enter(() => coordinator.PrepareWorkerAsync(plan, frame.Lifetime.Token)).ConfigureAwait(false); frame.Request = prepared.Request;
-            frame.Accepted = await frame.Enter(() => adapter.StartAsync(prepared.Request, frame.Lifetime.Remaining, frame.Lifetime.Token)).ConfigureAwait(false);
+            AgentRequest request;
+            if (localSingleFactory is not null)
+            {
+                var scheduler = localSingleFactory(schedulingPlan ?? throw new ToolUsageException("Actual frozen scheduling plan required."), plan, coordination ?? throw new ToolUsageException("Actual acquired parent required."));
+                frame.Scheduler = scheduler;
+                scheduler.BindOriginal(frame.Lifetime, coordination, () => frame.Worker.Actual, () => ObservePipelineSettled(plan.RunId) && NativeCompletedAndQuiet(frame));
+                frame.Reservation = await frame.Enter(() => scheduler.ReserveAsync(frame.Lifetime.Token)).ConfigureAwait(false);
+                request = await frame.Enter(() => scheduler.ProvisionAndPrepareAsync(frame.Reservation, frame.Lifetime.Token)).ConfigureAwait(false);
+            }
+            else request = (await frame.Enter(() => coordinator.PrepareWorkerAsync(plan, frame.Lifetime.Token)).ConfigureAwait(false)).Request;
+            frame.Request = request;
+            frame.Accepted = await frame.Enter(() => adapter.StartAsync(request, frame.Lifetime.Remaining, frame.Lifetime.Token)).ConfigureAwait(false);
             await frame.Enter(() => coordinator.AcceptAsync(frame.Accepted ?? throw new WorkerEnvelopeException("Missing actual acceptance."), frame.Lifetime.Token)).ConfigureAwait(false);
             var a = frame.Accepted ?? throw new WorkerEnvelopeException("Missing actual acceptance."); var binding = new AgentRunBinding(a.AdapterId, a.AdapterVersion, a.RunId, a.RequestIdentity, a.RuntimeRunIdentity, a.RuntimeTaskIdentity);
             frame.Completion = await frame.Enter(() => adapter.WaitAsync(binding, frame.Lifetime.Remaining, frame.Lifetime.Token)).ConfigureAwait(false);
-            WorkerEnvelope.ValidateCompletion(prepared.Request, a, frame.Completion ?? throw new WorkerEnvelopeException("Missing actual completion."));
+            WorkerEnvelope.ValidateCompletion(request, a, frame.Completion ?? throw new WorkerEnvelopeException("Missing actual completion."));
             if (frame.OwnerStopped) throw new WorkerEnvelopeException("Stopped original cannot enter completion or installed quality.");
             var committed = await frame.Enter(() => coordinator.CompleteAsync(frame.Completion ?? throw new WorkerEnvelopeException("Missing actual completion."), frame.Lifetime.Token)).ConfigureAwait(false); lock (frame.ReconciliationGate) frame.OwnerCompleted = true; adapter.MarkOwnerCompleted(binding);
             ToolResult? reviewPreparation = null;
@@ -425,7 +476,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
             return new(result.Quiescent && reviewerClosed ? "COMPLETE" : "INCOMPLETE", "OWNER_STOP", "Actual same-owner stop observation recorded; unknown original tasks still prevent frame disposal.", new { runId, result.Quiescent, ReviewerClosed = reviewerClosed, frame.Unknown });
         }
         catch (Exception error) { frame.Primary ??= error; return ToolResult.Incomplete("STOP_RETAINED", "Stop failed or exceeded the SAME original cleanup endpoint; originals retained.", new { runId, frame.Unknown, Type = error.GetType().FullName }); }
-        finally { frame.LeaveRoute(); frame.CloseWhenSettled(); }
+        finally { frame.LeaveRoute(); await FinishStoppedSchedulingAsync(frame).ConfigureAwait(false); frame.CloseWhenSettled(); }
     }
     public async Task<ToolResult> PauseAsync(string runId)
     {

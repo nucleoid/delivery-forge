@@ -15,7 +15,7 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
     readonly ToolLifetime original; readonly ProcessControl processes; readonly ExecutionCoordinator coordinator; readonly OwnerHostBridge bridge; readonly TrustedConfiguration configuration; ParentCoordinationHost? coordination; Task? coordinationCreation; bool coordinationEntered, disposeEntered;
     public ToolApplication Application { get; }
     public OwnerHostBridge ActualBridge => bridge;
-    public StandaloneOwnerComposition(TrustedConfiguration config, string actualStoreRoot, LocalWorkerPaths workerPaths, ToolLifetime actualOriginal, StandaloneHostSelection selectedHost, AgentAdapterProfile actualConformedProfile, LinuxScopeSelection? selectedLinuxScope = null, AdmissionFile? actualConfigurationPin = null)
+    public StandaloneOwnerComposition(TrustedConfiguration config, string actualStoreRoot, LocalWorkerPaths workerPaths, ToolLifetime actualOriginal, StandaloneHostSelection selectedHost, AgentAdapterProfile actualConformedProfile, LinuxScopeSelection? selectedLinuxScope = null, AdmissionFile? actualConfigurationPin = null, StandaloneResources? actualResources = null)
     {
         actualOriginal.Check(); original = actualOriginal; configuration = config;
         ArgumentNullException.ThrowIfNull(actualConformedProfile); ArgumentNullException.ThrowIfNull(selectedHost); ArgumentNullException.ThrowIfNull(config);
@@ -35,6 +35,23 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         };
         NamedHostAdapter adapter = config.Adapter switch { "codex.cli" => new CodexHostAdapter(actualNativePort), "claude-code.cli" => new ClaudeHostAdapter(actualNativePort), "pi.cli" => new PiHostAdapter(actualNativePort), _ => throw new ToolUsageException("No real standalone transport for selected optional host.") };
         processes = new ProcessControl(); var store = new RunStore(BoundedFiles.Plain(actualStoreRoot, true)); coordinator = new(store, worktrees, processes, adapter); bridge = new(coordinator, adapter, requireCoordination: true);
+        if (config.LocalSingle is { } scheduling)
+        {
+            if (actualConfigurationPin is null || actualResources is null) throw new ToolUsageException("LocalSingle requires the independent exact configuration and actual measured caller owner.");
+            var measured = actualResources.MeasureScheduling(actualOriginal);
+            var budget = DeliveryForge.Scheduling.ResourceBudget.Measure(measured, scheduling.Policy);
+            if (scheduling.Demand.TimeLimit > actualOriginal.WorkLimit || scheduling.Policy.MaximumTime > actualOriginal.WorkLimit || !budget.CanAllocate(scheduling.Demand)) throw new ToolUsageException("Scheduling selection exceeds the same original measured resource/time policy.");
+            bridge.BindLocalSingleFactory((plan, assignment, parent) =>
+            {
+                actualOriginal.Check();
+                _ = InstalledHostAdmission.ReadExact(actualConfigurationPin, actualOriginal, 65536);
+                var admitted = worktrees.WithParentAdmission(parent, assignment.RunId);
+                var admittedStore = coordinator.BindOriginalScheduling(actualOriginal, parent, assignment.RunId, admitted);
+                var reader = new DeliveryForge.Planning.GitRepositoryContextReader(config.GitExecutable, executor, actualOriginal).WithParentAdmission(parent, assignment.RunId);
+                return DeliveryForge.Scheduling.LocalSingleScheduler.Create(plan, assignment, scheduling.Demand, budget, admittedStore, coordinator, admitted, reader);
+            });
+        }
+        if (config.LocalRealGolden is not null && config.LocalSingle is null) throw new ToolUsageException("Local-real requires an independently approved finite LocalSingle policy; no direct execution fallback.");
         if (config.InstalledQuality is not null) bridge.BindInstalledQuality(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing quality requires the actual pinned root configuration."), actualOriginal, worktrees, selectedLinuxScope));
         if (config.InstalledReview is not null) bridge.BindInstalledReview(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing review requires the actual pinned root configuration."), actualOriginal, executor, selectedLinuxScope));
         if (config.LocalRealGolden is { } golden)

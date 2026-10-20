@@ -73,7 +73,7 @@ internal sealed class StandaloneEntrypoint
                     else
                     {
                         var admission = InstalledHostAdmission.ReadRootAccepted(root.InstalledHostAdmission, config, original);
-                        composition = new(config, root.StoreRoot, root.WorkerPaths, original, admission.Host, admission.Profile, scope, configPin); actualReferences.Add(composition); await composition.InitializeCoordinationAsync().ConfigureAwait(false); application = composition.Application;
+                        composition = new(config, root.StoreRoot, root.WorkerPaths, original, admission.Host, admission.Profile, scope, configPin, resources); actualReferences.Add(composition); await composition.InitializeCoordinationAsync().ConfigureAwait(false); application = composition.Application;
                     }
                     actualReferences.Add(application); var actual = application.ExecuteAsync(command, original.Token); actualReferences.Add(actual);
                     try { result = await actual.WaitAsync(original.Remaining).ConfigureAwait(false); } finally { if (!actual.IsCompleted) original.RetainUnknown(); }

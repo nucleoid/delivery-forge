@@ -16,6 +16,7 @@ public sealed record WorktreeObservation(
 
 public sealed class WorktreeManager
 {
+    static readonly List<WriterLease> RetainedWriterBirths = [];
     private readonly string _gitExecutable;
     private readonly ProcessCommandExecutor? _originalExecutor;
     private readonly IOwnedDuplexBudget? _originalBudget;
@@ -118,6 +119,27 @@ public sealed class WorktreeManager
     }
 
     public WriterLease AcquireWriter(string worktree, string runId, string writerToken)
+    {
+        if (_effectAdmission is null) return AcquireWriterCore(worktree, runId, writerToken);
+        if (_effectAdmission is not DeliveryForge.Coordination.ICoordinatedSynchronousEffectAdmission parent || runId != _effectRunId)
+            throw new WorktreeBoundaryException("Writer birth requires the same synchronous original parent.");
+        _originalBudget!.CheckWork(); parent.CheckCurrent(runId);
+        var lease = parent.EnterSynchronous(runId, () => AcquireWriterCore(worktree, runId, writerToken));
+        try { _originalBudget.CheckWork(); parent.CheckCurrent(runId); return lease; }
+        catch (Exception primary)
+        {
+            try { _ = _originalBudget.CleanupRemaining; lease.Dispose(); _ = _originalBudget.CleanupRemaining; }
+            catch (Exception close)
+            {
+                lock (RetainedWriterBirths) RetainedWriterBirths.Add(lease);
+                if (_originalBudget is IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown();
+                throw new AggregateException("Original writer birth and first disposition failed.", primary, close);
+            }
+            // Preserve its durable lock as failure evidence; no revoked delete.
+            throw;
+        }
+    }
+    WriterLease AcquireWriterCore(string worktree, string runId, string writerToken)
     {
         var path = WriterLockPath(worktree);
         try

@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup><OutputType>Exe</OutputType><PackAsTool>true</PackAsTool><ToolCommandName>delivery-forge</ToolCommandName><PackageId>DeliveryForge.Tool</PackageId><Version>0.1.0</Version><Description>Host-neutral Delivery Forge deterministic package entrypoint.</Description><Authors>Delivery Forge contributors</Authors><PackageLicenseExpression>MIT</PackageLicenseExpression><RepositoryUrl>https://github.com/nucleoid/delivery-forge</RepositoryUrl><PackageReadmeFile>README.md</PackageReadmeFile></PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../../scheduling/DeliveryForge.Scheduling/DeliveryForge.Scheduling.csproj" />
     <ProjectReference Include="../../contracts/DeliveryForge.Contracts/DeliveryForge.Contracts.csproj" />
     <ProjectReference Include="../../planning/DeliveryForge.Planning/DeliveryForge.Planning.csproj" />
     <ProjectReference Include="../../execution/DeliveryForge.Execution/DeliveryForge.Execution.csproj" />
