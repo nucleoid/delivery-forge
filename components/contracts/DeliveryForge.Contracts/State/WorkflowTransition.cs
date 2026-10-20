@@ -17,7 +17,9 @@ public sealed record TransitionEvidence(
     ValidatedContract? HostReviewReceipt = null,
     ReviewAcceptanceAuthority? ReviewAuthority = null,
     ReviewConsumerContext? ReviewContext = null,
-    ReviewConsumerContext? HostReviewContext = null);
+    ReviewConsumerContext? HostReviewContext = null,
+    TrustedGatePluginRegistry? GateAuthorityRegistry = null,
+    TrustedReceiptProvenance? GateReceiptProvenance = null);
 
 public static class WorkflowTransition
 {
@@ -276,10 +278,17 @@ public static class WorkflowTransition
             document.Dispose();
             throw new InvalidWorkflowTransitionException("Gate receipt does not match the required policy, gate identity, or allowed outcome.");
         }
-        if (!GateReceiptAuthority.TryValidateAuthoritativeOutcome(root, out var authorityFailure))
+        if (!GateReceiptAuthority.TryValidateAuthoritativeOutcome(
+                root, out var authorityFailure, evidence.GateAuthorityRegistry))
         {
             document.Dispose();
             throw new InvalidWorkflowTransitionException(authorityFailure);
+        }
+        if (evidence.GateReceiptProvenance?.Contains(gate.Identity) != true)
+        {
+            document.Dispose();
+            throw new InvalidWorkflowTransitionException(
+                "Gate receipt lacks host-owned append-only store provenance.");
         }
 
         return document;

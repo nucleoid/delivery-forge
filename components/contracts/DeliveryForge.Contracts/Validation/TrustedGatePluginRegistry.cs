@@ -42,7 +42,7 @@ public sealed class TrustedGatePluginRegistry
         new("crap4csharp", "delivery-forge.crap4csharp", "1.0.0", "crap4csharp", "0.1.0+1129c9d3280168b294f9fed1542f81ca716c6d53", "1.0"),
         new("mutation", "delivery-forge.mutate4csharp", "1.0.0", "mutate4csharp", "0.1.0-format-only", "2"),
         new("anti-slop", "dmmulroy.anti-slop", "0.1.2+13909c9e07590f5a85d93c62712259fe14a883f7", "oxlint", "1.78.0", "oxlint-json-v1"),
-        new("ci", "delivery-forge.ci", "1.0.0", "ci")
+        new("ci", "delivery-forge.ci", "1.0.0", "ci", "github-actions-v1", "github-checks-v1")
     ]);
 
     public bool TryGet(string gateId, out TrustedGatePluginBinding binding) =>

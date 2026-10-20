@@ -293,11 +293,19 @@ public sealed class WorkflowTransitionTests
             node["allowedNotApplicable"] = new JsonArray("mutation");
         });
         var notApplicable = GateFixture(policy.Identity, "mutation", notApplicable: true);
+        var receiptStore = new HostOwnedReceiptStore(Path.Combine(
+            Path.GetTempPath(), "delivery-forge-workflow-na", Guid.NewGuid().ToString("N")));
+        receiptStore.Append(notApplicable);
 
         WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.Evaluating,
             WorkflowState.IndependentReview,
-            evidence with { Policy = policy, GateReceipts = [notApplicable] });
+            evidence with
+            {
+                Policy = policy,
+                GateReceipts = [notApplicable],
+                GateReceiptProvenance = receiptStore.Provenance
+            });
     }
 
     [Fact]
@@ -493,6 +501,10 @@ public sealed class WorkflowTransitionTests
         var gates = new[] { "build", "test" }
             .Select(gateId => GateFixture(policy.Identity, gateId))
             .ToArray();
+        var ci = GateFixture(policy.Identity, "ci");
+        var receiptStore = new HostOwnedReceiptStore(Path.Combine(
+            Path.GetTempPath(), "delivery-forge-workflow-receipts", Guid.NewGuid().ToString("N")));
+        foreach (var receipt in gates.Append(ci)) receiptStore.Append(receipt);
         var review = ParseFixture("review-receipt.json");
         var hosted = MutatedFixture("review-receipt.json", node => node["reviewerFamily"] = "github-hosted");
         var root = new ReviewAuthorityRootContext(
@@ -519,7 +531,7 @@ public sealed class WorkflowTransitionTests
             TreeId: "2222222222222222222222222222222222222222",
             Policy: policy,
             GateReceipts: gates,
-            CiReceipt: GateFixture(policy.Identity, "ci"),
+            CiReceipt: ci,
             ReviewReceipt: review,
             PublicationReceipt: merged
                 ? MutatedFixture("publication-receipt.json", node => node["action"] = "MERGED")
@@ -527,7 +539,8 @@ public sealed class WorkflowTransitionTests
             HostReviewReceipt: hosted,
             ReviewAuthority: authorityHost.Authority,
             ReviewContext: authorityHost.CreateConsumerContext(independentContext),
-            HostReviewContext: authorityHost.CreateConsumerContext(hostedContext));
+            HostReviewContext: authorityHost.CreateConsumerContext(hostedContext),
+            GateReceiptProvenance: receiptStore.Provenance);
     }
 
     private static ValidatedContract GateFixture(string policyIdentity, string gateId, bool notApplicable = false) =>
@@ -539,7 +552,7 @@ public sealed class WorkflowTransitionTests
             var (plugin, tool, toolVersion, format) = gateId switch
             {
                 "mutation" => ("delivery-forge.mutate4csharp", "mutate4csharp", "0.1.0-format-only", "2"),
-                "ci" => ("delivery-forge.ci", "ci", "fixture", "fixture"),
+                "ci" => ("delivery-forge.ci", "ci", "github-actions-v1", "github-checks-v1"),
                 _ => ("delivery-forge.dotnet", "dotnet", "10.0.401", "trx-v1")
             };
             node["command"] = CommandEnvelope(tool, toolVersion, format);

@@ -4,7 +4,10 @@ namespace DeliveryForge.Contracts.Validation;
 
 public static class ContractReferenceValidator
 {
-    public static void Validate(IEnumerable<ReadOnlyMemory<byte>> documents)
+    public static void Validate(
+        IEnumerable<ReadOnlyMemory<byte>> documents,
+        TrustedGatePluginRegistry? gateAuthorityRegistry = null,
+        TrustedReceiptProvenance? gateReceiptProvenance = null)
     {
         var parsed = new List<(ValidatedContract Contract, JsonDocument Document)>();
 
@@ -40,7 +43,7 @@ public static class ContractReferenceValidator
                             root.GetProperty("baseCommit").GetString(),
                             root.GetProperty("headCommit").GetString(),
                             root.GetProperty("treeId").GetString());
-                        ValidateRunManifest(root, identities);
+                        ValidateRunManifest(root, identities, gateAuthorityRegistry, gateReceiptProvenance);
                         break;
                     case "checkpoint":
                         RequireReferences(
@@ -76,7 +79,9 @@ public static class ContractReferenceValidator
 
     private static void ValidateRunManifest(
         JsonElement manifest,
-        IReadOnlyDictionary<string, (ValidatedContract Contract, JsonDocument Document)> identities)
+        IReadOnlyDictionary<string, (ValidatedContract Contract, JsonDocument Document)> identities,
+        TrustedGatePluginRegistry? gateAuthorityRegistry,
+        TrustedReceiptProvenance? gateReceiptProvenance)
     {
         var plan = identities[manifest.GetProperty("planIdentity").GetString()!].Document.RootElement;
         var policy = identities[manifest.GetProperty("policyIdentity").GetString()!].Document.RootElement;
@@ -99,6 +104,7 @@ public static class ContractReferenceValidator
         var allowedNotApplicable = policy.GetProperty("allowedNotApplicable").EnumerateArray()
             .Select(item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
         var supplied = new HashSet<string>(StringComparer.Ordinal);
+        var suppliedIdentities = new List<string>();
         foreach (var gateIdentity in manifest.GetProperty("gateReceiptIds").EnumerateArray().Select(item => item.GetString()!))
         {
             var gate = identities[gateIdentity].Document.RootElement;
@@ -109,16 +115,21 @@ public static class ContractReferenceValidator
             {
                 throw new ContractReferenceException("run-manifest gate receipt is not a policy-satisfying authoritative outcome under its immutable policy.");
             }
-            if (!GateReceiptAuthority.TryValidateAuthoritativeOutcome(gate, out var authorityFailure))
+            if (!GateReceiptAuthority.TryValidateAuthoritativeOutcome(
+                    gate, out var authorityFailure, gateAuthorityRegistry))
                 throw new ContractReferenceException(authorityFailure);
 
             supplied.Add(gateId);
+            suppliedIdentities.Add(gateIdentity);
         }
 
         if (!required.IsSubsetOf(supplied))
         {
             throw new ContractReferenceException("run-manifest does not include every gate required by its immutable policy.");
         }
+        if (suppliedIdentities.Any(identity => gateReceiptProvenance?.Contains(identity) != true))
+            throw new ContractReferenceException(
+                "run-manifest gate receipt lacks host-owned append-only store provenance.");
     }
 
     private static void ValidateReplayBundle(JsonElement bundle, JsonElement manifest)

@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using System.Text.Json.Nodes;
 using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Contracts.Validation;
@@ -7,6 +8,36 @@ namespace DeliveryForge.Contracts.Tests;
 
 public sealed class SchemaValidationTests
 {
+    [Fact]
+    public void Custom_authority_registry_is_honored_by_consumers()
+    {
+        var policy = LoadNode("evidence-policy.json");
+        var gate = GateNode(policy, "custom");
+        gate["gateId"] = "custom";
+        gate["authorityBinding"]!["gateId"] = "custom";
+        gate["authorityBinding"]!["pluginId"] = "host.custom";
+        gate["authorityBinding"]!["pluginVersion"] = "2.0.0";
+        gate["authorityBinding"]!["tool"] = "custom-tool";
+        gate["authorityBinding"]!["toolVersion"] = "3.0.0";
+        using (var envelope = JsonDocument.Parse(gate["command"]!.GetValue<string>()))
+        {
+            var command = JsonNode.Parse(envelope.RootElement.GetRawText())!.AsObject();
+            command["capabilityTool"] = "custom-tool";
+            command["capabilityVersion"] = "3.0.0";
+            command["capabilityFormat"] = "custom-v1";
+            gate["command"] = command.ToJsonString();
+        }
+        SetIdentity(gate);
+        using var document = JsonDocument.Parse(Bytes(gate));
+        var custom = new TrustedGatePluginRegistry(
+            [new TrustedGatePluginBinding("custom", "host.custom", "2.0.0", "custom-tool", "3.0.0", "custom-v1")]);
+
+        Assert.False(GateReceiptAuthority.TryValidateAuthoritativeOutcome(
+            document.RootElement, out _, TrustedGatePluginRegistry.BuiltIns));
+        Assert.True(GateReceiptAuthority.TryValidateAuthoritativeOutcome(
+            document.RootElement, out var reason, custom), reason);
+    }
+
     [Fact]
     public void Canonical_v1_gate_receipt_rejects_v2_authority_binding()
     {
@@ -177,16 +208,48 @@ public sealed class SchemaValidationTests
         SetIdentity(replay);
 
         ReadOnlyMemory<byte>[] complete = [Bytes(plan), Bytes(policy), .. gates.Select(Bytes), Bytes(manifest), Bytes(replay)];
-        ContractReferenceValidator.Validate(complete);
+        ValidateReferences(complete);
 
         ReadOnlyMemory<byte>[] missingGate = [Bytes(plan), Bytes(policy), .. gates.Skip(1).Select(Bytes), Bytes(manifest), Bytes(replay)];
-        Assert.Throws<ContractReferenceException>(() => ContractReferenceValidator.Validate(missingGate));
+        Assert.Throws<ContractReferenceException>(() => ValidateReferences(missingGate));
 
         manifest["planIdentity"] = gates[0]["identity"]!.GetValue<string>();
         SetIdentity(manifest);
         ReadOnlyMemory<byte>[] wrongKind = [Bytes(plan), Bytes(policy), .. gates.Select(Bytes), Bytes(manifest)];
-        var error = Assert.Throws<ContractReferenceException>(() => ContractReferenceValidator.Validate(wrongKind));
+        var error = Assert.Throws<ContractReferenceException>(() => ValidateReferences(wrongKind));
         Assert.Contains("invalid kind", error.Message);
+    }
+
+    [Fact]
+    public void Patch_controlled_gate_files_cannot_mint_authority_without_host_store_provenance()
+    {
+        var bundle = ReferenceBundle.Create();
+
+        var error = Assert.Throws<ContractReferenceException>(() =>
+            ContractReferenceValidator.Validate(bundle.Documents()));
+
+        Assert.Contains("host-owned append-only store provenance", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Host_receipt_store_is_create_once_and_detects_replacement()
+    {
+        var policy = LoadNode("evidence-policy.json");
+        var receipt = ContractValidator.ParseAndValidate(Bytes(GateNode(policy, "test")).Span);
+        var root = Path.Combine(Path.GetTempPath(), "delivery-forge-store-test", Guid.NewGuid().ToString("N"));
+        try
+        {
+            var store = new HostOwnedReceiptStore(root);
+            var path = store.Append(receipt);
+            File.WriteAllText(path, "replaced");
+
+            Assert.Throws<IOException>(() => store.Append(receipt));
+            Assert.True(store.Provenance.Contains(receipt.Identity));
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
+        }
     }
 
     [Theory]
@@ -199,7 +262,7 @@ public sealed class SchemaValidationTests
         bundle.Gates[0][field] = new string('f', 40);
         bundle.Relink();
 
-        AssertReferenceMessage("different head or tree", () => ContractReferenceValidator.Validate(bundle.Documents()));
+        AssertReferenceMessage("different head or tree", () => ValidateReferences(bundle.Documents()));
     }
 
     [Theory]
@@ -218,7 +281,7 @@ public sealed class SchemaValidationTests
         SetIdentity(bundle.Replay);
 
         AssertReferenceMessage("different head or tree", () =>
-            ContractReferenceValidator.Validate(bundle.Documents(review)));
+            ValidateReferences(bundle.Documents(review)));
     }
 
     [Fact]
@@ -228,7 +291,7 @@ public sealed class SchemaValidationTests
         bundle.Plan["baseCommit"] = new string('f', 40);
         bundle.Relink();
 
-        AssertReferenceMessage("baseCommit does not match", () => ContractReferenceValidator.Validate(bundle.Documents()));
+        AssertReferenceMessage("baseCommit does not match", () => ValidateReferences(bundle.Documents()));
     }
 
     [Fact]
@@ -238,7 +301,7 @@ public sealed class SchemaValidationTests
         bundle.Manifest["repository"] = "other/repository";
         bundle.Relink();
 
-        AssertReferenceMessage("repository does not match", () => ContractReferenceValidator.Validate(bundle.Documents()));
+        AssertReferenceMessage("repository does not match", () => ValidateReferences(bundle.Documents()));
     }
 
     [Fact]
@@ -248,7 +311,7 @@ public sealed class SchemaValidationTests
         bundle.Manifest["authorizationCeiling"] = "merge";
         bundle.Relink();
 
-        AssertReferenceMessage("authorizationCeiling exceeds", () => ContractReferenceValidator.Validate(bundle.Documents()));
+        AssertReferenceMessage("authorizationCeiling exceeds", () => ValidateReferences(bundle.Documents()));
     }
 
     [Fact]
@@ -258,7 +321,7 @@ public sealed class SchemaValidationTests
         failing.Gates[0]["outcome"] = "FAIL";
         failing.Relink();
         AssertReferenceMessage("not a policy-satisfying authoritative outcome", () =>
-            ContractReferenceValidator.Validate(failing.Documents()));
+            ValidateReferences(failing.Documents()));
 
         var wrongPolicy = ReferenceBundle.Create();
         var alternatePolicy = LoadNode("evidence-policy.json");
@@ -267,7 +330,7 @@ public sealed class SchemaValidationTests
         wrongPolicy.Gates[0]["policyIdentity"] = alternatePolicy["identity"]!.GetValue<string>();
         wrongPolicy.Relink();
         AssertReferenceMessage("not a policy-satisfying authoritative outcome", () =>
-            ContractReferenceValidator.Validate(wrongPolicy.Documents(alternatePolicy)));
+            ValidateReferences(wrongPolicy.Documents(alternatePolicy)));
     }
 
     [Fact]
@@ -278,7 +341,7 @@ public sealed class SchemaValidationTests
         legacy.Gates[0]["schemaVersion"] = "1.0.0";
         legacy.Relink();
         AssertReferenceMessage("lacks a canonical authority binding", () =>
-            ContractReferenceValidator.Validate(legacy.Documents()));
+            ValidateReferences(legacy.Documents()));
 
         var impersonated = ReferenceBundle.Create();
         impersonated.Gates[0]["authorityBinding"]!["pluginId"] = "delivery-forge.anti-slop";
@@ -286,7 +349,7 @@ public sealed class SchemaValidationTests
         impersonated.Gates[0]["authorityBinding"]!["toolVersion"] = "1.78.0";
         impersonated.Relink();
         AssertReferenceMessage("impersonates the trusted gate/plugin mapping", () =>
-            ContractReferenceValidator.Validate(impersonated.Documents()));
+            ValidateReferences(impersonated.Documents()));
     }
 
     [Fact]
@@ -298,7 +361,7 @@ public sealed class SchemaValidationTests
         legacy["schemaVersion"] = "1.0.0";
         SetIdentity(legacy);
 
-        ContractReferenceValidator.Validate(
+        ValidateReferences(
         [
             Bytes(bundle.Policy),
             Bytes(legacy),
@@ -340,7 +403,7 @@ public sealed class SchemaValidationTests
         SetIdentity(bundle.Replay);
 
         AssertReferenceMessage("does not include every gate required", () =>
-            ContractReferenceValidator.Validate(bundle.Documents()));
+            ValidateReferences(bundle.Documents()));
     }
 
     [Theory]
@@ -368,7 +431,7 @@ public sealed class SchemaValidationTests
         SetIdentity(bundle.Replay);
 
         AssertReferenceMessage("omits manifest plan, policy, or gate evidence", () =>
-            ContractReferenceValidator.Validate(bundle.Documents()));
+            ValidateReferences(bundle.Documents()));
     }
 
     [Fact]
@@ -376,7 +439,7 @@ public sealed class SchemaValidationTests
     {
         var plan = LoadNode("plan.json");
         AssertReferenceMessage("Duplicate immutable contract identity", () =>
-            ContractReferenceValidator.Validate([Bytes(plan), Bytes(plan)]));
+            ValidateReferences([Bytes(plan), Bytes(plan)]));
     }
 
     [Fact]
@@ -608,6 +671,26 @@ public sealed class SchemaValidationTests
     {
         var error = Assert.Throws<ContractReferenceException>(action);
         Assert.Contains(expected, error.Message, StringComparison.Ordinal);
+    }
+
+    private static void ValidateReferences(IEnumerable<ReadOnlyMemory<byte>> documents)
+    {
+        var materialized = documents.ToArray();
+        var store = new HostOwnedReceiptStore(Path.Combine(
+            Path.GetTempPath(), "delivery-forge-reference-receipts", Guid.NewGuid().ToString("N")));
+        foreach (var bytes in materialized)
+        {
+            try
+            {
+                var contract = ContractValidator.ParseAndValidate(bytes.Span);
+                if (contract.SchemaName == "gate-receipt") store.Append(contract);
+            }
+            catch (ContractValidationException)
+            {
+                // The validator under test owns the canonical error for malformed input.
+            }
+        }
+        ContractReferenceValidator.Validate(materialized, gateReceiptProvenance: store.Provenance);
     }
 
     private static void SetIdentity(JsonObject node)
