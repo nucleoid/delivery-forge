@@ -113,9 +113,7 @@ internal sealed class InstalledToolInvocation(
         if (timestamp < _actual.StartedAt.AddSeconds(-2) || timestamp > _actual.CompletedAt.AddSeconds(2))
             throw new EvidenceWriteException("Mutation report was not generated within this actual invocation.");
         using var configuration = ProducerJson.Read(files.Read(Path.Combine(invocation.WorkingDirectory, profile.Data.ConfigurationRelativePath), 1024 * 1024));
-        var actualPolicy = root.GetProperty("policy");
-        if (!JsonElement.DeepEquals(configuration.RootElement.GetProperty("policy"), actualPolicy))
-            throw new EvidenceWriteException("Mutation execution policy differs from captured approved configuration.");
+        MutationPolicyBinding.RequireSame(configuration.RootElement, root.GetProperty("policy"));
         if (data.ClaimedOutcome != GateOutcome.Incomplete)
         {
             var expected = configuration.RootElement.GetProperty("testSuites").EnumerateArray().Select(SuiteKey).ToHashSet(StringComparer.Ordinal);
