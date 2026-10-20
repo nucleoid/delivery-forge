@@ -30,9 +30,10 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
     sealed class Observation { internal bool Entered, Returned; internal Task<BoundedCommandCaptureResult>? Actual; }
     readonly List<Observation> observations = [];
     CancellationTokenSource? phaseCancellation;
+    BoundedFiles.RetainedNativeImage? heldImage;
     long phaseStarted;
     bool entered, nativeBirthEntered, nativeBirthReturned; volatile bool shutdown, stopping, uncertain; int eventBytes;
-    internal bool Unknown { get { lock (tasks) return uncertain || nativeBirthEntered && !nativeBirthReturned || observations.Any(row => row.Entered && !row.Returned) || process?.HasUnknownIo == true || tasks.Any(task => !task.IsCompleted); } }
+    internal bool Unknown { get { lock (tasks) return uncertain || heldImage?.Unknown == true || nativeBirthEntered && !nativeBirthReturned || observations.Any(row => row.Entered && !row.Returned) || process?.HasUnknownIo == true || tasks.Any(task => !task.IsCompleted); } }
     Task<T> Keep<T>(Task<T> task) { lock (tasks) { if (tasks.Count >= 1024) throw new IOException("Independent reviewer task bound exceeded."); tasks.Add(task); } return task; }
     Task Keep(Task task) { lock (tasks) { if (tasks.Count >= 1024) throw new IOException("Independent reviewer task bound exceeded."); tasks.Add(task); } return task; }
     JsonElement[] Snapshot() { lock (events) return events.ToArray(); }
@@ -77,7 +78,17 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         var left = phase < policy ? phase : policy; if (original.Remaining < left) left = original.Remaining;
         if (left <= TimeSpan.Zero) throw new TimeoutException("Original bounded independent review allowance expired."); return left;
     }
-    void VerifyImage() => parent.EnterSynchronous(runId, () => { Current(); BoundedFiles.VerifyNativeImage(selection.Image, original, phaseCancellation?.Token ?? original.Token); Current(); return true; });
+    void VerifyImage() => parent.EnterSynchronous(runId, () =>
+    {
+        Current(); var token = phaseCancellation?.Token ?? original.Token;
+        if (OperatingSystem.IsWindows())
+        {
+            heldImage ??= BoundedFiles.RetainVerifiedNativeImage(selection.Image, original, token);
+            heldImage.Check(token);
+        }
+        else BoundedFiles.VerifyNativeImage(selection.Image, original, token);
+        Current(); return true;
+    });
     void Save(string path, byte[] bytes) => parent.EnterSynchronous(runId, () => { Current(); BoundedFiles.WriteNew(path, bytes, original); Current(); return true; });
     async Task<BoundedCommandCaptureResult> Observe(string[] arguments)
     {
@@ -117,7 +128,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
                 capture.OwnershipKind, capture.CaptureBoundExceeded, StandardOutputHash = Hash(capture.StandardOutputBytes), StandardErrorHash = Hash(capture.StandardErrorBytes) };
             throw failure;
         }
-        Current(); return capture;
+        Current(); VerifyImage(); return capture;
     }
     void RetainUncertain(string reason) { uncertain = true; original.RetainUnknown(); parent.RetainUncertain(runId, reason); }
     static bool Settled(BoundedCommandCaptureResult capture) => capture.Command.OwnedProcessQuiescent && capture.RootExitObserved &&
@@ -175,6 +186,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         lock (tasks) { if (stopping) throw new OperationCanceledException(); phaseCancellation = phaseStop; }
         var allowance = Remaining(started); var validUntil = phaseBeganAt + allowance;
         phaseStop.CancelAfter(allowance);
+        Exception? phaseFailure = null;
         try
         {
             verifyProtectedConfiguration();
@@ -263,6 +275,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         }
         catch (Exception primary)
         {
+            phaseFailure = primary;
             phaseStop.Cancel();
             if (nativeBirthEntered && !nativeBirthReturned) RetainUncertain("Actual reviewer creation entered without returning its original owner.");
             if (process is not null)
@@ -283,7 +296,45 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             }
             throw;
         }
-        finally { lock (tasks) phaseCancellation = null; }
+        finally
+        {
+            try
+            {
+                if (heldImage is not null)
+                {
+                    if (Unknown) heldImage.RetainUnknown();
+                    else
+                    {
+                        try
+                        {
+                            var cleanup = phaseFailure is not null || stopping || phaseStop.IsCancellationRequested;
+                            if (cleanup) heldImage.Close(true);
+                            else
+                            {
+                                var dispositionEntered = false;
+                                try { parent.EnterSynchronous(runId, () => { Current(); dispositionEntered = true; heldImage.Close(false); return true; }); }
+                                catch (Exception admission) when (!dispositionEntered)
+                                {
+                                    // Known native closure permits disposition of this
+                                    // SAME held file even when WORK/parent admission
+                                    // just expired. Never grant a replacement budget.
+                                    try { heldImage.Close(true); }
+                                    catch (Exception close) { throw new AggregateException("Image WORK disposition admission and original cleanup failure.", admission, close); }
+                                    throw;
+                                }
+                            }
+                        }
+                        catch (Exception disposition)
+                        {
+                            if (!heldImage.IsClosed) heldImage.RetainUnknown();
+                            if (phaseFailure is not null) throw new AggregateException("Independent review and original image first-disposition failure.", phaseFailure, disposition);
+                            throw;
+                        }
+                    }
+                }
+            }
+            finally { lock (tasks) phaseCancellation = null; }
+        }
     }
     static string Hash(byte[] bytes) => "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes));
 }

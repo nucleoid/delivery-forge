@@ -1,4 +1,6 @@
 using System.Security.Cryptography;
+using System.IO.MemoryMappedFiles;
+using System.Runtime.InteropServices;
 
 namespace DeliveryForge.Tool.Tests;
 
@@ -52,6 +54,57 @@ public sealed class NativeImageVerifierTests : IDisposable
         Assert.False(life.HasRetainedUnknown);
         using var exclusive = new FileStream(Image, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
     }
+
+    [Fact]
+    public void Retained_Windows_image_keeps_exact_identity_and_denies_mutation_until_original_first_close()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var pin = Pin();
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var held = BoundedFiles.RetainVerifiedNativeImage(pin, life);
+        try
+        {
+            for (var observation = 0; observation < 6; observation++) held.Check();
+            Assert.Throws<IOException>(() => { using var writer = new FileStream(Image, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete); writer.WriteByte(42); });
+            Assert.Throws<IOException>(() => File.Delete(Image));
+            Assert.Throws<IOException>(() => File.Move(Image, Image + ".moved"));
+            Assert.Equal("inert image bytes\n", File.ReadAllText(Image));
+            Assert.False(held.Unknown);
+        }
+        finally { held.Close(false); }
+        Assert.Throws<IOException>(() => held.Check());
+        using var exclusive = new FileStream(Image, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+    }
+
+    [Fact]
+    public void Retained_Windows_image_refuses_preexisting_writer_and_writable_view_even_after_originating_handles_close()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var pin = Pin();
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var writer = new FileStream(Image, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+        Assert.Throws<IOException>(() => BoundedFiles.RetainVerifiedNativeImage(pin, life));
+        // That refused acquisition entered its real constructor and therefore
+        // remains UNKNOWN; do not reuse its original as a fresh allowance.
+        using var mapLife = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var mapping = MemoryMappedFile.CreateFromFile(writer, null, 0, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, leaveOpen: true);
+        using var view = mapping.CreateViewAccessor(0, 0, MemoryMappedFileAccess.ReadWrite);
+        var fileHandle = writer.SafeFileHandle.DangerousGetHandle();
+        var mapHandle = mapping.SafeMemoryMappedFileHandle.DangerousGetHandle();
+        writer.Dispose(); mapping.Dispose();
+        Assert.False(GetHandleInformation(fileHandle, out _)); Assert.Equal(6, Marshal.GetLastPInvokeError());
+        Assert.False(GetHandleInformation(mapHandle, out _)); Assert.Equal(6, Marshal.GetLastPInvokeError());
+        Assert.Throws<IOException>(() => BoundedFiles.RetainVerifiedNativeImage(pin, mapLife));
+        // Prove that the surviving view really remains writable, rather than
+        // accepting a disposed mapping as the negative control.
+        view.Write(0, (byte)41); view.Flush();
+        using var sharedReader = new FileStream(Image, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        Assert.Equal(41, sharedReader.ReadByte());
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool GetHandleInformation(IntPtr handle, out uint flags);
 
     [Fact]
     public void Cancelled_reviewer_phase_refuses_image_acquisition_without_closing_original_work()

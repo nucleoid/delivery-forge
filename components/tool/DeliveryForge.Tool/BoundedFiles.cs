@@ -68,10 +68,10 @@ public static class BoundedFiles
         if (File.Exists(full) || Directory.Exists(full)) { var a = File.GetAttributes(full); if ((a & FileAttributes.ReparsePoint) != 0 || ((a & FileAttributes.Directory) != 0) != directory) throw new IOException("Unexpected path type/reparse entry."); }
         return full;
     }
-    sealed class FileFrame
+    internal sealed class FileFrame
     {
         internal required string Path; internal required ToolLifetime Original; internal FileStream? Stream;
-        internal bool AcquisitionEntered, AcquisitionReturned, CloseEntered, CloseReturned;
+        internal bool AcquisitionEntered, AcquisitionReturned, CloseEntered, CloseReturned, CleanupRequested;
         internal Exception? Primary, CloseFailure, Post; internal byte[]? Bytes;
         internal bool Unknown => AcquisitionEntered && !AcquisitionReturned || Stream is not null && !CloseReturned;
     }
@@ -92,7 +92,7 @@ public static class BoundedFiles
     }
     static void CloseFile(FileFrame frame)
     {
-        var life = frame.Original; var cleanup = frame.Primary is not null;
+        var life = frame.Original; var cleanup = frame.Primary is not null || frame.CleanupRequested;
         if (frame.Stream is not null)
         {
             try
@@ -131,6 +131,49 @@ public static class BoundedFiles
     // Native images have a separate finite extent profile. Retain the existing
     // original read credit and first-close protocol; never allocate the image.
     internal static void VerifyNativeImage(AdmissionFile pin, ToolLifetime life, CancellationToken token = default)
+        => _ = VerifyNativeImageCore(pin, life, token, false);
+
+    // Windows sharing denies writes and deletion for the entire retained native
+    // phase. The hash and every fresh volume/full-file-ID check use this SAME
+    // original held file; public pin DATA cannot manufacture such an owner.
+    internal sealed class RetainedNativeImage
+    {
+        readonly FileFrame frame; readonly AdmissionFile pin;
+        internal RetainedNativeImage(FileFrame actual, AdmissionFile selected) { frame = actual; pin = selected; }
+        internal bool Unknown => frame.AcquisitionEntered && !frame.AcquisitionReturned || frame.CloseEntered && !frame.CloseReturned;
+        internal bool IsClosed => frame.CloseReturned;
+        internal void Check(CancellationToken token = default)
+        {
+            frame.Original.Check(); token.ThrowIfCancellationRequested();
+            if (!OperatingSystem.IsWindows() || frame.Stream is null || frame.CloseEntered || frame.Stream.SafeFileHandle.IsClosed)
+                throw new IOException("Original retained Windows image handle is unavailable.");
+            _ = Plain(pin.Path);
+            var identity = DeliveryForge.Execution.Git.WriterNamespaceIdentityReader.Observe(frame.Stream.SafeFileHandle, pin.Path);
+            frame.Original.Check(); token.ThrowIfCancellationRequested();
+            if (identity.Outcome != DeliveryForge.Execution.Git.WriterNamespaceIdentityOutcome.Match || frame.Stream.Length != pin.Bytes)
+                throw new IOException("Original held native image no longer matches its exact plain namespace and extent.");
+            frame.Original.Check();
+        }
+        internal void Close(bool cleanup)
+        {
+            if (frame.CloseReturned) return;
+            frame.CleanupRequested |= cleanup; CloseFile(frame);
+        }
+        internal void RetainUnknown()
+        {
+            frame.Original.RetainUnknown();
+            lock (UnknownFiles) if (!UnknownFiles.Contains(frame)) UnknownFiles.Add(frame);
+        }
+    }
+    internal static RetainedNativeImage RetainVerifiedNativeImage(AdmissionFile pin, ToolLifetime life, CancellationToken token = default)
+    {
+        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Retained deny-write/delete image proof is Windows-only.");
+        var frame = VerifyNativeImageCore(pin, life, token, true);
+        var held = new RetainedNativeImage(frame, pin);
+        try { held.Check(token); return held; }
+        catch (Exception failure) { frame.Primary = failure; CloseFile(frame); throw; }
+    }
+    static FileFrame VerifyNativeImageCore(AdmissionFile pin, ToolLifetime life, CancellationToken token, bool retain)
     {
         life.Check(); token.ThrowIfCancellationRequested();
         if (pin is null || pin.Bytes is < 1 or > MaximumNativeImageBytes || pin.Sha256 is not { Length: 64 } ||
@@ -169,7 +212,8 @@ public static class BoundedFiles
             if (actual != pin.Sha256) throw new IOException("Complete selected native image SHA256 differs.");
         }
         catch (Exception error) { frame.Primary = error; }
-        CloseFile(frame);
+        if (!retain || frame.Primary is not null) CloseFile(frame);
+        return frame;
     }
     public static T ReadJson<T>(string path, ToolLifetime life, int maximum = 16 * 1024 * 1024)
     {
