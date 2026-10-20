@@ -25,6 +25,49 @@ public sealed class ParentOriginalAdmissionTests
         public void BeginFailureCleanup() => phase.BeginFailureCleanup();
         public void PreserveUnknown() => phase.PreserveUnknown();
     }
+    sealed class RestrictAfterActualEntry(ToolLifetime life, string entered) : IOwnedDuplexBudget, IOwnedFailureCleanup, IOwnedBudgetUnknownRetention
+    {
+        public long OriginalStarted => life.OriginalStarted;
+        public TimeSpan WholeLimit => life.WholeLimit;
+        public TimeSpan WorkLimit => life.WorkLimit;
+        public CancellationToken Token => life.Token;
+        public void CheckWork() { life.CheckWork(); if (File.Exists(entered)) throw new TimeoutException("Fixture restricts WORK after genuine child entry."); }
+        public TimeSpan CleanupRemaining => TimeSpan.Zero;
+        public void BeginFailureCleanup() => life.BeginFailureCleanup();
+        public void PreserveUnknown() => ((IOwnedBudgetUnknownRetention)life).PreserveUnknown();
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Actually_entered_child_without_admitted_cleanup_keeps_explicit_unknown()
+    {
+        if (!OperatingSystem.IsWindows()) Assert.Skip("Actual retained Windows process/frame; no manufactured capture result.");
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var root = Path.Combine(Path.GetTempPath(), "forge-unsettled-capture-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+        var entered = Path.Combine(root, "entered"); var release = Path.Combine(root, "release"); var exiting = Path.Combine(root, "exiting");
+        static string Quote(string path) => "'" + path.Replace("'", "''", StringComparison.Ordinal) + "'";
+        var script = "[IO.File]::WriteAllText(" + Quote(entered) + ", 'entered'); $bound=[Diagnostics.Stopwatch]::StartNew(); while(-not [IO.File]::Exists(" + Quote(release) + ") -and $bound.Elapsed.TotalSeconds -lt 10){Start-Sleep -Milliseconds 10}; [IO.File]::WriteAllText(" + Quote(exiting) + ", 'exiting')";
+        var shell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
+        try
+        {
+            var capture = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(new(shell,
+                ["-NoProfile", "-NonInteractive", "-Command", script], root), TimeSpan.FromSeconds(10), 4096, life.Token,
+                new RestrictAfterActualEntry(life, entered));
+            Assert.True(File.Exists(entered));
+            Assert.Equal(CommandStartupState.Established, capture.Command.LifecycleDiagnostics!.Startup!.Creation);
+            Assert.False(capture.Command.OwnedProcessQuiescent);
+            Assert.True(life.HasExplicitUnknown);
+        }
+        finally
+        {
+            // Cooperative stop of this exact nonce-bound fixture, no PID adoption.
+            // The marker is not kernel-zero proof; the outer original Job must settle.
+            File.WriteAllText(release, "stop");
+            var began = System.Diagnostics.Stopwatch.GetTimestamp();
+            while (File.Exists(entered) && !File.Exists(exiting) && System.Diagnostics.Stopwatch.GetElapsedTime(began) < TimeSpan.FromSeconds(8))
+                await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+        Assert.True(life.HasExplicitUnknown); // Late fixture exit never remints ownership.
+    }
 
     [Fact(Timeout = 30000)]
     public async Task Actual_successful_child_cancelled_at_first_disposition_still_closes_within_original_cleanup()

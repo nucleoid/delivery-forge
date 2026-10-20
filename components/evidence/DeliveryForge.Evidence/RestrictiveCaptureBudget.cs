@@ -9,6 +9,7 @@ internal sealed class RestrictiveCaptureBudget(long localStarted, TimeSpan local
     IOwnedDuplexBudget? enclosing, BoundedCaptureRetention retention)
 {
     private long? _cleanup;
+    private bool _failureCleanupEntered;
     internal long? CleanupStarted => _cleanup;
     internal bool WorkAvailable
     {
@@ -23,6 +24,8 @@ internal sealed class RestrictiveCaptureBudget(long localStarted, TimeSpan local
     internal void BeginFailureCleanup()
     {
         _cleanup ??= Stopwatch.GetTimestamp();
+        if (_failureCleanupEntered) return;
+        _failureCleanupEntered = true;
         if (enclosing is IOwnedFailureCleanup actual)
         {
             try { actual.BeginFailureCleanup(); }
@@ -51,7 +54,17 @@ internal sealed class RestrictiveCaptureBudget(long localStarted, TimeSpan local
                 }
                 return actual <= TimeSpan.Zero ? TimeSpan.Zero : actual < remaining ? actual : remaining;
             }
-            catch (Exception failure) { retention.Add(failure); return TimeSpan.Zero; }
+            catch (Exception failure)
+            {
+                retention.Add(failure);
+                if (!_failureCleanupEntered && enclosing is IOwnedFailureCleanup)
+                {
+                    // WORK can close between positive settlement and first close.
+                    // Notify the same original once, then recompute the same MIN.
+                    BeginFailureCleanup(); return CleanupRemaining;
+                }
+                return TimeSpan.Zero;
+            }
         }
     }
     internal bool CleanupAvailable => CleanupRemaining > TimeSpan.Zero;

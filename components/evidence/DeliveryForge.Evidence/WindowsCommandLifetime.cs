@@ -252,7 +252,8 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
             var quiescent = settled && outEof && errEof && (!killAttempted || killSucceeded) &&
                 restrictive.CleanupAvailable;
             // Never-created handles can be disposed without claiming helper exit/EOF.
-            var mayDispose = owner is not null && ((!owner._creationAttempted && output is null && error is null) || quiescent);
+            var creationRefused = owner is { _creationReturned: true, _creationSucceeded: false, _process: null };
+            var mayDispose = owner is not null && (((!owner._creationAttempted || creationRefused) && output is null && error is null) || quiescent);
             var dispositionKnown = owner is null;
             if (mayDispose)
             {
@@ -273,8 +274,8 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
                     OwnedTree = new(owner is { _assigned: true, _resumed: true }, settled, active > int.MaxValue ? -1 : (int)active),
                     NativeFailure = failure,
                     Startup = new(
-                        owner?._process is not null ? CommandStartupState.Established : owner?._creationAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
-                        owner?._process is not null ? CommandStartupState.Established : owner?._creationAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
+                        creationRefused ? CommandStartupState.Refused : owner?._process is not null ? CommandStartupState.Established : owner?._creationAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
+                        creationRefused ? CommandStartupState.NotAttempted : owner?._process is not null ? CommandStartupState.Established : owner?._creationAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
                         owner?._assigned == true ? CommandStartupState.Established : owner?._assignmentAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
                         owner?._resumed == true ? CommandStartupState.Established : owner?._resumeAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
                         owner is { _stdout: not null, _stderr: not null } ? CommandStartupState.Established : owner?._readerEndpointsAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
