@@ -387,8 +387,11 @@ public sealed class GateRunner
             OutcomeText(toolOutcome));
         if (scopeValidation.InputSetIdentity is not null)
             executedPlugin = executedPlugin with { InputSetIdentity = scopeValidation.InputSetIdentity };
+        var publishedDirectory = PublishAttemptDirectory(gateDirectory, out var publicationFailure);
+        if (publicationFailure is not null && normalized.Outcome is GateOutcome.Pass or GateOutcome.NotApplicable)
+            normalized = NormalizedEvidence.Incomplete(publicationFailure);
         return await PersistAsync(
-            request, gateDirectory, before, after, execution, artifactHashes, normalized, sourceChanged,
+            request, publishedDirectory, before, after, execution, artifactHashes, normalized, sourceChanged,
             executedPlugin, CancellationToken.None)
             .ConfigureAwait(false);
     }
@@ -406,11 +409,40 @@ public sealed class GateRunner
         var now = DateTimeOffset.UtcNow;
         var execution = new CommandResult(null, string.Empty, string.Empty, false, false, now, now);
         var hashes = await WriteArtifactsAsync(gateDirectory, execution, cancellationToken).ConfigureAwait(false);
+        gateDirectory = PublishAttemptDirectory(gateDirectory, out var publicationFailure);
+        if (publicationFailure is not null && normalized.Outcome is GateOutcome.Pass or GateOutcome.NotApplicable)
+            normalized = NormalizedEvidence.Incomplete(publicationFailure);
         return await PersistAsync(
             request, gateDirectory, before, after, execution, hashes, normalized,
             before != after || !before.IsClean || !after.IsClean,
             plugin, cancellationToken)
             .ConfigureAwait(false);
+    }
+
+    private static string PublishAttemptDirectory(string attemptDirectory, out string? failure)
+    {
+        const string marker = ".attempt-";
+        var markerIndex = attemptDirectory.LastIndexOf(marker, StringComparison.Ordinal);
+        if (markerIndex < 0)
+        {
+            failure = null;
+            return attemptDirectory;
+        }
+
+        var publishedDirectory = attemptDirectory[..markerIndex];
+        try
+        {
+            // Directory.Move is the same-filesystem atomic publication boundary. An existing
+            // canonical directory is immutable: retain this nonce attempt and fail closed.
+            Directory.Move(attemptDirectory, publishedDirectory);
+            failure = null;
+            return publishedDirectory;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            failure = $"Gate attempt could not be atomically published to its immutable canonical directory: {exception.Message}";
+            return attemptDirectory;
+        }
     }
 
     private async Task<GateRunResult> PersistAsync(
