@@ -110,7 +110,10 @@ internal sealed class LinuxCommandScope
                 Io("actual-private-birth-association-wait", () => Task.Delay(100, original.Token));
             }
             if (observedGroup is null) throw new IOException("Actual original private group association did not return within finite attempts.");
-            unitPath = bus!.GetUnit(unit); invocation = bus.InvocationId(unitPath, false); controlGroup = bus.StringProperty(unitPath, "org.freedesktop.systemd1.Unit", "ControlGroup", false);
+            unitPath = bus!.GetUnit(unit); invocation = bus.InvocationId(unitPath, false);
+            // systemd255 exposes ControlGroup on Scope; InvocationID stays on Unit.
+            // https://www.freedesktop.org/software/systemd/man/255/org.freedesktop.systemd1.html#Scope%20Unit%20Objects
+            controlGroup = bus.StringProperty(unitPath, "org.freedesktop.systemd1.Scope", "ControlGroup", false);
             if (controlGroup != observedGroup || ProcStart(false) != procStart) throw new IOException("Actual private group/generation does not join the original creator.");
             referenceEntered = true; bus.RefUnit(unit); referenceReturned = true; kernel = LinuxScopeKernel.Open(controlGroup, unit, original); kernel.RequireLimits(cpus!, false);
             if (!invocation.AsSpan().SequenceEqual(bus.InvocationId(unitPath, false)) || ProcStart(false) != procStart || Observe("actual-root-exit-at-binding", () => process.HasExited) || Observe("actual-original-root-affinity", () => process.ProcessorAffinity.ToInt64()) != actualMask) throw new IOException("Actual private unit/root generation/affinity changed.");
