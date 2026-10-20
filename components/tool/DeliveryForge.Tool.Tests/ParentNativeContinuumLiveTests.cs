@@ -163,8 +163,12 @@ public sealed class ParentNativeContinuumLiveTests
             await f.Keep(entered.Task).WaitAsync(f.Original.Remaining, TestContext.Current.CancellationToken);
             var quiet = await f.Keep(f.Owner.Parent.ObserveAsync(actual.Leases[0].Owner, f.Original.Token));
             Assert.False(quiet.Quiescent); Assert.True(f.Owner.Parent.ObserveContractFixtureData().Revoked);
-            f.Original.Check(); release.SetResult(true);
-            var denied = await operation.WaitAsync(f.Original.CleanupRemaining, TestContext.Current.CancellationToken);
+            // Observing the refusal must not itself end WORK before the resumed
+            // operation reaches parent admission. Bound this wait while WORK is
+            // still current; owner disposition starts cleanup afterwards.
+            var refusalWait = TimeSpan.FromTicks(Math.Min(f.Original.Remaining.Ticks, TimeSpan.FromSeconds(10).Ticks));
+            release.SetResult(true);
+            var denied = await operation.WaitAsync(refusalWait, TestContext.Current.CancellationToken);
             Assert.IsType<CoordinationUncertainException>(denied); Assert.Equal(births, git.ActualOwnedGitInvocations);
             await f.CloseOwner();
             await f.Finish(new { Kind = "ActualParentCurrentnessGitRevokedBirthControl-v1", Fixture = true, actual.Run, GenuineLeases = 4, NativeWorkerCompleted = true, PositiveGitBirths = births, BirthsAfterRevocation = 0, ParentObservationQuiet = false });
@@ -213,9 +217,10 @@ public sealed class ParentNativeContinuumLiveTests
             // Pending real effect makes quiet=false; it is not a native completion claim.
             var quiet = await f.Keep(f.Owner.Parent.ObserveAsync(actual.Leases[0].Owner, f.Original.Token));
             Assert.False(quiet.Quiescent); Assert.True(f.Owner.Parent.ObserveContractFixtureData().Revoked);
-            f.Original.Check(); // Causal refusal must precede any time/cancellation cleanup.
+            // Do not start cleanup merely to wait for the causal refusal.
+            var refusalWait = TimeSpan.FromTicks(Math.Min(f.Original.Remaining.Ticks, TimeSpan.FromSeconds(10).Ticks));
             release.SetResult(true);
-            var refusal = await operation.WaitAsync(f.Original.CleanupRemaining, TestContext.Current.CancellationToken);
+            var refusal = await operation.WaitAsync(refusalWait, TestContext.Current.CancellationToken);
             Assert.IsType<CoordinationUncertainException>(refusal);
             Assert.False(File.Exists(target));
             await f.CloseOwner();
