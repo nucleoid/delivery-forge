@@ -45,7 +45,7 @@ public sealed class GitRepositoryIdentityReaderTests
         var reader = new GitRepositoryIdentityReader(
             new QueueCommandExecutor(
                 Result(head + Environment.NewLine),
-                Result($"{TestEvidence.Commit('1')}\t.gitignore\0{TestEvidence.Commit('2')}\t.oxlintignore\0{TestEvidence.Commit('3')}\tgenerated/out.ts\0{TestEvidence.Commit('4')}\tsrc/app.ts\0{TestEvidence.Commit('5')}\tsrc/git-ignored.ts\0{TestEvidence.Commit('6')}\tsrc/tool-ignored.ts\0{TestEvidence.Commit('7')}\tsrc/app.cs\0"),
+                Result($"100644\t{TestEvidence.Commit('1')}\t.gitignore\0100644\t{TestEvidence.Commit('2')}\t.oxlintignore\0100644\t{TestEvidence.Commit('3')}\tgenerated/out.ts\0100644\t{TestEvidence.Commit('4')}\tsrc/app.ts\0100644\t{TestEvidence.Commit('5')}\tsrc/git-ignored.ts\0100644\t{TestEvidence.Commit('6')}\tsrc/tool-ignored.ts\0100644\t{TestEvidence.Commit('7')}\tsrc/app.cs\0"),
                 Result(string.Empty),
                 Result(string.Empty),
                 Result(string.Empty),
@@ -54,7 +54,8 @@ public sealed class GitRepositoryIdentityReaderTests
             System.IO.Path.GetTempPath(),
             TestEvidence.Commit('a'));
 
-        var scope = await reader.ReadEvaluationScopeAsync(head, TestContext.Current.CancellationToken);
+        var scope = await reader.ReadEvaluationScopeAsync(
+            head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
 
         Assert.Equal(
             [".gitignore", ".oxlintignore", "generated/out.ts", "src/app.cs", "src/app.ts", "src/git-ignored.ts", "src/tool-ignored.ts"],
@@ -70,16 +71,80 @@ public sealed class GitRepositoryIdentityReaderTests
         var reader = new GitRepositoryIdentityReader(
             new QueueCommandExecutor(
                 Result(head + Environment.NewLine),
-                Result($"{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
                 Result("src/app.ts\0"),
                 Result("/* eslint-disable */\nexport const value = 1;\n"),
-                Result("export const value = 1;\n")),
+                Result("export const value = 1;\n"),
+                Result(string.Empty, 128)),
             System.IO.Path.GetTempPath(),
             TestEvidence.Commit('a'));
 
-        var scope = await reader.ReadEvaluationScopeAsync(head, TestContext.Current.CancellationToken);
+        var scope = await reader.ReadEvaluationScopeAsync(
+            head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
 
         Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
+    }
+
+    [Fact]
+    public async Task Existing_or_repositioned_suppression_in_a_changed_file_is_never_grandfathered()
+    {
+        var head = TestEvidence.Commit('b');
+        var reader = new GitRepositoryIdentityReader(
+            new QueueCommandExecutor(
+                Result(head + Environment.NewLine),
+                Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result("src/app.ts\0"),
+                Result("export const unsafe = value as unknown as string;\n// eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const old = 1;\n"),
+                Result("// eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const old = 1;\n"),
+                Result(string.Empty, 128)),
+            System.IO.Path.GetTempPath(),
+            TestEvidence.Commit('a'));
+
+        var scope = await reader.ReadEvaluationScopeAsync(
+            head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
+
+        Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
+    }
+
+    [Fact]
+    public async Task Ordinary_eslint_or_oxlint_prose_is_not_a_directive()
+    {
+        var head = TestEvidence.Commit('b');
+        var reader = new GitRepositoryIdentityReader(
+            new QueueCommandExecutor(
+                Result(head + Environment.NewLine),
+                Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result("src/app.ts\0"),
+                Result("// run oxlint before commit\nexport const eslintName = 'eslint config';\n"),
+                Result("export const eslintName = 'old';\n"),
+                Result(string.Empty, 128)),
+            System.IO.Path.GetTempPath(),
+            TestEvidence.Commit('a'));
+
+        var scope = await reader.ReadEvaluationScopeAsync(
+            head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
+
+        Assert.Empty(scope.SuppressionViolations!);
+    }
+
+    [Fact]
+    public async Task Javascript_symlink_is_rejected_and_bound_into_scope_identity()
+    {
+        var head = TestEvidence.Commit('b');
+        var reader = new GitRepositoryIdentityReader(
+            new QueueCommandExecutor(
+                Result(head + Environment.NewLine),
+                Result($"120000\t{TestEvidence.Commit('1')}\tsrc/link.ts\0"),
+                Result(string.Empty),
+                Result(string.Empty, 128)),
+            System.IO.Path.GetTempPath(),
+            TestEvidence.Commit('a'));
+
+        var scope = await reader.ReadEvaluationScopeAsync(
+            head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
+
+        Assert.Equal(["src/link.ts"], scope.InvalidInputs);
+        Assert.StartsWith("sha256:", scope.InputSetIdentity);
     }
 
     [Fact]
@@ -89,14 +154,14 @@ public sealed class GitRepositoryIdentityReaderTests
         var reader = new GitRepositoryIdentityReader(
             new QueueCommandExecutor(
                 Result(head + Environment.NewLine),
-                Result($"{TestEvidence.Commit('1')}\t.gitignore\0{TestEvidence.Commit('2')}\tnode_modules/owned.ts\0{TestEvidence.Commit('3')}\tvendor/anti-slop/owned.ts\0"),
+                Result($"100644\t{TestEvidence.Commit('1')}\t.gitignore\0100644\t{TestEvidence.Commit('2')}\tnode_modules/owned.ts\0100644\t{TestEvidence.Commit('3')}\tvendor/anti-slop/owned.ts\0"),
                 Result(".gitignore\0"),
-                Result("export const nodeOwned = true;\n"),
-                Result("export const vendorOwned = true;\n")),
+                Result(string.Empty, 128)),
             System.IO.Path.GetTempPath(),
             TestEvidence.Commit('a'));
 
-        var scope = await reader.ReadEvaluationScopeAsync(head, TestContext.Current.CancellationToken);
+        var scope = await reader.ReadEvaluationScopeAsync(
+            head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
 
         Assert.Empty(scope.IgnoredFiles);
         Assert.Contains("node_modules/owned.ts", scope.TrackedFiles);

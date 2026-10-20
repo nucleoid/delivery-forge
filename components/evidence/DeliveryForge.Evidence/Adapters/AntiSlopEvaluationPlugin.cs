@@ -8,6 +8,7 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
 {
     public const string UpstreamCommit = "13909c9e07590f5a85d93c62712259fe14a883f7";
     public const string OxlintVersion = "1.78.0";
+    internal const int MaximumDirectArgumentBytes = 24_000;
     private static readonly HashSet<string> SupportedExtensions = new(
         [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"],
         StringComparer.OrdinalIgnoreCase);
@@ -123,22 +124,13 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             return NormalizedEvidence.Incomplete(
                 "Anti-slop requires a cleared, allow-listed execution environment.");
 
-        if (arguments.Count != inputs.Count + 7 ||
-            !Path.IsPathFullyQualified(request.Invocation.FileName) ||
-            !Path.IsPathFullyQualified(arguments[0]) ||
-            arguments[1] != "--config" ||
-            arguments[3] != "--format" ||
-            arguments[4] != "json" ||
-            arguments[5] != "--no-ignore" ||
-            arguments[6] != "--disable-nested-config")
-            return NormalizedEvidence.Incomplete(
-                "Anti-slop requires absolute Node and Oxlint entrypoints with the canonical read-only JSON invocation.");
-
-        var invocationInputs = arguments
-            .Skip(7)
-            .Select(input => input.Replace('\\', '/'))
-            .Order(StringComparer.Ordinal)
-            .ToArray();
+        string? invocationError = null;
+        string configPath = string.Empty;
+        IReadOnlyList<string> invocationInputs = [];
+        if (!Path.IsPathFullyQualified(request.Invocation.FileName) ||
+            !TryReadInvocation(arguments, inputs, out configPath, out invocationInputs, out invocationError))
+            return NormalizedEvidence.Incomplete(invocationError ??
+                "Anti-slop requires the canonical direct or argv-safe batch-host invocation.");
         if (!inputs.SequenceEqual(invocationInputs, StringComparer.Ordinal))
             return NormalizedEvidence.Incomplete(
                 "Anti-slop invocation inputs do not exactly match the frozen plugin input selection.");
@@ -146,7 +138,6 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         var expectedConfig = request.Plugin?.EnableEffectRules == true
             ? "oxlint.effect.config.ts"
             : "oxlint.config.ts";
-        var configPath = arguments[2];
         if (!Path.IsPathFullyQualified(configPath) ||
             !string.Equals(Path.GetFileName(configPath), expectedConfig, StringComparison.Ordinal))
             return NormalizedEvidence.Incomplete(
@@ -346,10 +337,13 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         CommandInvocation invocation,
         bool effectRulesEnabled)
     {
-        if (invocation.Arguments.Count < 3 || invocation.Arguments[1] != "--config")
+        var batched = invocation.Arguments.Count == 7 && invocation.Arguments[1] == "--oxlint";
+        var configIndex = batched ? 4 : 2;
+        if (invocation.Arguments.Count <= configIndex ||
+            invocation.Arguments[batched ? 3 : 1] != "--config")
             throw new InvalidOperationException("The canonical Oxlint configuration argument is missing.");
 
-        var configPath = Path.GetFullPath(invocation.Arguments[2]);
+        var configPath = Path.GetFullPath(invocation.Arguments[configIndex]);
         var root = Path.GetDirectoryName(configPath) ??
             throw new InvalidOperationException("The Oxlint configuration root is unavailable.");
         var expectedConfig = effectRulesEnabled ? "oxlint.effect.config.ts" : "oxlint.config.ts";
@@ -360,6 +354,7 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         AppendClosureFile(hash, root, Path.Combine(root, "package.json"));
         AppendClosureFile(hash, root, Path.Combine(root, "package-lock.json"));
         AppendClosureFile(hash, root, Path.Combine(root, "oxlint.config.ts"));
+        AppendClosureFile(hash, root, Path.Combine(root, "run-oxlint-batches.mjs"));
         if (effectRulesEnabled)
             AppendClosureFile(hash, root, Path.Combine(root, "oxlint.effect.config.ts"));
         AppendClosureDirectory(hash, root, Path.Combine(root, "vendor", "anti-slop"));
@@ -383,9 +378,18 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         if (!Path.IsPathFullyQualified(nodePath))
             throw new InvalidOperationException("The Node.js runtime path is not absolute.");
         var expectedEntryPoint = Path.GetFullPath(Path.Combine(root, "node_modules", "oxlint", "bin", "oxlint"));
-        if (!string.Equals(Path.GetFullPath(invocation.Arguments[0]), expectedEntryPoint,
+        var actualEntryPoint = batched ? invocation.Arguments[2] : invocation.Arguments[0];
+        if (!string.Equals(Path.GetFullPath(actualEntryPoint), expectedEntryPoint,
                 OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
             throw new InvalidOperationException("The Oxlint entrypoint is not the pinned package-local launcher.");
+        if (batched)
+        {
+            var expectedRunner = Path.GetFullPath(Path.Combine(root, "run-oxlint-batches.mjs"));
+            if (!string.Equals(Path.GetFullPath(invocation.Arguments[0]), expectedRunner, PathComparison))
+                throw new InvalidOperationException("The anti-slop batch runner is not the code-owned launcher.");
+            AppendClosureFile(hash, Path.GetDirectoryName(invocation.Arguments[6])!, invocation.Arguments[6],
+                "inputs/manifest.json");
+        }
         AppendValue(hash, "runtime/node-path", Path.GetFullPath(nodePath));
         AppendClosureFile(hash, Path.GetDirectoryName(nodePath)!, nodePath, "runtime/node-bytes");
         AppendValue(hash, "environment/inherit", invocation.InheritEnvironment.ToString());
@@ -424,6 +428,61 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         hash.AppendData([0]);
         hash.AppendData(Encoding.UTF8.GetBytes(value));
         hash.AppendData([0]);
+    }
+
+    private static bool TryReadInvocation(
+        IReadOnlyList<string> arguments,
+        IReadOnlyList<string> inputs,
+        out string configPath,
+        out IReadOnlyList<string> invocationInputs,
+        out string? error)
+    {
+        configPath = string.Empty;
+        invocationInputs = [];
+        error = null;
+        var direct = arguments.Count == inputs.Count + 7 &&
+            arguments.Count >= 7 && Path.IsPathFullyQualified(arguments[0]) &&
+            arguments[1] == "--config" && arguments[3] == "--format" && arguments[4] == "json" &&
+            arguments[5] == "--no-ignore" && arguments[6] == "--disable-nested-config";
+        if (direct)
+        {
+            if (arguments.Sum(argument => Encoding.UTF8.GetByteCount(argument) + 1) > MaximumDirectArgumentBytes)
+            {
+                error = "Anti-slop direct argv exceeds the deterministic safety budget; use the code-owned batch host.";
+                return false;
+            }
+            configPath = arguments[2];
+            invocationInputs = arguments.Skip(7).Select(input => input.Replace('\\', '/'))
+                .Order(StringComparer.Ordinal).ToArray();
+            return true;
+        }
+
+        var batched = arguments.Count == 7 && Path.IsPathFullyQualified(arguments[0]) &&
+            arguments[1] == "--oxlint" && Path.IsPathFullyQualified(arguments[2]) &&
+            arguments[3] == "--config" && arguments[5] == "--inputs" &&
+            Path.IsPathFullyQualified(arguments[6]);
+        if (!batched)
+        {
+            error = "Anti-slop invocation is neither canonical direct execution nor the argv-safe code-owned batch host.";
+            return false;
+        }
+        try
+        {
+            var manifest = JsonSerializer.Deserialize<string[]>(File.ReadAllBytes(arguments[6]));
+            if (manifest is null)
+            {
+                error = "Anti-slop input manifest is malformed.";
+                return false;
+            }
+            configPath = arguments[4];
+            invocationInputs = DeterministicEvaluationPluginRegistry.NormalizeInputs(manifest);
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+        {
+            error = $"Anti-slop input manifest is unavailable or malformed: {exception.Message}";
+            return false;
+        }
     }
 
     private sealed record AntiSlopSnapshot(IReadOnlyList<string> Inputs, string ConfigurationIdentity);

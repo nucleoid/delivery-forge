@@ -163,6 +163,35 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
+    public void Anti_slop_accepts_code_owned_manifest_batch_host_without_whole_tree_argv()
+    {
+        using var temp = new TempDirectory();
+        var (config, nodePath, entryPoint) = CreateFixtureAntiSlopClosure(temp.Path);
+        var root = System.IO.Path.GetDirectoryName(config)!;
+        var manifest = System.IO.Path.Combine(temp.Path, "inputs.json");
+        File.WriteAllText(manifest, "[\"src/app.ts\"]");
+        var invocation = new CommandInvocation(
+            nodePath,
+            [System.IO.Path.Combine(root, "run-oxlint-batches.mjs"), "--oxlint", entryPoint,
+                "--config", config, "--inputs", manifest],
+            temp.Path,
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            InheritEnvironment: false);
+        var original = TestEvidence.GateRequest(temp.Path);
+        var request = original with
+        {
+            Capability = new ToolCapability("oxlint", "1.78.0", "oxlint-json-v1", true, false),
+            Adapter = EvidenceAdapterKind.External,
+            Invocation = invocation,
+            ConfigurationIdentity = AntiSlopEvaluationPlugin.ComputeConfigurationIdentity(invocation, false),
+            Plugin = new EvaluationPluginSelection("dmmulroy.anti-slop", true, ["src/app.ts"])
+        };
+        var plugin = AntiSlopEvaluationPlugin.CreateBundled(root, nodePath);
+
+        Assert.Null(plugin.ValidateBeforeExecution(request));
+    }
+
+    [Fact]
     public void Anti_slop_revalidates_the_configuration_and_runtime_closure_after_execution()
     {
         using var temp = new TempDirectory();
@@ -418,7 +447,7 @@ public sealed class DeterministicEvaluationPluginTests
             result.Outcome == expectedOutcome,
             $"Expected {expectedOutcome}, received {result.Outcome}: {result.Reason}");
         if (omitTrackedInput)
-            Assert.Contains("every tracked JavaScript-family file", result.Reason, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("protected-base scope", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -640,6 +669,7 @@ public sealed class DeterministicEvaluationPluginTests
             ["package.json"] = "{}",
             ["package-lock.json"] = "{}",
             ["oxlint.config.ts"] = "export default {};",
+            ["run-oxlint-batches.mjs"] = "// fixture batch runner",
             ["vendor/anti-slop/index.ts"] = "export default {};",
             ["node_modules/oxlint/bin/oxlint"] = "#!/usr/bin/env node",
             ["node_modules/oxlint/dist/index.js"] = "export {};",

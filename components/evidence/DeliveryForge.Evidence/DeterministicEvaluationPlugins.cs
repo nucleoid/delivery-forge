@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
+using DeliveryForge.Contracts.Validation;
 using DeliveryForge.Evidence.Adapters;
 
 namespace DeliveryForge.Evidence;
@@ -8,7 +9,8 @@ public enum EvaluationPluginStatus
 {
     Selected,
     Disabled,
-    Executed
+    Executed,
+    NotApplicable
 }
 
 public sealed record EvaluationPluginSelection(
@@ -99,7 +101,7 @@ public sealed class DeterministicEvaluationPluginRegistry
         if ((trustedAntiSlopBundleRoot is null) != (trustedNodePath is null))
             throw new EvaluationPluginException(
                 "Anti-slop bundle and Node registration must be supplied together.");
-        return new(
+        var registry = new DeterministicEvaluationPluginRegistry(
         [
             new SealedEvidenceAdapterPlugin("delivery-forge.dotnet", "1.0.0", "dotnet", EvidenceAdapterKind.DotNet),
             new SealedEvidenceAdapterPlugin("delivery-forge.crap4csharp", "1.0.0", "crap4csharp", EvidenceAdapterKind.Crap4CSharp),
@@ -108,6 +110,8 @@ public sealed class DeterministicEvaluationPluginRegistry
                 ? AntiSlopEvaluationPlugin.CreateBundled(trustedAntiSlopBundleRoot, trustedNodePath!)
                 : AntiSlopEvaluationPlugin.CreateBundled()
         ]);
+        registry.AssertMatchesAuthorityRegistry(TrustedGatePluginRegistry.BuiltIns);
+        return registry;
     }
 
     public IDeterministicEvaluationPlugin Resolve(
@@ -157,9 +161,6 @@ public sealed class DeterministicEvaluationPluginRegistry
             if (inputs.Any(input => !candidates.Contains(input, StringComparer.Ordinal) || ignored.Contains(input)))
                 throw new EvaluationPluginException(
                     $"Plugin '{configuration.Id}' selected an input outside the frozen candidate scope.");
-            if (inputs.Count == 0)
-                continue;
-
             selections.Add(new EvaluationPluginSelection(
                 configuration.Id,
                 configuration.Enabled,
@@ -189,6 +190,25 @@ public sealed class DeterministicEvaluationPluginRegistry
             inputs,
             ComputeInputSetIdentity(inputs),
             toolOutcome);
+    }
+
+    internal void AssertMatchesAuthorityRegistry(TrustedGatePluginRegistry authority)
+    {
+        foreach (var plugin in _plugins.Values)
+        {
+            if (!authority.Bindings.Any(binding =>
+                    binding.PluginId == plugin.Id && binding.PluginVersion == plugin.Version &&
+                    binding.Tool == plugin.ExpectedTool))
+                throw new EvaluationPluginException(
+                    $"Plugin '{plugin.Id}' has no matching trusted gate authority binding.");
+        }
+        foreach (var binding in authority.Bindings.Where(binding => binding.GateId != "ci"))
+        {
+            if (!_plugins.TryGetValue(binding.PluginId, out var plugin) ||
+                plugin.Version != binding.PluginVersion || plugin.ExpectedTool != binding.Tool)
+                throw new EvaluationPluginException(
+                    $"Trusted gate '{binding.GateId}' drifts from the deterministic plugin registry.");
+        }
     }
 
     internal static IReadOnlyList<string> NormalizeInputs(IReadOnlyList<string> inputs)

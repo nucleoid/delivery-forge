@@ -40,7 +40,8 @@ public sealed class ResolvedEvidencePolicy
         IReadOnlyList<string> requiredGates,
         bool authorityVerified,
         string? sourceRepositoryRoot = null,
-        IReadOnlyList<RequiredGatePluginBinding>? requiredGatePluginBindings = null)
+        IReadOnlyList<RequiredGatePluginBinding>? requiredGatePluginBindings = null,
+        IReadOnlySet<string>? allowedNotApplicable = null)
     {
         PolicyIdentity = policyIdentity;
         ContentIdentity = contentIdentity;
@@ -51,6 +52,7 @@ public sealed class ResolvedEvidencePolicy
         AuthorityVerified = authorityVerified;
         SourceRepositoryRoot = sourceRepositoryRoot;
         RequiredGatePluginBindings = requiredGatePluginBindings ?? [];
+        AllowedNotApplicable = allowedNotApplicable ?? new HashSet<string>(StringComparer.Ordinal);
     }
 
     internal string? SourceRepositoryRoot { get; }
@@ -63,6 +65,7 @@ public sealed class ResolvedEvidencePolicy
     public IReadOnlyList<string> RequiredGates { get; }
     internal bool AuthorityVerified { get; }
     internal IReadOnlyList<RequiredGatePluginBinding> RequiredGatePluginBindings { get; }
+    internal IReadOnlySet<string> AllowedNotApplicable { get; }
 }
 
 public static partial class EvidencePolicy

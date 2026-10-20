@@ -53,11 +53,15 @@ public sealed class ProtectedGitPolicyResolver(
 
             var contentIdentity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
             var bindings = ValidateBindings(requiredGates.Select(value => value!).ToArray());
+            var allowedNotApplicable = root.GetProperty("allowedNotApplicable").EnumerateArray()
+                .Select(item => item.GetString()!)
+                .ToHashSet(StringComparer.Ordinal);
             return new ResolvedEvidencePolicy(
                 validated.Identity, contentIdentity, baseId, PolicyAuthorityKind.ProtectedGitBase,
                 0m, requiredGates.Select(value => value!).ToArray(), authorityVerified: true,
                 sourceRepositoryRoot: _repositoryRoot,
-                requiredGatePluginBindings: bindings);
+                requiredGatePluginBindings: bindings,
+                allowedNotApplicable: allowedNotApplicable);
         }
         catch (ContractValidationException exception)
         {

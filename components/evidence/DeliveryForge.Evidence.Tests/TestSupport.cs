@@ -174,6 +174,7 @@ internal sealed class ScopedSequenceRepositoryIdentityReader(
 
     public Task<RepositoryEvaluationScope> ReadEvaluationScopeAsync(
         string expectedHeadCommit,
+        TimeSpan timeout,
         CancellationToken cancellationToken) => Task.FromResult(scope);
 }
 

@@ -259,7 +259,7 @@ public sealed class WorkflowTransitionTests
     }
 
     [Fact]
-    public void Required_gate_and_ci_receipts_must_pass()
+    public void Required_gate_and_ci_receipts_must_have_policy_satisfying_outcomes()
     {
         var evidence = FullEvidence();
         var failingRequired = MutatedFixture("gate-receipt.json", node =>
@@ -268,7 +268,7 @@ public sealed class WorkflowTransitionTests
             node["gateId"] = "build";
             node["outcome"] = "FAIL";
         });
-        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
+        AssertMessage("allowed outcome", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.Evaluating, WorkflowState.IndependentReview,
             evidence with { GateReceipts = [failingRequired, .. evidence.GateReceipts!.Skip(1)] }));
 
@@ -278,8 +278,26 @@ public sealed class WorkflowTransitionTests
             node["gateId"] = "ci";
             node["outcome"] = "FAIL";
         });
-        AssertMessage("outcome PASS", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
+        AssertMessage("allowed outcome", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.PrPublished, WorkflowState.CiComplete, evidence with { CiReceipt = failingCi }));
+    }
+
+    [Fact]
+    public void Required_gate_accepts_authoritative_not_applicable_only_when_policy_allows_it()
+    {
+        var evidence = FullEvidence();
+        var policy = MutatedFixture("evidence-policy.json", node =>
+        {
+            node["authorizedCeiling"] = "merge";
+            node["requiredGates"] = new JsonArray("mutation");
+            node["allowedNotApplicable"] = new JsonArray("mutation");
+        });
+        var notApplicable = GateFixture(policy.Identity, "mutation", notApplicable: true);
+
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.Evaluating,
+            WorkflowState.IndependentReview,
+            evidence with { Policy = policy, GateReceipts = [notApplicable] });
     }
 
     [Fact]
@@ -364,7 +382,7 @@ public sealed class WorkflowTransitionTests
     {
         var evidence = FullEvidence();
         var gate = GateFixture(ParseFixture("evidence-policy.json").Identity, "build");
-        AssertMessage("required policy or gate identity", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
+        AssertMessage("required policy, gate identity", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
             WorkflowState.Evaluating, WorkflowState.IndependentReview,
             evidence with { GateReceipts = [gate, .. evidence.GateReceipts!.Skip(1)] }));
     }
@@ -512,15 +530,24 @@ public sealed class WorkflowTransitionTests
             HostReviewContext: authorityHost.CreateConsumerContext(hostedContext));
     }
 
-    private static ValidatedContract GateFixture(string policyIdentity, string gateId) =>
+    private static ValidatedContract GateFixture(string policyIdentity, string gateId, bool notApplicable = false) =>
         MutatedFixture("gate-receipt.json", node =>
         {
             node["schemaVersion"] = "2.0.0";
             node["policyIdentity"] = policyIdentity;
             node["gateId"] = gateId;
-            var (plugin, tool) = gateId == "mutation"
-                ? ("delivery-forge.mutate4csharp", "mutate4csharp")
-                : ("delivery-forge.dotnet", "dotnet");
+            var (plugin, tool, toolVersion, format) = gateId switch
+            {
+                "mutation" => ("delivery-forge.mutate4csharp", "mutate4csharp", "0.1.0-format-only", "2"),
+                "ci" => ("delivery-forge.ci", "ci", "fixture", "fixture"),
+                _ => ("delivery-forge.dotnet", "dotnet", "10.0.401", "trx-v1")
+            };
+            node["command"] = CommandEnvelope(tool, toolVersion, format);
+            if (notApplicable)
+            {
+                node["outcome"] = "NOT_APPLICABLE";
+                node["notApplicableRationale"] = "Protected policy permits this gate because no applicable inputs were selected.";
+            }
             node["authorityBinding"] = new JsonObject
             {
                 ["gateId"] = gateId,
@@ -529,16 +556,26 @@ public sealed class WorkflowTransitionTests
                 ["pluginId"] = plugin,
                 ["pluginVersion"] = "1.0.0",
                 ["tool"] = tool,
-                ["toolVersion"] = "10.0.401",
+                ["toolVersion"] = toolVersion,
                 ["toolIdentity"] = "sha256:" + new string('a', 64),
                 ["configurationIdentity"] = "sha256:" + new string('b', 64),
                 ["inputSetIdentity"] = "sha256:" + new string('c', 64),
                 ["enabled"] = true,
-                ["status"] = "EXECUTED",
+                ["status"] = notApplicable ? "NOT_APPLICABLE" : "EXECUTED",
                 ["productionCapable"] = true,
                 ["authority"] = "production"
             };
         });
+
+    private static string CommandEnvelope(string tool, string version, string format) => new JsonObject
+    {
+        ["capabilityTool"] = tool,
+        ["capabilityVersion"] = version,
+        ["capabilityFormat"] = format,
+        ["executableIdentity"] = "sha256:" + new string('a', 64),
+        ["configurationIdentity"] = "sha256:" + new string('b', 64),
+        ["plugin"] = new JsonObject { ["inputSetIdentity"] = "sha256:" + new string('c', 64) }
+    }.ToJsonString();
 
     private static ValidatedContract ParseFixture(string file) => ContractValidator.ParseAndValidate(
         File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "Valid", file)));

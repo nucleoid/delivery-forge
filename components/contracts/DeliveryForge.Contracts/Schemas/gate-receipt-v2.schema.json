@@ -41,7 +41,7 @@
         "configurationIdentity": { "$ref": "#/$defs/identity" },
         "inputSetIdentity": { "$ref": "#/$defs/identity" },
         "enabled": { "type": "boolean" },
-        "status": { "enum": ["SELECTED", "DISABLED", "EXECUTED"] },
+        "status": { "enum": ["SELECTED", "DISABLED", "EXECUTED", "NOT_APPLICABLE"] },
         "productionCapable": { "type": "boolean" },
         "authority": { "enum": ["production", "advisory"] }
       }

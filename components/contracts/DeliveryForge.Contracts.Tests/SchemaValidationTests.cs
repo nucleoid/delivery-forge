@@ -252,12 +252,12 @@ public sealed class SchemaValidationTests
     }
 
     [Fact]
-    public void Manifest_gates_must_pass_under_the_bound_policy()
+    public void Manifest_gates_must_have_policy_satisfying_authoritative_outcomes()
     {
         var failing = ReferenceBundle.Create();
         failing.Gates[0]["outcome"] = "FAIL";
         failing.Relink();
-        AssertReferenceMessage("not a PASS under its immutable policy", () =>
+        AssertReferenceMessage("not a policy-satisfying authoritative outcome", () =>
             ContractReferenceValidator.Validate(failing.Documents()));
 
         var wrongPolicy = ReferenceBundle.Create();
@@ -266,7 +266,7 @@ public sealed class SchemaValidationTests
         SetIdentity(alternatePolicy);
         wrongPolicy.Gates[0]["policyIdentity"] = alternatePolicy["identity"]!.GetValue<string>();
         wrongPolicy.Relink();
-        AssertReferenceMessage("not a PASS under its immutable policy", () =>
+        AssertReferenceMessage("not a policy-satisfying authoritative outcome", () =>
             ContractReferenceValidator.Validate(wrongPolicy.Documents(alternatePolicy)));
     }
 
@@ -318,6 +318,7 @@ public sealed class SchemaValidationTests
         gate["authorityBinding"]!["pluginId"] = "example.custom";
         gate["authorityBinding"]!["pluginVersion"] = "2.1.0";
         gate["authorityBinding"]!["tool"] = "custom-tool";
+        gate["command"] = CommandEnvelope("custom-tool", "10.0.401", "trx-v1");
         SetIdentity(gate);
         using var document = System.Text.Json.JsonDocument.Parse(Bytes(gate));
 
@@ -494,6 +495,30 @@ public sealed class SchemaValidationTests
         Assert.Contains("does not permit", error.Message);
     }
 
+    [Fact]
+    public void Policy_satisfying_not_applicable_requires_v2_central_authority()
+    {
+        var policy = LoadNode("evidence-policy.json");
+        var legacy = LoadNode("gate-receipt.json");
+        legacy["gateId"] = "mutation";
+        legacy["outcome"] = "NOT_APPLICABLE";
+        legacy["notApplicableRationale"] = "No mutation targets";
+        SetIdentity(legacy);
+        using (var legacyDocument = System.Text.Json.JsonDocument.Parse(Bytes(legacy)))
+            Assert.False(GateReceiptAuthority.TryValidateAuthoritativeOutcome(legacyDocument.RootElement, out _));
+
+        var authoritative = GateNode(policy, "mutation");
+        authoritative["outcome"] = "NOT_APPLICABLE";
+        authoritative["exitCode"] = null;
+        authoritative["notApplicableRationale"] = "No mutation targets in protected scope";
+        authoritative["authorityBinding"]!["status"] = "NOT_APPLICABLE";
+        SetIdentity(authoritative);
+        using var document = System.Text.Json.JsonDocument.Parse(Bytes(authoritative));
+
+        Assert.True(GateReceiptAuthority.TryValidateAuthoritativeOutcome(
+            document.RootElement, out var reason), reason);
+    }
+
     private sealed record ReferenceBundle(
         JsonObject Plan,
         JsonObject Policy,
@@ -576,9 +601,10 @@ public sealed class SchemaValidationTests
         gate["schemaVersion"] = "2.0.0";
         gate["policyIdentity"] = policy["identity"]!.GetValue<string>();
         gate["gateId"] = gateId;
-        var (plugin, tool) = gateId == "mutation"
-            ? ("delivery-forge.mutate4csharp", "mutate4csharp")
-            : ("delivery-forge.dotnet", "dotnet");
+        var (plugin, tool, toolVersion, format) = gateId == "mutation"
+            ? ("delivery-forge.mutate4csharp", "mutate4csharp", "0.1.0-format-only", "2")
+            : ("delivery-forge.dotnet", "dotnet", "10.0.401", "trx-v1");
+        gate["command"] = CommandEnvelope(tool, toolVersion, format);
         gate["authorityBinding"] = new JsonObject
         {
             ["gateId"] = gateId,
@@ -587,7 +613,7 @@ public sealed class SchemaValidationTests
             ["pluginId"] = plugin,
             ["pluginVersion"] = "1.0.0",
             ["tool"] = tool,
-            ["toolVersion"] = "10.0.401",
+            ["toolVersion"] = toolVersion,
             ["toolIdentity"] = "sha256:" + new string('a', 64),
             ["configurationIdentity"] = "sha256:" + new string('b', 64),
             ["inputSetIdentity"] = "sha256:" + new string('c', 64),
@@ -599,6 +625,16 @@ public sealed class SchemaValidationTests
         SetIdentity(gate);
         return gate;
     }
+
+    private static string CommandEnvelope(string tool, string version, string format) => new JsonObject
+    {
+        ["capabilityTool"] = tool,
+        ["capabilityVersion"] = version,
+        ["capabilityFormat"] = format,
+        ["executableIdentity"] = "sha256:" + new string('a', 64),
+        ["configurationIdentity"] = "sha256:" + new string('b', 64),
+        ["plugin"] = new JsonObject { ["inputSetIdentity"] = "sha256:" + new string('c', 64) }
+    }.ToJsonString();
 
     private static ReadOnlyMemory<byte> Bytes(JsonObject node) => Utf8(node.ToJsonString());
 

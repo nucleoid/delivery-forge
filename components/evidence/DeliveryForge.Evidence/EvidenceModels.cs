@@ -204,12 +204,14 @@ public sealed record RepositoryEvaluationScope(
     IReadOnlyList<string> TrackedFiles,
     IReadOnlySet<string> IgnoredFiles,
     string? InputSetIdentity = null,
-    IReadOnlyList<string>? SuppressionViolations = null);
+    IReadOnlyList<string>? SuppressionViolations = null,
+    IReadOnlyList<string>? InvalidInputs = null);
 
 public interface IRepositoryEvaluationScopeReader
 {
     Task<RepositoryEvaluationScope> ReadEvaluationScopeAsync(
         string expectedHeadCommit,
+        TimeSpan timeout,
         CancellationToken cancellationToken);
 }
 

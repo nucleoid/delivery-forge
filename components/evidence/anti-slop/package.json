@@ -15,6 +15,8 @@
     "typescript": "7.0.2"
   },
   "scripts": {
-    "test:fixtures": "tsx test-fixtures.ts"
+    "test:fixtures": "tsx test-fixtures.ts",
+    "test:batch": "node run-oxlint-batches.mjs --oxlint ./node_modules/oxlint/bin/oxlint --config ./oxlint.config.ts --inputs ./fixtures/inputs.json",
+    "test:batch-effect": "node run-oxlint-batches.mjs --oxlint ./node_modules/oxlint/bin/oxlint --config ./oxlint.effect.config.ts --inputs ./fixtures/inputs.json"
   }
 }

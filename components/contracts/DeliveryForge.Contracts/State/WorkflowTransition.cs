@@ -254,23 +254,29 @@ public static class WorkflowTransition
 
         if (!required.IsSubsetOf(supplied))
         {
-            throw new InvalidWorkflowTransitionException("Independent review requires every evidence-policy gate to have a matching PASS receipt.");
+            throw new InvalidWorkflowTransitionException("Independent review requires every evidence-policy gate to have a matching policy-satisfying authoritative receipt.");
         }
     }
 
     private static JsonDocument RequirePolicyBoundGate(ValidatedContract? gate, string? expectedGateId, TransitionEvidence evidence)
     {
-        RequireReceipt(gate, "gate-receipt", "PASS", action: null, evidence);
+        RequireReceipt(gate, "gate-receipt", outcome: null, action: null, evidence);
         var policy = RequirePolicy(evidence);
         var document = JsonDocument.Parse(gate!.CanonicalBytes);
         var root = document.RootElement;
+        using var policyDocument = JsonDocument.Parse(policy.CanonicalBytes);
+        var gateId = root.GetProperty("gateId").GetString()!;
+        var outcome = root.GetProperty("outcome").GetString();
+        var allowedNotApplicable = policyDocument.RootElement.GetProperty("allowedNotApplicable").EnumerateArray()
+            .Any(item => item.GetString() == gateId);
         if (root.GetProperty("policyIdentity").GetString() != policy.Identity ||
-            (expectedGateId is not null && root.GetProperty("gateId").GetString() != expectedGateId))
+            (expectedGateId is not null && gateId != expectedGateId) ||
+            outcome != "PASS" && (outcome != "NOT_APPLICABLE" || !allowedNotApplicable))
         {
             document.Dispose();
-            throw new InvalidWorkflowTransitionException("Gate receipt does not match the required policy or gate identity.");
+            throw new InvalidWorkflowTransitionException("Gate receipt does not match the required policy, gate identity, or allowed outcome.");
         }
-        if (!GateReceiptAuthority.TryValidateAuthoritativePass(root, out var authorityFailure))
+        if (!GateReceiptAuthority.TryValidateAuthoritativeOutcome(root, out var authorityFailure))
         {
             document.Dispose();
             throw new InvalidWorkflowTransitionException(authorityFailure);

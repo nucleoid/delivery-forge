@@ -41,7 +41,7 @@ public sealed class PublicationFixture
         Review = IssueReview(reviewPolicy, "claude", independentContext, Id(independentArtifact), ReviewEvidenceRole.Independent);
         HostedReview = IssueReview(reviewPolicy, "github-hosted", hostedContext, Id(hostedArtifact), ReviewEvidenceRole.Hosted);
         Gates = [Gate("build", "PASS"), Gate("test", "PASS")];
-        Ci = Gate("ci", "PASS");
+        Ci = Gate("ci", "PASS", "delivery-forge.ci", "ci");
         Authority = PublicationAuthorityHost.CreateIsolatedFixture(ReviewHost);
     }
 
@@ -79,17 +79,32 @@ public sealed class PublicationFixture
         { "schemaVersion":"2.0.0", "kind":"gate-receipt", "identity":"{{Id('0')}}",
           "gateId":"{{gateId}}", "policyIdentity":"{{Policy.Identity}}",
           "baseCommit":"{{Commit('a')}}", "headCommit":"{{Commit('b')}}", "treeId":"{{Commit('c')}}",
-          "command":"fixture command", "startedAt":"2026-10-11T00:00:00Z",
+          "command":{{CommandEnvelope(tool)}}, "startedAt":"2026-10-11T00:00:00Z",
           "completedAt":"2026-10-11T00:00:01Z", "exitCode":{{(outcome == "PASS" ? 0 : 1)}},
           "outcome":"{{outcome}}", "reason":"fixture", "artifactHashes":{},
           "sourceChanged":false, "limitations":["fixture"],
           "authorityBinding":{
             "gateId":"{{gateId}}", "policyIdentity":"{{Policy.Identity}}", "headCommit":"{{Commit('b')}}",
             "pluginId":"{{pluginId}}", "pluginVersion":"1.0.0", "tool":"{{tool}}",
-            "toolVersion":"10.0.401", "toolIdentity":"{{Id('a')}}",
+            "toolVersion":"{{(tool == "dotnet" ? "10.0.401" : "fixture")}}", "toolIdentity":"{{Id('a')}}",
             "configurationIdentity":"{{Id('b')}}", "inputSetIdentity":"{{Id('c')}}",
             "enabled":true, "status":"EXECUTED", "productionCapable":true, "authority":"production" } }
         """);
+
+    private static string CommandEnvelope(string tool)
+    {
+        var version = tool == "dotnet" ? "10.0.401" : "fixture";
+        var format = tool == "dotnet" ? "trx-v1" : "fixture";
+        return JsonValue.Create(new JsonObject
+        {
+            ["capabilityTool"] = tool,
+            ["capabilityVersion"] = version,
+            ["capabilityFormat"] = format,
+            ["executableIdentity"] = Id('a'),
+            ["configurationIdentity"] = Id('b'),
+            ["plugin"] = new JsonObject { ["inputSetIdentity"] = Id('c') }
+        }.ToJsonString())!.ToJsonString();
+    }
 
     private ValidatedContract IssueReview(ReviewPolicy policy, string family, ReviewAcceptanceContext context,
         string artifact, ReviewEvidenceRole role)

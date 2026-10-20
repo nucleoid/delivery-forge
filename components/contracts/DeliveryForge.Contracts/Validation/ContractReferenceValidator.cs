@@ -96,19 +96,23 @@ public static class ContractReferenceValidator
         }
 
         var required = policy.GetProperty("requiredGates").EnumerateArray().Select(item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
+        var allowedNotApplicable = policy.GetProperty("allowedNotApplicable").EnumerateArray()
+            .Select(item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
         var supplied = new HashSet<string>(StringComparer.Ordinal);
         foreach (var gateIdentity in manifest.GetProperty("gateReceiptIds").EnumerateArray().Select(item => item.GetString()!))
         {
             var gate = identities[gateIdentity].Document.RootElement;
+            var gateId = gate.GetProperty("gateId").GetString()!;
+            var outcome = gate.GetProperty("outcome").GetString();
             if (gate.GetProperty("policyIdentity").GetString() != manifest.GetProperty("policyIdentity").GetString() ||
-                gate.GetProperty("outcome").GetString() != "PASS")
+                outcome != "PASS" && (outcome != "NOT_APPLICABLE" || !allowedNotApplicable.Contains(gateId)))
             {
-                throw new ContractReferenceException("run-manifest gate receipt is not a PASS under its immutable policy.");
+                throw new ContractReferenceException("run-manifest gate receipt is not a policy-satisfying authoritative outcome under its immutable policy.");
             }
-            if (!GateReceiptAuthority.TryValidateAuthoritativePass(gate, out var authorityFailure))
+            if (!GateReceiptAuthority.TryValidateAuthoritativeOutcome(gate, out var authorityFailure))
                 throw new ContractReferenceException(authorityFailure);
 
-            supplied.Add(gate.GetProperty("gateId").GetString()!);
+            supplied.Add(gateId);
         }
 
         if (!required.IsSubsetOf(supplied))

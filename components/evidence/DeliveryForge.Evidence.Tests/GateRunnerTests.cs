@@ -1,6 +1,7 @@
 namespace DeliveryForge.Evidence.Tests;
 
 using System.Reflection;
+using System.Text.Json;
 
 public sealed class GateRunnerTests
 {
@@ -56,6 +57,25 @@ public sealed class GateRunnerTests
         Assert.Equal(["test", "DeliveryForge.Tests.csproj", "--no-restore"], result.Invocation.Arguments);
         Assert.Equal(2, result.ArtifactHashes.Count);
         Assert.All(result.ArtifactHashes.Values, value => Assert.StartsWith("sha256:", value));
+    }
+
+    [Fact]
+    public async Task Readers_first_rollout_switch_writes_canonical_v1_without_v2_authority()
+    {
+        using var temp = new TempDirectory();
+        var runner = new GateRunner(
+            new StubCommandExecutor(TestEvidence.CommandResult()),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
+            TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'),
+            emitAuthoritativeV2: false);
+
+        var result = await runner.RunAsync(
+            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
+
+        using var receipt = JsonDocument.Parse(await File.ReadAllBytesAsync(
+            result.ReceiptPath, TestContext.Current.CancellationToken));
+        Assert.Equal("1.0.0", receipt.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.False(receipt.RootElement.TryGetProperty("authorityBinding", out _));
     }
 
     [Fact]
