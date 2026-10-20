@@ -19,10 +19,11 @@ public sealed class AuthoritativeEvaluationHost
         string trustedWorkingDirectory,
         string trustedProtectedBaseCommit,
         string hostOwnedReceiptRoot,
+        ReadOnlySpan<byte> hostHeldReceiptSigningKey,
         DeterministicEvaluationPluginRegistry? plugins = null,
         TrustedGatePluginRegistry? authorityRegistry = null)
     {
-        receipts = new HostOwnedReceiptStore(hostOwnedReceiptRoot);
+        receipts = new HostOwnedReceiptStore(hostOwnedReceiptRoot, hostHeldReceiptSigningKey);
         runner = new GateRunner(
             executor,
             repository,

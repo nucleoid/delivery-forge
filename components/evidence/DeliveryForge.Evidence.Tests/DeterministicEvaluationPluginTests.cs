@@ -107,7 +107,7 @@ public sealed class DeterministicEvaluationPluginTests
             original.Invocation.WorkingDirectory, TestEvidence.Commit('a'), pluginRegistry,
             emitAuthoritativeV2: true, authorityRegistry: authorityRegistry,
             authoritativeReceiptStore: new HostOwnedReceiptStore(
-                System.IO.Path.Combine(temp.Path, "host-receipts")));
+                System.IO.Path.Combine(temp.Path, "host-receipts"), new byte[32]));
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
         var receipt = ContractValidator.ParseAndValidate(await File.ReadAllBytesAsync(
@@ -229,7 +229,7 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
-    public async Task Authoritative_anti_slop_not_applicable_validates_pin_bundle_config_scope_and_provenance()
+    public async Task Production_composition_runs_applicable_anti_slop_and_survives_restart()
     {
         using var repository = new TempDirectory();
         using var artifacts = new TempDirectory();
@@ -238,13 +238,22 @@ public sealed class DeterministicEvaluationPluginTests
         await Git(repository.Path, "config", "user.email", "forge@example.invalid");
         await File.WriteAllTextAsync(System.IO.Path.Combine(repository.Path, "Subject.cs"),
             "public static class Subject { }\n", TestContext.Current.CancellationToken);
-        await Git(repository.Path, "add", "Subject.cs");
+        await File.WriteAllTextAsync(System.IO.Path.Combine(repository.Path, "app.ts"),
+            "export const value = 1;\n", TestContext.Current.CancellationToken);
+        await Git(repository.Path, "add", ".");
         await Git(repository.Path, "commit", "-m", "base");
         var commit = (await Git(repository.Path, "rev-parse", "HEAD")).Trim();
-        var (config, nodePath, entryPoint) = CreateFixtureAntiSlopClosure(artifacts.Path);
+        var antiSlopRoot = System.IO.Path.GetFullPath(System.IO.Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "anti-slop"));
+        var config = System.IO.Path.Combine(antiSlopRoot, "oxlint.config.ts");
+        var nodePath = "/usr/bin/node";
+        var entryPoint = System.IO.Path.Combine(antiSlopRoot, "node_modules", "oxlint", "bin", "oxlint");
+        var manifest = System.IO.Path.Combine(artifacts.Path, "inputs.json");
+        await File.WriteAllTextAsync(manifest, "[\"app.ts\"]", TestContext.Current.CancellationToken);
         var invocation = new CommandInvocation(
             nodePath,
-            [entryPoint, "--config", config, "--format", "json", "--no-ignore", "--disable-nested-config"],
+            [System.IO.Path.Combine(antiSlopRoot, "run-oxlint-batches.mjs"), "--oxlint", entryPoint,
+                "--config", config, "--inputs", manifest],
             repository.Path,
             new Dictionary<string, string>(StringComparer.Ordinal),
             InheritEnvironment: false);
@@ -273,20 +282,23 @@ public sealed class DeterministicEvaluationPluginTests
             "frozen-javascript-family",
             TimeSpan.FromSeconds(30),
             System.IO.Path.Combine(artifacts.Path, "gate-output"),
-            new EvaluationPluginSelection("dmmulroy.anti-slop", Enabled: true, Inputs: []));
+            new EvaluationPluginSelection("dmmulroy.anti-slop", Enabled: true, Inputs: ["app.ts"]));
         var host = new AuthoritativeEvaluationHost(
             new ProcessCommandExecutor(), reader, repository.Path, commit,
             System.IO.Path.Combine(artifacts.Path, "host-receipts"),
+            new byte[32],
             DeterministicEvaluationPluginRegistry.CreateBuiltIns(
-                System.IO.Path.GetDirectoryName(config)!, nodePath));
+                antiSlopRoot, nodePath));
 
-        var result = await host.RunAsync(request, TestContext.Current.CancellationToken);
-        var receipt = ContractValidator.ParseAndValidate(File.ReadAllBytes(result.ReceiptPath));
+        var bundle = await new AuthoritativeEvaluationComposition(host).RunRequiredAsync(
+            [request], TestContext.Current.CancellationToken);
+        var receipt = Assert.Single(bundle.Receipts);
         using var document = System.Text.Json.JsonDocument.Parse(receipt.CanonicalBytes);
 
-        Assert.Equal(GateOutcome.NotApplicable, result.Outcome);
-        Assert.True(result.ProductionCapable);
-        Assert.True(host.ReceiptProvenance.Contains(receipt.Identity));
+        Assert.True(bundle.ReceiptProvenance.Contains(receipt.Identity));
+        var restartedStore = new HostOwnedReceiptStore(
+            System.IO.Path.Combine(artifacts.Path, "host-receipts"), new byte[32]);
+        Assert.True(restartedStore.Provenance.Contains(receipt.Identity));
         Assert.True(GateReceiptAuthority.TryValidateAuthoritativeOutcome(
             document.RootElement, out var reason), reason);
     }
@@ -701,7 +713,7 @@ public sealed class DeterministicEvaluationPluginTests
             TestEvidence.Commit('a'),
             emitAuthoritativeV2: true,
             authoritativeReceiptStore: new HostOwnedReceiptStore(
-                System.IO.Path.Combine(temp.Path, "host-receipts")));
+                System.IO.Path.Combine(temp.Path, "host-receipts"), new byte[32]));
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 

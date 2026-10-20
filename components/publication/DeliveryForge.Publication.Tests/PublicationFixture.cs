@@ -43,7 +43,7 @@ public sealed class PublicationFixture
         Gates = [Gate("build", "PASS"), Gate("test", "PASS")];
         Ci = Gate("ci", "PASS", "delivery-forge.ci", "ci");
         var receiptStore = new HostOwnedReceiptStore(Path.Combine(
-            Path.GetTempPath(), "delivery-forge-publication-receipts", Guid.NewGuid().ToString("N")));
+            Path.GetTempPath(), "delivery-forge-publication-receipts", Guid.NewGuid().ToString("N")), new byte[32]);
         foreach (var receipt in Gates.Append(Ci)) receiptStore.Append(receipt);
         GateReceiptProvenance = receiptStore.Provenance;
         Authority = PublicationAuthorityHost.CreateIsolatedFixture(ReviewHost);

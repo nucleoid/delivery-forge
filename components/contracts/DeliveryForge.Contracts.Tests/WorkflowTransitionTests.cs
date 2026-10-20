@@ -294,7 +294,7 @@ public sealed class WorkflowTransitionTests
         });
         var notApplicable = GateFixture(policy.Identity, "mutation", notApplicable: true);
         var receiptStore = new HostOwnedReceiptStore(Path.Combine(
-            Path.GetTempPath(), "delivery-forge-workflow-na", Guid.NewGuid().ToString("N")));
+            Path.GetTempPath(), "delivery-forge-workflow-na", Guid.NewGuid().ToString("N")), new byte[32]);
         receiptStore.Append(notApplicable);
 
         WorkflowTransition.EnsureAllowedForIsolatedTest(
@@ -503,7 +503,7 @@ public sealed class WorkflowTransitionTests
             .ToArray();
         var ci = GateFixture(policy.Identity, "ci");
         var receiptStore = new HostOwnedReceiptStore(Path.Combine(
-            Path.GetTempPath(), "delivery-forge-workflow-receipts", Guid.NewGuid().ToString("N")));
+            Path.GetTempPath(), "delivery-forge-workflow-receipts", Guid.NewGuid().ToString("N")), new byte[32]);
         foreach (var receipt in gates.Append(ci)) receiptStore.Append(receipt);
         var review = ParseFixture("review-receipt.json");
         var hosted = MutatedFixture("review-receipt.json", node => node["reviewerFamily"] = "github-hosted");

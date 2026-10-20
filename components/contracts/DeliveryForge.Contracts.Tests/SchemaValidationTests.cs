@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -239,11 +240,21 @@ public sealed class SchemaValidationTests
         var root = Path.Combine(Path.GetTempPath(), "delivery-forge-store-test", Guid.NewGuid().ToString("N"));
         try
         {
-            var store = new HostOwnedReceiptStore(root);
+            var key = SHA256.HashData(Encoding.UTF8.GetBytes("restart-test-authority"));
+            var store = new HostOwnedReceiptStore(root, key);
             var path = store.Append(receipt);
-            var reopened = new HostOwnedReceiptStore(root);
+            var reopened = new HostOwnedReceiptStore(root, key);
             Assert.True(reopened.Provenance.Contains(receipt.Identity));
             Assert.Equal(receipt.Identity, reopened.Read(receipt.Identity).Identity);
+
+            var ledgerPath = Path.Combine(root, ".provenance", receipt.Identity.Replace(':', '-') + ".entry");
+            var genuineLedger = File.ReadAllBytes(ledgerPath);
+            var publicDigest = Convert.ToHexStringLower(SHA256.HashData(receipt.CanonicalBytes.Span));
+            File.WriteAllText(ledgerPath, receipt.Identity + " " + publicDigest + " " + new string('0', 64) + "\n");
+            Assert.False(reopened.Provenance.Contains(receipt.Identity));
+            File.WriteAllBytes(ledgerPath, genuineLedger);
+            Assert.True(reopened.Provenance.Contains(receipt.Identity));
+
             File.WriteAllText(path, "replaced");
 
             Assert.Throws<IOException>(() => store.Append(receipt));
@@ -681,7 +692,7 @@ public sealed class SchemaValidationTests
     {
         var materialized = documents.ToArray();
         var store = new HostOwnedReceiptStore(Path.Combine(
-            Path.GetTempPath(), "delivery-forge-reference-receipts", Guid.NewGuid().ToString("N")));
+            Path.GetTempPath(), "delivery-forge-reference-receipts", Guid.NewGuid().ToString("N")), new byte[32]);
         foreach (var bytes in materialized)
         {
             try

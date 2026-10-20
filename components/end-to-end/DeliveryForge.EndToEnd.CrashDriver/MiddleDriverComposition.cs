@@ -23,6 +23,8 @@ namespace DeliveryForge.EndToEnd.CrashDriver;
 
 internal static class MiddleDriverComposition
 {
+    private static readonly byte[] FixtureReceiptSigningKey = SHA256.HashData(
+        Encoding.UTF8.GetBytes("delivery-forge-crash-driver-fixture-only"));
     private static readonly JsonSerializerOptions Json = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
     internal static bool Supports(string stage) => stage is "command-completed" or "gate-receipt-written" or "review-registration" or "review-receipt";
     internal static TimeSpan Remaining(DriverInput input, int maximumSeconds, bool cleanup = false)
@@ -341,7 +343,7 @@ internal static class MiddleDriverComposition
         var configPath = Path.Combine(input.ArtifactRoot, "actual-driver-gate-configuration.json"); await WriteBytes(configPath, configuration, token);
         var authoritativeHost = new AuthoritativeEvaluationHost(
             executor, reader, clone, input.RuntimeBaseCommit,
-            Path.Combine(input.ArtifactRoot, "host-owned-gate-receipts"));
+            Path.Combine(input.ArtifactRoot, "host-owned-gate-receipts"), FixtureReceiptSigningKey);
         var gate = await authoritativeHost.RunAsync(new("test", policy, detection.Capability,
             EvidenceAdapterKind.DotNet, Hash(configuration), before, invocation, "actual-middle-driver",
             Remaining(input, 75), Path.Combine(input.ArtifactRoot, "actual-driver-gates")), token);
@@ -555,7 +557,8 @@ internal static class MiddleDriverComposition
         var bytes = await Read(receiptPath, input, token);
         var receipt = ContractValidator.ParseAndValidate(bytes);
         if (receipt.SchemaName != "gate-receipt") throw new IOException("Actual boundary is not a canonical gate receipt.");
-        var durable = new HostOwnedReceiptStore(Path.Combine(input.ArtifactRoot, "host-owned-gate-receipts"))
+        var durable = new HostOwnedReceiptStore(
+                Path.Combine(input.ArtifactRoot, "host-owned-gate-receipts"), FixtureReceiptSigningKey)
             .Read(receipt.Identity);
         if (!durable.CanonicalBytes.Span.SequenceEqual(bytes))
             throw new IOException("Fresh consumer could not verify the durable host receipt provenance.");

@@ -12,11 +12,13 @@ public sealed class TrustedReceiptProvenance
     private const int MaximumReceiptBytes = 8 * 1024 * 1024;
     private readonly string root;
     private readonly string ledger;
+    private readonly byte[] signingKey;
 
-    internal TrustedReceiptProvenance(string root, string ledger)
+    internal TrustedReceiptProvenance(string root, string ledger, byte[] signingKey)
     {
         this.root = root;
         this.ledger = ledger;
+        this.signingKey = signingKey;
     }
 
     public bool Contains(string identity)
@@ -39,8 +41,8 @@ public sealed class TrustedReceiptProvenance
             if (receipt.SchemaName != "gate-receipt" || receipt.Identity != identity ||
                 !receipt.CanonicalBytes.Span.SequenceEqual(bytes))
                 return false;
-            var expectedLedger = LedgerBytes(identity, bytes);
-            return File.ReadAllBytes(ledgerPath).AsSpan().SequenceEqual(expectedLedger);
+            var expectedLedger = LedgerBytes(identity, bytes, signingKey);
+            return CryptographicOperations.FixedTimeEquals(File.ReadAllBytes(ledgerPath), expectedLedger);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ContractValidationException)
         {
@@ -48,8 +50,14 @@ public sealed class TrustedReceiptProvenance
         }
     }
 
-    internal static byte[] LedgerBytes(string identity, ReadOnlySpan<byte> canonicalBytes) =>
-        Encoding.ASCII.GetBytes(identity + " " + Convert.ToHexStringLower(SHA256.HashData(canonicalBytes)) + "\n");
+    internal static byte[] LedgerBytes(
+        string identity, ReadOnlySpan<byte> canonicalBytes, ReadOnlySpan<byte> signingKey)
+    {
+        var digest = Convert.ToHexStringLower(SHA256.HashData(canonicalBytes));
+        var payload = Encoding.ASCII.GetBytes(identity + " " + digest);
+        var mac = Convert.ToHexStringLower(HMACSHA256.HashData(signingKey, payload));
+        return Encoding.ASCII.GetBytes(identity + " " + digest + " " + mac + "\n");
+    }
 
     internal static bool TryFileSegment(string identity, out string segment)
     {
@@ -73,19 +81,25 @@ public sealed class HostOwnedReceiptStore
 {
     private readonly string root;
     private readonly string ledger;
+    private readonly byte[] signingKey;
     private readonly TrustedReceiptProvenance provenance;
 
-    public HostOwnedReceiptStore(string absoluteRoot)
+    public HostOwnedReceiptStore(string absoluteRoot, ReadOnlySpan<byte> hostHeldSigningKey)
     {
         if (string.IsNullOrWhiteSpace(absoluteRoot) || !Path.IsPathFullyQualified(absoluteRoot))
             throw new ArgumentException("Receipt store root must be an absolute host-owned path.", nameof(absoluteRoot));
         root = Path.GetFullPath(absoluteRoot);
+        if (hostHeldSigningKey.Length < 32)
+            throw new ArgumentException(
+                "Receipt signing key must contain at least 256 bits and remain unavailable to gate subprocesses.",
+                nameof(hostHeldSigningKey));
+        signingKey = hostHeldSigningKey.ToArray();
         Directory.CreateDirectory(root);
         EnsureProtectedDirectory(root, nameof(absoluteRoot));
         ledger = Path.Combine(root, ".provenance");
         Directory.CreateDirectory(ledger);
         EnsureProtectedDirectory(ledger, nameof(absoluteRoot));
-        provenance = new(root, ledger);
+        provenance = new(root, ledger, signingKey);
     }
 
     public TrustedReceiptProvenance Provenance => provenance;
@@ -100,7 +114,7 @@ public sealed class HostOwnedReceiptStore
         var bytes = receipt.CanonicalBytes.ToArray();
         WriteCreateOnce(path, bytes);
         var ledgerPath = Path.Combine(ledger, segment + ".entry");
-        WriteCreateOnce(ledgerPath, TrustedReceiptProvenance.LedgerBytes(receipt.Identity, bytes));
+        WriteCreateOnce(ledgerPath, TrustedReceiptProvenance.LedgerBytes(receipt.Identity, bytes, signingKey));
         if (!provenance.Contains(receipt.Identity))
             throw new IOException("Durable receipt provenance could not be verified after append.");
         return path;
