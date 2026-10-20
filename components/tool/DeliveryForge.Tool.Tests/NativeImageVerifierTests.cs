@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.IO.MemoryMappedFiles;
-using System.Runtime.InteropServices;
 
 namespace DeliveryForge.Tool.Tests;
 
@@ -89,11 +88,13 @@ public sealed class NativeImageVerifierTests : IDisposable
         using var mapLife = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var mapping = MemoryMappedFile.CreateFromFile(writer, null, 0, MemoryMappedFileAccess.ReadWrite, HandleInheritability.None, leaveOpen: true);
         using var view = mapping.CreateViewAccessor(0, 0, MemoryMappedFileAccess.ReadWrite);
-        var fileHandle = writer.SafeFileHandle.DangerousGetHandle();
-        var mapHandle = mapping.SafeMemoryMappedFileHandle.DangerousGetHandle();
+        var fileHandle = writer.SafeFileHandle;
+        var mapHandle = mapping.SafeMemoryMappedFileHandle;
         writer.Dispose(); mapping.Dispose();
-        Assert.False(GetHandleInformation(fileHandle, out _)); Assert.Equal(6, Marshal.GetLastPInvokeError());
-        Assert.False(GetHandleInformation(mapHandle, out _)); Assert.Equal(6, Marshal.GetLastPInvokeError());
+        // Managed owner state only: released raw handle values are recyclable
+        // and cannot be queried as independent original kernel-close evidence.
+        Assert.True(fileHandle.IsClosed); Assert.True(mapHandle.IsClosed);
+        Assert.False(view.SafeMemoryMappedViewHandle.IsClosed);
         Assert.Throws<IOException>(() => BoundedFiles.RetainVerifiedNativeImage(pin, mapLife, TestContext.Current.CancellationToken));
         // Prove that the surviving view really remains writable, rather than
         // accepting a disposed mapping as the negative control.
@@ -101,10 +102,6 @@ public sealed class NativeImageVerifierTests : IDisposable
         using var sharedReader = new FileStream(Image, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
         Assert.Equal(41, sharedReader.ReadByte());
     }
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    static extern bool GetHandleInformation(IntPtr handle, out uint flags);
 
     [Fact]
     public void Cancelled_reviewer_phase_refuses_image_acquisition_without_closing_original_work()

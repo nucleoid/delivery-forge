@@ -74,7 +74,14 @@ public sealed class CodexJsonlProtocol(Stream input, Stream output, ToolLifetime
         if (hasId && id.ValueKind != JsonValueKind.Number && id.ValueKind != JsonValueKind.String) throw new IOException("Unsupported Codex response ID type.");
         if (hasMethod && (method.ValueKind != JsonValueKind.String || method.GetString()!.Length > 256)) throw new IOException("Invalid Codex method.");
         if (hasMethod && (message.TryGetProperty("result", out _) || message.TryGetProperty("error", out _))) throw new IOException("Method message cannot carry response fields.");
-        var allowed = hasMethod ? new[] { "jsonrpc", "id", "method", "params" } : new[] { "jsonrpc", "id", "result", "error" }; if (message.EnumerateObject().Any(x => !allowed.Contains(x.Name, StringComparer.Ordinal))) throw new IOException("Unknown Codex envelope member.");
+        // Codex0.153.4 ServerNotificationEnvelope adds Option<i64> metadata.
+        // This server event timestamp supplies no identity or deadline authority.
+        var notification = hasMethod && !hasId;
+        if (message.TryGetProperty("emittedAtMs", out var emitted) &&
+            (!notification || emitted.ValueKind != JsonValueKind.Null &&
+             (emitted.ValueKind != JsonValueKind.Number || !emitted.TryGetInt64(out _))))
+            throw new IOException("Invalid Codex server notification timestamp.");
+        var allowed = notification ? new[] { "jsonrpc", "method", "params", "emittedAtMs" } : hasMethod ? new[] { "jsonrpc", "id", "method", "params" } : new[] { "jsonrpc", "id", "result", "error" }; if (message.EnumerateObject().Any(x => !allowed.Contains(x.Name, StringComparer.Ordinal))) throw new IOException("Unknown Codex envelope member.");
         if (!hasId && !hasMethod) throw new IOException("Codex envelope has neither ID nor method.");
         if (!hasMethod && hasId && (message.TryGetProperty("result", out _) == message.TryGetProperty("error", out _))) throw new IOException("Codex response must contain exactly result or error.");
     }

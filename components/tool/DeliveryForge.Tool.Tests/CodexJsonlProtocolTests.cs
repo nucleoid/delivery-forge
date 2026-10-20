@@ -18,6 +18,39 @@ public sealed class CodexJsonlProtocolTests
     [InlineData("{\"method\":\"turn/completed\",\"params\":{}}")]
     public void Valid_exact_protocol_envelopes(string text) { using var doc = JsonDocument.Parse(text); CodexJsonlProtocol.RequireEnvelope(doc.RootElement); }
     [Theory]
+    [InlineData("", true)]
+    [InlineData(",\"emittedAtMs\":null", true)]
+    [InlineData(",\"emittedAtMs\":1234", true)]
+    [InlineData(",\"emittedAtMs\":-9223372036854775808", true)]
+    [InlineData(",\"emittedAtMs\":9223372036854775807", true)]
+    [InlineData(",\"emittedAtMs\":9223372036854775808", false)]
+    [InlineData(",\"emittedAtMs\":1.5", false)]
+    [InlineData(",\"emittedAtMs\":\"1234\"", false)]
+    [InlineData(",\"emittedAtMs\":true", false)]
+    [InlineData(",\"emittedAtMs\":{}", false)]
+    [InlineData(",\"emittedAtMs\":[]", false)]
+    [InlineData(",\"emittedAtMs\":1,\"unrelated\":true", false)]
+    public async Task Actual_JSONL_notification_timestamp_matches_versioned_optional_signed_integer(string field, bool accepted)
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        using var input = new MemoryStream();
+        using var output = new MemoryStream(Encoding.UTF8.GetBytes("{\"method\":\"configWarning\",\"params\":{}" + field + "}\n"));
+        var codec = new CodexJsonlProtocol(input, output, life);
+        using var message = await codec.ReadAsync(TestContext.Current.CancellationToken); Assert.NotNull(message);
+        if (accepted) CodexJsonlProtocol.RequireEnvelope(message.RootElement);
+        else Assert.Throws<IOException>(() => CodexJsonlProtocol.RequireEnvelope(message.RootElement));
+        Assert.Null(await codec.ReadAsync(TestContext.Current.CancellationToken));
+    }
+    [Theory]
+    [InlineData("{\"id\":1,\"method\":\"server/request\",\"params\":{},\"emittedAtMs\":1}")]
+    [InlineData("{\"id\":1,\"result\":{},\"emittedAtMs\":null}")]
+    [InlineData("{\"id\":1,\"error\":{\"code\":1},\"emittedAtMs\":1}")]
+    public void Notification_metadata_never_extends_request_or_response_envelopes(string text)
+    {
+        using var doc = JsonDocument.Parse(text);
+        Assert.Throws<IOException>(() => CodexJsonlProtocol.RequireEnvelope(doc.RootElement));
+    }
+    [Theory]
     [InlineData("{\"id\":1}")]
     [InlineData("{\"id\":null,\"result\":{}}")]
     [InlineData("{\"id\":1,\"result\":{},\"error\":{}}")]
