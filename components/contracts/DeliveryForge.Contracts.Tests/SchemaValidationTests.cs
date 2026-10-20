@@ -519,6 +519,30 @@ public sealed class SchemaValidationTests
             document.RootElement, out var reason), reason);
     }
 
+    [Theory]
+    [InlineData("capabilityVersion", "1.77.0")]
+    [InlineData("capabilityFormat", "forged-oxlint-json-v1")]
+    public void Authoritative_not_applicable_requires_trusted_pinned_metadata(string field, string staleValue)
+    {
+        var policy = LoadNode("evidence-policy.json");
+        var gate = GateNode(policy, "anti-slop");
+        gate["outcome"] = "NOT_APPLICABLE";
+        gate["exitCode"] = null;
+        gate["notApplicableRationale"] = "No JavaScript-family inputs in protected scope";
+        gate["authorityBinding"]!["status"] = "NOT_APPLICABLE";
+        var command = JsonNode.Parse(gate["command"]!.GetValue<string>())!.AsObject();
+        command[field] = staleValue;
+        gate["command"] = command.ToJsonString();
+        if (field == "capabilityVersion")
+            gate["authorityBinding"]!["toolVersion"] = staleValue;
+        SetIdentity(gate);
+        using var document = System.Text.Json.JsonDocument.Parse(Bytes(gate));
+
+        Assert.False(GateReceiptAuthority.TryValidateAuthoritativeOutcome(
+            document.RootElement, out var reason));
+        Assert.Contains("trusted pinned tool version/format", reason, StringComparison.Ordinal);
+    }
+
     private sealed record ReferenceBundle(
         JsonObject Plan,
         JsonObject Policy,
@@ -601,9 +625,12 @@ public sealed class SchemaValidationTests
         gate["schemaVersion"] = "2.0.0";
         gate["policyIdentity"] = policy["identity"]!.GetValue<string>();
         gate["gateId"] = gateId;
-        var (plugin, tool, toolVersion, format) = gateId == "mutation"
-            ? ("delivery-forge.mutate4csharp", "mutate4csharp", "0.1.0-format-only", "2")
-            : ("delivery-forge.dotnet", "dotnet", "10.0.401", "trx-v1");
+        var (plugin, pluginVersion, tool, toolVersion, format) = gateId switch
+        {
+            "mutation" => ("delivery-forge.mutate4csharp", "1.0.0", "mutate4csharp", "0.1.0-format-only", "2"),
+            "anti-slop" => ("dmmulroy.anti-slop", "0.1.2+13909c9e07590f5a85d93c62712259fe14a883f7", "oxlint", "1.78.0", "oxlint-json-v1"),
+            _ => ("delivery-forge.dotnet", "1.0.0", "dotnet", "10.0.401", "trx-v1")
+        };
         gate["command"] = CommandEnvelope(tool, toolVersion, format);
         gate["authorityBinding"] = new JsonObject
         {
@@ -611,7 +638,7 @@ public sealed class SchemaValidationTests
             ["policyIdentity"] = policy["identity"]!.GetValue<string>(),
             ["headCommit"] = gate["headCommit"]!.GetValue<string>(),
             ["pluginId"] = plugin,
-            ["pluginVersion"] = "1.0.0",
+            ["pluginVersion"] = pluginVersion,
             ["tool"] = tool,
             ["toolVersion"] = toolVersion,
             ["toolIdentity"] = "sha256:" + new string('a', 64),

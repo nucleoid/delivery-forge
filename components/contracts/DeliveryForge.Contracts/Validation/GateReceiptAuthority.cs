@@ -67,7 +67,7 @@ public static class GateReceiptAuthority
 
         if (!receipt.TryGetProperty("command", out var commandValue) ||
             commandValue.ValueKind != JsonValueKind.String ||
-            !TryValidateCommandEnvelope(commandValue.GetString()!, binding, trusted, outcome, out reason))
+            !TryValidateCommandEnvelope(commandValue.GetString()!, binding, trusted, out reason))
             return false;
 
         reason = string.Empty;
@@ -91,7 +91,6 @@ public static class GateReceiptAuthority
         string serialized,
         JsonElement binding,
         TrustedGatePluginBinding trusted,
-        string outcome,
         out string reason)
     {
         try
@@ -109,11 +108,10 @@ public static class GateReceiptAuthority
                 reason = "Gate authority binding disagrees with its immutable command/configuration/input envelope.";
                 return false;
             }
-            if (outcome == "PASS" &&
-                ((trusted.ExpectedToolVersion is not null &&
+            if ((trusted.ExpectedToolVersion is not null &&
                   !string.Equals(Text(command, "capabilityVersion"), trusted.ExpectedToolVersion, StringComparison.Ordinal)) ||
                  (trusted.ExpectedFormatVersion is not null &&
-                  !string.Equals(Text(command, "capabilityFormat"), trusted.ExpectedFormatVersion, StringComparison.Ordinal))))
+                  !string.Equals(Text(command, "capabilityFormat"), trusted.ExpectedFormatVersion, StringComparison.Ordinal)))
             {
                 reason = "Gate authority binding does not use the trusted pinned tool version/format.";
                 return false;

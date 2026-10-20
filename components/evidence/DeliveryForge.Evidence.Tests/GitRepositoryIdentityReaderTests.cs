@@ -128,6 +128,52 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Fact]
+    public async Task Directive_looking_strings_urls_templates_and_comment_prose_are_not_suppressions()
+    {
+        var head = TestEvidence.Commit('b');
+        var reader = new GitRepositoryIdentityReader(
+            new QueueCommandExecutor(
+                Result(head + Environment.NewLine),
+                Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result("src/app.ts\0"),
+                Result("const url = \"http://eslint-disable\";\nconst text = '/* oxlint-disable */';\nconst template = `// eslint-disable-next-line`;\n// Documentation mentions eslint-disable but does not activate it.\n/* Use oxlint-disable only after approval. */\n"),
+                Result("export const old = 1;\n"),
+                Result(string.Empty, 128)),
+            System.IO.Path.GetTempPath(),
+            TestEvidence.Commit('a'));
+
+        var scope = await reader.ReadEvaluationScopeAsync(
+            head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
+
+        Assert.Empty(scope.SuppressionViolations!);
+    }
+
+    [Theory]
+    [InlineData("const value = 1; // eslint-disable-line anti-slop/no-chained-type-assertions\n")]
+    [InlineData("// oxlint-disable-next-line anti-slop/no-chained-type-assertions\nconst value = 1;\n")]
+    [InlineData("/* eslint-disable anti-slop/no-chained-type-assertions */\nconst value = 1;\n")]
+    [InlineData("/* oxlint-enable anti-slop/no-chained-type-assertions */\nconst value = 1;\n")]
+    public async Task Actual_supported_directive_comment_forms_are_suppressions(string content)
+    {
+        var head = TestEvidence.Commit('b');
+        var reader = new GitRepositoryIdentityReader(
+            new QueueCommandExecutor(
+                Result(head + Environment.NewLine),
+                Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result("src/app.ts\0"),
+                Result(content),
+                Result("export const old = 1;\n"),
+                Result(string.Empty, 128)),
+            System.IO.Path.GetTempPath(),
+            TestEvidence.Commit('a'));
+
+        var scope = await reader.ReadEvaluationScopeAsync(
+            head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
+
+        Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
+    }
+
+    [Fact]
     public async Task Javascript_symlink_is_rejected_and_bound_into_scope_identity()
     {
         var head = TestEvidence.Commit('b');

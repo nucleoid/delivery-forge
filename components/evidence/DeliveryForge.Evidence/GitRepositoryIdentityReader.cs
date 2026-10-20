@@ -1,6 +1,5 @@
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.RegularExpressions;
 
 namespace DeliveryForge.Evidence;
 
@@ -132,13 +131,211 @@ public sealed class GitRepositoryIdentityReader(
         return new TreeEntry(mode, path, objectId);
     }
 
-    private static IReadOnlyList<string> SuppressionDirectives(string content) =>
-        Regex.Matches(content, @"//[^\r\n]*|/\*[\s\S]*?\*/", RegexOptions.CultureInvariant)
-            .SelectMany(comment => Regex.Matches(
-                comment.Value,
-                @"(?i)\b(?:eslint|oxlint)-(?:disable|enable)(?:-next-line|-line)?\b[^\r\n]*",
-                RegexOptions.CultureInvariant).Select(match => match.Value.Trim()))
-            .ToArray();
+    private static IReadOnlyList<string> SuppressionDirectives(string content)
+    {
+        var directives = new List<string>();
+        var index = 0;
+        ScanCode(content, ref index, directives, stopAtTemplateExpressionEnd: false);
+        return directives;
+    }
+
+    private static void ScanCode(
+        string content,
+        ref int index,
+        List<string> directives,
+        bool stopAtTemplateExpressionEnd)
+    {
+        var braceDepth = 0;
+        var canStartRegularExpression = true;
+        while (index < content.Length)
+        {
+            var current = content[index];
+            if (char.IsWhiteSpace(current))
+            {
+                index++;
+                continue;
+            }
+            if (current is '\'' or '"')
+            {
+                SkipQuoted(content, ref index, current);
+                canStartRegularExpression = false;
+                continue;
+            }
+            if (current == '`')
+            {
+                ScanTemplate(content, ref index, directives);
+                canStartRegularExpression = false;
+                continue;
+            }
+            if (current == '/' && index + 1 < content.Length && content[index + 1] == '/')
+            {
+                var start = index += 2;
+                while (index < content.Length && content[index] is not ('\r' or '\n'))
+                    index++;
+                AddDirective(content[start..index], directives);
+                continue;
+            }
+            if (current == '/' && index + 1 < content.Length && content[index + 1] == '*')
+            {
+                var start = index += 2;
+                while (index + 1 < content.Length && !(content[index] == '*' && content[index + 1] == '/'))
+                    index++;
+                var end = index;
+                if (index + 1 < content.Length)
+                    index += 2;
+                AddDirective(content[start..end], directives);
+                continue;
+            }
+            if (current == '/' && canStartRegularExpression)
+            {
+                SkipRegularExpression(content, ref index);
+                canStartRegularExpression = false;
+                continue;
+            }
+            if (current == '{')
+            {
+                braceDepth++;
+                index++;
+                canStartRegularExpression = true;
+                continue;
+            }
+            if (current == '}')
+            {
+                if (stopAtTemplateExpressionEnd && braceDepth == 0)
+                {
+                    index++;
+                    return;
+                }
+                braceDepth = Math.Max(0, braceDepth - 1);
+                index++;
+                canStartRegularExpression = false;
+                continue;
+            }
+            if (IsIdentifierStart(current))
+            {
+                var start = index++;
+                while (index < content.Length && IsIdentifierPart(content[index]))
+                    index++;
+                canStartRegularExpression = ExpressionPrefixKeywords.Contains(content[start..index]);
+                continue;
+            }
+            if (char.IsDigit(current))
+            {
+                index++;
+                while (index < content.Length &&
+                       (char.IsLetterOrDigit(content[index]) || content[index] is '.' or '_' or 'x' or 'X'))
+                    index++;
+                canStartRegularExpression = false;
+                continue;
+            }
+
+            index++;
+            canStartRegularExpression = current switch
+            {
+                ')' or ']' => false,
+                '.' => false,
+                '+' or '-' when index < content.Length && content[index] == current => false,
+                _ => true
+            };
+        }
+    }
+
+    private static void ScanTemplate(string content, ref int index, List<string> directives)
+    {
+        index++;
+        while (index < content.Length)
+        {
+            if (content[index] == '\\')
+            {
+                index = Math.Min(content.Length, index + 2);
+                continue;
+            }
+            if (content[index] == '`')
+            {
+                index++;
+                return;
+            }
+            if (content[index] == '$' && index + 1 < content.Length && content[index + 1] == '{')
+            {
+                index += 2;
+                ScanCode(content, ref index, directives, stopAtTemplateExpressionEnd: true);
+                continue;
+            }
+            index++;
+        }
+    }
+
+    private static void SkipQuoted(string content, ref int index, char quote)
+    {
+        index++;
+        while (index < content.Length)
+        {
+            if (content[index] == '\\')
+            {
+                index = Math.Min(content.Length, index + 2);
+                continue;
+            }
+            if (content[index++] == quote)
+                return;
+        }
+    }
+
+    private static void SkipRegularExpression(string content, ref int index)
+    {
+        index++;
+        var inCharacterClass = false;
+        while (index < content.Length && content[index] is not ('\r' or '\n'))
+        {
+            if (content[index] == '\\')
+            {
+                index = Math.Min(content.Length, index + 2);
+                continue;
+            }
+            if (content[index] == '[')
+                inCharacterClass = true;
+            else if (content[index] == ']')
+                inCharacterClass = false;
+            else if (content[index] == '/' && !inCharacterClass)
+            {
+                index++;
+                while (index < content.Length && IsIdentifierPart(content[index]))
+                    index++;
+                return;
+            }
+            index++;
+        }
+    }
+
+    private static void AddDirective(string commentBody, List<string> directives)
+    {
+        var candidate = commentBody.TrimStart();
+        foreach (var directive in SuppressionDirectiveNames)
+        {
+            if (!candidate.StartsWith(directive, StringComparison.Ordinal))
+                continue;
+            if (candidate.Length == directive.Length || char.IsWhiteSpace(candidate[directive.Length]))
+                directives.Add(candidate.Trim());
+            return;
+        }
+    }
+
+    private static bool IsIdentifierStart(char value) =>
+        char.IsLetter(value) || value is '_' or '$';
+
+    private static bool IsIdentifierPart(char value) =>
+        char.IsLetterOrDigit(value) || value is '_' or '$';
+
+    private static readonly HashSet<string> ExpressionPrefixKeywords = new(StringComparer.Ordinal)
+    {
+        "await", "case", "delete", "do", "else", "in", "instanceof", "new", "of", "return", "throw",
+        "typeof", "void", "yield"
+    };
+
+    private static readonly string[] SuppressionDirectiveNames =
+    [
+        "eslint-disable-next-line", "eslint-disable-line", "eslint-disable", "eslint-enable",
+        "oxlint-disable-next-line", "oxlint-disable-line", "oxlint-disable", "oxlint-enable"
+    ];
 
     private async Task<HashSet<string>> ReadProtectedIgnoresAsync(
         IReadOnlyList<TreeEntry> entries,
