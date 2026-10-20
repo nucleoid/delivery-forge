@@ -490,9 +490,9 @@ public sealed class GitRepositoryIdentityReaderTests
     public void Deleting_enable_extends_blanket_coverage_over_changed_code()
     {
         var @base = JavaScriptSuppressionScanner.Scan(System.Text.Encoding.UTF8.GetBytes(
-            "/* oxlint-disable */\nexport const old = 1;\n/* oxlint-enable */\nexport const tail = 1;\n"));
+            "/* oxlint-disable */\nexport const old = 1;\n/* oxlint-enable */\nexport const tail = 1;\n"), TestContext.Current.CancellationToken);
         var head = JavaScriptSuppressionScanner.Scan(System.Text.Encoding.UTF8.GetBytes(
-            "/* oxlint-disable */\nexport const old = 1;\nexport const tail = 2;\n"));
+            "/* oxlint-disable */\nexport const old = 1;\nexport const tail = 2;\n"), TestContext.Current.CancellationToken);
 
         Assert.True(JavaScriptSuppressionScanner.IntroducesDangerousCoverage(head, @base));
     }
