@@ -6,7 +6,7 @@ internal sealed partial class WindowsCommandLifetime
     internal static void OpenDuplex(CommandInvocation invocation, IOwnedDuplexBudget budget, OwnedDuplexProcess session)
     {
         budget.CheckWork(); var owner = new WindowsCommandLifetime(); var retention = new BoundedCaptureRetention(); retention.Add(owner); retention.Add(session);
-        session.AttachOwner(owner, () =>
+        session.AttachOwner(owner, _ =>
         {
             if (!owner._creationAttempted || owner._creationReturned && !owner._creationSucceeded) return new(true, true, 0, null, "Original native creator returned no child.");
             var known = owner.Observe(out var exited, out var active, out var failure); int? exit = null; if (known && exited && owner._process is not null && GetExitCodeProcess(owner._process, out var code)) exit = unchecked((int)code);

@@ -15,7 +15,7 @@ internal sealed class LinuxCommandScope
     readonly List<Operation> operations = []; readonly List<object> retained = []; readonly List<Exception> failures = [];
     LinuxSystemdLibrary? library; LinuxScopeBus? bus; LinuxScopeKernel? kernel; string? unitPath, controlGroup, cpus; byte[]? invocation; ulong procStart; long actualMask;
     DuplexNativeObservation? finalObservation;
-    bool productionGate; bool prepared, creationEntered, creationReturned, created, bound, referenceEntered, referenceReturned, releaseEntered, releaseReturned, stopEntered, dispositionEntered, disposed;
+    bool productionGate; bool prepared, creationEntered, creationReturned, created, bound, referenceEntered, referenceReturned, releaseEntered, releaseReturned, stopEntered, stopFailureCleanup, dispositionEntered, disposed;
     internal sealed class Operation { internal required string Kind; internal bool Entered, Returned; internal Task? ActualTask; internal object? Resource; internal bool CloseEntered, Closed; internal Exception? Primary, Post, CloseFailure; internal bool Unknown => Entered && (!Returned || ActualTask is not null && !ActualTask.IsCompleted) || CloseEntered && !Closed; }
     static readonly List<LinuxCommandScope> Retained = [];
     internal LinuxCommandScope(Process actualProcess, IOwnedDuplexBudget actualOriginal, LinuxScopeSelection selection) { if (selection is null || selection.GateBuildReceipt is null || selection.GateBuildReceipt.Path is null || !Path.IsPathFullyQualified(selection.GateBuildReceipt.Path) || selection.GateBuildReceipt.Bytes is <= 0 or > 65536 || selection.GateBuildReceipt.Sha256 is null || selection.GateBuildReceipt.Sha256.Length != 64 || selection.GateBuildReceipt.Sha256.Any(c => !char.IsAsciiHexDigit(c) || char.IsAsciiLetterUpper(c)) || selection.BirthGateClosure is null || selection.BirthGateClosure.Count != 5 || selection.ManagerVersion is null || selection.ManagerVersion.Length > 256 || selection.KernelRelease is null || selection.KernelRelease.Length > 256) throw new IOException("Finite complete scope profile required before snapshot allocation."); process = actualProcess; original = actualOriginal; selected = selection with { BirthGateClosure = Array.AsReadOnly(selection.BirthGateClosure.ToArray()) }; retained.Add(actualProcess); retained.Add(actualOriginal); lock (Retained) Retained.Add(this); }
@@ -128,22 +128,23 @@ internal sealed class LinuxCommandScope
         }
     }
     internal bool HasCreationOwnedScope { get { lock (gate) return bound && releaseReturned; } }
-    internal DuplexNativeObservation ObserveNative()
+    internal DuplexNativeObservation ObserveNative(bool cleanup = false)
     {
         lock (gate)
         {
             if (disposed) return finalObservation ?? new(false, false, uint.MaxValue, null, "Final original scope proof unavailable.");
             if (!creationEntered || creationReturned && !created) return new(true, true, 0, null, "Actual creator did not create a root; no scope issued."); if (!creationReturned) return new(false, false, uint.MaxValue, null, "Original Process.Start return unknown.");
-            try { var cleanup = stopEntered; Check(cleanup); var exited = Observe("actual-original-root-exit", () => process.HasExited, cleanup); if (!bound || kernel is null) return new(false, exited, uint.MaxValue, exited ? process.ExitCode : null, "Original pre-target scope binding/release incomplete."); var empty = kernel.Empty(cleanup); Check(cleanup); return new(true, exited, empty ? 0u : uint.MaxValue, exited ? process.ExitCode : null, "Actual original scope FD populated/deleted proof; nonempty is not an exact process count."); }
+            cleanup |= stopFailureCleanup; stopFailureCleanup |= cleanup;
+            try { Check(cleanup); var exited = Observe("actual-original-root-exit", () => process.HasExited, cleanup); if (!bound || kernel is null) return new(false, exited, uint.MaxValue, exited ? process.ExitCode : null, "Original pre-target scope binding/release incomplete."); var empty = kernel.Empty(cleanup); Check(cleanup); return new(true, exited, empty ? 0u : uint.MaxValue, exited ? process.ExitCode : null, "Actual original scope FD populated/deleted proof; nonempty is not an exact process count."); }
             catch (Exception error) { failures.Add(error); return new(false, false, uint.MaxValue, null, "Original scope observation failed: " + error.GetType().Name); }
         }
     }
-    internal void Stop(bool cleanup) { lock (gate) { Check(cleanup); if (stopEntered) throw new IOException("Original scope stop already entered; no retry."); stopEntered = true; if (!creationEntered || creationReturned && !created) return; if (!creationReturned || kernel is null) throw new IOException("Original prebinding scope cannot be guessed or adopted for termination."); if (!kernel.Empty(cleanup)) kernel.Kill(cleanup); Check(cleanup); } }
+    internal void Stop(bool cleanup) { lock (gate) { cleanup |= stopFailureCleanup; Check(cleanup); if (stopEntered) throw new IOException("Original scope stop already entered; no retry."); stopEntered = true; stopFailureCleanup |= cleanup; if (!creationEntered || creationReturned && !created) return; if (!creationReturned || kernel is null) throw new IOException("Original prebinding scope cannot be guessed or adopted for termination."); if (!kernel.Empty(cleanup)) kernel.Kill(cleanup); Check(cleanup); } }
     internal bool DisposeKnown(bool cleanup)
     {
         lock (gate)
         {
-            Check(cleanup); if (dispositionEntered) throw new IOException("Original scope disposition already entered."); var observation = ObserveNative(); if (!observation.Known || !observation.RootExited || observation.ActiveProcesses != 0 || operations.Any(x => x.Unknown) || referenceEntered && !referenceReturned) return false; dispositionEntered = true;
+            cleanup |= stopFailureCleanup; Check(cleanup); if (dispositionEntered) throw new IOException("Original scope disposition already entered."); var observation = ObserveNative(cleanup); if (!observation.Known || !observation.RootExited || observation.ActiveProcesses != 0 || operations.Any(x => x.Unknown) || referenceEntered && !referenceReturned) return false; dispositionEntered = true;
             var failed = cleanup;
             try { kernel?.CloseEmpty(failed); } catch (Exception error) { failures.Add(error); failed = true; }
             if (kernel is not null && !kernel.KnownDisposed) return false;

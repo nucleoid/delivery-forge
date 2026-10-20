@@ -4,6 +4,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using DeliveryForge.Evidence;
+using DeliveryForge.Execution.Git;
 using DeliveryForge.Tool;
 namespace DeliveryForge.Tool.Tests;
 // Genuine fixture-process controls. All require the actual build output binding;
@@ -64,7 +65,7 @@ public sealed class OwnedDuplexProcessTests
     [Fact(Timeout = 90000)]
     public async Task Actual_blocked_stdout_is_stopped_by_original_owner_not_terminal_text()
     {
-        using var affinity = new Affinity(); await using var run = new Run("output-block"); await run.Ready(); var closed = await run.Session.RetireAsync(true); AssertPhysicalScope(closed); Assert.True(closed.RootExited); Assert.False(run.Session.HasUnknownIo); run.Preserve(closed);
+        using var affinity = new Affinity(); await using var run = new Run("output-block"); await run.Ready(); var retirement = run.Session.RetireAsync(true); Assert.Throws<TimeoutException>(run.Original.Check); var closed = await retirement; AssertPhysicalScope(closed); Assert.True(closed.RootExited); Assert.False(run.Session.HasUnknownIo); run.Preserve(closed);
     }
     [Fact(Timeout = 90000)]
     public async Task Actual_blocked_stdin_records_original_task_and_cancellation_without_replay()
@@ -74,6 +75,7 @@ public sealed class OwnedDuplexProcessTests
         var pendingWrite = Assert.Single(run.Session.ActualIo, x => x.Kind == "stdin-write" && x.Unknown);
         Assert.NotNull(pendingWrite.ActualTask);
         cancel.Cancel(); var retirement = run.Session.RetireAsync(true);
+        Assert.Throws<TimeoutException>(run.Original.Check);
         // Retirement latches cleanup synchronously. Preserve the cancelled actual
         // write and its independent WORK post-check rather than dropping either.
         var failure = await Record.ExceptionAsync(async () => await originalWrite);
@@ -97,14 +99,56 @@ public sealed class OwnedDuplexProcessTests
     [Fact(Timeout = 90000)]
     public async Task Actual_stderr_overflow_is_retained_failure_not_truncated_success()
     {
-        using var affinity = new Affinity(); await using var run = new Run("stderr-overflow"); await run.Ready(); var codec = new DeliveryForge.Tool.Codex.CodexJsonlProtocol(run.Session.Input, run.Session.Output, run.Original); using var terminal = await codec.ReadAsync(TestContext.Current.CancellationToken); Assert.NotNull(terminal); DeliveryForge.Tool.Codex.CodexJsonlProtocol.RequireEnvelope(terminal.RootElement); Assert.Equal("completed", terminal.RootElement.GetProperty("params").GetProperty("turn").GetProperty("status").GetString()); Assert.NotNull(run.Session.OriginalErrorDrainTask); await Assert.ThrowsAsync<IOException>(async () => await run.Session.OriginalErrorDrainTask.WaitAsync(run.Original.Remaining, TestContext.Current.CancellationToken)); var closed = await run.Session.RetireAsync(true); Assert.Throws<IOException>(() => HostTransportRetirement.RequireSuccessful(closed)); Assert.True(closed.RootExited); Assert.Contains(closed.Failures, x => x.Contains("stderr profile", StringComparison.Ordinal)); Assert.True(run.Session.StandardError.Length <= 1048576); run.Preserve(closed);
+        using var affinity = new Affinity(); await using var run = new Run("stderr-overflow"); await run.Ready(); var codec = new DeliveryForge.Tool.Codex.CodexJsonlProtocol(run.Session.Input, run.Session.Output, run.Original); using var terminal = await codec.ReadAsync(TestContext.Current.CancellationToken); Assert.NotNull(terminal); DeliveryForge.Tool.Codex.CodexJsonlProtocol.RequireEnvelope(terminal.RootElement); Assert.Equal("completed", terminal.RootElement.GetProperty("params").GetProperty("turn").GetProperty("status").GetString()); Assert.NotNull(run.Session.OriginalErrorDrainTask); await Assert.ThrowsAsync<IOException>(async () => await run.Session.OriginalErrorDrainTask.WaitAsync(run.Original.Remaining, TestContext.Current.CancellationToken)); var retirement = run.Session.RetireAsync(false); Assert.Throws<TimeoutException>(run.Original.Check); var closed = await retirement; Assert.Throws<IOException>(() => HostTransportRetirement.RequireSuccessful(closed)); Assert.True(closed.RootExited); Assert.Contains(closed.Failures, x => x.Contains("stderr profile", StringComparison.Ordinal)); Assert.True(run.Session.StandardError.Length <= 1048576); run.Preserve(closed);
     }
     [Fact(Timeout = 90000)]
     public async Task Known_actual_creator_failure_retains_frame_and_never_claims_child_exit_zero()
     {
         using var affinity = new Affinity(); await using var run = new Run("echo", missing: true); Assert.True(run.Session.HasRetainedOriginalOwner);
-        if (OperatingSystem.IsLinux()) { Assert.Null(run.Session.StartupFailure); var closed = await run.Session.RetireAsync(false); AssertPhysicalScope(closed); Assert.Equal(125, closed.ExitCode); Assert.Throws<IOException>(() => HostTransportRetirement.RequireSuccessful(closed)); run.Preserve(closed); }
+        if (OperatingSystem.IsLinux()) { Assert.Null(run.Session.StartupFailure); var closed = await run.Session.RetireAsync(false); Assert.Throws<TimeoutException>(run.Original.Check); AssertPhysicalScope(closed); Assert.Equal(125, closed.ExitCode); Assert.Throws<IOException>(() => HostTransportRetirement.RequireSuccessful(closed)); run.Preserve(closed); }
         else { Assert.NotNull(run.Session.StartupFailure); var closed = await run.Session.RetireAsync(true); Assert.True(closed.RootExited); Assert.Null(closed.ExitCode); Assert.NotEmpty(closed.Failures); run.Preserve(closed); }
+    }
+    [Fact(Timeout = 90000)]
+    public async Task Exit_zero_root_with_live_owned_descendant_retires_under_unchanged_work_then_verifies_actual_Git()
+    {
+        var gitImage = Environment.GetEnvironmentVariable("DELIVERY_FORGE_DUPLEX_TEST_GIT") ?? throw new IOException("Explicit actual Git image required for post-retirement verification.");
+        Assert.True(Path.IsPathFullyQualified(gitImage) && File.Exists(gitImage));
+        using var affinity = new Affinity(); await using var run = new Run("orphan-parent"); await run.Ready();
+        var originalStarted = run.Original.OriginalStarted; var whole = run.Original.WholeLimit; var work = run.Original.WorkLimit;
+        Assert.Equal(0, await run.Session.Output.ReadAsync(new byte[1], 0, 1, run.Original.Token));
+        Assert.True(File.Exists(Path.Combine(run.DirectoryPath, run.Nonce + "-child-entered")));
+        DuplexNativeObservation before;
+        do { run.Original.Check(); before = run.Session.ObserveActualNative(); if (!before.RootExited) await Task.Delay(5, run.Original.Token); } while (!before.RootExited);
+        Assert.True(before.Known); Assert.Equal(0, before.ExitCode); Assert.True(before.ActiveProcesses > 0);
+        var retiring = Stopwatch.GetTimestamp(); var first = run.Session.RetireAsync(false);
+        Assert.Same(first, run.Session.RetireAsync(false)); var closed = await first;
+        Assert.True(Stopwatch.GetElapsedTime(retiring) >= TimeSpan.FromSeconds(2), "The actual live descendant must outlast the unchanged two-second root grace.");
+        HostTransportRetirement.RequireSuccessful(closed); AssertPhysicalScope(closed);
+        Assert.True(closed.InputCloseReturned && closed.OutputEof && closed.ErrorEof); Assert.False(run.Session.HasUnknownIo);
+        Assert.All(run.Session.ActualIo, row => Assert.False(row.Unknown)); run.Original.Check();
+        Assert.Equal(originalStarted, run.Original.OriginalStarted); Assert.Equal(whole, run.Original.WholeLimit); Assert.Equal(work, run.Original.WorkLimit);
+        // Observe beyond the real child's four-second marker. Root exit/EOF alone
+        // cannot pass while that original descendant still has future effects.
+        await Task.Delay(2500, run.Original.Token); run.Original.Check();
+        Assert.False(File.Exists(Path.Combine(run.DirectoryPath, run.Nonce + "-child-returned")));
+        var repository = Path.Combine(run.DirectoryPath, "post-retirement-git"); run.Original.Check(); Directory.CreateDirectory(repository); run.Original.Check();
+        var executor = ActualOrdinaryCapture.Select(run.Original);
+        async Task Git(params string[] arguments)
+        {
+            run.Original.Check(); var disabled = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+            var env = ActualOrdinaryCapture.ResourceEnvironment(); env["GIT_CONFIG_NOSYSTEM"] = "1"; env["GIT_CONFIG_GLOBAL"] = disabled; env["GIT_CONFIG_SYSTEM"] = disabled; env["GIT_NO_REPLACE_OBJECTS"] = "1"; env["GIT_TERMINAL_PROMPT"] = "0";
+            var argv = new[] { "--no-replace-objects", "-c", "core.hooksPath=" + disabled, "-c", "core.fsmonitor=false", "-c", "user.name=DuplexFixture", "-c", "user.email=fixture@example.invalid" }.Concat(arguments).ToArray();
+            var actual = await executor.ExecuteBoundedCaptureAsync(new(gitImage, argv, repository, env), run.Original.Remaining, 65536, run.Original.Token, new OwnedWorkPhaseBudget(run.Original));
+            ActualOrdinaryCapture.Require(actual); Assert.Equal(0, actual.Command.ExitCode); Assert.False(actual.Command.TimedOut || actual.Command.Cancelled); run.Original.Check();
+        }
+        await Git("init", "-q", "-b", "main");
+        BoundedFiles.WriteNew(Path.Combine(repository, "tracked.txt"), Encoding.UTF8.GetBytes("post-retirement " + run.Nonce + "\n"), run.Original);
+        await Git("add", "--", "tracked.txt"); await Git("commit", "-q", "-m", "actual post-retirement fixture");
+        var manager = new WorktreeManager(gitImage, executor, run.Original);
+        var observed = await manager.ObserveAsync(repository, run.Original.Token); run.Original.Check();
+        Assert.True(observed.IsClean); Assert.True(manager.ActualOwnedGitInvocations > 0);
+        Assert.Equal(originalStarted, run.Original.OriginalStarted); Assert.Equal(whole, run.Original.WholeLimit); Assert.Equal(work, run.Original.WorkLimit);
+        run.Preserve(closed);
     }
     [Fact(Timeout = 90000)]
     public async Task Parent_exit_and_pipe_EOF_with_surviving_child_never_certify_Linux_group_zero()

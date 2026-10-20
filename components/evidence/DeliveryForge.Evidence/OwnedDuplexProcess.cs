@@ -24,7 +24,7 @@ public sealed class OwnedDuplexProcess
 {
     static readonly ConcurrentDictionary<OwnedDuplexProcess, byte> Retained = new();
     readonly IOwnedDuplexBudget budget; readonly List<DuplexIoObservation> io = []; readonly object gate = new();
-    Stream? input, output, error; Action<bool>? closeInput; readonly int errorLimit; bool errorQuotaExceeded; Func<DuplexNativeObservation>? observe; Action<bool>? terminate; Func<bool, bool>? dispose;
+    Stream? input, output, error; Action<bool>? closeInput; readonly int errorLimit; bool errorQuotaExceeded; Func<bool, DuplexNativeObservation>? observe; Action<bool>? terminate; Func<bool, bool>? dispose;
     DuplexNativeObservation lastObservation = new(false, false, uint.MaxValue, null, "No actual native observation returned.");
     Func<bool>? creationOwnedScope;
     internal bool HasCreationOwnedLinuxScope => creationOwnedScope?.Invoke() == true;
@@ -60,14 +60,14 @@ public sealed class OwnedDuplexProcess
         catch (Exception failure) { session.StartupFailure = failure; session.failures.Add(failure); session.opening = false; }
         return session; // Includes failed creator frame; callers must retire it, never retry.
     }
-    internal void AttachOwner(object owner, Func<DuplexNativeObservation> observation, Action<bool> stop, Func<bool, bool> disposition) { actualOwner = owner; observe = observation; terminate = stop; dispose = disposition; }
+    internal void AttachOwner(object owner, Func<bool, DuplexNativeObservation> observation, Action<bool> stop, Func<bool, bool> disposition) { actualOwner = owner; observe = observation; terminate = stop; dispose = disposition; }
     internal void AttachStreams(Stream stdin, Stream stdout, Stream stderr, Action<bool>? closeOriginalInput = null) { input = stdin; output = stdout; error = stderr; closeInput = closeOriginalInput; }
     internal void RecordOwnerFailure(Exception failure) { lock (failures) if (!failures.Contains(failure)) failures.Add(failure); }
     // Outgoing observation from THIS retained owner only. It does not adopt a
     // PID, accept a DTO or grant stop/disposition authority.
     public DuplexNativeObservation ObserveActualNative() => ObserveOriginal(false);
     internal DuplexNativeObservation ObserveNativeForCapture() => ObserveOriginal(false);
-    DuplexNativeObservation ObserveOriginal(bool cleanup) { Check(cleanup); var actual = observe?.Invoke() ?? new(false, false, uint.MaxValue, null, "No original native owner."); lastObservation = actual; Check(cleanup); return actual; }
+    DuplexNativeObservation ObserveOriginal(bool cleanup) { Check(cleanup); var actual = observe?.Invoke(cleanup) ?? new(false, false, uint.MaxValue, null, "No original native owner."); lastObservation = actual; Check(cleanup); return actual; }
     internal bool ErrorQuotaExceeded => errorQuotaExceeded;
     // An actual task reference is borrowed, never serialized signaling authority.
     public void AttachOriginalOutputConsumer(Task actual) { ArgumentNullException.ThrowIfNull(actual); lock (gate) { if (retirement is not null || outputConsumer is not null) throw new IOException("Original output consumer already bound or retirement entered."); outputConsumer = actual; } }
@@ -116,7 +116,7 @@ public sealed class OwnedDuplexProcess
     async Task<DuplexRetirement> RetireCoreAsync(bool cleanup)
     {
         void FailureAdmission() { if (budget is IOwnedFailureCleanup actual) actual.BeginFailureCleanup(); }
-        void Admission() { if (cleanup) FailureAdmission(); try { Check(cleanup); } catch (Exception failure) when (!cleanup) { lock (failures) failures.Add(failure); cleanup = true; FailureAdmission(); Check(true); } }
+        void Admission() { if (!cleanup) { lock (failures) cleanup = failures.Count != 0; } if (cleanup) FailureAdmission(); try { Check(cleanup); } catch (Exception failure) when (!cleanup) { lock (failures) failures.Add(failure); cleanup = true; FailureAdmission(); Check(true); } }
         try
         {
             Admission(); // successful retirement remains WORK; actual failure latches parent synchronously.
@@ -125,8 +125,16 @@ public sealed class OwnedDuplexProcess
             var native = ObserveOriginal(cleanup);
             var graceful = Stopwatch.GetTimestamp();
             while (native.Known && (!native.RootExited || native.ActiveProcesses != 0) && inputCloseReturned && Stopwatch.GetElapsedTime(graceful) < TimeSpan.FromSeconds(2)) { Admission(); await Task.Delay(OperatingSystem.IsLinux() ? 100 : 5).ConfigureAwait(false); native = ObserveOriginal(cleanup); }
-            if (!native.Known || !native.RootExited || native.ActiveProcesses != 0) { cleanup = true; Admission(); terminate?.Invoke(true); Admission(); }
-            while (true) { Admission(); native = ObserveOriginal(cleanup); if (!native.Known && native.RootExited) { lock (failures) failures.Add(new IOException("Root exited but original group quiescence remains unproved; retain original owner/streams, no dependent disposition.")); PreserveOriginalUnknown(); return new(false, true, native.ActiveProcesses, outputEof, errorEof, inputCloseReturned, false, native.ExitCode, FailureText()); } if (native.Known && native.RootExited && native.ActiveProcesses == 0 && !ActualIo.Any(x => x.Unknown) && Volatile.Read(ref readerBusy) == 0 && Volatile.Read(ref writerBusy) == 0 && (errorDrain is null || errorDrain.IsCompleted) && (outputConsumer is null || outputConsumer.IsCompleted)) break; await Task.Delay(TimeSpan.FromMilliseconds(OperatingSystem.IsLinux() ? 100 : 5)).ConfigureAwait(false); }
+            if (native.Known && native.RootExited && native.ExitCode != 0) { cleanup = true; Admission(); }
+            if (!native.Known || !native.RootExited || native.ActiveProcesses != 0)
+            {
+                // Retiring known owned descendants after an exit-zero root is
+                // normal enclosing WORK. It cannot renew time or bypass any
+                // actual IO/disposition failure, unknown state or explicit Stop.
+                if (cleanup || !native.Known || !native.RootExited || native.ExitCode != 0) cleanup = true;
+                Admission(); terminate?.Invoke(cleanup); Admission();
+            }
+            while (true) { Admission(); native = ObserveOriginal(cleanup); if (!native.Known && native.RootExited) { lock (failures) failures.Add(new IOException("Root exited but original group quiescence remains unproved; retain original owner/streams, no dependent disposition.")); Admission(); PreserveOriginalUnknown(); return new(false, true, native.ActiveProcesses, outputEof, errorEof, inputCloseReturned, false, native.ExitCode, FailureText()); } if (native.Known && native.RootExited && native.ActiveProcesses == 0 && !ActualIo.Any(x => x.Unknown) && Volatile.Read(ref readerBusy) == 0 && Volatile.Read(ref writerBusy) == 0 && (errorDrain is null || errorDrain.IsCompleted) && (outputConsumer is null || outputConsumer.IsCompleted)) break; await Task.Delay(TimeSpan.FromMilliseconds(OperatingSystem.IsLinux() ? 100 : 5)).ConfigureAwait(false); }
             if (outputConsumer is not null) { try { await outputConsumer.ConfigureAwait(false); } catch (Exception failure) { RecordOwnerFailure(failure); cleanup = true; Admission(); } }
             // A failed/finished protocol pump may leave unread bytes. Drain only
             // after its ORIGINAL read invocation is terminal and reader lease free.
@@ -135,12 +143,14 @@ public sealed class OwnedDuplexProcess
             if (!errorEof && error is not null) { var buffer = new byte[4096]; while (await Read(error, buffer, 0, buffer.Length, true, cleanup, CancellationToken.None).ConfigureAwait(false) != 0) { } }
             var ready = (input is null || inputCloseReturned) && native.Known && native.RootExited && native.ActiveProcesses == 0 && !HasUnknownIo && Volatile.Read(ref readerBusy) == 0 && Volatile.Read(ref writerBusy) == 0 && (output is null || outputEof) && (error is null || errorEof);
             if (ready && !disposeEntered) { Admission(); disposeEntered = true; disposeReturned = dispose?.Invoke(cleanup) == true; Admission(); }
-            var known = ready && disposeReturned; if (known) Retained.TryRemove(this, out _); else PreserveOriginalUnknown();
+            var known = ready && disposeReturned; if (known) Retained.TryRemove(this, out _); else { cleanup = true; Admission(); PreserveOriginalUnknown(); }
             return new(known, native.RootExited, native.ActiveProcesses, outputEof, errorEof, inputCloseReturned, disposeReturned, native.ExitCode, FailureText());
         }
         catch (Exception failure)
         {
-            PreserveOriginalUnknown(); lock (failures) failures.Add(failure); var n = lastObservation; // No fresh native effect after endpoint/primary failure.
+            lock (failures) failures.Add(failure);
+            try { FailureAdmission(); } catch (Exception admission) { lock (failures) failures.Add(admission); }
+            PreserveOriginalUnknown(); var n = lastObservation; // No fresh native effect after endpoint/primary failure.
             return new(false, n.RootExited, n.ActiveProcesses, outputEof, errorEof, inputCloseReturned, disposeReturned, n.ExitCode, FailureText());
         }
     }

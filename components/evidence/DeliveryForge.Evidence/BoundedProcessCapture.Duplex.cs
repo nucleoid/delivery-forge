@@ -17,7 +17,7 @@ internal static partial class BoundedProcessCapture
         budget.CheckWork(); var process = new Process(); var retention = new BoundedCaptureRetention(); retention.Add(process); retention.Add(session);
         LinuxCommandScope? scope = null; StreamWriter? input = null; StreamReader? output = null, error = null; var inputCloseEntered = false; var inputClosed = false; var lastFailure = 0;
         void Failures() { if (scope is not null) foreach (var failure in scope.Failures.Skip(lastFailure)) { session.RecordOwnerFailure(failure); lastFailure++; } }
-        session.AttachOwner(process, () => { try { return scope?.ObserveNative() ?? new(true, true, 0, null, "Actual original Process.Start never entered."); } finally { Failures(); } }, cleanup => { try { scope?.Stop(cleanup); } finally { Failures(); } }, cleanup =>
+        session.AttachOwner(process, cleanup => { try { return scope?.ObserveNative(cleanup) ?? new(true, true, 0, null, "Actual original Process.Start never entered."); } finally { Failures(); } }, cleanup => { try { scope?.Stop(cleanup); } finally { Failures(); } }, cleanup =>
         {
             var known = true; try { if (scope is not null && !scope.DisposeKnown(cleanup)) return false; } finally { Failures(); }
             if (inputCloseEntered && !inputClosed) return false;
