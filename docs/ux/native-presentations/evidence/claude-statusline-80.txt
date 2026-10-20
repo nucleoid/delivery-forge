@@ -1,0 +1,6 @@
+HARNESS RENDER — statusLine contract, not installed Claude Code
+HARNESS RENDER | DEMO SYNTHETIC
+FORGE DEMO | demo-014 | r3 | b45e000 | ceiling IMPLEMENT
+EVALUATE / INCOMPLETE — Mutation evidence is incomplete.
+USD API-EQUIVALENT ESTIMATE ~0.0442 | multiple models | PARTIAL
+Next: Inspect missing evidence before requesting bounded repair.

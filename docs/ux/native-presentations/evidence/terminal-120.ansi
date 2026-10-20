@@ -1,0 +1,47 @@
+HARNESS RENDER — native text contract (not an installed host screenshot)
+DEMO • SYNTHETIC — zero live adapters
+FORGE / demo-014 / plan r3 / head b45e000 / ceiling IMPLEMENT
+Source snapshot-evaluate-004 | seq 4 | current/complete | fixture-capabilities-v1
+Phase: Launch -> Plan -> Execute -> [Evaluate] -> Repair -> Review -> PR
+
+EVALUATE / INCOMPLETE
+Mutation evidence is incomplete.
+The synthetic report covers 18 of 20 discovered mutants. Publication is blocked.
+
+Evidence
+Build PASS receipt-build-b45e
+Tests PASS receipt-tests-b45e
+Crap4CSharp PASS receipt-crap-b45e
+Mutate4CSharp INCOMPLETE receipt-mutation-attempt-1
+Migration NOT_APPLICABLE receipt-migration-na
+N/A rationale: No schema or data migration in approved scope.
+  Attempt history (retained)
+mutation-attempt-1: failed-evidence; head b45e000; receipt-mutation-attempt-1
+
+Control
+Desired BLOCKED; observed BLOCKED; cleanup not-requested; active owned operations 0.
+
+Next
+Inspect missing evidence — AVAILABLE. Original attempt and raw fixture receipt are retained.
+
+Integrations
+Engram: unavailable; not connected. Demo does not connect to Engram
+Continuum memory: unavailable; not connected. Memory is distinct from coordination authority
+Continuum coordination: unavailable; not connected. No lease was requested or inferred
+Switchyard: unverified; not measured. No runtime readiness claim
+
+Measurements
+  Elapsed: unknown
+  Actual charge: unknown
+  CPU: unknown
+  Memory: unknown
+
+Usage
+USD API-EQUIVALENT ESTIMATE: USD 0.044225 known / PARTIAL
+SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge
+Observed tokens: 19300; final 4; provisional 0; unpriced requests 1; freshness current.
+Actual charge: unknown.
+condition: mirror obs-writer-mirror retained as corroboration
+
+Full identity: run=demo-014 plan=plan-demo-014-csv-export-r3 head=b45e00000000000000000000000000000000002
+tree=tree-demo-b45e000000000000000000000000000001 policy=policy-demo-safe-v1 capability=fixture-capabilities-v1

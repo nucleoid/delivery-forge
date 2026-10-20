@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Forge presentation laboratory — companion, not an embedded host UI</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to run status</a>
+  <header>
+    <div><span class="mark">FORGE</span><span class="demo">COMPANION DEMO · SYNTHETIC</span></div>
+    <p>Presentation laboratory — companion, not an embedded host UI</p>
+  </header>
+  <div class="shell">
+    <nav aria-label="Fixture phases">
+      <p class="eyebrow">Walkthrough</p>
+      <div id="scenario-nav"></div>
+      <p class="keys">←/→ replay · ↑/↓ evidence · Enter detail · P preview · R reset</p>
+    </nav>
+    <main id="main" tabindex="-1">
+      <p id="identity" class="identity"></p>
+      <div id="trail" class="trail" aria-label="Phase trail"></div>
+      <section class="focus" aria-labelledby="focus-title">
+        <p id="phase-outcome" class="eyebrow"></p>
+        <h1 id="focus-title"></h1>
+        <p id="explanation" class="lead"></p>
+        <div id="control-state" class="control-state"></div>
+      </section>
+      <section aria-labelledby="next-title" class="next">
+        <p class="eyebrow">Safest next move</p>
+        <h2 id="next-title"></h2>
+        <p id="next-reason"></p>
+        <button id="preview" type="button">Preview bound intent</button>
+        <pre id="intent" tabindex="0" aria-label="Intent preview"></pre>
+      </section>
+      <section aria-labelledby="integrations-title">
+        <h2 id="integrations-title">Integrations</h2>
+        <div id="integrations" class="integration-grid"></div>
+      </section>
+      <section class="usage" aria-labelledby="usage-title">
+        <p class="eyebrow">Synthetic telemetry</p>
+        <h2 id="usage-title">USD API-EQUIVALENT ESTIMATE</h2>
+        <p id="usage-summary"></p>
+        <pre id="usage-detail" tabindex="0"></pre>
+      </section>
+    </main>
+    <aside aria-labelledby="evidence-title">
+      <div class="rail-head"><p class="eyebrow">Evidence</p><h2 id="evidence-title"></h2></div>
+      <div id="evidence"></div>
+      <div id="detail" tabindex="0" aria-live="polite"></div>
+      <section class="measure"><p class="eyebrow">Other measurements</p><div id="measurements"></div></section>
+    </aside>
+  </div>
+  <div id="announce" class="sr-only" aria-live="polite"></div>
+  <script src="companion-data.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

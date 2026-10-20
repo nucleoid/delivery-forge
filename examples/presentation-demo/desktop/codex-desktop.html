@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Forge in Codex Desktop — DESKTOP MOCKUP, not an installed-host capture</title>
+  <link rel="stylesheet" href="forge-cockpit.css">
+  <style>
+    /* Host chrome drawn for layout only: cool near-black greys, so the Forge palette remains the only accent system. */
+    :root{color-scheme:dark;--h-bg:#121214;--h-panel:#18181b;--h-raised:#202024;--h-line:#2c2c31;--h-text:#f1f1f3;--h-muted:#a1a1aa;--h-dim:#6b6b74;--h-accent:#e4e4e7;font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif;color:var(--h-text);background:#0b0b0d}
+    *{box-sizing:border-box}body{margin:0;min-width:1180px}
+    .window{display:grid;grid-template-rows:40px 1fr 30px;height:100vh;min-height:860px;background:var(--h-bg)}
+    .titlebar{display:flex;align-items:center;gap:14px;padding:0 14px;white-space:nowrap;overflow:hidden;border-bottom:1px solid var(--h-line);background:#0f0f11;font-size:13px}
+    .titlebar .app{font-weight:700}
+    .titlebar .mode{display:flex;border:1px solid var(--h-line);border-radius:999px;overflow:hidden;font-size:12px}
+    .titlebar .mode span{padding:4px 12px;color:var(--h-muted)}
+    .titlebar .mode span.on{background:var(--h-raised);color:var(--h-text);font-weight:600}
+    .titlebar .project{color:var(--h-muted);font-size:12.5px}
+    .titlebar .project b{color:var(--h-text);font-weight:600}
+    .titlebar .right{margin-left:auto;display:flex;gap:14px;color:var(--h-muted);font-size:12.5px}
+    .body{display:grid;grid-template-columns:260px minmax(480px,1fr) 600px;min-height:0;min-width:0}
+    .sidebar{border-right:1px solid var(--h-line);background:#101012;padding:12px 10px;display:flex;flex-direction:column;gap:6px;font-size:13px}
+    .sidebar .new{border:1px solid var(--h-line);border-radius:8px;padding:8px 10px;font-weight:600;background:var(--h-raised)}
+    .sidebar .group{color:var(--h-dim);font:700 10.5px ui-monospace,monospace;letter-spacing:.1em;text-transform:uppercase;margin:10px 6px 2px}
+    .sidebar .thread{padding:8px 10px;border-radius:8px;color:var(--h-muted);display:flex;flex-direction:column;gap:2px}
+    .sidebar .thread.on{background:var(--h-raised);color:var(--h-text)}
+    .sidebar .thread small{color:var(--h-dim);font-size:11.5px}
+    .sidebar .plugin{margin-top:auto;border:1px solid var(--h-line);border-radius:8px;padding:8px 10px;font-size:12px;color:var(--h-muted)}
+    .sidebar .plugin b{display:block;color:var(--h-text);font-weight:600}
+    .thread-main{display:flex;flex-direction:column;min-width:0;overflow:hidden;border-right:1px solid var(--h-line)}
+    .thread-main header{display:flex;align-items:center;gap:10px;padding:10px 20px;border-bottom:1px solid var(--h-line);font-size:13px;color:var(--h-muted);white-space:nowrap;overflow:hidden}
+    .thread-main header b{color:var(--h-text);font-weight:600}
+    .thread-main header .mono{font:12px ui-monospace,monospace}
+    .thread-main header .pill{margin-left:auto;border:1px solid var(--h-line);border-radius:999px;padding:3px 10px;font-size:11.5px}
+    .transcript{flex:1;overflow:auto;padding:22px 28px;display:flex;flex-direction:column;gap:18px}
+    .msg{max-width:720px}
+    .msg.user{align-self:flex-end;background:var(--h-raised);border-radius:14px 14px 4px 14px;padding:10px 14px;max-width:560px}
+    .msg .who{color:var(--h-dim);font:600 11px ui-monospace,monospace;letter-spacing:.06em;text-transform:uppercase;margin-bottom:6px}
+    .tool{display:flex;align-items:center;gap:8px;color:var(--h-muted);font:12.5px ui-monospace,monospace;padding:6px 10px;border:1px solid var(--h-line);border-radius:8px;background:var(--h-panel);width:max-content;max-width:100%}
+    .tool .dot{width:8px;height:8px;border-radius:50%;background:#79d7c4;display:inline-block}
+    .msg p{margin:8px 0;line-height:1.55}
+    .surface-label{color:var(--h-dim);font:11px ui-monospace,monospace;letter-spacing:.06em;margin:10px 0 6px}
+    .plan{border:1px solid var(--h-line);border-radius:10px;background:var(--h-panel);padding:10px 14px;font-size:13px;display:grid;gap:6px;max-width:560px}
+    .plan .t{display:flex;gap:10px;align-items:center;color:var(--h-muted)}
+    .plan .t i{font-style:normal;width:16px;text-align:center;font-weight:700}
+    .plan .t.done{color:var(--h-dim);text-decoration:line-through}
+    .plan .t.now{color:var(--h-text)}
+    .composer{border-top:1px solid var(--h-line);padding:12px 20px 14px;display:flex;flex-direction:column;gap:8px}
+    .composer .box{border:1px solid var(--h-line);border-radius:12px;background:var(--h-panel);padding:12px 14px;color:var(--h-dim);min-height:52px}
+    .composer .row{display:flex;gap:14px;color:var(--h-dim);font-size:12px}
+    .composer .row b{color:var(--h-muted);font-weight:600}
+    .pane{display:flex;flex-direction:column;min-height:0;min-width:0;background:var(--h-bg)}
+    .pane header{display:flex;align-items:center;gap:8px;padding:0 10px;height:40px;border-bottom:1px solid var(--h-line);background:#101012;font-size:12.5px}
+    .pane header .tab{padding:6px 12px;border-radius:7px;color:var(--h-muted)}
+    .pane header .tab.on{background:var(--h-raised);color:var(--h-text);font-weight:600}
+    .pane header .url{margin-left:auto;color:var(--h-dim);font:11.5px ui-monospace,monospace;white-space:nowrap}
+    .pane .host{flex:1;min-height:0;min-width:0;display:flex}
+    .pane .host>*{flex:1;min-height:0;min-width:0}
+    .caption{display:flex;align-items:center;gap:16px;padding:0 14px;border-top:1px solid var(--h-line);background:#070709;color:#c9a06a;font:700 11px ui-monospace,monospace;letter-spacing:.06em;white-space:nowrap;overflow:hidden}
+    .caption span{color:var(--h-dim);font-weight:500;letter-spacing:0}
+    .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)}
+  </style>
+</head>
+<body>
+  <div class="window" aria-label="Codex Desktop mockup">
+    <div class="titlebar">
+      <span class="app">Codex</span>
+      <div class="mode"><span>Chat</span><span class="on">Codex</span></div>
+      <span class="project"><b>report-service</b> · local · worktree ux/csv-export</span>
+      <div class="right"><span>Review</span><span>Automations</span><span>Plugins</span><span>⋯</span></div>
+    </div>
+    <div class="body">
+      <aside class="sidebar" aria-label="Threads">
+        <div class="new">New thread</div>
+        <div class="group">report-service</div>
+        <div class="thread on">CSV export via Forge (demo-014)<small>evaluate · mutation evidence incomplete</small></div>
+        <div class="thread">Harden export-contract tests<small>2 files · diff ready for review</small></div>
+        <div class="thread">Reconcile stopped run demo-011<small>cleanup UNKNOWN · blocked</small></div>
+        <div class="group">Automations</div>
+        <div class="thread">Nightly: re-evaluate open Forge heads<small>paused · no run resumed</small></div>
+        <div class="plugin"><b>Forge (plugin)</b>MCP App · skill $forge-demo · read-only tools · zero live adapters</div>
+      </aside>
+      <main class="thread-main" aria-label="Thread">
+        <header><b>CSV export via Forge</b><span class="mono">demo-014</span><span>·</span><span>skill <span class="mono">$forge-demo</span></span><span class="pill">Local · worktree</span></header>
+        <div class="transcript">
+          <div class="msg user"><div class="who">You</div>$forge-demo Run the CSV export plan r3 and pause at the first gate that is not clean. Show the evidence, then wait for me before any repair or PR request.</div>
+          <div class="msg">
+            <div class="who">Codex</div>
+            <div class="tool"><span class="dot"></span>forge_demo_status(scenario, view: cockpit) · MCP App rendered inline · no side effect</div>
+            <div class="surface-label">MCP APP · DISPLAY MODE inline</div>
+            <div id="card"></div>
+            <p id="narrative"></p>
+            <div class="plan" aria-label="Plan">
+              <div class="t done"><i>✓</i>Confirm frozen plan r3 and base a11ce00</div>
+              <div class="t done"><i>✓</i>Execute: failing export-contract test, then implementation</div>
+              <div class="t now"><i>◐</i>Evaluate exact-head gates (Mutate4CSharp INCOMPLETE)</div>
+              <div class="t"><i>·</i>Bounded repair request — waiting for you</div>
+              <div class="t"><i>·</i>Independent review, then PR authorization packet</div>
+            </div>
+          </div>
+        </div>
+        <div class="composer">
+          <div class="box">Message Codex… ($forge-demo preview request.repair to see the bound intent)</div>
+          <div class="row"><b>gpt-6-astra</b><span>·</span><span>xhigh</span><span>·</span><span>Forge app open in thread tab</span><span>·</span><span>approvals: ask</span></div>
+        </div>
+      </main>
+      <section class="pane" aria-label="Forge thread tab">
+        <header><span class="tab">Diff</span><span class="tab on">Forge</span><span class="tab">Terminal</span><span class="url">MCP App · thread content tab · display mode fullscreen</span></header>
+        <div class="host"><div id="forge"></div></div>
+      </section>
+    </div>
+    <div class="caption">DESKTOP MOCKUP · NOT AN INSTALLED-HOST CAPTURE <span>ChatGPT desktop in Codex mode, chrome drawn for layout only. MCP App surfaces follow the openai/mcp-extensions spec (inline card, thread content tab); embedding in the installed Codex build is unverified. Same projection as the terminal cockpit.</span></div>
+  </div>
+  <div id="announce" class="sr-only" aria-live="polite"></div>
+  <script src="../companion/companion-data.js"></script>
+  <script src="forge-cockpit.js"></script>
+  <script>
+    (() => {
+      const params = new URLSearchParams(location.search);
+      const scenario = params.get('scenario') || 'failed-gate', tab = params.get('tab') || 'overview';
+      const states = globalThis.FORGE_DEMO_STATES || [];
+      const s = states.find((x) => x.name === scenario) || states[0];
+      const primary = s.actions.find((a) => a.id === s.focus.nextActionId) || s.actions[0];
+      ForgeCockpit.card(document.getElementById('card'), { scenario, openLabel: 'Open Forge tab', footer: 'MCP App inline card · same projection as the thread tab · preview only', onOpen: () => ui.setTab('evidence') });
+      document.getElementById('narrative').textContent = `${s.focus.title} ${s.focus.explanation} ${/aggregate is/i.test(s.focus.explanation) ? '' : `Aggregate is ${s.aggregate.outcome}. `}I have not requested repair, pause or publication; the Forge tab shows every receipt and the bound intent preview. ${primary ? `Next: ${primary.label} (${primary.available ? 'available' : 'unavailable: ' + primary.reason}).` : s.focus.nextActionReason}`;
+      const ui = ForgeCockpit.mount(document.getElementById('forge'), { scenario, tab, detail: params.has('detail'), preview: params.has('preview'), hints: '↑/↓ evidence · Enter detail · 1-5 tabs · P preview · $forge-demo in thread',
+        onRender: (state) => { document.getElementById('announce').textContent = `${state.workflow.phase}. ${state.aggregate.outcome}. ${state.focus.title}`; } });
+      globalThis.ForgeDesktop = { ui, scenario };
+    })();
+  </script>
+</body>
+</html>

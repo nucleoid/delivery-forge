@@ -1,0 +1,7 @@
+{
+  "name": "forge-demo-codex-text-package",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": { "forge-demo-mcp": "./mcp-server.mjs" }
+}

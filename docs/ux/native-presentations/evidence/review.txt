@@ -1,0 +1,51 @@
+HARNESS RENDER — native text contract (not an installed host screenshot)
+DEMO • SYNTHETIC — zero live adapters
+FORGE / demo-014 / plan r3 / head c82e4a1 / ceiling IMPLEMENT
+Source snapshot-review-006 | seq 6 | current/complete | fixture-capabilities-v1
+Phase: Launch -> Plan -> Execute -> Evaluate -> Repair -> [Review] -> PR
+
+REVIEW / PASS
+Independent review, on this exact head.
+Synthetic trust assessment binds reviewer, writer, patch, tree and exact head.
+
+Evidence
+Build PASS receipt-build-c82e4a1
+Tests PASS receipt-tests-c82e4a1
+Crap4CSharp PASS receipt-crap4csharp-c82e4a1
+Mutate4CSharp PASS receipt-mutation-c82e4a1
+Migration NOT_APPLICABLE receipt-migration-c82e4a1
+N/A rationale: No schema or data migration in approved scope.
+Review PASS / independence accepted / fixture://evidence/review-assessment.json
+  Attempt history (retained)
+mutation-attempt-1: superseded-incomplete; head b45e000; receipt-mutation-attempt-1
+mutation-attempt-2: current-capture-only; head c82e4a1; receipt-mutation-attempt-2
+
+Control
+Desired REVIEWING; observed READY; cleanup not-requested; active owned operations 0.
+
+Next
+Inspect findings and review binding — AVAILABLE. Synthetic assessment is inspectable.
+
+Integrations
+Engram: unavailable; not connected. Demo does not connect to Engram
+Continuum memory: unavailable; not connected. Memory is distinct from coordination authority
+Continuum coordination: unavailable; not connected. No lease was requested or inferred
+Switchyard: unverified; not measured. No runtime readiness claim
+
+Measurements
+  Elapsed: unknown
+  Actual charge: unknown
+  CPU: unknown
+  Memory: unknown
+
+Usage
+USD API-EQUIVALENT ESTIMATE: USD 0.044225 known / PARTIAL
+SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge
+Observed tokens: 19300; final 4; provisional 0; unpriced requests 1; freshness current.
+Actual charge: unknown.
+condition: mirror obs-writer-mirror retained as corroboration
+
+Full identity: run=demo-014 plan=plan-demo-014-csv-export-r3
+head=c82e4a100000000000000000000000000000003
+tree=tree-demo-c82e4a1000000000000000000000000002 policy=policy-demo-safe-v1
+capability=fixture-capabilities-v1

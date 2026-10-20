@@ -1,0 +1,18 @@
+HARNESS RENDER — usage detail (not an installed host screenshot)
+DEMO • SYNTHETIC TOKENS + SYNTHETIC RATES
+FORGE / demo-014 / EVALUATE / workflow INCOMPLETE
+
+Usage
+USD API-EQUIVALENT ESTIMATE: USD 0.044225 known / PARTIAL
+SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual
+charge
+Observed tokens: 19300; final 4; provisional 0; unpriced requests 1; freshness
+current.
+Actual charge: unknown.
+
+demo.openai.writer | demo.openai | USD 0.031700 known
+input 10500 = ordinary 3500 + cacheR 6000 + cacheW 1000 (1h 0)
+output 2100; reasoning subset 500 known + unknown
+actors worker:demo.writer; requested demo-writer-alias
+rate synthetic.writer.v1; synthetic-standard; as-of 2026-10-19T10:00:00.000Z;
+j/k or arrows: scroll | Esc: close

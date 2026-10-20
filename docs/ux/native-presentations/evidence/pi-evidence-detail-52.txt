@@ -1,0 +1,11 @@
+HARNESS RENDER — evidence detail (not an installed
+host screenshot)
+DEMO • SYNTHETIC
+Tests: PASS / current
+receipt=receipt-tests-b45e
+head=b45e00000000000000000000000000000000002
+tree=tree-demo-b45e000000000000000000000000000001
+policy=policy-demo-safe-v1
+artifacts=fixture://evidence/tests.txt
+limitations=none
+j/k: scroll | Esc: evidence list
