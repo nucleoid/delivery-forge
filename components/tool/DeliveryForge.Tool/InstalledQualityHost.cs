@@ -25,6 +25,9 @@ internal sealed class InstalledQualityHost
     readonly Dictionary<string, AdmissionFile> gateReceiptPins = new(StringComparer.Ordinal);
     HostBridgeFrame? protectedCompletedFrame;
     AgentCompletionReceipt? protectedCompletedWorker;
+    sealed record ProtectedCompletion(InstalledBaselineComparison Comparison, ProtectedBaselineRegistrySelection Registry,
+        string PolicyIdentity, IReadOnlyList<GateRunResult> Results);
+    ProtectedCompletion? protectedCompletion;
     internal bool HasLocalRealCompletion(HostBridgeFrame frame) => ReferenceEquals(protectedCompletedFrame, frame);
     internal bool Unknown => tools?.HasUncertainOriginals == true;
     internal InstalledQualityHost(TrustedConfiguration config, AdmissionFile actualConfigurationPin,
@@ -210,21 +213,47 @@ internal sealed class InstalledQualityHost
             return new("BLOCKED", "PROTECTED_BASELINE_REGRESSION", comparison.Reason, new { run.RunId, comparison });
         if (comparison.Outcome != GateOutcome.Pass)
             return ToolResult.Incomplete("PROTECTED_BASELINE_INCOMPLETE", comparison.Reason, new { run.RunId, comparison });
+        // Retain the actual closed issuer comparison and exact original gate objects.
+        // ProducerVerified permits a current gate PASS; ProductionCapable deliberately
+        // remains false and cannot stand in for this protected comparison.
+        protectedCompletion = new(comparison, selection.Registry, selection.PolicyIdentity, results.ToArray());
         protectedCompletedFrame = frame; protectedCompletedWorker = completion;
         return ToolResult.Incomplete("PROTECTED_QUALITY_PASSED_INDEPENDENT_REVIEW_REQUIRED", "Actual installed gates and owner-approved protected baseline comparison passed; independent review and later publication authorization remain separate.", new { run.RunId, comparison, PublicationAuthority = false });
     }
 
     internal async Task<IReadOnlyList<DeliveryForge.Contracts.Validation.ValidatedContract>?> LocalRealEvidenceAsync(HostBridgeFrame frame, ParentCoordinationHost parent)
     {
-        if (!ReferenceEquals(protectedCompletedFrame, frame) || protectedCompletedWorker is null || selection.Registry is null) return null;
+        if (!ReferenceEquals(protectedCompletedFrame, frame) || protectedCompletedWorker is null ||
+            selection.Registry is null || protectedCompletion is not { } accepted) return null;
         await CurrentAsync(frame, protectedCompletedWorker, parent).ConfigureAwait(false);
-        if (results.Count != selection.Gates.Count || results.Any(row => row.Outcome != GateOutcome.Pass || row.Fixture || !row.ProductionCapable || row.SourceChanged))
-            throw new WorkerEnvelopeException("Local-real requires every actual nonfixture production-capable gate and protected comparison.");
+        if (!ReferenceEquals(accepted.Registry, selection.Registry) || accepted.PolicyIdentity != selection.PolicyIdentity ||
+            results.Count != accepted.Results.Count || results.Where((row, index) => !ReferenceEquals(row, accepted.Results[index])).Any() ||
+            selection.Gates.Any(gate => !gateResults.TryGetValue(gate.GateId, out var result) ||
+                !accepted.Results.Any(row => ReferenceEquals(row, result))))
+            throw new WorkerEnvelopeException("Local-real requires the same private actual protected comparison and gate objects.");
+        ValidateProtectedQualityTuple(selection, accepted.Comparison,
+            new(assignment!.BaseCommit, protectedCompletedWorker.HeadCommit, protectedCompletedWorker.TreeId, true), accepted.Results);
         return parent.EnterSynchronous(frame.RunId, () =>
         {
             var receipts = selection.Gates.Select(gate => DeliveryForge.Contracts.Validation.ContractValidator.ParseAndValidate(
                 InstalledHostAdmission.ReadExact(gateReceiptPins[gate.GateId], original, 1048576))).ToArray();
             original.Check(); return Array.AsReadOnly(receipts);
         });
+    }
+
+    // DATA consistency only; this cannot issue a baseline or accept caller results.
+    // The sole production caller first verifies its private same-frame actual completion.
+    internal static void ValidateProtectedQualityTuple(InstalledQualitySelection selected, InstalledBaselineComparison? comparison,
+        RepositoryIdentity expected, IReadOnlyList<GateRunResult> current)
+    {
+        if (selected.Registry is not { } registry || comparison is null || comparison.Outcome != GateOutcome.Pass ||
+            comparison.RegistryCommit != registry.RegistryCommit || comparison.RegistryIdentity != registry.RegistryIdentity ||
+            comparison.BaselineSourceRevision != expected.BaseCommit || !expected.IsClean ||
+            current.Count != selected.Gates.Count || current.Count != 2 ||
+            current.Where((row, index) => row.Outcome != GateOutcome.Pass || row.Fixture || row.SourceChanged ||
+                row.PolicyIdentity != selected.PolicyIdentity || row.Before != expected || row.After != expected ||
+                row.Scope != selected.Gates[index].Scope || row.Execution.ExitCode != 0 || row.Execution.TimedOut ||
+                row.Execution.Cancelled || !row.Execution.OwnedProcessQuiescent).Any())
+            throw new WorkerEnvelopeException("Local-real requires exact current nonfixture gate PASS tuples and the actual protected baseline comparison.");
     }
 }

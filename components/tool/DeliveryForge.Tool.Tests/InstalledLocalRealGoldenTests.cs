@@ -64,6 +64,24 @@ public sealed class InstalledLocalRealGoldenTests
         Assert.False(row.GetProperty("ProductionPublicationAuthority").GetBoolean()); Assert.False(row.GetProperty("RecoveryCertified").GetBoolean());
         Assert.False(row.GetProperty("SchedulingCertified").GetBoolean());
         Assert.Equal(2, row.GetProperty("GateReceipts").GetArrayLength());
+        foreach (var gate in config.InstalledQuality!.Gates)
+        {
+            var gateRoot = Path.Combine(config.InstalledQuality.ArtifactRoot, actualSelection.RunId);
+            using var settled = JsonDocument.Parse(BoundedFiles.Read(Path.Combine(gateRoot, gate.GateId + "-settled.json"), original, 65536));
+            var current = settled.RootElement;
+            Assert.Equal("Pass", current.GetProperty("Outcome").GetString()); Assert.False(current.GetProperty("Fixture").GetBoolean());
+            // Genuine installed producer evidence remains distinct from production authority.
+            Assert.False(current.GetProperty("ProductionCapable").GetBoolean());
+            var pin = current.GetProperty("Receipt").Deserialize<AdmissionFile>(BoundedFiles.Json)!;
+            var gateReceipt = DeliveryForge.Contracts.Validation.ContractValidator.ParseAndValidate(InstalledHostAdmission.ReadExact(pin, original, 1048576));
+            Assert.Contains(row.GetProperty("GateReceipts").EnumerateArray(), value => value.GetString() == gateReceipt.Identity);
+            using var gateData = JsonDocument.Parse(gateReceipt.CanonicalBytes);
+            Assert.Equal("PASS", gateData.RootElement.GetProperty("outcome").GetString());
+            Assert.Equal(config.InstalledQuality.PolicyIdentity, gateData.RootElement.GetProperty("policyIdentity").GetString());
+            Assert.Equal(row.GetProperty("BaseCommit").GetString(), gateData.RootElement.GetProperty("baseCommit").GetString());
+            Assert.Equal(row.GetProperty("HeadCommit").GetString(), gateData.RootElement.GetProperty("headCommit").GetString());
+            Assert.Equal(row.GetProperty("HeadTree").GetString(), gateData.RootElement.GetProperty("treeId").GetString());
+        }
         _ = PackageLifecycle.Verify(fixture.Installation, original); // Retain prefix and all real artifacts; lifecycle removal is separate.
     }
 
