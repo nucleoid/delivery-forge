@@ -48,6 +48,25 @@ public sealed class CapabilityDetectorTests
     }
 
     [Fact]
+    public async Task Oxlint_version_prefix_is_parsed_without_weakening_exact_policy_matching()
+    {
+        using var temp = new TempDirectory();
+        var executable = System.IO.Path.Combine(temp.Path, OperatingSystem.IsWindows() ? "oxlint.exe" : "oxlint");
+        await File.WriteAllTextAsync(executable, "fixture", TestContext.Current.CancellationToken);
+        var detector = new ToolCapabilityDetector(new QueueCommandExecutor(
+            new CommandResult(0, "Version: 1.78.0", "", false, false, TestEvidence.Time(0), TestEvidence.Time(1)),
+            new CommandResult(0, "--format json --config", "", false, false, TestEvidence.Time(1), TestEvidence.Time(2))));
+
+        var result = await detector.DetectAsync(new CapabilityProbe(
+            "oxlint", ExecutableSource.TrustedExplicit, executable, temp.Path, null,
+            ["--version"], ["--help"], "1.78.0", "oxlint-json-v1", false),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(result.Capability.Supported);
+        Assert.Equal("1.78.0", result.Capability.Version);
+    }
+
+    [Fact]
     public async Task Missing_or_mismatched_executable_is_incomplete_capability()
     {
         var detector = new ToolCapabilityDetector(new QueueCommandExecutor());

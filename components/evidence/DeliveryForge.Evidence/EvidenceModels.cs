@@ -4,7 +4,8 @@ public enum EvidenceAdapterKind
 {
     DotNet,
     Crap4CSharp,
-    Mutate4CSharp
+    Mutate4CSharp,
+    External
 }
 
 public enum GateOutcome
@@ -143,7 +144,8 @@ public sealed record GateRequest(
     CommandInvocation Invocation,
     string Scope,
     TimeSpan Timeout,
-    string OutputDirectory);
+    string OutputDirectory,
+    EvaluationPluginSelection? Plugin = null);
 
 public sealed record GateRunResult(
     GateOutcome Outcome,
@@ -162,7 +164,10 @@ public sealed record GateRunResult(
     string Scope,
     IReadOnlyDictionary<string, string> ArtifactHashes,
     string ReceiptPath,
-    string? NotApplicableRationale);
+    string? NotApplicableRationale)
+{
+    public EvaluationPluginReceiptMetadata Plugin { get; init; } = EvaluationPluginReceiptMetadata.Unbound;
+}
 
 public interface ICommandExecutor
 {

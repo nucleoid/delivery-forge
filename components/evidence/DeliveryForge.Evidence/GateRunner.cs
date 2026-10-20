@@ -15,23 +15,30 @@ public sealed class GateRunner
     private readonly IRepositoryIdentityReader _repository;
     private readonly string _trustedWorkingDirectory;
     private readonly string _trustedProtectedBaseCommit;
+    private readonly DeterministicEvaluationPluginRegistry _plugins;
 
     public GateRunner(
         ICommandExecutor executor,
         IRepositoryIdentityReader repository,
         string trustedWorkingDirectory,
-        string trustedProtectedBaseCommit)
+        string trustedProtectedBaseCommit,
+        DeterministicEvaluationPluginRegistry? plugins = null)
     {
         _executor = executor;
         _repository = repository;
         _trustedWorkingDirectory = Path.GetFullPath(trustedWorkingDirectory);
         _trustedProtectedBaseCommit = trustedProtectedBaseCommit;
+        _plugins = plugins ?? DeterministicEvaluationPluginRegistry.CreateBuiltIns();
     }
     private static readonly JsonSerializerOptions ContractJson = CreateContractJson();
 
     public async Task<GateRunResult> RunAsync(GateRequest request, CancellationToken cancellationToken = default)
     {
         ValidateRequest(request);
+        var plugin = _plugins.Resolve(request.Adapter, request.Plugin);
+        var pluginBinding = DeterministicEvaluationPluginRegistry.Bind(
+            request, plugin,
+            request.Plugin?.Enabled == false ? EvaluationPluginStatus.Disabled : EvaluationPluginStatus.Selected);
         Directory.CreateDirectory(request.OutputDirectory);
         var claimPath = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId) + ".claim");
         var gateDirectory = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
@@ -52,14 +59,24 @@ public sealed class GateRunner
             return await PersistWithoutExecutionAsync(
                 request, failureDirectory, request.ExpectedRepository, request.ExpectedRepository,
                 NormalizedEvidence.Error("Gate artifact directory existed before the atomic claim."),
+                pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
         }
 
-        var capabilityFailure = ValidateCapabilityBinding(request);
+        if (!pluginBinding.Enabled)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, request.ExpectedRepository, request.ExpectedRepository,
+                NormalizedEvidence.Incomplete(
+                    "The selected deterministic evaluation plugin is disabled; no tool outcome exists and the gate is unsatisfied."),
+                pluginBinding,
+                CancellationToken.None).ConfigureAwait(false);
+
+        var capabilityFailure = ValidateCapabilityBinding(request, plugin);
         if (capabilityFailure is not null)
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, request.ExpectedRepository, request.ExpectedRepository,
                 capabilityFailure,
+                pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
 
         RepositoryIdentity before;
@@ -72,6 +89,7 @@ public sealed class GateRunner
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, request.ExpectedRepository, request.ExpectedRepository,
                 NormalizedEvidence.Error($"Repository identity could not be read: {exception.Message}"),
+                pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
         }
         if (!before.IsClean || before != request.ExpectedRepository)
@@ -79,6 +97,7 @@ public sealed class GateRunner
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, before, before,
                 NormalizedEvidence.Error("Repository identity is not the expected clean committed base/head/tree."),
+                pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
         }
         if (request.Policy.AuthorityVerified &&
@@ -91,21 +110,37 @@ public sealed class GateRunner
                 request, gateDirectory, before, before,
                 NormalizedEvidence.Error(
                     "Protected policy authority is not bound to this gate's frozen repository base and root."),
+                pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
         }
 
-
-        Directory.CreateDirectory(gateDirectory);
-        EvidenceExecutionSnapshot evidenceSnapshot;
+        NormalizedEvidence? pluginValidation;
         try
         {
-            evidenceSnapshot = EvidenceAdapterDispatcher.CaptureBefore(request);
+            pluginValidation = plugin.ValidateBeforeExecution(request);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            pluginValidation = NormalizedEvidence.Error(
+                $"Plugin configuration or inputs could not be read: {exception.Message}");
+        }
+        if (pluginValidation is not null)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before, pluginValidation, pluginBinding,
+                CancellationToken.None).ConfigureAwait(false);
+
+        Directory.CreateDirectory(gateDirectory);
+        EvaluationPluginSnapshot evidenceSnapshot;
+        try
+        {
+            evidenceSnapshot = plugin.CaptureBefore(request);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, before, before,
                 NormalizedEvidence.Error($"Evidence inputs could not be snapshotted: {exception.Message}"),
+                pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
         }
 
@@ -133,7 +168,7 @@ public sealed class GateRunner
         string? artifactBindingError = null;
         try
         {
-            EvidenceAdapterDispatcher.AppendBoundArtifacts(
+            plugin.AppendBoundArtifacts(
                 request, evidenceSnapshot, gateDirectory, artifactHashes);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -157,7 +192,7 @@ public sealed class GateRunner
         try
         {
             normalized = artifactBindingError is null
-                ? EvidenceAdapterDispatcher.Normalize(request, execution, evidenceSnapshot)
+                ? plugin.Normalize(request, execution, evidenceSnapshot)
                 : NormalizedEvidence.Error($"Bound evidence artifact could not be persisted: {artifactBindingError}");
         }
         catch (OperationCanceledException)
@@ -168,12 +203,15 @@ public sealed class GateRunner
         {
             normalized = NormalizedEvidence.Error($"Evidence normalizer failed: {exception.Message}");
         }
+        var toolOutcome = normalized.Outcome;
         if (identityReadFailed)
             normalized = NormalizedEvidence.Error("Repository identity could not be read after evaluation.");
         else if (sourceChanged)
             normalized = NormalizedEvidence.Error("Repository source/index/status identity changed during evaluation.");
-        else if (ValidateCapabilityBinding(request) is not null)
+        else if (ValidateCapabilityBinding(request, plugin) is not null)
             normalized = NormalizedEvidence.Error("The bound executable bytes changed during gate execution.");
+        else if (plugin.ValidateAfterExecution(request, evidenceSnapshot) is { } postExecutionValidation)
+            normalized = postExecutionValidation;
         else if (!execution.OwnedProcessQuiescent)
             normalized = NormalizedEvidence.Error("Owned tool process did not become quiescent after interruption.");
         else if (execution.TimedOut)
@@ -191,8 +229,11 @@ public sealed class GateRunner
             normalized = NormalizedEvidence.Incomplete(
                 "Tool PASS is advisory because protected policy/gate authority or certified producer evidence is absent.");
 
+        var executedPlugin = DeterministicEvaluationPluginRegistry.Bind(
+            request, plugin, EvaluationPluginStatus.Executed, OutcomeText(toolOutcome));
         return await PersistAsync(
-            request, gateDirectory, before, after, execution, artifactHashes, normalized, sourceChanged, CancellationToken.None)
+            request, gateDirectory, before, after, execution, artifactHashes, normalized, sourceChanged,
+            executedPlugin, CancellationToken.None)
             .ConfigureAwait(false);
     }
 
@@ -202,6 +243,7 @@ public sealed class GateRunner
         RepositoryIdentity before,
         RepositoryIdentity after,
         NormalizedEvidence normalized,
+        EvaluationPluginReceiptMetadata plugin,
         CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(gateDirectory);
@@ -209,7 +251,9 @@ public sealed class GateRunner
         var execution = new CommandResult(null, string.Empty, string.Empty, false, false, now, now);
         var hashes = await WriteArtifactsAsync(gateDirectory, execution, cancellationToken).ConfigureAwait(false);
         return await PersistAsync(
-            request, gateDirectory, before, after, execution, hashes, normalized, true, cancellationToken)
+            request, gateDirectory, before, after, execution, hashes, normalized,
+            before != after || !before.IsClean || !after.IsClean,
+            plugin, cancellationToken)
             .ConfigureAwait(false);
     }
 
@@ -222,6 +266,7 @@ public sealed class GateRunner
         IReadOnlyDictionary<string, string> artifactHashes,
         NormalizedEvidence normalized,
         bool sourceChanged,
+        EvaluationPluginReceiptMetadata plugin,
         CancellationToken cancellationToken)
     {
         var limitations = normalized.Limitations
@@ -247,7 +292,19 @@ public sealed class GateRunner
                 CapabilityProbeWorkingDirectory = request.Capability.ProbeWorkingDirectory,
                 PolicySourceRevision = request.Policy.SourceRevision,
                 PolicyContentIdentity = request.Policy.ContentIdentity,
-                request.ConfigurationIdentity
+                request.ConfigurationIdentity,
+                Plugin = new
+                {
+                    plugin.Id,
+                    plugin.Version,
+                    plugin.Enabled,
+                    Status = plugin.Status.ToString().ToUpperInvariant(),
+                    plugin.ConfigurationIdentity,
+                    plugin.Inputs,
+                    plugin.InputSetIdentity,
+                    plugin.ToolOutcome,
+                    EffectRulesEnabled = request.Plugin?.EnableEffectRules ?? false
+                }
             }, ContractJson),
             execution.StartedAt, execution.CompletedAt, execution.ExitCode,
             OutcomeText(normalized.Outcome), normalized.Reason, artifactHashes,
@@ -263,7 +320,10 @@ public sealed class GateRunner
             normalized.Outcome, normalized.Reason, normalized.Fixture, normalized.ProductionCapable,
             limitations, sourceChanged, request.Invocation, execution, before, after,
             request.Policy.PolicyIdentity, request.Capability.ExecutableIdentity ?? "unavailable", request.ConfigurationIdentity, request.Scope,
-            artifactHashes, receiptPath, normalized.NotApplicableRationale);
+            artifactHashes, receiptPath, normalized.NotApplicableRationale)
+        {
+            Plugin = plugin
+        };
     }
 
     private static async Task<Dictionary<string, string>> WriteArtifactsAsync(
@@ -328,15 +388,11 @@ public sealed class GateRunner
     }
 
 
-    private NormalizedEvidence? ValidateCapabilityBinding(GateRequest request)
+    private NormalizedEvidence? ValidateCapabilityBinding(
+        GateRequest request,
+        IDeterministicEvaluationPlugin plugin)
     {
-        var expectedTool = request.Adapter switch
-        {
-            EvidenceAdapterKind.DotNet => "dotnet",
-            EvidenceAdapterKind.Crap4CSharp => "crap4csharp",
-            EvidenceAdapterKind.Mutate4CSharp => "mutate4csharp",
-            _ => string.Empty
-        };
+        var expectedTool = plugin.ExpectedTool;
         if (!string.Equals(expectedTool, request.Capability.Tool, StringComparison.Ordinal))
             return NormalizedEvidence.Error("The selected adapter does not match the detected tool capability.");
         if (!request.Capability.DetectionVerified)

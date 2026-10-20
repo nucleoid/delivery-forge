@@ -15,6 +15,18 @@ Scope is risk-proportionate. Documentation-only work may mark code/test/mutation
 
 Every gate returns exactly one outcome: `PASS`, `FAIL`, `INCOMPLETE`, `ERROR`, or `NOT_APPLICABLE`. Timeout, unsupported capability, missing coverage/artifacts, truncated results, or incomplete mutation enumeration never map to `PASS`.
 
+## Deterministic evaluation plugins
+
+Gate execution resolves a trusted, code-registered deterministic evaluation plugin. The built-in .NET test, Crap4CSharp, and Mutate4CSharp adapters retain their existing default-enabled gate behavior behind compatibility wrappers. Trusted host code may register another implementation by stable ID/version/tool identity; frozen plans can select only registered IDs and cannot supply executable plugin code or commands.
+
+Plugin configuration records an explicit enabled state. Disabling a selected required gate yields `INCOMPLETE`; it is evidence metadata, not a policy bypass. Receipts bind the effective plugin ID/version, enabled/status metadata, configuration identity, normalized input list and input-set hash inside the existing v1 `command` envelope, preserving the canonical gate-receipt schema.
+
+The bundled `dmmulroy.anti-slop` plugin automatically selects repository-relative `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.mts`, and `.cts` files from a trusted caller's frozen candidate scope after that caller has applied repository ignores. Input discovery is intentionally a registry API boundary while the delivery pipeline remains paused; callers must not substitute an arbitrary patch-supplied file list or ignore policy.
+
+Its invocation is read-only and canonical: the package-local Oxlint capability, JSON output, and the exact selected inputs. The configuration identity binds the package manifests, selected config, vendored rules, Oxlint JavaScript runtime, plugin package, installed native binding, resolved Node executable bytes/path, and relevant Node environment. The closure is revalidated after execution. Autofix and option-like input paths are refused. Syntax/parser/tool failures, missing filenames, unsupported report shapes, zero configured rules, and incomplete file counts are `INCOMPLETE`; policy findings are `FAIL`. A clean anti-slop tool result is advisory only and cannot satisfy a protected required correctness gate. Effect rules require explicit opt-in. Vendoring, immutable upstream revision, licenses, exact tool pins, and real fixture verification are recorded in `components/evidence/anti-slop/PROVENANCE.md`.
+
+Implementation tracking: plugin contract and registry [#48](https://github.com/nucleoid/delivery-forge/issues/48), compatibility adapters [#49](https://github.com/nucleoid/delivery-forge/issues/49), pinned JavaScript/TypeScript anti-slop integration [#50](https://github.com/nucleoid/delivery-forge/issues/50), and tests/review/documentation [#51](https://github.com/nucleoid/delivery-forge/issues/51).
+
 ## Receipt contract
 
 Every receipt records gate/policy IDs; base/head/tree; tool version and detected capability; config and baseline identity; exact command/invocation; scope; timestamps/exit state; outcome/reason; artifact paths/hashes; limitations/exclusions/missing data/N/A rationale; and whether source/tree changed during evaluation. Receipts are append-only evidence; summaries cannot erase failures or limitations.
