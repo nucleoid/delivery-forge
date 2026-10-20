@@ -55,12 +55,13 @@ public sealed class GateRunnerTests
             new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
             request.Invocation.WorkingDirectory,
             TestEvidence.Commit('a'),
-            receiptRoot);
+            receiptRoot,
+            new byte[32]);
 
         var result = await host.RunAsync(request, TestContext.Current.CancellationToken);
         var receipt = ContractValidator.ParseAndValidate(await File.ReadAllBytesAsync(
             result.ReceiptPath, TestContext.Current.CancellationToken));
-        var reopened = new HostOwnedReceiptStore(receiptRoot);
+        var reopened = new HostOwnedReceiptStore(receiptRoot, new byte[32]);
 
         Assert.Equal("2.0.0", receipt.SchemaVersion);
         Assert.True(host.ReceiptProvenance.Contains(receipt.Identity));
@@ -158,12 +159,12 @@ public sealed class GateRunnerTests
         Assert.Equal(GateOutcome.Incomplete, retry.Outcome);
         Assert.True(File.Exists(first.ReceiptPath));
         Assert.True(File.Exists(retry.ReceiptPath));
-        Assert.Contains("retry-", retry.ReceiptPath, StringComparison.Ordinal);
+        Assert.Contains(".attempt-", retry.ReceiptPath, StringComparison.Ordinal);
         Assert.False(File.Exists(System.IO.Path.Combine(temp.Path, request.GateId + ".claim")));
     }
 
     [Fact]
-    public async Task Live_claim_is_never_stolen_and_exited_child_claim_is_recovered_for_retry()
+    public async Task Killed_execution_owner_persists_interruption_and_allows_immutable_retry()
     {
         using var temp = new TempDirectory();
         var request = TestEvidence.GateRequest(temp.Path) with
@@ -180,7 +181,7 @@ public sealed class GateRunnerTests
                 OperatingSystem.IsWindows() ? "/d" : "-c",
                 OperatingSystem.IsWindows() ? "/s" : "sleep 1",
                 OperatingSystem.IsWindows() ? "/c" : string.Empty,
-                OperatingSystem.IsWindows() ? "ping -n 3 127.0.0.1 >NUL" : string.Empty
+                OperatingSystem.IsWindows() ? "ping -n 30 127.0.0.1 >NUL" : "sleep 30"
             }
         }) ?? throw new InvalidOperationException("Child claim fixture did not start.");
         var claimPath = System.IO.Path.Combine(temp.Path, request.GateId + ".claim");
@@ -196,11 +197,16 @@ public sealed class GateRunnerTests
         Assert.Contains("live process", live.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.True(File.Exists(claimPath));
 
+        var interruptedAttempt = System.IO.Path.Combine(
+            temp.Path, request.GateId + ".attempt-killed-fixture");
+        Directory.CreateDirectory(interruptedAttempt);
+        child.Kill(entireProcessTree: true);
         await child.WaitForExitAsync(TestContext.Current.CancellationToken);
         var recovered = await runner.RunAsync(request, TestContext.Current.CancellationToken);
         Assert.Equal(GateOutcome.Incomplete, recovered.Outcome);
         Assert.Contains("interrupted", recovered.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.True(File.Exists(recovered.ReceiptPath));
+        Assert.True(Directory.Exists(interruptedAttempt));
         Assert.False(File.Exists(claimPath));
 
         var retry = await runner.RunAsync(request, TestContext.Current.CancellationToken);
@@ -247,7 +253,7 @@ public sealed class GateRunnerTests
         var retry = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
         Assert.Equal(GateOutcome.Error, retry.Outcome);
-        Assert.Contains("retry-", retry.ReceiptPath, StringComparison.Ordinal);
+        Assert.Contains(".attempt-", retry.ReceiptPath, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -464,7 +470,7 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
-    public async Task Preexisting_incomplete_gate_directory_gets_a_separate_incomplete_receipt_without_execution()
+    public async Task Preexisting_legacy_gate_directory_cannot_block_a_nonce_attempt()
     {
         using var temp = new TempDirectory();
         var request = TestEvidence.GateRequest(temp.Path);
@@ -477,8 +483,8 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
-        Assert.Contains("incomplete", result.Reason, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("claim-incomplete", result.ReceiptPath, StringComparison.Ordinal);
+        Assert.Contains("could not be read", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(".attempt-", result.ReceiptPath, StringComparison.Ordinal);
         Assert.True(File.Exists(result.ReceiptPath));
     }
 

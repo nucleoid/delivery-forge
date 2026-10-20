@@ -23,7 +23,7 @@ internal sealed class GateClaimLease : IAsyncDisposable
         this.stream = stream;
     }
 
-    internal static GateClaimAcquisition Acquire(string path)
+    internal static GateClaimAcquisition Acquire(string path, Action<string>? afterInspectionForTest = null)
     {
         string? interruptedClaimPath = null;
         for (var attempt = 0; attempt < 8; attempt++)
@@ -60,6 +60,7 @@ internal sealed class GateClaimLease : IAsyncDisposable
                     return new(null, $"Gate claim ownership is ambiguous: {inspection.Reason}", null);
 
                 var interrupted = path + ".interrupted-" + Guid.NewGuid().ToString("N");
+                afterInspectionForTest?.Invoke(path);
                 try
                 {
                     File.Move(path, interrupted);
@@ -71,6 +72,22 @@ internal sealed class GateClaimLease : IAsyncDisposable
                 catch (IOException)
                 {
                     continue;
+                }
+
+                var displaced = Inspect(interrupted);
+                if (displaced.State != ClaimOwnerState.Stale ||
+                    !string.Equals(displaced.Nonce, inspection.Nonce, StringComparison.Ordinal))
+                {
+                    try
+                    {
+                        File.Move(interrupted, path);
+                    }
+                    catch (IOException)
+                    {
+                        // Preserve the displaced claim for diagnosis if a concurrent owner won.
+                    }
+                    return new(null,
+                        "Gate claim changed identity during stale takeover; ownership is ambiguous.", null);
                 }
 
                 // The stale name was atomically displaced. The bounded outer loop acquires the
@@ -101,31 +118,31 @@ internal sealed class GateClaimLease : IAsyncDisposable
         {
             var information = new FileInfo(path);
             if (!information.Exists)
-                return new(ClaimOwnerState.Stale, "claim disappeared");
+                return new(ClaimOwnerState.Stale, "claim disappeared", null);
             if (information.Length <= 0 || information.Length > MaximumClaimBytes ||
                 information.Attributes.HasFlag(FileAttributes.ReparsePoint))
-                return new(ClaimOwnerState.Ambiguous, "claim is empty, oversized, or a reparse point");
+                return new(ClaimOwnerState.Ambiguous, "claim is empty, oversized, or a reparse point", null);
             var bytes = File.ReadAllBytes(path);
             var claim = JsonSerializer.Deserialize<ClaimDocument>(bytes);
             if (claim is null || claim.Version != ClaimVersion || claim.ProcessId <= 0 ||
                 string.IsNullOrWhiteSpace(claim.BootId) || string.IsNullOrWhiteSpace(claim.ProcessStartToken) ||
                 string.IsNullOrWhiteSpace(claim.Nonce))
-                return new(ClaimOwnerState.Ambiguous, "claim metadata is malformed");
+                return new(ClaimOwnerState.Ambiguous, "claim metadata is malformed", null);
             var currentBoot = BootId();
             if (!string.Equals(currentBoot, claim.BootId, StringComparison.Ordinal))
-                return new(ClaimOwnerState.Stale, "claim belongs to an earlier boot");
+                return new(ClaimOwnerState.Stale, "claim belongs to an earlier boot", claim.Nonce);
             var currentStart = TryProcessStartToken(claim.ProcessId, out var missing);
             if (missing)
-                return new(ClaimOwnerState.Stale, "claim owner process exited");
+                return new(ClaimOwnerState.Stale, "claim owner process exited", claim.Nonce);
             if (currentStart is null)
-                return new(ClaimOwnerState.Ambiguous, "claim owner process identity cannot be verified");
+                return new(ClaimOwnerState.Ambiguous, "claim owner process identity cannot be verified", claim.Nonce);
             return string.Equals(currentStart, claim.ProcessStartToken, StringComparison.Ordinal)
-                ? new(ClaimOwnerState.Live, "claim owner is live")
-                : new(ClaimOwnerState.Stale, "claim PID was reused");
+                ? new(ClaimOwnerState.Live, "claim owner is live", claim.Nonce)
+                : new(ClaimOwnerState.Stale, "claim PID was reused", claim.Nonce);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or EvidenceWriteException)
         {
-            return new(ClaimOwnerState.Ambiguous, exception.Message);
+            return new(ClaimOwnerState.Ambiguous, exception.Message, null);
         }
     }
 
@@ -235,6 +252,6 @@ internal sealed class GateClaimLease : IAsyncDisposable
         string Nonce,
         DateTimeOffset AcquiredAt);
 
-    private sealed record ClaimInspection(ClaimOwnerState State, string Reason);
+    private sealed record ClaimInspection(ClaimOwnerState State, string Reason, string? Nonce);
     private enum ClaimOwnerState { Live, Stale, Ambiguous }
 }

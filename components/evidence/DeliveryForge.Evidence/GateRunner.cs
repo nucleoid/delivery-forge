@@ -55,8 +55,10 @@ public sealed class GateRunner
             request.Plugin?.Enabled == false ? EvaluationPluginStatus.Disabled : EvaluationPluginStatus.Selected);
         Directory.CreateDirectory(request.OutputDirectory);
         var claimPath = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId) + ".claim");
-        var gateDirectory = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
-        var gateDirectoryPreexisted = Directory.Exists(gateDirectory);
+        var gateDirectoryPrefix = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
+        // Every execution owns a fresh immutable attempt directory. A killed process may leave
+        // that directory incomplete, but can never reserve the canonical gate name forever.
+        var gateDirectory = gateDirectoryPrefix + ".attempt-" + Guid.NewGuid().ToString("N");
         GateClaimAcquisition claim;
         try
         {
@@ -68,36 +70,18 @@ public sealed class GateRunner
         }
         if (claim.Lease is null)
             return await PersistWithoutExecutionAsync(
-                request, gateDirectory + ".claim-incomplete-" + Guid.NewGuid().ToString("N"),
+                request, gateDirectoryPrefix + ".claim-incomplete-" + Guid.NewGuid().ToString("N"),
                 request.ExpectedRepository, request.ExpectedRepository,
                 NormalizedEvidence.Incomplete(claim.UnavailableReason ?? "Gate claim is unavailable."),
                 pluginBinding, CancellationToken.None).ConfigureAwait(false);
         await using var claimLease = claim.Lease;
         if (claim.InterruptedClaimPath is not null)
             return await PersistWithoutExecutionAsync(
-                request, gateDirectory + ".interrupted-" + Guid.NewGuid().ToString("N"),
+                request, gateDirectoryPrefix + ".interrupted-" + Guid.NewGuid().ToString("N"),
                 request.ExpectedRepository, request.ExpectedRepository,
                 NormalizedEvidence.Incomplete(
                     "Recovered a stale gate claim from an interrupted owner; retry is permitted after this durable receipt."),
                 pluginBinding, CancellationToken.None).ConfigureAwait(false);
-        if (gateDirectoryPreexisted)
-        {
-            var priorReceipts = Path.Combine(gateDirectory, "receipts");
-            var completedAttempt = Directory.Exists(priorReceipts) &&
-                    Directory.EnumerateFiles(priorReceipts, "*.json").Any() ||
-                File.Exists(Path.Combine(gateDirectory, "stdout.txt")) &&
-                    File.Exists(Path.Combine(gateDirectory, "stderr.txt"));
-            if (!completedAttempt)
-            {
-                var failureDirectory = gateDirectory + ".claim-incomplete-" + Guid.NewGuid().ToString("N");
-                return await PersistWithoutExecutionAsync(
-                    request, failureDirectory, request.ExpectedRepository, request.ExpectedRepository,
-                    NormalizedEvidence.Incomplete("Gate artifact directory was left incomplete before the atomic claim."),
-                    pluginBinding, CancellationToken.None).ConfigureAwait(false);
-            }
-            gateDirectory += ".retry-" + Guid.NewGuid().ToString("N");
-        }
-
         if (plugin is not Adapters.AntiSlopEvaluationPlugin && pluginBinding.Enabled &&
             ValidateCapabilityBinding(request, plugin) is { } nonScopeCapabilityFailure)
             return await PersistWithoutExecutionAsync(
