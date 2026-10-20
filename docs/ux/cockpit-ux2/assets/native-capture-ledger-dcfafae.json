@@ -1,0 +1,515 @@
+{
+  "schemaVersion": "delivery-forge.public-native-capture-ledger/1",
+  "revision": "UX-2",
+  "summary": {
+    "status": "NATIVE_CAPTURES_PENDING_PARENT_REVIEW",
+    "scope": "deterministic bundled synthetic presets only",
+    "capturesPublished": 13,
+    "hostsCaptured": [
+      "Claude Code 2.1.303",
+      "Codex CLI 0.162.1",
+      "Pi 1.3.0"
+    ],
+    "productionEffects": false,
+    "modelPrompts": false,
+    "actualDurableLedgerClaim": false,
+    "pixelReview": "Every published image was viewed by the capturing session before cropping; parent pixel review is still required before acceptance."
+  },
+  "source": {
+    "prototypeCommit": "dcfafae1f094e5f27645c4047548f07e697ed1a2",
+    "baseCommit": "e045e82e01788dc99e005100daa2bbe6252f2819",
+    "branch": "ux/ux2-native-captures from ux/ux2-cockpit-prototypes (PR #43 head e045e82)",
+    "renderer": "examples/presentation-demo/src/render-cockpit.mjs",
+    "fixture": "demo-014",
+    "syntheticOnly": true,
+    "note": "Claude frames bind to the base commit; render-cockpit.mjs and hosts/claude are byte-identical between the base and the fix commit, which touches only hosts/pi and its test."
+  },
+  "environment": {
+    "os": "Windows 11 laptop",
+    "terminal": "Windows Terminal (wt.exe), fresh window per host, pwsh -NoProfile",
+    "node": "v22.17.0",
+    "captureMethod": "window-rect screen copy of the terminal window driven by scripted keystrokes; every command was photographed in the input box and read by the operator session before Enter",
+    "sanitizationReview": "Only cropped terminal content is public. Title bars, the Codex footer (model, local task path, approval mode), the Claude Code header (local repo path) and all Pi footer rows (local path, branch, cost meter, model) are excluded."
+  },
+  "captures": [
+    {
+      "slot": "claude.launch",
+      "file": "claude-native-2.1.303-ux2-launch.png",
+      "label": "NATIVE",
+      "hostVersion": "Claude Code 2.1.303",
+      "surface": "native status line",
+      "action": "launch",
+      "view": "status",
+      "sourceCommit": "e045e82e01788dc99e005100daa2bbe6252f2819",
+      "fixture": "demo-014 (examples/presentation-demo/src/fixtures.mjs synthetic catalog)",
+      "command": "claude.exe 2.1.303 --settings <session settings json whose statusLine command is: node <repo>/examples/presentation-demo/hosts/claude/statusline.mjs --state <temp copy of hosts/claude/statusline-state.json>> --strict-mcp-config --mcp-config {\"mcpServers\":{}}; every CLAUDE*/ANTHROPIC* variable inherited from the launching environment was removed first; no prompt was submitted; exit via /exit; state file scenario=launch",
+      "capturedUtc": "2026-10-19T23:01:08.1024148Z",
+      "dimensions": {
+        "width": 1570,
+        "height": 215
+      },
+      "bytes": 21767,
+      "sha256": "8f4f151d93da8ad7dfa4cbda72e5f9810f81f0be78b34cf6fc7a5b1298417255",
+      "observed": "LAUNCH / INCOMPLETE; ceiling PLAN; estimate unavailable; Next: Review scope; NATIVE DEMO SURFACE tag right-aligned; the host adds its own \"auto mode on\" and \"0 tokens\" rows.",
+      "provenance": "startup status-line render; no prompt",
+      "crop": {
+        "kind": "physical window crop of the native status line and empty prompt",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "terminal": "Windows Terminal, 128 columns, default font"
+      }
+    },
+    {
+      "slot": "claude.execute",
+      "file": "claude-native-2.1.303-ux2-execute.png",
+      "label": "NATIVE",
+      "hostVersion": "Claude Code 2.1.303",
+      "surface": "native status line",
+      "action": "execute",
+      "view": "status",
+      "sourceCommit": "e045e82e01788dc99e005100daa2bbe6252f2819",
+      "fixture": "demo-014 (examples/presentation-demo/src/fixtures.mjs synthetic catalog)",
+      "command": "claude.exe 2.1.303 --settings <session settings json whose statusLine command is: node <repo>/examples/presentation-demo/hosts/claude/statusline.mjs --state <temp copy of hosts/claude/statusline-state.json>> --strict-mcp-config --mcp-config {\"mcpServers\":{}}; every CLAUDE*/ANTHROPIC* variable inherited from the launching environment was removed first; no prompt was submitted; exit via /exit; state file scenario=execute",
+      "capturedUtc": "2026-10-19T23:01:43.6458227Z",
+      "dimensions": {
+        "width": 1570,
+        "height": 215
+      },
+      "bytes": 21388,
+      "sha256": "7015c1138188f86c85c7afb0e193ec0d84d132e5a25d46ae6f63ffe3ffdedce5",
+      "observed": "EXECUTE / INCOMPLETE; ~0.0217 COMPLETE, 1 model; Next: Request pause.",
+      "provenance": "startup status-line render; no prompt",
+      "crop": {
+        "kind": "physical window crop of the native status line and empty prompt",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "terminal": "Windows Terminal, 128 columns, default font"
+      }
+    },
+    {
+      "slot": "claude.failed-gate",
+      "file": "claude-native-2.1.303-ux2-failed-gate.png",
+      "label": "NATIVE",
+      "hostVersion": "Claude Code 2.1.303",
+      "surface": "native status line",
+      "action": "failed-gate",
+      "view": "status",
+      "sourceCommit": "e045e82e01788dc99e005100daa2bbe6252f2819",
+      "fixture": "demo-014 (examples/presentation-demo/src/fixtures.mjs synthetic catalog)",
+      "command": "claude.exe 2.1.303 --settings <session settings json whose statusLine command is: node <repo>/examples/presentation-demo/hosts/claude/statusline.mjs --state <temp copy of hosts/claude/statusline-state.json>> --strict-mcp-config --mcp-config {\"mcpServers\":{}}; every CLAUDE*/ANTHROPIC* variable inherited from the launching environment was removed first; no prompt was submitted; exit via /exit; state file scenario=failed-gate",
+      "capturedUtc": "2026-10-19T23:02:19.2975455Z",
+      "dimensions": {
+        "width": 1570,
+        "height": 215
+      },
+      "bytes": 22660,
+      "sha256": "95a716d404b88fab3350e82c02116609735934d453ff43a097f2a33346dd92a5",
+      "observed": "EVALUATE / INCOMPLETE; Mutation evidence is incomplete; ~0.0442 PARTIAL, 2 models + 1 unpriced; Next: Inspect missing evidence.",
+      "provenance": "startup status-line render; no prompt",
+      "crop": {
+        "kind": "physical window crop of the native status line and empty prompt",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "terminal": "Windows Terminal, 128 columns, default font"
+      }
+    },
+    {
+      "slot": "claude.missing-state",
+      "file": "claude-native-2.1.303-ux2-missing-state.png",
+      "label": "NATIVE",
+      "hostVersion": "Claude Code 2.1.303",
+      "surface": "native status line",
+      "action": "missing-state",
+      "view": "fallback",
+      "sourceCommit": "e045e82e01788dc99e005100daa2bbe6252f2819",
+      "fixture": "demo-014 (examples/presentation-demo/src/fixtures.mjs synthetic catalog)",
+      "command": "claude.exe 2.1.303 --settings <session settings json whose statusLine command is: node <repo>/examples/presentation-demo/hosts/claude/statusline.mjs --state <temp copy of hosts/claude/statusline-state.json>> --strict-mcp-config --mcp-config {\"mcpServers\":{}}; every CLAUDE*/ANTHROPIC* variable inherited from the launching environment was removed first; no prompt was submitted; exit via /exit; state file deleted",
+      "capturedUtc": "2026-10-19T23:02:54.9704522Z",
+      "dimensions": {
+        "width": 1570,
+        "height": 215
+      },
+      "bytes": 17864,
+      "sha256": "acbb89456a3f2721403bd7050c9a9d2609dfc31fef9f50fe4c5326f53c08c1fe",
+      "observed": "Fail-closed fallback: NATIVE DEMO SURFACE | DEMO SYNTHETIC, state unavailable / INCOMPLETE, Reconciliation required, explicit fixture state is unavailable.",
+      "provenance": "startup status-line render with the state file deleted; no prompt",
+      "crop": {
+        "kind": "physical window crop of the native status line and empty prompt",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "terminal": "Windows Terminal, 128 columns, default font"
+      }
+    },
+    {
+      "slot": "codex.cockpit",
+      "file": "codex-native-0.162.1-ux2-cockpit.png",
+      "label": "NATIVE",
+      "hostVersion": "Codex CLI 0.162.1",
+      "surface": "native user-shell transcript",
+      "action": "failed-gate",
+      "view": "cockpit",
+      "sourceCommit": "dcfafae1f094e5f27645c4047548f07e697ed1a2",
+      "fixture": "demo-014 (examples/presentation-demo/src/fixtures.mjs synthetic catalog)",
+      "command": "!node forge-demo/scripts/demo.mjs failed-gate 80 --presentation native",
+      "capturedUtc": "2026-10-19T23:59:22.6998772Z",
+      "dimensions": {
+        "width": 700,
+        "height": 720
+      },
+      "bytes": 66289,
+      "sha256": "0e5bf77ffb7ff7129d56f2ef927ac879dda790068d45825cd69cb7aaa943cf51",
+      "observed": "Full 80-column framed UX-2 cockpit in the transcript under \"You ran node forge-demo/scripts/demo.mjs failed-gate 80 --presentation native\": identity rail, phase trail with EVALUATE marked, blocker MUTATION_ENUMERATION_INCOMPLETE, aligned evidence rows, why INCOMPLETE line, Control, Next with intent preview-only tag, Usage with share-of-known bars and UNPRICED row, Integrations, dim footer. Codex renders the shell output monochrome; the demo was run without --color.",
+      "provenance": "literal local user-shell command (! prefix) typed into the composer, verified on screen in Shell mode before Enter; no model turn",
+      "crop": {
+        "kind": "physical window crop of the native transcript",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "terminal": "Windows Terminal, font zoomed out two steps with Ctrl+minus (runtime only, no settings change) so the 45-line cockpit fits one viewport"
+      }
+    },
+    {
+      "slot": "codex.status",
+      "file": "codex-native-0.162.1-ux2-status.png",
+      "label": "NATIVE",
+      "hostVersion": "Codex CLI 0.162.1",
+      "surface": "native user-shell transcript",
+      "action": "failed-gate",
+      "view": "status",
+      "sourceCommit": "dcfafae1f094e5f27645c4047548f07e697ed1a2",
+      "fixture": "demo-014 (examples/presentation-demo/src/fixtures.mjs synthetic catalog)",
+      "command": "!node forge-demo/scripts/demo.mjs failed-gate 80 --presentation native --view status",
+      "capturedUtc": "2026-10-20T00:00:09.1770049Z",
+      "dimensions": {
+        "width": 780,
+        "height": 835
+      },
+      "bytes": 77303,
+      "sha256": "9d9c283147265ee16c66c72d5324cbff22ab33a8fe9349251da823926acfeef2",
+      "observed": "Four-line UX-2 status view appended below the cockpit: identity line with NATIVE DEMO SURFACE tag, EVALUATE / INCOMPLETE, API-equivalent estimate ~0.0442 PARTIAL, Next action.",
+      "provenance": "literal local user-shell command; no model turn",
+      "crop": {
+        "kind": "physical window crop of the native transcript",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "terminal": "Windows Terminal, font zoomed out two steps with Ctrl+minus (runtime only, no settings change) so the 45-line cockpit fits one viewport"
+      }
+    },
+    {
+      "slot": "codex.usage-panel",
+      "file": "codex-native-0.162.1-ux2-usage-panel.png",
+      "label": "NATIVE",
+      "hostVersion": "Codex CLI 0.162.1",
+      "surface": "native user-shell transcript",
+      "action": "failed-gate",
+      "view": "usage-panel",
+      "sourceCommit": "dcfafae1f094e5f27645c4047548f07e697ed1a2",
+      "fixture": "demo-014 (examples/presentation-demo/src/fixtures.mjs synthetic catalog)",
+      "command": "!node forge-demo/scripts/demo.mjs failed-gate 80 --presentation native --view usage-panel",
+      "capturedUtc": "2026-10-20T00:00:52.8575445Z",
+      "dimensions": {
+        "width": 820,
+        "height": 645
+      },
+      "bytes": 65361,
+      "sha256": "9fa378016af83399b41ea9535ad2f01a2583bacdc36028813258cc1357350e04",
+      "observed": "UX-2 usage panel: USD 0.044225 known PARTIAL, 19,300 tokens, 1 unpriced, per-model rows with share-of-known bars, UNPRICED unresolved row, requests/attempts table; actual charge unknown.",
+      "provenance": "literal local user-shell command; no model turn",
+      "crop": {
+        "kind": "physical window crop of the native transcript",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "terminal": "Windows Terminal, font zoomed out two steps with Ctrl+minus (runtime only, no settings change) so the 45-line cockpit fits one viewport"
+      }
+    },
+    {
+      "slot": "pi.widget-launch",
+      "file": "pi-native-1.3.0-ux2-widget-launch.png",
+      "label": "NATIVE",
+      "hostVersion": "Pi 1.3.0 (latest at capture; UX-1 pinned 0.80.7 superseded by owner decision)",
+      "surface": "native extension widget",
+      "action": "launch",
+      "view": "widget",
+      "sourceCommit": "dcfafae1f094e5f27645c4047548f07e697ed1a2",
+      "fixture": "demo-014 (examples/presentation-demo/src/fixtures.mjs synthetic catalog)",
+      "command": "pi.cmd 1.3.0 -e <repo>/examples/presentation-demo/hosts/pi/forge-demo-extension.js --no-extensions --no-session --no-context-files; every CLAUDE*/ANTHROPIC* variable inherited from the launching environment was removed first; only /forge-demo commands and panel keys were sent, each verified on screen before Enter; no model turn",
+      "capturedUtc": "2026-10-20T00:02:01.3341951Z",
+      "dimensions": {
+        "width": 1570,
+        "height": 160
+      },
+      "bytes": 16161,
+      "sha256": "ddc491899db7a2806678c5bce9cdd1fd40852576aca5530d338ce23948c9342a",
+      "observed": "Persistent four-line UX-2 status widget above the editor at session start: LAUNCH / INCOMPLETE, ceiling PLAN, estimate unavailable, Next: Review scope; coloured through the host theme after the SGR fix. The empty editor box below it is the host prompt; the Pi footer (local path, branch, cost meter, model, and the extension setStatus row \"FORGE DEMO demo-014 LAUNCH\") is cropped out.",
+      "provenance": "offline extension command or panel key; no model turn",
+      "crop": {
+        "kind": "physical window crop of the native widget or custom panel area",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "terminal": "Windows Terminal, 128 columns x 30 rows, default font"
+      }
+    },
+    {
+      "slot": "pi.widget-failed-gate",
+      "file": "pi-native-1.3.0-ux2-widget-failed-gate.png",
+      "label": "NATIVE",
+      "hostVersion": "Pi 1.3.0 (latest at capture; UX-1 pinned 0.80.7 superseded by owner decision)",
+      "surface": "native extension widget",
+      "action": "failed-gate",
+      "view": "widget",
+      "sourceCommit": "dcfafae1f094e5f27645c4047548f07e697ed1a2",
+      "fixture": "demo-014 (examples/presentation-demo/src/fixtures.mjs synthetic catalog)",
+      "command": "pi.cmd 1.3.0 -e <repo>/examples/presentation-demo/hosts/pi/forge-demo-extension.js --no-extensions --no-session --no-context-files; every CLAUDE*/ANTHROPIC* variable inherited from the launching environment was removed first; only /forge-demo commands and panel keys were sent, each verified on screen before Enter; no model turn",
+      "capturedUtc": "2026-10-20T00:03:05.9852292Z",
+      "dimensions": {
+        "width": 1570,
+        "height": 155
+      },
+      "bytes": 16786,
+      "sha256": "10904b58302583ce181d83c4ef2bb6e984b609abfec6eafa4c4d76682fd7518d",
+      "observed": "Widget after /forge-demo scenario failed-gate: EVALUATE / INCOMPLETE, Mutation evidence is incomplete, ~0.0442 PARTIAL 2 models + 1 unpriced, Next: Inspect missing evidence.",
+      "provenance": "offline extension command or panel key; no model turn",
+      "crop": {
+        "kind": "physical window crop of the native widget or custom panel area",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "terminal": "Windows Terminal, 128 columns x 30 rows, default font"
+      }
+    },
+    {
+      "slot": "pi.detail-list",
+      "file": "pi-native-1.3.0-ux2-detail-list.png",
+      "label": "NATIVE",
+      "hostVersion": "Pi 1.3.0 (latest at capture; UX-1 pinned 0.80.7 superseded by owner decision)",
+      "surface": "native custom evidence panel",
+      "action": "failed-gate",
+      "view": "evidence-list",
+      "sourceCommit": "dcfafae1f094e5f27645c4047548f07e697ed1a2",
+      "fixture": "demo-014 (examples/presentation-demo/src/fixtures.mjs synthetic catalog)",
+      "command": "pi.cmd 1.3.0 -e <repo>/examples/presentation-demo/hosts/pi/forge-demo-extension.js --no-extensions --no-session --no-context-files; every CLAUDE*/ANTHROPIC* variable inherited from the launching environment was removed first; only /forge-demo commands and panel keys were sent, each verified on screen before Enter; no model turn",
+      "capturedUtc": "2026-10-20T00:03:36.8785422Z",
+      "dimensions": {
+        "width": 1570,
+        "height": 280
+      },
+      "bytes": 37051,
+      "sha256": "544234fac237c49d28cd6bb034f77f487f3af26f6cc03fbf8bdc23d0e17b5c5a",
+      "observed": "Custom panel from /forge-demo detail: aligned evidence rows with the first row selected (inverse video, > prefix) and the j/k Enter Esc help line.",
+      "provenance": "offline extension command or panel key; no model turn",
+      "crop": {
+        "kind": "physical window crop of the native widget or custom panel area",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "terminal": "Windows Terminal, 128 columns x 30 rows, default font"
+      }
+    },
+    {
+      "slot": "pi.detail-selection",
+      "file": "pi-native-1.3.0-ux2-detail-selection.png",
+      "label": "NATIVE",
+      "hostVersion": "Pi 1.3.0 (latest at capture; UX-1 pinned 0.80.7 superseded by owner decision)",
+      "surface": "native custom evidence panel",
+      "action": "failed-gate",
+      "view": "evidence-list",
+      "sourceCommit": "dcfafae1f094e5f27645c4047548f07e697ed1a2",
+      "fixture": "demo-014 (examples/presentation-demo/src/fixtures.mjs synthetic catalog)",
+      "command": "pi.cmd 1.3.0 -e <repo>/examples/presentation-demo/hosts/pi/forge-demo-extension.js --no-extensions --no-session --no-context-files; every CLAUDE*/ANTHROPIC* variable inherited from the launching environment was removed first; only /forge-demo commands and panel keys were sent, each verified on screen before Enter; no model turn",
+      "capturedUtc": "2026-10-20T00:04:00.0467233Z",
+      "dimensions": {
+        "width": 1570,
+        "height": 280
+      },
+      "bytes": 37057,
+      "sha256": "71671c87fc0fa6cb769c3951703e4fd3ee3c767d0c144799914377d860f5f26d",
+      "observed": "Same panel after one j keypress: selection moved to the Tests row before Enter.",
+      "provenance": "offline extension command or panel key; no model turn",
+      "crop": {
+        "kind": "physical window crop of the native widget or custom panel area",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "terminal": "Windows Terminal, 128 columns x 30 rows, default font"
+      }
+    },
+    {
+      "slot": "pi.detail-evidence",
+      "file": "pi-native-1.3.0-ux2-detail-evidence.png",
+      "label": "NATIVE",
+      "hostVersion": "Pi 1.3.0 (latest at capture; UX-1 pinned 0.80.7 superseded by owner decision)",
+      "surface": "native custom evidence panel",
+      "action": "failed-gate",
+      "view": "evidence-detail",
+      "sourceCommit": "dcfafae1f094e5f27645c4047548f07e697ed1a2",
+      "fixture": "demo-014 (examples/presentation-demo/src/fixtures.mjs synthetic catalog)",
+      "command": "pi.cmd 1.3.0 -e <repo>/examples/presentation-demo/hosts/pi/forge-demo-extension.js --no-extensions --no-session --no-context-files; every CLAUDE*/ANTHROPIC* variable inherited from the launching environment was removed first; only /forge-demo commands and panel keys were sent, each verified on screen before Enter; no model turn",
+      "capturedUtc": "2026-10-20T00:04:05.3744246Z",
+      "dimensions": {
+        "width": 1570,
+        "height": 305
+      },
+      "bytes": 34851,
+      "sha256": "79f243fe6c5e1a9163de994ecf8ce9173fbefe59cdb08ffda0d1120ac9210d7c",
+      "observed": "Evidence detail for the selected row after Enter: receipt, outcome, full head and tree hard-wrapped, with the Esc-to-list help line.",
+      "provenance": "offline extension command or panel key; no model turn",
+      "crop": {
+        "kind": "physical window crop of the native widget or custom panel area",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "terminal": "Windows Terminal, 128 columns x 30 rows, default font"
+      }
+    },
+    {
+      "slot": "pi.usage",
+      "file": "pi-native-1.3.0-ux2-usage.png",
+      "label": "NATIVE",
+      "hostVersion": "Pi 1.3.0 (latest at capture; UX-1 pinned 0.80.7 superseded by owner decision)",
+      "surface": "native custom usage panel",
+      "action": "failed-gate",
+      "view": "usage",
+      "sourceCommit": "dcfafae1f094e5f27645c4047548f07e697ed1a2",
+      "fixture": "demo-014 (examples/presentation-demo/src/fixtures.mjs synthetic catalog)",
+      "command": "pi.cmd 1.3.0 -e <repo>/examples/presentation-demo/hosts/pi/forge-demo-extension.js --no-extensions --no-session --no-context-files; every CLAUDE*/ANTHROPIC* variable inherited from the launching environment was removed first; only /forge-demo commands and panel keys were sent, each verified on screen before Enter; no model turn",
+      "capturedUtc": "2026-10-20T00:04:58.3134174Z",
+      "dimensions": {
+        "width": 1570,
+        "height": 510
+      },
+      "bytes": 70497,
+      "sha256": "1c6124182e1f529799a47b7e367cee898212b7bbf30c2b7a0b93c6be2562bfdb",
+      "observed": "Custom usage panel from /forge-demo usage: USD 0.044225 known PARTIAL, 19,300 tokens, 1 unpriced, per-model rows and share bars, bounded to 18 rows with scroll hint.",
+      "provenance": "offline extension command or panel key; no model turn",
+      "crop": {
+        "kind": "physical window crop of the native widget or custom panel area",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "terminal": "Windows Terminal, 128 columns x 30 rows, default font"
+      }
+    }
+  ],
+  "versionPolicy": {
+    "decision": "Owner decision (Mitch, 2026-10-20, relayed by the parent session): UX-2 native captures use the latest installed version of each TUI, not the UX-1 pinned profiles. This supersedes the 'no host upgrade' line in epic #36 for this revision. The owner may override on the PR.",
+    "hosts": [
+      {
+        "host": "Codex CLI",
+        "ux1Pinned": "0.153.4",
+        "captured": "0.162.1",
+        "basis": "globally installed; equals the latest npm publish at capture time"
+      },
+      {
+        "host": "Claude Code CLI",
+        "ux1Pinned": "2.1.302 preflight / 2.1.303 captured",
+        "captured": "2.1.303",
+        "basis": "installed; current through its native installer (npm lags and is not the distribution channel)"
+      },
+      {
+        "host": "Pi",
+        "ux1Pinned": "0.80.7",
+        "captured": "1.3.0",
+        "basis": "installed by the owner via the pi.dev installer during this session; the capability matrix had already inspected 1.3.0 source as research context"
+      }
+    ],
+    "capabilityMatrixNote": "docs/ux/native-presentations/capability-matrix.md still pins the UX-1 profiles; admitting 0.162.1 and 1.3.0 there is a documentation follow-up, not done in this PR."
+  },
+  "hostLaunch": {
+    "codex": {
+      "binary": "C:/Users/<user>/AppData/Roaming/npm/codex.cmd (codex-cli 0.162.1). A 0.153.4 binary found in the npx cache was used for an earlier capture set that the owner's version decision superseded; those images are not published.",
+      "home": "normal CODEX_HOME (logged-in account); no authentication file was read or copied; config.toml not edited",
+      "overrides": [
+        "-c mcp_servers.node_repl.enabled=false",
+        "-c mcp_servers.engram.enabled=false",
+        "-c mcp_servers.openaiDeveloperDocs.enabled=false",
+        "-c mcp_servers.content-orchestration.enabled=false",
+        "-c mcp_servers.context7.enabled=false",
+        "-c mcp_servers.total-recall.enabled=false",
+        "-c mcp_servers.GitKraken.enabled=false",
+        "-c plugins.unified-computer-use@openai-bundled.enabled=false",
+        "-c projects.<task-dir>.trust_level=\"trusted\"",
+        "--cd <temp>/codex-task"
+      ],
+      "mcpReceipt": "codex mcp list (0.162.1) with the same overrides, before launch: GitKraken disabled; code-review disabled; codex_app disabled; content-orchestration disabled; context7 disabled; node_repl disabled; engram disabled; openaiDeveloperDocs disabled; total-recall disabled; cua_repl absent (plugin disabled); 0 enabled",
+      "taskDirectory": "empty task-owned temp directory containing one NTFS junction `forge-demo` to <repo>/examples/presentation-demo, so the transcript command stays relative and shows no absolute path",
+      "configWrites": "none; the trust override replaces the interactive trust prompt that would otherwise write a [projects] entry"
+    },
+    "claude": {
+      "binary": "C:/Users/<user>/.local/bin/claude.exe 2.1.303",
+      "settings": "--settings <temp>/claude/settings.session.json = {\"statusLine\":{\"type\":\"command\",\"command\":\"node <repo>/examples/presentation-demo/hosts/claude/statusline.mjs --state <temp>/claude/statusline-state.json\"}}",
+      "mcp": "--strict-mcp-config --mcp-config <temp>/claude/mcp-empty.json ({\"mcpServers\":{}})",
+      "environment": "launcher removed every CLAUDE* and ANTHROPIC* variable inherited from the capturing session; without that, Claude Code showed a 'Transcript saving is off - inherited CLAUDE_CODE_CHILD_SESSION marker' row above the status line (that frame was discarded)",
+      "stateFile": "per-scenario rewrite of a temp copy of hosts/claude/statusline-state.json; deleted for missing-state; the repository file was not modified",
+      "exit": "/exit typed, verified on screen, then Enter",
+      "configWrites": "none (session-scoped --settings only)"
+    },
+    "pi": {
+      "binary": "C:/Users/<user>/.pi/agent/bin/pi.cmd 1.3.0",
+      "command": "pi -e <repo>/examples/presentation-demo/hosts/pi/forge-demo-extension.js --no-extensions --no-session --no-context-files",
+      "environment": "launcher removed every CLAUDE* and ANTHROPIC* variable inherited from the capturing session",
+      "model": "Pi's footer showed the owner's configured default model; no prompt was submitted. Only /forge-demo commands and panel keys were sent, each verified on screen before Enter. The owner's provider connection was not touched.",
+      "apiCheck": "Installed 1.3.0 dist/core/extensions/types.d.ts: registerCommand(name, options), setWidget(key, (tui, theme) => Component, {placement}), setStatus(key, text), custom<T>((tui, theme, keybindings, done) => Component), appendEntry(customType, data), sendMessage(message, {triggerTurn}), ctx.mode / ctx.hasUI, sessionManager.getBranch(fromId?) all match what the extension assumes; no signature moved.",
+      "configWrites": "none (--no-session; settings untouched)"
+    }
+  },
+  "findings": [
+    {
+      "host": "Pi 1.3.0",
+      "surface": "native extension widget",
+      "severity": "defect in hosts/pi/forge-demo-extension.js at UX-2 source e045e82, fixed on the base branch in dcfafae",
+      "detail": "With a real Pi theme useColor() is true, so renderStatusLine emits ANSI colour sequences; the widget then passed each line through clean(), whose control-character regex stripped the ESC byte and left the remainder as literal text ('[1mFORGE DEMO ... [0m'). The detail and usage panels never used clean() and were unaffected. Harness tests missed it because their test doubles carry no theme.fg function. The owner's session fixed clean() to keep ESC (dcfafae) with a real-theme widget test; this session had drafted an equivalent fix, which was dropped in favour of the base-branch commit. The first native widget frame that showed the defect is retained privately; the published Pi frames come from the fixed source."
+    },
+    {
+      "host": "Claude Code 2.1.303",
+      "surface": "native status line",
+      "severity": "observation",
+      "detail": "At 100 terminal columns Claude Code elides the end of the first status row with an ellipsis (the right-aligned NATIVE DEMO SURFACE tag was cut); at 128 columns the full row shows. Published Claude frames are the 128-column set."
+    },
+    {
+      "host": "Codex CLI 0.162.1",
+      "surface": "native user-shell transcript",
+      "severity": "observation",
+      "detail": "Codex prints user-shell output monochrome under a 'You ran ...' header; box-drawing and share-bar glyphs render correctly. The 45-line cockpit needs more rows than a default 1080p terminal offers, so the terminal font was zoomed out two steps at runtime (Ctrl+minus, no settings change)."
+    }
+  ],
+  "incidents": [
+    {
+      "when": "2026-10-19T22:33Z",
+      "what": "The first scripted key-send targeted the newest Windows Terminal window instead of the capture window. That window was the owner's own pi.dev installer; the keystrokes answered its 'Install Pi?' prompt with 'do nothing' and the rest failed as a PowerShell command. The owner re-ran the installer afterwards. The toolkit was changed to target only a window whose title matches the capture marker.",
+      "effectOnCaptures": "none"
+    },
+    {
+      "when": "2026-10-19T22:42Z",
+      "what": "A stray character typed at the keyboard during a scripted send turned the first Codex command into 'd!node ...', which Codex submitted as a prompt instead of a user-shell command. The turn ran the owner's own Codex hook, which timed out, and Codex aborted the turn (session log: turn_aborted, reason interrupted, 6.6 s; no assistant message, no token_usage record). That session was discarded; every published Codex frame comes from a later session whose only inputs were three '!' commands, each verified in the composer before Enter.",
+      "effectOnCaptures": "none; modelPrompts stays false for every published frame, but one accidental prompt submission with no recorded completion occurred in a discarded session"
+    }
+  ],
+  "caveats": [
+    "Codex printed enterprise 'Ignoring unknown features requirement ultrafast_mode' warnings at startup; they belong to the owner's managed configuration and are excluded by the crop.",
+    "Claude Code shows its own 'auto mode on' row and token counter around the Forge status line; both are host chrome and carry no private data, so they were kept.",
+    "No idle refresh of the Claude Code status line was exercised; each state is a fresh startup render.",
+    "The owner's Codex hooks (hooks.json) and Pi settings remained active; nothing in them was read beyond key names.",
+    "The terminal windows were driven by scripted keystrokes with the owner present at the machine; two incidents are recorded above and neither affects a published frame.",
+    "The Claude frames were captured at e045e82; render-cockpit.mjs and hosts/claude are unchanged between e045e82 and the Pi/Codex source commit dcfafae (the commits in between fix Windows-only tests and the Pi widget)."
+  ]
+}

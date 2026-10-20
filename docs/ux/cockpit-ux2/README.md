@@ -1,6 +1,6 @@
 # FORGE cockpit — UX-2 prototypes for the terminal, Claude Code Desktop and Codex Desktop
 
-**Revision UX-2, 2026-10-20. Prototype only: HARNESS RENDER and DESKTOP MOCKUP images, synthetic fixtures, zero live adapters.** This revision answers the UX half of [epic #36](https://github.com/nucleoid/delivery-forge/issues/36): one evidence model, presented well on every surface a developer actually sits in front of. It supersedes the presentation layer of PR #33 while keeping its projection, fixtures, usage ledger, intent preview and honesty rules untouched. The UX-1 material under [`../native-presentations`](../native-presentations/README.md) remains the frozen baseline that the fourteen installed-host captures were taken from.
+**Revision UX-2, 2026-10-20. Prototype only: HARNESS RENDER and DESKTOP MOCKUP images plus NATIVE installed-host captures (see [Native captures](#native-captures)), synthetic fixtures, zero live adapters.** This revision answers the UX half of [epic #36](https://github.com/nucleoid/delivery-forge/issues/36): one evidence model, presented well on every surface a developer actually sits in front of. It supersedes the presentation layer of PR #33 while keeping its projection, fixtures, usage ledger, intent preview and honesty rules untouched. The UX-1 material under [`../native-presentations`](../native-presentations/README.md) remains the frozen baseline that the fourteen installed-host captures were taken from.
 
 ## What changed and why
 
@@ -66,9 +66,9 @@ The selected row is inverse video and prefixed with `>`. Detail hard-wraps the f
 
 | Host | Surface | What UX-2 changes | Boundary |
 |---|---|---|---|
-| Codex CLI 0.153.4 | `!node scripts/demo.mjs <state> 80` user-shell transcript; `forge_demo_status` MCP text | Default MCP view is the framed cockpit; `view: "status"` and `view: "usage"` added; `ascii: true` for transcripts that cannot draw box characters; UX-1 views kept as `legacy-*` | Still a disciplined transcript. No footer item, no persistent widget. Not re-captured on the installed host for UX-2 |
-| Claude Code CLI 2.1.303 | `statusLine` command | `hosts/claude/statusline.mjs` emits the four-line UX-2 status with ANSI colour unless `NO_COLOR=1`; all fail-closed paths unchanged | Reads the explicit fixture state file only. Not re-captured on the installed host for UX-2 |
-| Pi 0.80.7 | widget above editor, `/forge-demo detail`, `/forge-demo usage` | Widget renders the status line; detail and usage panels use the new list, detail and usage renderers; colour only when Pi hands the component a real theme | Same deterministic commands, same `ctx.mode === "tui"` guard, same branch restore and shutdown |
+| Codex CLI 0.162.1 (UX-1 pin 0.153.4) | `!node scripts/demo.mjs <state> 80` user-shell transcript; `forge_demo_status` MCP text | Default MCP view is the framed cockpit; `view: "status"` and `view: "usage"` added; `ascii: true` for transcripts that cannot draw box characters; UX-1 views kept as `legacy-*` | Still a disciplined transcript. No footer item, no persistent widget. Captured on the installed host, see [Native captures](#native-captures) |
+| Claude Code CLI 2.1.303 | `statusLine` command | `hosts/claude/statusline.mjs` emits the four-line UX-2 status with ANSI colour unless `NO_COLOR=1`; all fail-closed paths unchanged | Reads the explicit fixture state file only. Captured on the installed host, see [Native captures](#native-captures) |
+| Pi 1.3.0 (UX-1 pin 0.80.7) | widget above editor, `/forge-demo detail`, `/forge-demo usage` | Widget renders the status line; detail and usage panels use the new list, detail and usage renderers; colour only when Pi hands the component a real theme | Same deterministic commands, same `ctx.mode === "tui"` guard, same branch restore and shutdown. Captured on the installed host, see [Native captures](#native-captures) |
 
 ## Desktop surfaces
 
@@ -106,6 +106,65 @@ MCP App surfaces follow the public `openai/mcp-extensions` spec: an **inline** c
 
 ![Shared panel, usage tab](assets/panel-usage.png)
 
+## Native captures
+
+**Installed-host evidence for the UX-2 renderer, captured 2026-10-20 on a Windows 11 laptop.** Every image in this section is labelled **NATIVE**: a cropped screen capture of the real host rendering the UX-2 output, driven only by local input (`!` user-shell lines in Codex, a session-scoped `statusLine` in Claude Code, `/forge-demo` commands and panel keys in Pi). No prompt was sent to any model for a published frame. Host version, surface, source commit, fixture, command, capture time, dimensions and SHA-256 for each file are in the [UX-2 capture ledger](assets/native-capture-ledger-dcfafae.json), together with the host launch lines, the MCP-disabled receipt, one defect the captures exposed, two incidents during capture and the caveats. Parent pixel review has not yet accepted these images.
+
+**Versions.** By owner decision this revision captures the latest installed version of each TUI rather than the UX-1 pinned profiles, which supersedes the "no host upgrade" line in [epic #36](https://github.com/nucleoid/delivery-forge/issues/36) for UX-2; the owner may still override on the PR. The capability matrix still lists the UX-1 pins and is not updated here.
+
+| Host | UX-1 pinned | Captured | Frames |
+|---|---|---|---|
+| Claude Code CLI | 2.1.303 | **2.1.303** (current; exact match) | 4 |
+| Codex CLI | 0.153.4 | **0.162.1** (installed, equals the latest npm publish) | 3 |
+| Pi | 0.80.7 | **1.3.0** (installed by the owner during capture) | 6 |
+
+### Claude Code 2.1.303, native status line
+
+Session-scoped `--settings` pointing `statusLine` at `hosts/claude/statusline.mjs` with a temp copy of the fixture state file, `--strict-mcp-config` with no servers, no prompt, one fresh start per state. The `auto mode on` row and the token counter are the host's own.
+
+![NATIVE Claude Code 2.1.303: launch](assets/claude-native-2.1.303-ux2-launch.png)
+
+![NATIVE Claude Code 2.1.303: execute](assets/claude-native-2.1.303-ux2-execute.png)
+
+![NATIVE Claude Code 2.1.303: failed gate](assets/claude-native-2.1.303-ux2-failed-gate.png)
+
+![NATIVE Claude Code 2.1.303: missing state fallback](assets/claude-native-2.1.303-ux2-missing-state.png)
+
+At 100 columns Claude Code elides the end of the first status row with an ellipsis; the frames above are at 128 columns.
+
+### Codex CLI 0.162.1, native user-shell transcript
+
+Every configured MCP server disabled by `-c` override (receipt in the ledger), a `-c projects` trust override instead of a config write, and an empty task directory holding one junction to `examples/presentation-demo`. Codex prints `!` output monochrome, so these show the UX-2 shapes without colour.
+
+![NATIVE Codex 0.162.1: UX-2 cockpit, failed gate](assets/codex-native-0.162.1-ux2-cockpit.png)
+
+![NATIVE Codex 0.162.1: UX-2 status view below the cockpit](assets/codex-native-0.162.1-ux2-status.png)
+
+![NATIVE Codex 0.162.1: UX-2 usage panel](assets/codex-native-0.162.1-ux2-usage-panel.png)
+
+### Pi 1.3.0, native widget and custom panels
+
+`pi -e hosts/pi/forge-demo-extension.js --no-extensions --no-session --no-context-files`. The installed 1.3.0 extension types were checked against what the extension assumes (`registerCommand`, `setWidget` with placement, `setStatus`, `custom`, `appendEntry`, `sendMessage`, `sessionManager.getBranch`); no signature moved.
+
+The first native widget frame exposed a UX-2 defect: with a real host theme the widget scrubbed the ESC byte out of its own colour sequences and printed `[1mFORGE DEMO ... [0m` as text. That is fixed on the base branch (`dcfafae`, `clean()` keeps ESC, with a real-theme widget test), and the frames below come from the fixed source.
+
+![NATIVE Pi 1.3.0: widget at launch](assets/pi-native-1.3.0-ux2-widget-launch.png)
+
+![NATIVE Pi 1.3.0: widget at failed gate](assets/pi-native-1.3.0-ux2-widget-failed-gate.png)
+
+![NATIVE Pi 1.3.0: /forge-demo detail, evidence list](assets/pi-native-1.3.0-ux2-detail-list.png)
+
+![NATIVE Pi 1.3.0: selection moved with j](assets/pi-native-1.3.0-ux2-detail-selection.png)
+
+![NATIVE Pi 1.3.0: Enter opens evidence detail](assets/pi-native-1.3.0-ux2-detail-evidence.png)
+
+![NATIVE Pi 1.3.0: /forge-demo usage](assets/pi-native-1.3.0-ux2-usage.png)
+
+### What this changes about the claims above
+
+- The three "not re-captured on the installed host for UX-2" notes in the host-wiring table are superseded by this section.
+- Admission of 0.162.1 and 1.3.0 in the capability matrix, and any UX-1 ledger cross-reference, remain follow-up documentation work.
+
 ## Honesty rules carried over unchanged
 
 - Every surface shows `DEMO • SYNTHETIC`, the provenance (`HARNESS RENDER`, `NATIVE DEMO SURFACE` or `DESKTOP MOCKUP`), `actual charge unknown`, and that intent output is preview only with `sideEffects 0` and `authorityIssued false`.
@@ -128,6 +187,6 @@ npm run screenshots:ux2           # writes assets/*.png and assets/manifest.json
 
 ## Not done in this revision
 
-- No installed-host recapture of Codex, Claude Code or Pi with the UX-2 renderer. The UX-1 native captures remain the only installed-host evidence; UX-2 native acceptance is the same work item as before (#38, #39, #40, #41) with a better renderer to point at.
+- Installed-host captures of Codex, Claude Code and Pi with the UX-2 renderer now exist (see [Native captures](#native-captures)), but they have not been through parent pixel review, and the capability matrix still lists the UX-1 pins; acceptance of the native surfaces remains the work items #38, #39, #40 and #41.
 - No embedding test in Claude Code Desktop or the Codex desktop app. The mockups show where the panel would live according to public documentation; admission of each desktop surface still needs its own capability and version check.
 - The companion web app and the mobile layout from UX-1 were intentionally left as they were; the user asked for the TUI and the two desktop experiences.
