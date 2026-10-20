@@ -48,7 +48,7 @@ public sealed class ClaudeReviewerIsolationTests
         var root = Path.Combine(Path.GetTempPath(), "forge-reviewer-cwd-overlap-" + Guid.NewGuid().ToString("N"));
         var worker = Path.Combine(root, "worker"); Directory.CreateDirectory(worker);
         var artifacts = Path.Combine(worker, "artifacts");
-        Assert.Throws<IOException>(() => ClaudeReviewerWorkingDirectory.Create(original, "run-cwd-control", artifacts,
+        Assert.Throws<ToolUsageException>(() => ClaudeReviewerWorkingDirectory.Create(original, "run-cwd-control", artifacts,
             Path.Combine(root, "parent"), worker, Path.Combine(root, "result")));
         Assert.False(Directory.Exists(artifacts)); original.Check();
     }

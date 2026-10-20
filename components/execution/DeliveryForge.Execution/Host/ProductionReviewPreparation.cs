@@ -37,8 +37,9 @@ public sealed class ProductionReviewSourceOwner
         this.original = original ?? throw new ArgumentNullException(nameof(original));
         this.parent = parent ?? throw new ArgumentNullException(nameof(parent));
         nativeCompletedAndQuiet = actualNativeCompletedAndQuiet ?? throw new ArgumentNullException(nameof(actualNativeCompletedAndQuiet));
-        RunId = runId; SourceRoot = sourceRoot; WorkerGitDirectory = workerGitDirectory;
-        CommonGitDirectory = commonGitDirectory; GitExecutable = trustedGitExecutable;
+        foreach (var path in new[] { sourceRoot, workerGitDirectory, commonGitDirectory, trustedGitExecutable }) Plain(path);
+        RunId = runId; SourceRoot = Path.GetFullPath(sourceRoot); WorkerGitDirectory = Path.GetFullPath(workerGitDirectory);
+        CommonGitDirectory = Path.GetFullPath(commonGitDirectory); GitExecutable = Path.GetFullPath(trustedGitExecutable);
         gitBytes = trustedGitBytes; gitSha256 = trustedGitSha256; GitVersion = expectedGitVersion;
         BaseCommit = baseCommit; HeadCommit = headCommit;
         PlanIdentity = expectedPlanIdentity; EvidencePolicyIdentity = expectedEvidencePolicyIdentity;
@@ -55,7 +56,6 @@ public sealed class ProductionReviewSourceOwner
             trustedGitSha256.Any(c => !char.IsAsciiHexDigitLower(c)) || !expectedGitVersion.StartsWith("git version ", StringComparison.Ordinal) ||
             !Identity(expectedPlanIdentity) || !Identity(expectedEvidencePolicyIdentity) || string.IsNullOrWhiteSpace(expectedPolicyRelativePath) || maximumEvidenceBytes is < 1 or > 16777216)
             throw new ArgumentException("Actual finite Git image and exact completed revision required.");
-        foreach (var path in new[] { sourceRoot, workerGitDirectory, commonGitDirectory, trustedGitExecutable }) Plain(path);
         VerifyImage();
     }
     static bool SamePath(string left, string right) => string.Equals(Path.GetFullPath(left), Path.GetFullPath(right),
@@ -184,13 +184,16 @@ public sealed class ProductionReviewSourceOwner
     internal void Begin(string directory)
     {
         Check(); CheckMetadataBinding(); if (entered) throw new ReviewPreflightException("Production source preparation cannot replay.");
-        entered = true; controlled = directory;
+        Plain(directory); entered = true; controlled = Path.GetFullPath(directory);
     }
     internal async Task<GitProcessResult> GitAsync(string gitDirectory, IReadOnlyList<string> arguments,
         CancellationToken token, byte[]? input = null, IReadOnlyDictionary<string, string>? extra = null)
     {
         VerifyImage(); token.ThrowIfCancellationRequested();
-        if (gitDirectory != WorkerGitDirectory && gitDirectory != controlled)
+        Plain(gitDirectory); gitDirectory = Path.GetFullPath(gitDirectory);
+        var workerRole = SamePath(gitDirectory, WorkerGitDirectory);
+        var controlledRole = controlled is not null && SamePath(gitDirectory, controlled);
+        if (!workerRole && !controlledRole)
             throw new ReviewPreflightException("Git evidence attempted a foreign object authority.");
         string? patchPath = null;
         var dispatchEntered = false;
@@ -198,7 +201,7 @@ public sealed class ProductionReviewSourceOwner
         var args = arguments.ToArray();
         if (input is not null)
         {
-            if (input.Length > MaximumBytes || gitDirectory != controlled || args.Length < 2 || args[0] != "apply" || args[^1] != "-" ||
+            if (input.Length > MaximumBytes || !controlledRole || args.Length < 2 || args[0] != "apply" || args[^1] != "-" ||
                 !args.SequenceEqual(new[] { "apply", "--cached", "--binary", "--whitespace=nowarn", "-" }) &&
                 !args.SequenceEqual(new[] { "apply", "--cached", "--reverse", "--binary", "--whitespace=nowarn", "-" }))
                 throw new ReviewPreflightException("Only exact bounded patch reconstruction may carry Git input.");
@@ -215,14 +218,14 @@ public sealed class ProductionReviewSourceOwner
             var closed = new Dictionary<string, string>
             {
                 ["GIT_DIR"] = gitDirectory,
-                ["GIT_COMMON_DIR"] = gitDirectory == WorkerGitDirectory ? CommonGitDirectory : gitDirectory,
+                ["GIT_COMMON_DIR"] = workerRole ? CommonGitDirectory : gitDirectory,
                 ["GIT_WORK_TREE"] = SourceRoot,
-                ["GIT_OBJECT_DIRECTORY"] = Path.Combine(gitDirectory == WorkerGitDirectory ? CommonGitDirectory : gitDirectory, "objects"),
+                ["GIT_OBJECT_DIRECTORY"] = Path.Combine(workerRole ? CommonGitDirectory : gitDirectory, "objects"),
                 ["GIT_INDEX_FILE"] = Path.Combine(gitDirectory, "index"),
                 ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "",
                 ["GIT_CONFIG_COUNT"] = "0",
                 ["GIT_CONFIG_PARAMETERS"] = "",
-                ["GIT_CONFIG"] = Path.Combine(gitDirectory == WorkerGitDirectory ? CommonGitDirectory : gitDirectory, "config"),
+                ["GIT_CONFIG"] = Path.Combine(workerRole ? CommonGitDirectory : gitDirectory, "config"),
                 ["GIT_CONFIG_NOSYSTEM"] = "1",
                 ["GIT_CONFIG_GLOBAL"] = nullDevice,
                 ["GIT_CONFIG_SYSTEM"] = nullDevice,

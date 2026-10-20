@@ -190,7 +190,7 @@ internal sealed class RetainedHostTask<T>(ToolLifetime original)
 
 public sealed class HostBridgeFrame
 {
-    internal HostBridgeFrame(string runId, ToolLifetime life, ExecutionCoordinator owner, Func<bool> externalUnknown, bool ownsOriginal) { RunId = runId; Lifetime = life; Owner = owner; ExternalUnknown = externalUnknown; OwnsOriginal = ownsOriginal; Worker = new(life); Quality = new(life); Review = new(life); IndependentReview = new(life); LocalReal = new(life); SchedulingCompletion = new(life); }
+    internal HostBridgeFrame(string runId, ToolLifetime life, ExecutionCoordinator owner, Func<bool> externalUnknown, bool ownsOriginal) { RunId = runId; Lifetime = life; Owner = owner; ExternalUnknown = externalUnknown; OwnsOriginal = ownsOriginal; Worker = new(life); Quality = new(life); Review = new(life); IndependentReview = new(life); LocalReal = new(life); BatchEvidenceCapture = new(life); SchedulingCompletion = new(life); }
     readonly Func<bool> ExternalUnknown; readonly bool OwnsOriginal;
     internal readonly object ReconciliationGate = new();
     internal RetainedHostTask<ToolResult> Worker { get; }
@@ -198,6 +198,7 @@ public sealed class HostBridgeFrame
     internal RetainedHostTask<ToolResult> Review { get; }
     internal RetainedHostTask<ToolResult> IndependentReview { get; }
     internal RetainedHostTask<ToolResult> LocalReal { get; }
+    internal RetainedHostTask<bool> BatchEvidenceCapture { get; }
     internal RetainedHostTask<bool> SchedulingCompletion { get; }
     internal LocalSingleScheduler? Scheduler;
     internal LocalDispatchReservation? Reservation;
@@ -244,7 +245,7 @@ public sealed class HostBridgeFrame
     public AgentCompletionReceipt? Completion { get; internal set; }
     public bool OwnerCompleted { get; internal set; }
     public bool OwnerStopped { get; internal set; }
-    public bool Unknown => SchedulingCleanupEntered && (SchedulingCleanup is null || !SchedulingCleanup.IsCompleted) || Scheduler?.HasRetainedReservation == true || SchedulingCompletion.Unknown || Worker.Unknown || Quality.Unknown || Review.Unknown || IndependentReview.Unknown || LocalReal.Unknown || ResumeControls.Any(control => control.Unknown) || RouteActive || InvocationUnknown || EnteredTasks.Any(t => !t.IsCompleted) || Owner.HasPendingControlOperations(RunId) || ExternalUnknown() || (Accepted is not null && !OwnerCompleted && !OwnerStopped);
+    public bool Unknown => SchedulingCleanupEntered && (SchedulingCleanup is null || !SchedulingCleanup.IsCompleted) || Scheduler?.HasRetainedReservation == true || SchedulingCompletion.Unknown || BatchEvidenceCapture.Unknown || Worker.Unknown || Quality.Unknown || Review.Unknown || IndependentReview.Unknown || LocalReal.Unknown || ResumeControls.Any(control => control.Unknown) || RouteActive || InvocationUnknown || EnteredTasks.Any(t => !t.IsCompleted) || Owner.HasPendingControlOperations(RunId) || ExternalUnknown() || (Accepted is not null && !OwnerCompleted && !OwnerStopped);
     internal async Task<T> Enter<T>(Func<Task<T>> invoke)
     {
         Lifetime.Check(); T value = default!; Exception? primary = null; Exception? post = null; var operation = AdmitOperation();
@@ -333,7 +334,7 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
         // CurrentAsync/EnterAsync admission. Every actual containing phase and
         // child/control remains an obligation; only this observation route is
         // excluded. In particular an unreturned phase invocation is not quiet.
-        if (actual.Worker.Unknown || actual.Quality.Unknown || actual.Review.Unknown || actual.IndependentReview.Unknown || actual.LocalReal.Unknown || historicalQuality?.Unknown == true || actual.ResumeControls.Any(control => control.Unknown) || actual.InvocationUnknown || actual.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(runId) || !adapter.ObserveBoundNativeQuiescence(runId) || !coordinator.ObserveOriginalProcessesSettled(runId)) return false;
+        if (actual.BatchEvidenceCapture.Unknown || actual.Worker.Unknown || actual.Quality.Unknown || actual.Review.Unknown || actual.IndependentReview.Unknown || actual.LocalReal.Unknown || historicalQuality?.Unknown == true || actual.ResumeControls.Any(control => control.Unknown) || actual.InvocationUnknown || actual.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(runId) || !adapter.ObserveBoundNativeQuiescence(runId) || !coordinator.ObserveOriginalProcessesSettled(runId)) return false;
         return actual.OwnerCompleted || actual.OwnerStopped || actual.Accepted is null && !adapter.ActualCalls.Any(call => call.RunId == runId && call.Kind == "Start");
     }
     readonly ConcurrentDictionary<string, HostBridgeFrame> frames = new(StringComparer.Ordinal);
@@ -351,44 +352,130 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
         internal string HeadCommit => Frame.Completion!.HeadCommit;
         internal string Phase { get; } = phase;
     }
+    // Captured only by the actual post-worker/pre-writer-disposition route.
+    // This private object is not serialized and cannot be reconstructed from
+    // Pass labels, receipt DATA, or a completed boolean Task.
+    sealed class BatchNodeEvidence
+    {
+        internal readonly OwnerHostBridge Issuer;
+        internal readonly HostBridgeFrame Frame;
+        internal readonly AgentCompletionReceipt Completion;
+        internal readonly InstalledQualityHost? QualityOwner;
+        internal readonly InstalledReviewHost? ReviewOwner;
+        internal readonly DeliveryForge.Execution.Git.WorktreeManager.OwnedGitBinding WriterBinding;
+        internal readonly DeliveryForge.Evidence.GateRunResult[] GateResults;
+        internal readonly IReadOnlyList<DeliveryForge.Contracts.Validation.ValidatedContract>? GateReceipts;
+        internal readonly DeliveryForge.Tool.Claude.ClaudeIndependentReviewer.AcceptedLocalRevision? AcceptedReview;
+        internal readonly DeliveryForge.Contracts.Validation.ValidatedContract? ReviewPolicy;
+        internal readonly (RetainedHostTask<ToolResult> Phase, Task<ToolResult> Actual)[] Phases;
+        internal readonly string Phase;
+        internal BatchNodeEvidence(OwnerHostBridge issuer, HostBridgeFrame frame,
+            DeliveryForge.Execution.Git.WorktreeManager.OwnedGitBinding writerBinding,
+            InstalledQualityHost? qualityOwner, InstalledReviewHost? reviewOwner,
+            IReadOnlyList<DeliveryForge.Contracts.Validation.ValidatedContract>? quality,
+            DeliveryForge.Tool.Claude.ClaudeIndependentReviewer.AcceptedLocalRevision? review,
+            DeliveryForge.Contracts.Validation.ValidatedContract? policy,
+            (RetainedHostTask<ToolResult> Phase, Task<ToolResult> Actual)[] phases, string phase)
+        {
+            Issuer = issuer; Frame = frame; Completion = frame.Completion!; WriterBinding = writerBinding;
+            QualityOwner = qualityOwner; ReviewOwner = reviewOwner;
+            GateResults = qualityOwner?.RetainedResults.ToArray() ?? [];
+            GateReceipts = quality; AcceptedReview = review; ReviewPolicy = policy;
+            Phases = phases; Phase = phase;
+        }
+    }
+    BatchNodeEvidence? batchEvidence;
+    Task<bool>? batchEvidenceTask;
     BatchNodeCompletion? batchCompletion;
+    static RetainedHostTask<ToolResult>[] BatchPhases(HostBridgeFrame frame) =>
+        [frame.Worker, frame.Quality, frame.Review, frame.IndependentReview, frame.LocalReal];
+    void RequireWorkerSettledBeforeBatchEvidence(HostBridgeFrame frame, ToolLifetime original)
+    {
+        original.Check();
+        if (batchControl is null || !frames.TryGetValue(frame.RunId, out var actual) || !ReferenceEquals(actual, frame) ||
+            !ReferenceEquals(frame.Lifetime, original) || original.HasExplicitUnknown || !NativeCompletedAndQuiet(frame) ||
+            frame.Scheduler is not { HasRetainedReservation: true } || frame.Reservation is null ||
+            frame.InvocationUnknown || frame.EnteredTasks.Any(task => !task.IsCompleted) ||
+            frame.ResumeControls.Any(control => control.Unknown))
+            throw new IOException("Batch evidence requires its actual settled worker and still-owned scheduling reservation.");
+        foreach (var phase in BatchPhases(frame))
+            if (phase.Started && (phase.Actual is not { IsCompletedSuccessfully: true } || phase.Primary is not null || phase.Post is not null))
+                throw new IOException("Actual worker/gate/reviewer phase has not settled before evidence capture.");
+    }
+    async Task<bool> CaptureActualBatchEvidenceAsync(HostBridgeFrame frame, ToolLifetime original)
+    {
+        try
+        {
+            RequireWorkerSettledBeforeBatchEvidence(frame, original);
+            if (batchEvidence is not null) throw new IOException("Actual batch evidence cannot be recaptured.");
+            // Both calls below may read current Git/metadata. They MUST finish
+            // while the exact original writer is still owned.
+            var writer = coordinator.RequireOriginalWorktreeBinding(frame.RunId, original);
+            var phases = BatchPhases(frame).Where(phase => phase.Started).Select(phase => (Phase: phase, Actual: phase.Actual!)).ToArray();
+            var results = phases.Where(row => !ReferenceEquals(row.Phase, frame.Review) || !frame.IndependentReview.Started).Select(row => row.Actual.Result).ToArray();
+            var quality = installedQuality is null || coordination is null ? null : await installedQuality.LocalRealEvidenceAsync(frame, coordination).ConfigureAwait(false);
+            var review = installedReview is null || coordination is null ? null : await installedReview.LocalRealEvidenceAsync(frame, coordination).ConfigureAwait(false);
+            var requiredGateIds = new HashSet<string>(StringComparer.Ordinal);
+            if (schedulingPlan is not null)
+            {
+                using var plan = System.Text.Json.JsonDocument.Parse(schedulingPlan.CanonicalBytes);
+                foreach (var gate in plan.RootElement.GetProperty("plan").GetProperty("gates").EnumerateArray()) requiredGateIds.Add(gate.GetProperty("id").GetString()!);
+            }
+            var actualGateIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var receipt in quality ?? Array.Empty<DeliveryForge.Contracts.Validation.ValidatedContract>())
+            {
+                using var document = System.Text.Json.JsonDocument.Parse(receipt.CanonicalBytes);
+                actualGateIds.Add(document.RootElement.GetProperty("gateId").GetString()!);
+            }
+            // Worker-local COMPLETE and source-preparation COMPLETE are never a
+            // substitute for protected quality, exact accepted independent review,
+            // and complete coverage of the frozen plan's required gate identities.
+            var gatesPassed = quality is not null && review is not null && requiredGateIds.Count != 0 && requiredGateIds.IsSubsetOf(actualGateIds);
+            var phase = results.Any(result => result.Outcome is "FAIL" or "BLOCKED") ? "Fail" : gatesPassed ? "Pass" :
+                installedQuality is null && installedReview is null ? "LocalComplete" : "Incomplete";
+            RequireWorkerSettledBeforeBatchEvidence(frame, original);
+            if (!ReferenceEquals(writer, coordinator.RequireOriginalWorktreeBinding(frame.RunId, original)))
+                throw new IOException("Actual writer changed during pre-disposition batch evidence capture.");
+            batchEvidence = new(this, frame, writer, installedQuality, installedReview, quality, review?.Accepted, review?.Policy, phases, phase);
+            return true;
+        }
+        catch (Exception error) { frame.Primary ??= error; throw; }
+    }
+    internal void RequireCapturedBatchEvidence(HostBridgeFrame frame, ToolLifetime original)
+    {
+        original.Check();
+        var proof = batchEvidence ?? throw new IOException("Private pre-disposition batch evidence was not captured.");
+        if (!ReferenceEquals(proof.Issuer, this) || !ReferenceEquals(proof.Frame, frame) || !ReferenceEquals(frame.Lifetime, original) ||
+            !ReferenceEquals(proof.Completion, frame.Completion) || !ReferenceEquals(proof.QualityOwner, installedQuality) ||
+            !ReferenceEquals(proof.ReviewOwner, installedReview) || original.HasExplicitUnknown ||
+            frame.BatchEvidenceCapture.Actual is not { IsCompletedSuccessfully: true } capture || !ReferenceEquals(capture, batchEvidenceTask) || !capture.Result ||
+            frame.BatchEvidenceCapture.Primary is not null || frame.BatchEvidenceCapture.Post is not null ||
+            proof.Phases.Any(row => !ReferenceEquals(row.Phase.Actual, row.Actual) || !row.Actual.IsCompletedSuccessfully || row.Phase.Primary is not null || row.Phase.Post is not null))
+            throw new IOException("Actual original/frame/phase references changed after batch evidence capture.");
+        var current = installedQuality?.RetainedResults ?? Array.Empty<DeliveryForge.Evidence.GateRunResult>();
+        if (current.Count != proof.GateResults.Length || current.Where((row, index) => !ReferenceEquals(row, proof.GateResults[index])).Any())
+            throw new IOException("Actual protected gate result references changed after capture.");
+        // No current Git, metadata/writer check, or new acceptance is performed
+        // here. The writer may now be disposed; the genuine proof remains on
+        // this same original frame and completed capture Task.
+    }
     internal async Task<BatchNodeCompletion> ReadActualBatchCompletionAsync(ToolLifetime original)
     {
         original.Check();
         if (frames.Count != 1) throw new IOException("Batch node requires exactly one actual original frame.");
         var frame = frames.Values.Single();
+        RequireCapturedBatchEvidence(frame, original);
+        _ = await frame.BatchEvidenceCapture.ObserveAsync(original).ConfigureAwait(false);
+        RequireSettledBatchFrame(frame, original);
         if (batchCompletion is not null) { RequireActualBatchCompletion(batchCompletion, original); return batchCompletion; }
-        RequireSettledBatchFrame(frame, original);
-        var phases = new List<RetainedHostTask<ToolResult>> { frame.Worker, frame.Quality, frame.IndependentReview.Started ? frame.IndependentReview : frame.Review, frame.LocalReal };
-        var results = phases.Where(phase => phase.Started).Select(phase => phase.Actual!.Result).ToArray();
-        var quality = installedQuality is null || coordination is null ? null : await installedQuality.LocalRealEvidenceAsync(frame, coordination).ConfigureAwait(false);
-        var review = installedReview is null || coordination is null ? null : await installedReview.LocalRealEvidenceAsync(frame, coordination).ConfigureAwait(false);
-        var requiredGateIds = new HashSet<string>(StringComparer.Ordinal);
-        if (schedulingPlan is not null)
-        {
-            using var plan = System.Text.Json.JsonDocument.Parse(schedulingPlan.CanonicalBytes);
-            foreach (var gate in plan.RootElement.GetProperty("plan").GetProperty("gates").EnumerateArray()) requiredGateIds.Add(gate.GetProperty("id").GetString()!);
-        }
-        var actualGateIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var receipt in quality ?? Array.Empty<DeliveryForge.Contracts.Validation.ValidatedContract>())
-        {
-            using var document = System.Text.Json.JsonDocument.Parse(receipt.CanonicalBytes);
-            actualGateIds.Add(document.RootElement.GetProperty("gateId").GetString()!);
-        }
-        // Worker-local COMPLETE and source-preparation COMPLETE are never a
-        // substitute for protected quality, exact accepted independent review,
-        // and complete coverage of the frozen plan's required gate identities.
-        var gatesPassed = quality is not null && review is not null && requiredGateIds.Count != 0 && requiredGateIds.IsSubsetOf(actualGateIds);
-        var phase = results.Any(result => result.Outcome is "FAIL" or "BLOCKED") ? "Fail" : gatesPassed ? "Pass" :
-            installedQuality is null && installedReview is null ? "LocalComplete" : "Incomplete";
-        RequireSettledBatchFrame(frame, original);
-        return batchCompletion = new(this, frame, phase);
+        return batchCompletion = new(this, frame, batchEvidence!.Phase);
     }
     internal void RequireActualBatchCompletion(BatchNodeCompletion actual, ToolLifetime original)
     {
         if (!ReferenceEquals(actual, batchCompletion) || !ReferenceEquals(actual.Issuer, this) ||
             !frames.TryGetValue(actual.RunId, out var retained) || !ReferenceEquals(retained, actual.Frame))
             throw new IOException("Foreign or reconstructed batch completion cannot retire this original.");
+        RequireCapturedBatchEvidence(retained, original);
         RequireSettledBatchFrame(retained, original);
     }
     void RequireSettledBatchFrame(HostBridgeFrame frame, ToolLifetime original)
@@ -420,6 +507,12 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
             var actualResult = await frame.Worker.ObserveAsync(original).ConfigureAwait(false);
             if (frame.Scheduler is { } scheduler && frame.Reservation is { } reservation && frame.Primary is null && frame.Post is null && NativeCompletedAndQuiet(frame))
             {
+                if (batchControl is not null)
+                {
+                    frame.BatchEvidenceCapture.Start(original, () => CaptureActualBatchEvidenceAsync(frame, original));
+                    _ = await frame.BatchEvidenceCapture.ObserveAsync(original).ConfigureAwait(false);
+                    batchEvidenceTask = frame.BatchEvidenceCapture.Actual;
+                }
                 frame.SchedulingCompletion.Start(original, async () =>
                 {
                     await scheduler.CompleteObservedAsync(reservation,

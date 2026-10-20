@@ -28,6 +28,7 @@ public sealed class ProvisionedGitBindingTests
             _ => Path.Combine(binding.GitDirectory, "commondir")
         };
         var before = fixture.Manager.ActualOwnedGitInvocations;
+        if (role == "marker") File.SetAttributes(path, File.GetAttributes(path) & ~FileAttributes.ReadOnly);
         File.WriteAllText(path, role == "marker" ? "gitdir: " + fixture.Foreign + "\n" : fixture.Foreign + "\n");
         if (role != "marker") Assert.Equal(marker, File.ReadAllBytes(Path.Combine(fixture.Worker, ".git")));
         Assert.Equal(WriterNamespaceIdentityOutcome.Match, writer.ObserveCurrentNamespaceIdentity().Outcome);
@@ -44,10 +45,11 @@ public sealed class ProvisionedGitBindingTests
         var foreign = new WorktreeManager(fixture.GitImage, fixture.Executor, fixture.Original)
             .WithParentAdmission(fixture.Parent, "owned");
         var before = foreign.ActualOwnedGitInvocations;
+        var originalWriterPath = fixture.Manager.RequireOriginalBinding(fixture.Worker).WriterPath;
         await Assert.ThrowsAsync<WorktreeBoundaryException>(() => foreign.ValidateAssignedWorktreeAsync(fixture.Repository, fixture.Worker, TestContext.Current.CancellationToken));
         Assert.Throws<WorktreeBoundaryException>(() => foreign.AcquireWriter(fixture.Worker, "owned", "adopted"));
         Assert.Equal(before, foreign.ActualOwnedGitInvocations);
-        Assert.False(File.Exists(fixture.Manager.RequireOriginalBinding(fixture.Worker).WriterPath));
+        Assert.False(File.Exists(originalWriterPath));
         Assert.False(fixture.Original.HasExplicitUnknown);
     }
 
