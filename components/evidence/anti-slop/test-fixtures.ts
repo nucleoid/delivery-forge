@@ -23,7 +23,9 @@ function run(fixture:
   | "suppression-reserved-method"
   | "suppression-adjacent-quote"
   | "suppression-line-comment-terminator"
-  | "suppression-multiline-block"): {
+  | "suppression-multiline-block"
+  | "suppression-bare"
+  | "suppression-unknown"): {
   status: number | null;
   report: Report;
 } {
@@ -89,6 +91,12 @@ for (const bypass of [
   assert.equal(result.status, 0, `${bypass}: pinned Oxlint must demonstrate the suppression attack`);
   assert.equal(result.report.number_of_files, 1);
   assert.equal(result.report.number_of_rules, 19);
+  assert.deepEqual(result.report.diagnostics, []);
+}
+
+for (const name of ["suppression-bare", "suppression-unknown"] as const) {
+  const result = run(name);
+  assert.equal(result.status, 0, `${name}: pinned Oxlint accepts this suppression name`);
   assert.deepEqual(result.report.diagnostics, []);
 }
 

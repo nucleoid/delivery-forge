@@ -215,13 +215,20 @@ public sealed class GitRepositoryIdentityReaderTests
     [InlineData("const view = <p>Don't panic</p>;\n", false)]
     [InlineData("if (ok) /'/.test(value);\n", false)]
     [InlineData("if (ok) /'/.test(value);\n// eslint-disable-next-line x\nrun();\n", true)]
-    [InlineData("}\n/'/.test(value);\n", false)]
     [InlineData("const text = `// oxlint-disable`;\n", false)]
     [InlineData("const text = '/* eslint-disable */';\n", false)]
     [InlineData("/* oxlint-disable */\n", true)]
     public void Suppression_lexer_handles_jsx_regex_and_literal_edges(string source, bool expected)
     {
         Assert.Equal(expected, GitRepositoryIdentityReader.ContainsSuppressionDirective(source));
+    }
+
+    [Fact]
+    public void Regex_after_closing_brace_is_ambiguous_and_fails_closed()
+    {
+        var error = Assert.Throws<EvidenceRepositoryException>(() =>
+            GitRepositoryIdentityReader.ContainsSuppressionDirective("}\n/'/.test(value);\n"));
+        Assert.Contains("ambiguous", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -311,7 +318,7 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Fact]
-    public async Task Existing_semantically_identical_suppression_in_a_changed_file_is_inherited()
+    public async Task Moved_disable_next_line_is_not_inherited()
     {
         var head = TestEvidence.Commit('b');
         var reader = new GitRepositoryIdentityReader(
@@ -330,11 +337,11 @@ public sealed class GitRepositoryIdentityReaderTests
         var scope = await reader.ReadEvaluationScopeAsync(
             head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
 
-        Assert.Empty(scope.SuppressionViolations!);
+        Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
     }
 
     [Fact]
-    public async Task Unchanged_blanket_suppression_in_a_changed_file_is_inherited()
+    public async Task Inherited_blanket_suppression_covering_changed_code_is_rejected()
     {
         var head = TestEvidence.Commit('b');
         const string content = "/* oxlint-disable */\nexport const changed = 2;\n";
@@ -346,7 +353,7 @@ public sealed class GitRepositoryIdentityReaderTests
                 Result("src/app.ts\0"),
                 Result(content),
                 Result(TestEvidence.Commit('2') + Environment.NewLine),
-                Result(content),
+                Result("/* oxlint-disable */\nexport const changed = 1;\n"),
                 Result(string.Empty)),
             System.IO.Path.GetTempPath(),
             TestEvidence.Commit('a'));
@@ -354,7 +361,7 @@ public sealed class GitRepositoryIdentityReaderTests
         var scope = await reader.ReadEvaluationScopeAsync(
             head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
 
-        Assert.Empty(scope.SuppressionViolations!);
+        Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
     }
 
     [Fact]
@@ -440,6 +447,11 @@ public sealed class GitRepositoryIdentityReaderTests
     [InlineData("const a = b\n  / c /* oxlint-disable */ / d;\n")]
     [InlineData("x = p.catch(e) / 2 /* oxlint-disable */ / 3;\n")]
     [InlineData("[typeof'x' /* oxlint-disable */, 'z'in globalThis];\n")]
+    [InlineData("x = {} / 1 /* oxlint-disable */ / 2;\n")]
+    [InlineData("a++ / 1 /* oxlint-disable */ / 2;\n")]
+    [InlineData("const view = <div><p>\"</p>{/* oxlint-disable */}<p>\"</p></div>;\n")]
+    [InlineData("const view = <div><p>`</p>{/* oxlint-disable */}<p>`</p></div>;\n")]
+    [InlineData("// note\u2028/* oxlint-disable */\n")]
     public async Task Conservative_scan_blocks_known_lexer_bypass_shapes(string content)
     {
         var head = TestEvidence.Commit('b');
@@ -460,6 +472,29 @@ public sealed class GitRepositoryIdentityReaderTests
             head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
 
         Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
+    }
+
+    [Fact]
+    public void Deep_template_nesting_fails_closed_without_recursive_stack_growth()
+    {
+        var source = string.Concat(Enumerable.Repeat("`${", JavaScriptSuppressionScanner.MaximumNestingDepth + 1)) +
+            "0" + string.Concat(Enumerable.Repeat("}`", JavaScriptSuppressionScanner.MaximumNestingDepth + 1));
+
+        var error = Assert.Throws<EvidenceRepositoryException>(() =>
+            GitRepositoryIdentityReader.ContainsSuppressionDirective(source));
+
+        Assert.Contains("nesting", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Deleting_enable_extends_blanket_coverage_over_changed_code()
+    {
+        var @base = JavaScriptSuppressionScanner.Scan(System.Text.Encoding.UTF8.GetBytes(
+            "/* oxlint-disable */\nexport const old = 1;\n/* oxlint-enable */\nexport const tail = 1;\n"));
+        var head = JavaScriptSuppressionScanner.Scan(System.Text.Encoding.UTF8.GetBytes(
+            "/* oxlint-disable */\nexport const old = 1;\nexport const tail = 2;\n"));
+
+        Assert.True(JavaScriptSuppressionScanner.IntroducesDangerousCoverage(head, @base));
     }
 
     [Theory]
