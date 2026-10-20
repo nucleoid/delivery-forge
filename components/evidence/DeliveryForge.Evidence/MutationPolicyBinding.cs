@@ -80,6 +80,7 @@ internal static class MutationPolicyBinding
         var exponent = 0;
         if (exponentMarker >= 0 && !int.TryParse(text[(exponentMarker + 1)..],
             NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out exponent)) return false;
+        if (exponent is < -100000 or > 100000) return false;
         var digits = text[start..mantissaEnd].ToString().Where(c => c != '.').ToArray();
         var decimalPosition = (long)digits.Length - fractionalDigits + exponent;
         var firstNonZero = Array.FindIndex(digits, c => c != '0');

@@ -92,6 +92,22 @@ public sealed class MutationPolicyBindingTests
     }
 
     [Theory]
+    [InlineData(false, 100000, true)]
+    [InlineData(true, 100000, true)]
+    [InlineData(false, 100001, false)]
+    [InlineData(true, 100001, false)]
+    public void Cancelling_mantissa_cannot_exceed_producer_exponent_bound(bool positive, int magnitude, bool supported)
+    {
+        // Both spellings have exact value one, so magnitude alone must decide
+        // refusal; Int32 overflow/value checks cannot detect this contract edge.
+        var token = positive ? "0." + new string('0', magnitude - 1) + "1e" + magnitude
+            : "1" + new string('0', magnitude) + "e-" + magnitude;
+        var configuration = "{\"policy\":{\"maxWorkers\":" + token + ",\"overallDeadlineSeconds\":600}}";
+        if (supported) Join(configuration, Complete());
+        else Assert.Throws<EvidenceWriteException>(() => Join(configuration, Complete()));
+    }
+
+    [Theory]
     [InlineData("null")]
     [InlineData("[]")]
     [InlineData("{\"overallDeadlineSeconds\":600,\"unknown\":1}")]
