@@ -63,6 +63,10 @@ public sealed class EvidenceBehaviorTests
         Assert.Equal(identity, policy.PolicyIdentity);
         Assert.Equal(TestEvidence.Commit('a'), policy.SourceRevision);
         Assert.Equal(["build", "test"], policy.RequiredGates);
+        Assert.Equal(
+            ["build:delivery-forge.dotnet:1.0.0:dotnet", "test:delivery-forge.dotnet:1.0.0:dotnet"],
+            policy.RequiredGatePluginBindings.Select(binding =>
+                $"{binding.GateId}:{binding.PluginId}:{binding.PluginVersion}:{binding.Tool}"));
     }
 
     [Fact]

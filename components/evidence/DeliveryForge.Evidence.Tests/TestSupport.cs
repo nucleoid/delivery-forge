@@ -141,6 +141,21 @@ internal sealed class SequenceRepositoryIdentityReader(params RepositoryIdentity
         Task.FromResult(identities[Math.Min(_index++, identities.Length - 1)]);
 }
 
+internal sealed class ScopedSequenceRepositoryIdentityReader(
+    RepositoryEvaluationScope scope,
+    params RepositoryIdentity[] identities)
+    : IRepositoryIdentityReader, IRepositoryEvaluationScopeReader
+{
+    private int _index;
+
+    public Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(identities[Math.Min(_index++, identities.Length - 1)]);
+
+    public Task<RepositoryEvaluationScope> ReadEvaluationScopeAsync(
+        string expectedHeadCommit,
+        CancellationToken cancellationToken) => Task.FromResult(scope);
+}
+
 internal sealed class ThrowingRepositoryIdentityReader : IRepositoryIdentityReader
 {
     public Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken) =>

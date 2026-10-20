@@ -298,7 +298,7 @@ internal sealed class WindowsCommandLifetime : IDisposable
             if (commandLine.Length >= 32767) throw new ArgumentException("Windows command line exceeds32766 characters.");
         }
         if (commandLine.Length >= 32767) throw new ArgumentException("Windows command line exceeds32766 characters.");
-        var environment = EnvironmentBlock(invocation.Environment);
+        var environment = EnvironmentBlock(invocation.Environment, invocation.InheritEnvironment);
         var directory = Path.GetFullPath(invocation.WorkingDirectory);
         using (var attributes = new InheritedHandles(_inRead, _outWrite, _errWrite))
         {
@@ -417,10 +417,14 @@ internal sealed class WindowsCommandLifetime : IDisposable
         }
         return result.Append('\\', slashes * 2).Append('"').ToString();
     }
-    private static string EnvironmentBlock(IReadOnlyDictionary<string, string>? additions)
+    private static string EnvironmentBlock(
+        IReadOnlyDictionary<string, string>? additions,
+        bool inheritEnvironment)
     {
         var values = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables()) values[(string)entry.Key] = (string)entry.Value!;
+        if (inheritEnvironment)
+            foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
+                values[(string)entry.Key] = (string)entry.Value!;
         foreach (var entry in additions ?? new Dictionary<string, string>())
         {
             if (entry.Key.Length == 0 || entry.Key.Contains('=') || entry.Key.Contains('\0') || entry.Value.Contains('\0'))

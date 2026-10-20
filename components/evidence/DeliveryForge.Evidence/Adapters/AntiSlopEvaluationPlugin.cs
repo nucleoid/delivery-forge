@@ -7,12 +7,21 @@ namespace DeliveryForge.Evidence.Adapters;
 public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
 {
     public const string UpstreamCommit = "13909c9e07590f5a85d93c62712259fe14a883f7";
+    public const string OxlintVersion = "1.78.0";
     private static readonly HashSet<string> SupportedExtensions = new(
         [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"],
         StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> AllowedEnvironment = new(
+        ["SystemRoot", "WINDIR", "TMP", "TEMP"],
+        StringComparer.OrdinalIgnoreCase);
 
-    private AntiSlopEvaluationPlugin()
+    private readonly string? _trustedBundleRoot;
+    private readonly string? _trustedNodePath;
+
+    private AntiSlopEvaluationPlugin(string? trustedBundleRoot = null, string? trustedNodePath = null)
     {
+        _trustedBundleRoot = trustedBundleRoot is null ? null : Path.GetFullPath(trustedBundleRoot);
+        _trustedNodePath = trustedNodePath is null ? null : Path.GetFullPath(trustedNodePath);
     }
 
     public string Id => "dmmulroy.anti-slop";
@@ -21,6 +30,15 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
     public EvidenceAdapterKind CompatibilityAdapter => EvidenceAdapterKind.External;
 
     public static AntiSlopEvaluationPlugin CreateBundled() => new();
+
+    public static AntiSlopEvaluationPlugin CreateBundled(string bundleRoot, string nodePath)
+    {
+        if (string.IsNullOrWhiteSpace(bundleRoot) || string.IsNullOrWhiteSpace(nodePath) ||
+            !Path.IsPathFullyQualified(bundleRoot) || !Path.IsPathFullyQualified(nodePath))
+            throw new EvaluationPluginException(
+                "Anti-slop registration requires absolute code-owned bundle and Node paths.");
+        return new(bundleRoot, nodePath);
+    }
 
     public static bool IsSupportedInput(string path) =>
         !string.IsNullOrWhiteSpace(path) && SupportedExtensions.Contains(Path.GetExtension(path));
@@ -55,6 +73,10 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
 
     public NormalizedEvidence? ValidateBeforeExecution(GateRequest request)
     {
+        if (!string.Equals(request.Capability.Version, OxlintVersion, StringComparison.Ordinal) ||
+            !string.Equals(request.Capability.FormatVersion, "oxlint-json-v1", StringComparison.Ordinal))
+            return NormalizedEvidence.Incomplete(
+                "Anti-slop requires the exact pinned Oxlint 1.78.0 JSON capability.");
         var inputs = DeterministicEvaluationPluginRegistry.NormalizeInputs(request.Plugin?.Inputs ?? []);
         if (inputs.Count == 0)
             return NormalizedEvidence.Incomplete("Anti-slop selected zero JavaScript-family inputs.");
@@ -66,20 +88,22 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         var arguments = request.Invocation.Arguments;
         if (arguments.Any(argument => argument.StartsWith("--fix", StringComparison.Ordinal)))
             return NormalizedEvidence.Incomplete("Anti-slop never permits Oxlint autofix options.");
-        if (!string.IsNullOrWhiteSpace(EffectiveEnvironment(request.Invocation, "NODE_OPTIONS")) ||
-            !string.IsNullOrWhiteSpace(EffectiveEnvironment(request.Invocation, "NODE_PATH")))
+        if (request.Invocation.InheritEnvironment ||
+            (request.Invocation.Environment?.Keys.Any(key => !AllowedEnvironment.Contains(key)) ?? false))
             return NormalizedEvidence.Incomplete(
-                "Anti-slop does not permit NODE_OPTIONS or NODE_PATH in the execution environment.");
+                "Anti-slop requires a cleared, allow-listed execution environment.");
 
-        if (arguments.Count != inputs.Count + 4 ||
-            arguments[0] != "--config" ||
-            arguments[2] != "--format" ||
-            arguments[3] != "json")
+        if (arguments.Count != inputs.Count + 5 ||
+            !Path.IsPathFullyQualified(request.Invocation.FileName) ||
+            !Path.IsPathFullyQualified(arguments[0]) ||
+            arguments[1] != "--config" ||
+            arguments[3] != "--format" ||
+            arguments[4] != "json")
             return NormalizedEvidence.Incomplete(
-                "Anti-slop requires the canonical read-only invocation: --config <absolute bundled config> --format json <frozen inputs>.");
+                "Anti-slop requires absolute Node and Oxlint entrypoints with the canonical read-only JSON invocation.");
 
         var invocationInputs = arguments
-            .Skip(4)
+            .Skip(5)
             .Select(input => input.Replace('\\', '/'))
             .Order(StringComparer.Ordinal)
             .ToArray();
@@ -90,11 +114,27 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         var expectedConfig = request.Plugin?.EnableEffectRules == true
             ? "oxlint.effect.config.ts"
             : "oxlint.config.ts";
-        var configPath = arguments[1];
+        var configPath = arguments[2];
         if (!Path.IsPathFullyQualified(configPath) ||
             !string.Equals(Path.GetFileName(configPath), expectedConfig, StringComparison.Ordinal))
             return NormalizedEvidence.Incomplete(
                 $"Anti-slop invocation is not bound to an absolute {expectedConfig} configuration.");
+        if (_trustedBundleRoot is null || _trustedNodePath is null)
+            return NormalizedEvidence.Incomplete(
+                "Anti-slop has no code-owned installed bundle/runtime registration.");
+        try
+        {
+            var selectedConfigRoot = Path.GetDirectoryName(Path.GetFullPath(configPath));
+            if (!string.Equals(selectedConfigRoot, _trustedBundleRoot, PathComparison) ||
+                !string.Equals(Path.GetFullPath(request.Invocation.FileName), _trustedNodePath, PathComparison))
+                return NormalizedEvidence.Incomplete(
+                    "Anti-slop invocation does not use the code-owned registered bundle and Node runtime.");
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return NormalizedEvidence.Incomplete(
+                $"Anti-slop bundle/runtime path is malformed: {exception.Message}");
+        }
         string configIdentity;
         try
         {
@@ -127,11 +167,11 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
                 request.Plugin?.EnableEffectRules == true);
             return string.Equals(after, state.ConfigurationIdentity, StringComparison.Ordinal)
                 ? null
-                : NormalizedEvidence.Error("Anti-slop configuration or runtime closure changed during evaluation.");
+                : NormalizedEvidence.Incomplete("Anti-slop configuration or runtime closure changed during evaluation.");
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
         {
-            return NormalizedEvidence.Error(
+            return NormalizedEvidence.Incomplete(
                 $"Anti-slop configuration or runtime closure became unavailable: {exception.Message}");
         }
     }
@@ -144,10 +184,14 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         var state = snapshot.State as AntiSlopSnapshot;
         if (state is null)
             return NormalizedEvidence.Error("Anti-slop snapshot is missing or mismatched.");
-        return NormalizeReport(
+        var normalized = NormalizeReport(
             System.Text.Encoding.UTF8.GetBytes(execution.StandardOutput),
             state.Inputs,
-            execution.ExitCode ?? -1);
+            execution.ExitCode ?? -1,
+            request.Invocation.WorkingDirectory);
+        if (normalized.Outcome == GateOutcome.Pass && HasExactTrustedPolicyBinding(request))
+            return normalized with { ProductionCapable = true, Limitations = [] };
+        return normalized;
     }
 
     public void AppendBoundArtifacts(
@@ -161,7 +205,8 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
     public NormalizedEvidence NormalizeReport(
         ReadOnlySpan<byte> report,
         IReadOnlyList<string> analyzedInputs,
-        int processExitCode)
+        int processExitCode,
+        string? workingDirectory = null)
     {
         if (analyzedInputs.Count == 0)
             return NormalizedEvidence.Incomplete("Anti-slop analyzed zero JavaScript-family inputs.");
@@ -181,7 +226,8 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             if (findings.Any(finding => finding.IsParserOrToolDiagnostic))
                 return NormalizedEvidence.Incomplete("Oxlint reported a parser, configuration, or tool diagnostic.");
             if (findings.Any(finding => finding.File is not null &&
-                !analyzedInputs.Contains(NormalizeReportedPath(finding.File), StringComparer.Ordinal)))
+                !analyzedInputs.Contains(
+                    NormalizeReportedPath(finding.File, workingDirectory), StringComparer.Ordinal)))
                 return NormalizedEvidence.Incomplete("Oxlint report contains a finding outside the frozen input set.");
             if (findings.Count > 0)
             {
@@ -200,7 +246,7 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
                 $"Anti-slop completed cleanly for {analyzedInputs.Count} JavaScript-family input(s).",
                 false,
                 false,
-                ["Anti-slop is opinionated structural lint evidence, not protected correctness authority."]);
+                ["Anti-slop is advisory unless protected policy binds this exact plugin identity, version, and tool."]);
         }
         catch (JsonException exception)
         {
@@ -240,20 +286,31 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             ? value.GetString()
             : null;
 
-    private static string NormalizeReportedPath(string path)
+    private static string NormalizeReportedPath(string path, string? workingDirectory)
     {
+        if (Path.IsPathFullyQualified(path) && !string.IsNullOrWhiteSpace(workingDirectory))
+            path = Path.GetRelativePath(workingDirectory, path);
         var normalized = path.Replace('\\', '/');
         return normalized.StartsWith("./", StringComparison.Ordinal) ? normalized[2..] : normalized;
     }
+
+    private bool HasExactTrustedPolicyBinding(GateRequest request) =>
+        request.Policy.AuthorityVerified &&
+        request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) &&
+        request.Policy.RequiredGatePluginBindings.Any(binding =>
+            string.Equals(binding.GateId, request.GateId, StringComparison.Ordinal) &&
+            string.Equals(binding.PluginId, Id, StringComparison.Ordinal) &&
+            string.Equals(binding.PluginVersion, Version, StringComparison.Ordinal) &&
+            string.Equals(binding.Tool, ExpectedTool, StringComparison.Ordinal));
 
     internal static string ComputeConfigurationIdentity(
         CommandInvocation invocation,
         bool effectRulesEnabled)
     {
-        if (invocation.Arguments.Count < 2 || invocation.Arguments[0] != "--config")
+        if (invocation.Arguments.Count < 3 || invocation.Arguments[1] != "--config")
             throw new InvalidOperationException("The canonical Oxlint configuration argument is missing.");
 
-        var configPath = Path.GetFullPath(invocation.Arguments[1]);
+        var configPath = Path.GetFullPath(invocation.Arguments[2]);
         var root = Path.GetDirectoryName(configPath) ??
             throw new InvalidOperationException("The Oxlint configuration root is unavailable.");
         var expectedConfig = effectRulesEnabled ? "oxlint.effect.config.ts" : "oxlint.config.ts";
@@ -267,8 +324,7 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         if (effectRulesEnabled)
             AppendClosureFile(hash, root, Path.Combine(root, "oxlint.effect.config.ts"));
         AppendClosureDirectory(hash, root, Path.Combine(root, "vendor", "anti-slop"));
-        AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "oxlint", "bin"));
-        AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "oxlint", "dist"));
+        AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "oxlint"));
         AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "@oxlint", "plugins"));
 
         var bindingsRoot = Path.Combine(root, "node_modules", "@oxlint");
@@ -282,11 +338,19 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         foreach (var binding in bindings)
             AppendClosureDirectory(hash, root, binding);
 
-        var nodePath = ResolveNodeExecutable(invocation);
+        var nodePath = invocation.FileName;
+        if (!Path.IsPathFullyQualified(nodePath))
+            throw new InvalidOperationException("The Node.js runtime path is not absolute.");
+        var expectedEntryPoint = Path.GetFullPath(Path.Combine(root, "node_modules", "oxlint", "bin", "oxlint"));
+        if (!string.Equals(Path.GetFullPath(invocation.Arguments[0]), expectedEntryPoint,
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+            throw new InvalidOperationException("The Oxlint entrypoint is not the pinned package-local launcher.");
         AppendValue(hash, "runtime/node-path", Path.GetFullPath(nodePath));
         AppendClosureFile(hash, Path.GetDirectoryName(nodePath)!, nodePath, "runtime/node-bytes");
-        AppendValue(hash, "environment/NODE_OPTIONS", EffectiveEnvironment(invocation, "NODE_OPTIONS") ?? string.Empty);
-        AppendValue(hash, "environment/NODE_PATH", EffectiveEnvironment(invocation, "NODE_PATH") ?? string.Empty);
+        AppendValue(hash, "environment/inherit", invocation.InheritEnvironment.ToString());
+        foreach (var pair in (invocation.Environment ?? new Dictionary<string, string>())
+                     .OrderBy(pair => pair.Key, StringComparer.Ordinal))
+            AppendValue(hash, $"environment/{pair.Key}", pair.Value);
 
         return $"sha256:{Convert.ToHexStringLower(hash.GetHashAndReset())}";
     }
@@ -321,31 +385,14 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         hash.AppendData([0]);
     }
 
-    private static string ResolveNodeExecutable(CommandInvocation invocation)
-    {
-        var path = EffectiveEnvironment(invocation, "PATH") ?? string.Empty;
-        var names = OperatingSystem.IsWindows() ? new[] { "node.exe", "node.cmd", "node" } : ["node"];
-        foreach (var directory in path.Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
-        {
-            foreach (var name in names)
-            {
-                var candidate = Path.Combine(directory, name);
-                if (File.Exists(candidate))
-                    return candidate;
-            }
-        }
-        throw new InvalidOperationException("The Node.js executable cannot be resolved from the effective PATH.");
-    }
-
-    private static string? EffectiveEnvironment(CommandInvocation invocation, string name) =>
-        invocation.Environment is not null && invocation.Environment.TryGetValue(name, out var value)
-            ? value
-            : Environment.GetEnvironmentVariable(name);
-
     private sealed record AntiSlopSnapshot(IReadOnlyList<string> Inputs, string ConfigurationIdentity);
     private sealed record AntiSlopFinding(string? File, string? Rule, bool IsParserOrToolDiagnostic);
     private sealed record AntiSlopReport(
         IReadOnlyList<AntiSlopFinding> Findings,
         int AnalyzedFileCount,
         int RuleCount);
+
+    private static StringComparison PathComparison => OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
 }

@@ -63,19 +63,10 @@ public sealed class GateRunner
                 CancellationToken.None).ConfigureAwait(false);
         }
 
-        if (!pluginBinding.Enabled)
+        if (pluginBinding.Enabled && ValidateCapabilityBinding(request, plugin) is { } earlyCapabilityFailure)
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, request.ExpectedRepository, request.ExpectedRepository,
-                NormalizedEvidence.Incomplete(
-                    "The selected deterministic evaluation plugin is disabled; no tool outcome exists and the gate is unsatisfied."),
-                pluginBinding,
-                CancellationToken.None).ConfigureAwait(false);
-
-        var capabilityFailure = ValidateCapabilityBinding(request, plugin);
-        if (capabilityFailure is not null)
-            return await PersistWithoutExecutionAsync(
-                request, gateDirectory, request.ExpectedRepository, request.ExpectedRepository,
-                capabilityFailure,
+                earlyCapabilityFailure,
                 pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
 
@@ -100,6 +91,14 @@ public sealed class GateRunner
                 pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
         }
+        if (!pluginBinding.Enabled)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before,
+                NormalizedEvidence.Incomplete(
+                    "The selected deterministic evaluation plugin is disabled; no tool outcome exists and the gate is unsatisfied."),
+                pluginBinding,
+                CancellationToken.None).ConfigureAwait(false);
+
         if (request.Policy.AuthorityVerified &&
             (!string.Equals(request.Policy.SourceRevision, before.BaseCommit, StringComparison.Ordinal) ||
              !string.Equals(request.Policy.SourceRevision, _trustedProtectedBaseCommit, StringComparison.Ordinal) ||
@@ -113,6 +112,19 @@ public sealed class GateRunner
                 pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
         }
+
+        var requiredGateBindingFailure = ValidateRequiredGateBinding(request, plugin);
+        if (requiredGateBindingFailure is not null)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before, requiredGateBindingFailure, pluginBinding,
+                CancellationToken.None).ConfigureAwait(false);
+
+        var scopeFailure = await ValidateAutomaticScopeAsync(
+            request, plugin, before, CancellationToken.None).ConfigureAwait(false);
+        if (scopeFailure is not null)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before, scopeFailure, pluginBinding,
+                CancellationToken.None).ConfigureAwait(false);
 
         NormalizedEvidence? pluginValidation;
         try
@@ -139,7 +151,10 @@ public sealed class GateRunner
         {
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, before, before,
-                NormalizedEvidence.Error($"Evidence inputs could not be snapshotted: {exception.Message}"),
+                plugin is Adapters.AntiSlopEvaluationPlugin
+                    ? NormalizedEvidence.Incomplete(
+                        $"Anti-slop configuration or runtime closure became unavailable before execution: {exception.Message}")
+                    : NormalizedEvidence.Error($"Evidence inputs could not be snapshotted: {exception.Message}"),
                 pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
         }
@@ -282,6 +297,7 @@ public sealed class GateRunner
                 request.Invocation.Arguments,
                 request.Invocation.WorkingDirectory,
                 Environment = request.Invocation.Environment ?? new Dictionary<string, string>(),
+                request.Invocation.InheritEnvironment,
                 request.Scope,
                 request.Capability.ExecutableIdentity,
                 CapabilityTool = request.Capability.Tool,
@@ -441,6 +457,58 @@ public sealed class GateRunner
             return NormalizedEvidence.Error("The bound capability executable cannot be read.");
         }
     }
+
+    private static NormalizedEvidence? ValidateRequiredGateBinding(
+        GateRequest request,
+        IDeterministicEvaluationPlugin plugin)
+    {
+        if (!request.Policy.AuthorityVerified ||
+            !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal))
+            return null;
+        var binding = request.Policy.RequiredGatePluginBindings.SingleOrDefault(candidate =>
+            string.Equals(candidate.GateId, request.GateId, StringComparison.Ordinal));
+        if (binding is null)
+            return NormalizedEvidence.Error(
+                "Protected required gate has no trusted code-owned plugin identity binding.");
+        return string.Equals(binding.PluginId, plugin.Id, StringComparison.Ordinal) &&
+               string.Equals(binding.PluginVersion, plugin.Version, StringComparison.Ordinal) &&
+               string.Equals(binding.Tool, plugin.ExpectedTool, StringComparison.Ordinal) &&
+               string.Equals(binding.Tool, request.Capability.Tool, StringComparison.Ordinal)
+            ? null
+            : NormalizedEvidence.Error(
+                "Selected plugin identity/version/tool does not match the protected required-gate binding.");
+    }
+
+    private async Task<NormalizedEvidence?> ValidateAutomaticScopeAsync(
+        GateRequest request,
+        IDeterministicEvaluationPlugin plugin,
+        RepositoryIdentity repository,
+        CancellationToken cancellationToken)
+    {
+        if (plugin is not Adapters.AntiSlopEvaluationPlugin)
+            return null;
+        if (_repository is not IRepositoryEvaluationScopeReader scopeReader)
+            return NormalizedEvidence.Error(
+                "Anti-slop requires trusted frozen-tree scope and effective-ignore evidence.");
+        try
+        {
+            var scope = await scopeReader.ReadEvaluationScopeAsync(
+                repository.HeadCommit, cancellationToken).ConfigureAwait(false);
+            var expected = DeterministicEvaluationPluginRegistry.NormalizeInputs(
+                plugin.DetectInputs(scope.TrackedFiles, scope.IgnoredFiles));
+            var requested = DeterministicEvaluationPluginRegistry.NormalizeInputs(request.Plugin?.Inputs ?? []);
+            return expected.SequenceEqual(requested, StringComparer.Ordinal)
+                ? null
+                : NormalizedEvidence.Incomplete(
+                    "Anti-slop requested inputs do not exactly match the complete frozen Git-tree scope after effective ignores.");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or EvidenceRepositoryException or EvaluationPluginException)
+        {
+            return NormalizedEvidence.Error(
+                $"Anti-slop frozen-tree scope could not be derived: {exception.Message}");
+        }
+    }
+
     private static string OutcomeText(GateOutcome outcome) => outcome switch
     {
         GateOutcome.Pass => "PASS",

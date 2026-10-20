@@ -104,7 +104,8 @@ public sealed record CommandInvocation(
     string FileName,
     IReadOnlyList<string> Arguments,
     string WorkingDirectory,
-    IReadOnlyDictionary<string, string>? Environment = null);
+    IReadOnlyDictionary<string, string>? Environment = null,
+    bool InheritEnvironment = true);
 
 public sealed record CommandResult(
     int? ExitCode,
@@ -180,6 +181,17 @@ public interface ICommandExecutor
 public interface IRepositoryIdentityReader
 {
     Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken);
+}
+
+public sealed record RepositoryEvaluationScope(
+    IReadOnlyList<string> TrackedFiles,
+    IReadOnlySet<string> IgnoredFiles);
+
+public interface IRepositoryEvaluationScopeReader
+{
+    Task<RepositoryEvaluationScope> ReadEvaluationScopeAsync(
+        string expectedHeadCommit,
+        CancellationToken cancellationToken);
 }
 
 public sealed class EvidenceWriteException(string message) : Exception(message);

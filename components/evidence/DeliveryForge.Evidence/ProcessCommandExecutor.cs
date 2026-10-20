@@ -72,6 +72,8 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             UseShellExecute = false,
             CreateNoWindow = true
         };
+        if (!invocation.InheritEnvironment)
+            startInfo.Environment.Clear();
         foreach (var argument in invocation.Arguments)
             startInfo.ArgumentList.Add(argument);
         foreach (var pair in invocation.Environment ?? new Dictionary<string, string>())

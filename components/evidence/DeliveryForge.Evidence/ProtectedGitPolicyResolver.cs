@@ -8,7 +8,8 @@ namespace DeliveryForge.Evidence;
 public sealed class ProtectedGitPolicyResolver(
     ICommandExecutor executor,
     string repositoryRoot,
-    string protectedBaseCommit)
+    string protectedBaseCommit,
+    IReadOnlyList<RequiredGatePluginBinding>? trustedGatePluginBindings = null)
 {
     private readonly string _repositoryRoot = Path.GetFullPath(repositoryRoot);
 
@@ -51,10 +52,12 @@ public sealed class ProtectedGitPolicyResolver(
                 throw new EvidencePolicyException("Protected policy required gates are empty, malformed, or duplicated.");
 
             var contentIdentity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
+            var bindings = ValidateBindings(requiredGates.Select(value => value!).ToArray());
             return new ResolvedEvidencePolicy(
                 validated.Identity, contentIdentity, baseId, PolicyAuthorityKind.ProtectedGitBase,
                 0m, requiredGates.Select(value => value!).ToArray(), authorityVerified: true,
-                sourceRepositoryRoot: _repositoryRoot);
+                sourceRepositoryRoot: _repositoryRoot,
+                requiredGatePluginBindings: bindings);
         }
         catch (ContractValidationException exception)
         {
@@ -64,6 +67,25 @@ public sealed class ProtectedGitPolicyResolver(
         {
             throw new EvidencePolicyException($"Protected policy JSON is malformed: {exception.Message}");
         }
+    }
+
+    private IReadOnlyList<RequiredGatePluginBinding> ValidateBindings(IReadOnlyList<string> requiredGates)
+    {
+        var supplied = trustedGatePluginBindings ?? RequiredGatePluginBindings.BuiltIns;
+        if (supplied.Any(binding =>
+                string.IsNullOrWhiteSpace(binding.GateId) ||
+                string.IsNullOrWhiteSpace(binding.PluginId) ||
+                string.IsNullOrWhiteSpace(binding.PluginVersion) ||
+                string.IsNullOrWhiteSpace(binding.Tool)) ||
+            supplied.GroupBy(binding => binding.GateId, StringComparer.Ordinal).Any(group => group.Count() != 1))
+            throw new EvidencePolicyException("Trusted required-gate plugin bindings are malformed or duplicated.");
+
+        return requiredGates
+            .Select(gate => supplied.SingleOrDefault(binding =>
+                string.Equals(binding.GateId, gate, StringComparison.Ordinal)))
+            .Where(binding => binding is not null)
+            .Select(binding => binding!)
+            .ToArray();
     }
 
     private async Task<CommandResult> GitAsync(
@@ -83,4 +105,15 @@ public sealed class ProtectedGitPolicyResolver(
     private static bool IsGitObject(string value) =>
         value.Length is 40 or 64 && value.All(character =>
             character is >= '0' and <= '9' or >= 'a' and <= 'f');
+}
+
+internal static class RequiredGatePluginBindings
+{
+    internal static IReadOnlyList<RequiredGatePluginBinding> BuiltIns { get; } =
+    [
+        new("build", "delivery-forge.dotnet", "1.0.0", "dotnet"),
+        new("test", "delivery-forge.dotnet", "1.0.0", "dotnet"),
+        new("coverage", "delivery-forge.dotnet", "1.0.0", "dotnet"),
+        new("mutation", "delivery-forge.mutate4csharp", "1.0.0", "mutate4csharp")
+    ];
 }

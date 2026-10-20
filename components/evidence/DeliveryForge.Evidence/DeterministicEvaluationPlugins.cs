@@ -92,13 +92,23 @@ public sealed class DeterministicEvaluationPluginRegistry
         _plugins = indexed;
     }
 
-    public static DeterministicEvaluationPluginRegistry CreateBuiltIns() => new(
-    [
-        new SealedEvidenceAdapterPlugin("delivery-forge.dotnet", "1.0.0", "dotnet", EvidenceAdapterKind.DotNet),
-        new SealedEvidenceAdapterPlugin("delivery-forge.crap4csharp", "1.0.0", "crap4csharp", EvidenceAdapterKind.Crap4CSharp),
-        new SealedEvidenceAdapterPlugin("delivery-forge.mutate4csharp", "1.0.0", "mutate4csharp", EvidenceAdapterKind.Mutate4CSharp),
-        AntiSlopEvaluationPlugin.CreateBundled()
-    ]);
+    public static DeterministicEvaluationPluginRegistry CreateBuiltIns(
+        string? trustedAntiSlopBundleRoot = null,
+        string? trustedNodePath = null)
+    {
+        if ((trustedAntiSlopBundleRoot is null) != (trustedNodePath is null))
+            throw new EvaluationPluginException(
+                "Anti-slop bundle and Node registration must be supplied together.");
+        return new(
+        [
+            new SealedEvidenceAdapterPlugin("delivery-forge.dotnet", "1.0.0", "dotnet", EvidenceAdapterKind.DotNet),
+            new SealedEvidenceAdapterPlugin("delivery-forge.crap4csharp", "1.0.0", "crap4csharp", EvidenceAdapterKind.Crap4CSharp),
+            new SealedEvidenceAdapterPlugin("delivery-forge.mutate4csharp", "1.0.0", "mutate4csharp", EvidenceAdapterKind.Mutate4CSharp),
+            trustedAntiSlopBundleRoot is not null
+                ? AntiSlopEvaluationPlugin.CreateBundled(trustedAntiSlopBundleRoot, trustedNodePath!)
+                : AntiSlopEvaluationPlugin.CreateBundled()
+        ]);
+    }
 
     public IDeterministicEvaluationPlugin Resolve(
         EvidenceAdapterKind compatibilityAdapter,

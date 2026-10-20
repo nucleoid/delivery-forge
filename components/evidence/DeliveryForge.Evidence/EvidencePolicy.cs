@@ -23,6 +23,12 @@ public sealed record PolicyCandidate(
     decimal MaximumChangedCodeDebtIncrease,
     IReadOnlyList<string> RequiredGates);
 
+public sealed record RequiredGatePluginBinding(
+    string GateId,
+    string PluginId,
+    string PluginVersion,
+    string Tool);
+
 public sealed class ResolvedEvidencePolicy
 {
     internal ResolvedEvidencePolicy(
@@ -33,7 +39,8 @@ public sealed class ResolvedEvidencePolicy
         decimal maximumChangedCodeDebtIncrease,
         IReadOnlyList<string> requiredGates,
         bool authorityVerified,
-        string? sourceRepositoryRoot = null)
+        string? sourceRepositoryRoot = null,
+        IReadOnlyList<RequiredGatePluginBinding>? requiredGatePluginBindings = null)
     {
         PolicyIdentity = policyIdentity;
         ContentIdentity = contentIdentity;
@@ -43,6 +50,7 @@ public sealed class ResolvedEvidencePolicy
         RequiredGates = requiredGates;
         AuthorityVerified = authorityVerified;
         SourceRepositoryRoot = sourceRepositoryRoot;
+        RequiredGatePluginBindings = requiredGatePluginBindings ?? [];
     }
 
     internal string? SourceRepositoryRoot { get; }
@@ -54,6 +62,7 @@ public sealed class ResolvedEvidencePolicy
     public decimal MaximumChangedCodeDebtIncrease { get; }
     public IReadOnlyList<string> RequiredGates { get; }
     internal bool AuthorityVerified { get; }
+    internal IReadOnlyList<RequiredGatePluginBinding> RequiredGatePluginBindings { get; }
 }
 
 public static partial class EvidencePolicy

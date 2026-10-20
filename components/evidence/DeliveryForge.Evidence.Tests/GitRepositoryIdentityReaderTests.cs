@@ -38,6 +38,29 @@ public sealed class GitRepositoryIdentityReaderTests
         Assert.False(identity.IsClean);
     }
 
-    private static CommandResult Result(string stdout) =>
-        new(0, stdout, string.Empty, false, false, TestEvidence.Time(0), TestEvidence.Time(1));
+    [Fact]
+    public async Task Evaluation_scope_comes_from_the_exact_tree_and_effective_ignores()
+    {
+        var head = TestEvidence.Commit('b');
+        var reader = new GitRepositoryIdentityReader(
+            new QueueCommandExecutor(
+                Result(head + Environment.NewLine),
+                Result(".gitignore\0.oxlintignore\0generated/out.ts\0src/app.ts\0src/git-ignored.ts\0src/tool-ignored.ts\0src/app.cs\0"),
+                Result("generated\nsrc/git-ignored.ts\n"),
+                Result("src/tool-ignored.ts\n")),
+            System.IO.Path.GetTempPath(),
+            TestEvidence.Commit('a'));
+
+        var scope = await reader.ReadEvaluationScopeAsync(head, TestContext.Current.CancellationToken);
+
+        Assert.Equal(
+            [".gitignore", ".oxlintignore", "generated/out.ts", "src/app.cs", "src/app.ts", "src/git-ignored.ts", "src/tool-ignored.ts"],
+            scope.TrackedFiles);
+        Assert.Equal(
+            ["generated/out.ts", "src/git-ignored.ts", "src/tool-ignored.ts"],
+            scope.IgnoredFiles.Order(StringComparer.Ordinal));
+    }
+
+    private static CommandResult Result(string stdout, int exitCode = 0) =>
+        new(exitCode, stdout, string.Empty, false, false, TestEvidence.Time(0), TestEvidence.Time(1));
 }

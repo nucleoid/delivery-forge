@@ -52,6 +52,8 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.False(result.Plugin.Enabled);
         Assert.Equal("delivery-forge.dotnet", result.Plugin.Id);
         Assert.Contains("disabled", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(TestEvidence.Repository(), result.Before);
+        Assert.False(result.SourceChanged);
     }
 
     [Theory]
@@ -88,18 +90,17 @@ public sealed class DeterministicEvaluationPluginTests
     public async Task Anti_slop_rejects_autofix_before_execution_and_binds_config_bytes()
     {
         using var temp = new TempDirectory();
-        var (config, nodeDirectory) = CreateFixtureAntiSlopClosure(temp.Path);
+        var (config, nodePath, entryPoint) = CreateFixtureAntiSlopClosure(temp.Path);
         var original = TestEvidence.GateRequest(temp.Path);
         var executableIdentity = $"sha256:{Convert.ToHexStringLower(
             System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(
-                original.Invocation.FileName, TestContext.Current.CancellationToken)))}";
+                nodePath, TestContext.Current.CancellationToken)))}";
         var canonicalInvocation = original.Invocation with
         {
-            Arguments = ["--config", config, "--format", "json", "src/app.ts"],
-            Environment = new Dictionary<string, string>(StringComparer.Ordinal)
-            {
-                ["PATH"] = nodeDirectory
-            }
+            FileName = nodePath,
+            Arguments = [entryPoint, "--config", config, "--format", "json", "src/app.ts"],
+            Environment = new Dictionary<string, string>(StringComparer.Ordinal),
+            InheritEnvironment = false
         };
         var configIdentity = AntiSlopEvaluationPlugin.ComputeConfigurationIdentity(
             canonicalInvocation,
@@ -108,29 +109,35 @@ public sealed class DeterministicEvaluationPluginTests
         {
             Capability = ToolCapability.FromDetection(
                 "oxlint", "1.78.0", "oxlint-json-v1", false, [],
-                original.Invocation.FileName, executableIdentity, ["lint"],
+                nodePath, executableIdentity, ["lint"],
                 original.Invocation.WorkingDirectory),
             Adapter = EvidenceAdapterKind.External,
             ConfigurationIdentity = configIdentity,
             Invocation = canonicalInvocation with
             {
-                Arguments = ["--fix", "--config", config, "--format", "json", "src/app.ts"]
+                Arguments = [entryPoint, "--fix", "--config", config, "--format", "json", "src/app.ts"]
             },
             Plugin = new EvaluationPluginSelection(
                 "dmmulroy.anti-slop", Enabled: true, Inputs: ["src/app.ts"])
         };
         var runner = new GateRunner(
             new QueueCommandExecutor(),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            new ScopedSequenceRepositoryIdentityReader(
+                new RepositoryEvaluationScope(
+                    ["src/app.ts"], new HashSet<string>(StringComparer.Ordinal)),
+                TestEvidence.Repository()),
             request.Invocation.WorkingDirectory,
-            TestEvidence.Commit('a'));
+            TestEvidence.Commit('a'),
+            DeterministicEvaluationPluginRegistry.CreateBuiltIns(
+                System.IO.Path.GetDirectoryName(config)!, nodePath));
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.Contains("autofix", result.Reason, StringComparison.OrdinalIgnoreCase);
 
-        var plugin = AntiSlopEvaluationPlugin.CreateBundled();
+        var plugin = AntiSlopEvaluationPlugin.CreateBundled(
+            System.IO.Path.GetDirectoryName(config)!, nodePath);
         var canonical = request with
         {
             Invocation = canonicalInvocation
@@ -145,7 +152,7 @@ public sealed class DeterministicEvaluationPluginTests
             Invocation = canonical.Invocation with { Environment = poisonedEnvironment }
         });
         Assert.Equal(GateOutcome.Incomplete, poisoned?.Outcome);
-        Assert.Contains("NODE_OPTIONS", poisoned?.Reason, StringComparison.Ordinal);
+        Assert.Contains("allow-listed", poisoned?.Reason, StringComparison.OrdinalIgnoreCase);
         var mismatched = plugin.ValidateBeforeExecution(canonical with
         {
             ConfigurationIdentity = TestEvidence.Identity('9')
@@ -158,12 +165,14 @@ public sealed class DeterministicEvaluationPluginTests
     public void Anti_slop_revalidates_the_configuration_and_runtime_closure_after_execution()
     {
         using var temp = new TempDirectory();
-        var (config, nodeDirectory) = CreateFixtureAntiSlopClosure(temp.Path);
+        var (config, nodePath, entryPoint) = CreateFixtureAntiSlopClosure(temp.Path);
         var original = TestEvidence.GateRequest(temp.Path);
         var invocation = original.Invocation with
         {
-            Arguments = ["--config", config, "--format", "json", "src/app.ts"],
-            Environment = new Dictionary<string, string>(StringComparer.Ordinal) { ["PATH"] = nodeDirectory }
+            FileName = nodePath,
+            Arguments = [entryPoint, "--config", config, "--format", "json", "src/app.ts"],
+            Environment = new Dictionary<string, string>(StringComparer.Ordinal),
+            InheritEnvironment = false
         };
         var request = original with
         {
@@ -173,15 +182,16 @@ public sealed class DeterministicEvaluationPluginTests
             Plugin = new EvaluationPluginSelection(
                 "dmmulroy.anti-slop", Enabled: true, Inputs: ["src/app.ts"])
         };
-        var plugin = AntiSlopEvaluationPlugin.CreateBundled();
+        var plugin = AntiSlopEvaluationPlugin.CreateBundled(
+            System.IO.Path.GetDirectoryName(config)!, nodePath);
         var snapshot = plugin.CaptureBefore(request);
         File.AppendAllText(
-            System.IO.Path.Combine(temp.Path, "anti-slop", "vendor", "anti-slop", "index.ts"),
+            System.IO.Path.Combine(temp.Path, "anti-slop-bundle", "vendor", "anti-slop", "index.ts"),
             "// changed");
 
         var result = plugin.ValidateAfterExecution(request, snapshot);
 
-        Assert.Equal(GateOutcome.Error, result?.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result?.Outcome);
         Assert.Contains("changed", result?.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -227,21 +237,71 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
-    public async Task Anti_slop_clean_pass_is_advisory_and_cannot_satisfy_a_protected_required_gate()
+    public void Anti_slop_normalizes_exact_pinned_oxlint_1_78_fixture_output()
+    {
+        var plugin = AntiSlopEvaluationPlugin.CreateBundled();
+        const string clean = """
+            { "diagnostics": [],
+              "number_of_files": 1,
+              "number_of_rules": 115,
+              "threads_count": 1,
+              "start_time": 0.325023302
+            }
+            """;
+        const string violation = """
+            { "diagnostics": [{"message": "Parameter `value` leaves input unparsed. Accept a named domain type; run the expected schema or parser at the I/O boundary before calling this function.","code": "anti-slop(no-unknown-parameters)","severity": "error","filename": "fixtures/violation.ts","labels": [{"span": {"offset": 33,"length": 7,"line": 1,"column": 34}}]},
+            {"message": "A `typeof` check narrows a representation without establishing its contract. Parse input at its I/O boundary, then branch on the domain value.","code": "anti-slop(no-runtime-typeof)","severity": "error","filename": "fixtures/violation.ts","labels": [{"span": {"offset": 61,"length": 12,"line": 2,"column": 10}}]}],
+              "number_of_files": 1,
+              "number_of_rules": 115,
+              "threads_count": 1,
+              "start_time": 0.504229757
+            }
+            """;
+        const string malformed = """
+            { "diagnostics": [{"message": "Unexpected token","severity": "error","filename": "fixtures/malformed.ts","labels": [{"span": {"offset": 23,"length": 1,"line": 1,"column": 24}}]}],
+              "number_of_files": 1,
+              "number_of_rules": 115,
+              "threads_count": 1,
+              "start_time": 0.343900535
+            }
+            """;
+
+        Assert.Equal(
+            GateOutcome.Pass,
+            plugin.NormalizeReport(System.Text.Encoding.UTF8.GetBytes(clean), ["fixtures/clean.ts"], 0).Outcome);
+        Assert.Equal(
+            GateOutcome.Fail,
+            plugin.NormalizeReport(System.Text.Encoding.UTF8.GetBytes(violation), ["fixtures/violation.ts"], 1).Outcome);
+        Assert.Equal(
+            GateOutcome.Incomplete,
+            plugin.NormalizeReport(System.Text.Encoding.UTF8.GetBytes(malformed), ["fixtures/malformed.ts"], 1).Outcome);
+    }
+
+    [Fact]
+    public async Task Anti_slop_cannot_impersonate_a_protected_test_gate()
     {
         using var temp = new TempDirectory();
-        var (config, nodeDirectory) = CreateFixtureAntiSlopClosure(temp.Path);
+        var (config, nodePath, entryPoint) = CreateFixtureAntiSlopClosure(temp.Path);
         var original = TestEvidence.GateRequest(temp.Path);
         var invocation = original.Invocation with
         {
-            Arguments = ["--config", config, "--format", "json", "src/app.ts"],
-            Environment = new Dictionary<string, string>(StringComparer.Ordinal) { ["PATH"] = nodeDirectory }
+            FileName = nodePath,
+            Arguments = [entryPoint, "--config", config, "--format", "json", "src/app.ts"],
+            Environment = new Dictionary<string, string>(StringComparer.Ordinal),
+            InheritEnvironment = false
         };
         var executableIdentity = $"sha256:{Convert.ToHexStringLower(
             System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(
                 invocation.FileName, TestContext.Current.CancellationToken)))}";
         var request = original with
         {
+            Policy = new ResolvedEvidencePolicy(
+                TestEvidence.Identity('1'), TestEvidence.Identity('2'), TestEvidence.Commit('a'),
+                PolicyAuthorityKind.ProtectedGitBase, 0m, ["test"], authorityVerified: true,
+                sourceRepositoryRoot: invocation.WorkingDirectory,
+                requiredGatePluginBindings:
+                [new RequiredGatePluginBinding(
+                    "test", "delivery-forge.dotnet", "1.0.0", "dotnet")]),
             Adapter = EvidenceAdapterKind.External,
             Capability = ToolCapability.FromDetection(
                 "oxlint", "1.78.0", "oxlint-json-v1", false, [], invocation.FileName,
@@ -261,15 +321,18 @@ public sealed class DeterministicEvaluationPluginTests
                 false,
                 now,
                 now)),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
+            new ScopedSequenceRepositoryIdentityReader(
+                new RepositoryEvaluationScope(
+                    ["src/app.ts"], new HashSet<string>(StringComparer.Ordinal)),
+                TestEvidence.Repository(), TestEvidence.Repository()),
             request.Invocation.WorkingDirectory,
             TestEvidence.Commit('a'));
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
-        Assert.Equal("PASS", result.Plugin.ToolOutcome);
-        Assert.Contains("advisory", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Null(result.Plugin.ToolOutcome);
+        Assert.Contains("required-gate binding", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -277,6 +340,70 @@ public sealed class DeterministicEvaluationPluginTests
     {
         Assert.Throws<EvaluationPluginException>(() =>
             AntiSlopEvaluationPlugin.DetectSupportedInputs(["--config.ts"]));
+    }
+
+    [Theory]
+    [InlineData(false, GateOutcome.Pass)]
+    [InlineData(true, GateOutcome.Incomplete)]
+    public async Task Protected_anti_slop_binding_requires_the_complete_frozen_scope(
+        bool omitTrackedInput,
+        GateOutcome expectedOutcome)
+    {
+        using var temp = new TempDirectory();
+        var (config, nodePath, entryPoint) = CreateFixtureAntiSlopClosure(temp.Path);
+        var original = TestEvidence.GateRequest(temp.Path);
+        var selected = omitTrackedInput ? new[] { "src/app.ts" } : new[] { "src/app.ts", "src/extra.ts" };
+        var invocation = original.Invocation with
+        {
+            FileName = nodePath,
+            Arguments = [entryPoint, "--config", config, "--format", "json", .. selected],
+            Environment = new Dictionary<string, string>(StringComparer.Ordinal),
+            InheritEnvironment = false
+        };
+        var executableIdentity = $"sha256:{Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(nodePath)))}";
+        var request = original with
+        {
+            GateId = "anti-slop",
+            Policy = new ResolvedEvidencePolicy(
+                TestEvidence.Identity('1'), TestEvidence.Identity('2'), TestEvidence.Commit('a'),
+                PolicyAuthorityKind.ProtectedGitBase, 0m, ["anti-slop"], authorityVerified: true,
+                sourceRepositoryRoot: invocation.WorkingDirectory,
+                requiredGatePluginBindings:
+                [new RequiredGatePluginBinding(
+                    "anti-slop", "dmmulroy.anti-slop",
+                    $"0.1.2+{AntiSlopEvaluationPlugin.UpstreamCommit}", "oxlint")]),
+            Capability = ToolCapability.FromDetection(
+                "oxlint", "1.78.0", "oxlint-json-v1", false, [], nodePath,
+                executableIdentity, ["lint"], invocation.WorkingDirectory),
+            Adapter = EvidenceAdapterKind.External,
+            ConfigurationIdentity = AntiSlopEvaluationPlugin.ComputeConfigurationIdentity(invocation, false),
+            Invocation = invocation,
+            Plugin = new EvaluationPluginSelection(
+                "dmmulroy.anti-slop", Enabled: true, Inputs: selected)
+        };
+        var now = DateTimeOffset.UtcNow;
+        var runner = new GateRunner(
+            new StubCommandExecutor(new CommandResult(
+                0,
+                $"{{\"diagnostics\":[],\"number_of_files\":{selected.Length},\"number_of_rules\":115}}",
+                string.Empty, false, false, now, now)),
+            new ScopedSequenceRepositoryIdentityReader(
+                new RepositoryEvaluationScope(
+                    ["src/app.ts", "src/extra.ts"], new HashSet<string>(StringComparer.Ordinal)),
+                TestEvidence.Repository(), TestEvidence.Repository()),
+            invocation.WorkingDirectory,
+            TestEvidence.Commit('a'),
+            DeterministicEvaluationPluginRegistry.CreateBuiltIns(
+                System.IO.Path.GetDirectoryName(config)!, nodePath));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.True(
+            result.Outcome == expectedOutcome,
+            $"Expected {expectedOutcome}, received {result.Outcome}: {result.Reason}");
+        if (omitTrackedInput)
+            Assert.Contains("complete frozen Git-tree scope", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -383,9 +510,9 @@ public sealed class DeterministicEvaluationPluginTests
         }
     }
 
-    private static (string Config, string NodeDirectory) CreateFixtureAntiSlopClosure(string parent)
+    private static (string Config, string NodePath, string EntryPoint) CreateFixtureAntiSlopClosure(string parent)
     {
-        var root = System.IO.Path.Combine(parent, "anti-slop");
+        var root = System.IO.Path.Combine(parent, "anti-slop-bundle");
         var nodeDirectory = System.IO.Path.Combine(root, "runtime");
         var files = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -405,6 +532,9 @@ public sealed class DeterministicEvaluationPluginTests
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(path)!);
             File.WriteAllText(path, contents);
         }
-        return (System.IO.Path.Combine(root, "oxlint.config.ts"), nodeDirectory);
+        return (
+            System.IO.Path.Combine(root, "oxlint.config.ts"),
+            System.IO.Path.Combine(nodeDirectory, "node"),
+            System.IO.Path.Combine(root, "node_modules", "oxlint", "bin", "oxlint"));
     }
 }
