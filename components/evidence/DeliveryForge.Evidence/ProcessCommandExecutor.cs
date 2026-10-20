@@ -45,9 +45,9 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
     {
         if (!_creationOwnedWindows)
             throw new InvalidOperationException("Injected executor delegates cannot establish creation-owned byte capture.");
-        if (entireBudget <= TimeSpan.Zero || entireBudget > TimeSpan.FromMinutes(15))
+        if (entireBudget <= TimeSpan.Zero || entireBudget > TimeSpan.FromHours(1))
             throw new ArgumentOutOfRangeException(nameof(entireBudget));
-        if (maximumBytesPerStream <= 0 || maximumBytesPerStream > 16 * 1024 * 1024)
+        if (maximumBytesPerStream <= 0 || maximumBytesPerStream > 128 * 1024 * 1024)
             throw new ArgumentOutOfRangeException(nameof(maximumBytesPerStream));
         if (OperatingSystem.IsWindows())
             return WindowsCommandLifetime.ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken);

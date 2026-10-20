@@ -76,7 +76,7 @@ public sealed class PublicationFixture
 
     public ValidatedContract Gate(string gateId, string outcome,
         string pluginId = "delivery-forge.dotnet", string tool = "dotnet") => Contract($$"""
-        { "schemaVersion":"1.0.0", "kind":"gate-receipt", "identity":"{{Id('0')}}",
+        { "schemaVersion":"2.0.0", "kind":"gate-receipt", "identity":"{{Id('0')}}",
           "gateId":"{{gateId}}", "policyIdentity":"{{Policy.Identity}}",
           "baseCommit":"{{Commit('a')}}", "headCommit":"{{Commit('b')}}", "treeId":"{{Commit('c')}}",
           "command":"fixture command", "startedAt":"2026-10-11T00:00:00Z",

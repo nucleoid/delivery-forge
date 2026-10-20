@@ -1,3 +1,7 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
+
 namespace DeliveryForge.Evidence;
 
 public sealed class GitRepositoryIdentityReader(
@@ -6,6 +10,8 @@ public sealed class GitRepositoryIdentityReader(
     string protectedBaseCommit) : IRepositoryIdentityReader, IRepositoryEvaluationScopeReader
 {
     private readonly string _repositoryRoot = Path.GetFullPath(repositoryRoot);
+    internal bool SupportsCreationOwnedBoundedRead =>
+        executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true };
 
     public async Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken)
     {
@@ -47,70 +53,116 @@ public sealed class GitRepositoryIdentityReader(
             throw new EvidenceRepositoryException("Evaluation scope head does not match the frozen repository head.");
 
         var tree = await GitAsync(
-            ["ls-tree", "-r", "--name-only", "-z", expectedHeadCommit], cancellationToken).ConfigureAwait(false);
-        var files = tree.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries)
-            .Select(path => path.Replace('\\', '/'))
+            ["ls-tree", "-r", "-z", "--format=%(objectname)%x09%(path)", expectedHeadCommit], cancellationToken)
+            .ConfigureAwait(false);
+        var entries = tree.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Select(ParseTreeEntry)
+            .OrderBy(entry => entry.Path, StringComparer.Ordinal)
+            .ToArray();
+        var files = entries.Select(entry => entry.Path).ToArray();
+        var javascript = entries.Where(entry => Adapters.AntiSlopEvaluationPlugin.IsSupportedInput(entry.Path)).ToArray();
+        var changed = await GitAsync(
+            ["diff", "--name-only", "-z", protectedBaseCommit, expectedHeadCommit, "--"], cancellationToken)
+            .ConfigureAwait(false);
+        var changedPaths = changed.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Select(path => path.Replace('\\', '/')).ToHashSet(StringComparer.Ordinal);
+        var violations = new List<string>();
+        foreach (var entry in javascript)
+        {
+            var headBlob = await GitAsync(["show", $"{expectedHeadCommit}:{entry.Path}"], cancellationToken)
+                .ConfigureAwait(false);
+            var headDirectives = SuppressionDirectives(headBlob.StandardOutput);
+            if (headDirectives.Count == 0 || !changedPaths.Contains(entry.Path))
+                continue;
+
+            var baseBlob = await TryGitAsync(["show", $"{protectedBaseCommit}:{entry.Path}"], cancellationToken)
+                .ConfigureAwait(false);
+            var baseDirectives = baseBlob is null ? [] : SuppressionDirectives(baseBlob.StandardOutput);
+            if (!headDirectives.SequenceEqual(baseDirectives, StringComparer.Ordinal))
+                violations.Add(entry.Path);
+        }
+
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (var entry in javascript)
+        {
+            hash.AppendData(Encoding.UTF8.GetBytes(entry.Path));
+            hash.AppendData([0]);
+            hash.AppendData(Encoding.UTF8.GetBytes(entry.ObjectId));
+            hash.AppendData([0]);
+        }
+        return new RepositoryEvaluationScope(
+            files,
+            new HashSet<string>(StringComparer.Ordinal),
+            $"sha256:{Convert.ToHexStringLower(hash.GetHashAndReset())}",
+            violations);
+    }
+
+    private static TreeEntry ParseTreeEntry(string value)
+    {
+        var separator = value.IndexOf('\t');
+        if (separator <= 0 || separator == value.Length - 1)
+            throw new EvidenceRepositoryException("Git returned a malformed frozen tree entry.");
+        var objectId = value[..separator];
+        var path = value[(separator + 1)..].Replace('\\', '/');
+        if (!IsGitObject(objectId) || string.IsNullOrWhiteSpace(path))
+            throw new EvidenceRepositoryException("Git returned a malformed frozen tree object identity.");
+        return new TreeEntry(path, objectId);
+    }
+
+    private static IReadOnlyList<string> SuppressionDirectives(string content) =>
+        Regex.Matches(
+                content,
+                @"(?im)(?:eslint|oxlint)(?:-(?:disable|enable)(?:-next-line|-line)?|\s+[a-z@][a-z0-9@/_-]*)[^\r\n]*",
+                RegexOptions.CultureInvariant)
+            .Select(match => match.Value.Trim())
             .Order(StringComparer.Ordinal)
             .ToArray();
-        var ignored = new HashSet<string>(StringComparer.Ordinal);
-        var ignorePatterns = await ReadIgnorePatternsAsync(
-            expectedHeadCommit, files, cancellationToken).ConfigureAwait(false);
-
-        foreach (var file in files.Where(Adapters.AntiSlopEvaluationPlugin.IsSupportedInput))
-        {
-            if (IgnorePatternMatcher.IsIgnored(file, ignorePatterns))
-                ignored.Add(file);
-        }
-        return new RepositoryEvaluationScope(files, ignored);
-    }
-
-    private async Task<IReadOnlyList<ScopedIgnorePattern>> ReadIgnorePatternsAsync(
-        string head,
-        IReadOnlyList<string> files,
-        CancellationToken cancellationToken)
-    {
-        var patterns = new List<ScopedIgnorePattern>
-        {
-            new(string.Empty, "node_modules/**"),
-            new(string.Empty, "vendor/anti-slop/**")
-        };
-        var ignoreFiles = files
-            .Where(file => string.Equals(Path.GetFileName(file), ".gitignore", StringComparison.Ordinal) ||
-                           file is ".oxlintignore" or ".eslintignore")
-            .OrderBy(file => file.Count(character => character == '/'))
-            .ThenBy(file => file, StringComparer.Ordinal);
-        foreach (var ignoreFile in ignoreFiles)
-        {
-            var content = await GitAsync(["show", $"{head}:{ignoreFile}"], cancellationToken).ConfigureAwait(false);
-            var basePath = Path.GetDirectoryName(ignoreFile)?.Replace('\\', '/') ?? string.Empty;
-            foreach (var pattern in content.StandardOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
-            {
-                if (pattern.Contains('\\') || pattern.Contains('[') || pattern.Contains(']'))
-                    throw new EvidenceRepositoryException(
-                        $"Ignore pattern uses unsupported escaping or a character class: {ignoreFile}");
-                var doubleStarProbe = pattern.TrimStart('!').Trim('/').Split('/');
-                if (doubleStarProbe.Any(segment => segment.Contains("**", StringComparison.Ordinal) && segment != "**"))
-                    throw new EvidenceRepositoryException(
-                        $"Ignore pattern uses an unsupported embedded double-star: {ignoreFile}");
-                patterns.Add(new ScopedIgnorePattern(basePath, pattern));
-            }
-        }
-        return patterns;
-    }
 
     private async Task<CommandResult> GitAsync(
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken)
     {
-        var result = await executor.ExecuteAsync(
-            new CommandInvocation(
-                "git", arguments, _repositoryRoot, new Dictionary<string, string> { ["GIT_OPTIONAL_LOCKS"] = "0" }),
-            TimeSpan.FromSeconds(30),
-            cancellationToken).ConfigureAwait(false);
+        var result = await ExecuteGitAsync(arguments, cancellationToken).ConfigureAwait(false);
         if (result.TimedOut || result.Cancelled || result.ExitCode != 0)
             throw new EvidenceRepositoryException(
                 $"Git identity command failed: git {string.Join(" ", arguments)}");
         return result;
+    }
+
+    private async Task<CommandResult?> TryGitAsync(
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken)
+    {
+        var result = await ExecuteGitAsync(arguments, cancellationToken).ConfigureAwait(false);
+        if (result.TimedOut || result.Cancelled)
+            throw new EvidenceRepositoryException($"Frozen Git blob read did not settle: git {string.Join(" ", arguments)}");
+        return result.ExitCode == 0 ? result : null;
+    }
+
+    private async Task<CommandResult> ExecuteGitAsync(
+        IReadOnlyList<string> arguments,
+        CancellationToken cancellationToken)
+    {
+        var invocation = new CommandInvocation(
+            "git", arguments, _repositoryRoot,
+            new Dictionary<string, string> { ["GIT_OPTIONAL_LOCKS"] = "0" });
+        if (executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } owned)
+        {
+            var capture = await owned.ExecuteBoundedCaptureAsync(
+                invocation, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, cancellationToken).ConfigureAwait(false);
+            if (capture.CaptureBoundExceeded)
+                throw new EvidenceRepositoryException("Frozen Git evidence exceeded the bounded capture limit.");
+            return capture.Command;
+        }
+        if (executor is IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true } fixture)
+        {
+            var capture = await fixture.ExecuteBoundedCaptureAsync(
+                invocation, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, cancellationToken).ConfigureAwait(false);
+            if (capture.CaptureBoundExceeded)
+                throw new EvidenceRepositoryException("Frozen Git evidence exceeded the bounded capture limit.");
+            return capture.Command;
+        }
+        return await executor.ExecuteAsync(invocation, TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
     }
 
     private static bool IsGitObject(string value) =>
@@ -118,46 +170,6 @@ public sealed class GitRepositoryIdentityReader(
             character is >= '0' and <= '9' or >= 'a' and <= 'f');
 }
 
+internal sealed record TreeEntry(string Path, string ObjectId);
+
 public sealed class EvidenceRepositoryException(string message) : Exception(message);
-
-internal static class IgnorePatternMatcher
-{
-    internal static bool IsIgnored(string path, IReadOnlyList<ScopedIgnorePattern> patterns)
-    {
-        var ignored = false;
-        foreach (var scoped in patterns)
-        {
-            var prefixPath = scoped.BasePath.Length == 0 ? string.Empty : scoped.BasePath + "/";
-            if (!path.StartsWith(prefixPath, StringComparison.Ordinal))
-                continue;
-            var relativePath = path[prefixPath.Length..];
-            var value = scoped.Pattern.TrimEnd();
-            if (value.Length == 0 || value.StartsWith('#'))
-                continue;
-            var negated = value.StartsWith('!');
-            if (negated)
-                value = value[1..];
-            if (value.Length == 0)
-                continue;
-            var anchored = value.StartsWith('/');
-            value = value.TrimStart('/');
-            value = value.TrimEnd('/');
-            var expression = System.Text.RegularExpressions.Regex.Escape(value)
-                .Replace(@"\*\*/", "(?:.*/)?")
-                .Replace(@"\*\*", ".*")
-                .Replace(@"\*", "[^/]*")
-                .Replace(@"\?", "[^/]");
-            var prefix = anchored || value.Contains('/') ? "^" : "(?:^|.*/)";
-            // A gitignore token can name either a file or a directory. If it names a
-            // directory, all descendants are ignored even without a trailing slash.
-            var suffix = "(?:/.*)?$";
-            if (System.Text.RegularExpressions.Regex.IsMatch(
-                    relativePath, prefix + expression + suffix,
-                    System.Text.RegularExpressions.RegexOptions.CultureInvariant))
-                ignored = !negated;
-        }
-        return ignored;
-    }
-}
-
-internal sealed record ScopedIgnorePattern(string BasePath, string Pattern);

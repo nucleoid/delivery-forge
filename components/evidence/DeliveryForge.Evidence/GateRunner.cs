@@ -11,7 +11,8 @@ namespace DeliveryForge.Evidence;
 
 public sealed class GateRunner
 {
-    internal const int MaximumCapturedBytesPerStream = 1024 * 1024;
+    internal const int AntiSlopMaximumCapturedBytesPerStream = 1024 * 1024;
+    internal const int ExistingGateMaximumCapturedBytesPerStream = 64 * 1024 * 1024;
     private readonly ICommandExecutor _executor;
     private readonly IRepositoryIdentityReader _repository;
     private readonly string _trustedWorkingDirectory;
@@ -71,6 +72,15 @@ public sealed class GateRunner
                 pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
 
+        if (pluginBinding.Enabled && !request.Capability.Fixture && request.Policy.AuthorityVerified &&
+            request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) &&
+            !HasTrustedProductionExecution())
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, request.ExpectedRepository, request.ExpectedRepository,
+                NormalizedEvidence.Incomplete(
+                    "A required production gate requires code-owned bounded process and Git readers; caller-supplied execution is advisory only."),
+                pluginBinding, CancellationToken.None).ConfigureAwait(false);
+
         RepositoryIdentity before;
         try
         {
@@ -120,11 +130,13 @@ public sealed class GateRunner
                 request, gateDirectory, before, before, requiredGateBindingFailure, pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
 
-        var scopeFailure = await ValidateAutomaticScopeAsync(
+        var scopeValidation = await ValidateAutomaticScopeAsync(
             request, plugin, before, CancellationToken.None).ConfigureAwait(false);
-        if (scopeFailure is not null)
+        if (scopeValidation.InputSetIdentity is not null)
+            pluginBinding = pluginBinding with { InputSetIdentity = scopeValidation.InputSetIdentity };
+        if (scopeValidation.Failure is not null)
             return await PersistWithoutExecutionAsync(
-                request, gateDirectory, before, before, scopeFailure, pluginBinding,
+                request, gateDirectory, before, before, scopeValidation.Failure, pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
 
         NormalizedEvidence? pluginValidation;
@@ -141,15 +153,6 @@ public sealed class GateRunner
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, before, before, pluginValidation, pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
-
-        if (plugin is Adapters.AntiSlopEvaluationPlugin &&
-            _executor is not ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } &&
-            _executor is not IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true })
-            return await PersistWithoutExecutionAsync(
-                request, gateDirectory, before, before,
-                NormalizedEvidence.Error(
-                    "Anti-slop requires the code-owned bounded process executor; unbounded or caller-supplied capture cannot produce gate evidence."),
-                pluginBinding, CancellationToken.None).ConfigureAwait(false);
 
         Directory.CreateDirectory(gateDirectory);
         EvaluationPluginSnapshot evidenceSnapshot;
@@ -175,16 +178,22 @@ public sealed class GateRunner
         {
             if (_executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } ownedExecutor)
             {
+                var captureLimit = plugin is Adapters.AntiSlopEvaluationPlugin
+                    ? AntiSlopMaximumCapturedBytesPerStream
+                    : ExistingGateMaximumCapturedBytesPerStream;
                 var capture = await ownedExecutor.ExecuteBoundedCaptureAsync(
-                    request.Invocation, request.Timeout, MaximumCapturedBytesPerStream, cancellationToken)
+                    request.Invocation, request.Timeout, captureLimit, cancellationToken)
                     .ConfigureAwait(false);
                 execution = capture.Command;
                 captureBoundExceeded = capture.CaptureBoundExceeded;
             }
             else if (_executor is IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true } fixtureExecutor)
             {
+                var captureLimit = plugin is Adapters.AntiSlopEvaluationPlugin
+                    ? AntiSlopMaximumCapturedBytesPerStream
+                    : ExistingGateMaximumCapturedBytesPerStream;
                 var capture = await fixtureExecutor.ExecuteBoundedCaptureAsync(
-                    request.Invocation, request.Timeout, MaximumCapturedBytesPerStream, cancellationToken)
+                    request.Invocation, request.Timeout, captureLimit, cancellationToken)
                     .ConfigureAwait(false);
                 execution = capture.Command;
                 captureBoundExceeded = capture.CaptureBoundExceeded;
@@ -263,7 +272,7 @@ public sealed class GateRunner
             normalized = NormalizedEvidence.Error("Owned tool process did not become quiescent after interruption.");
         else if (captureBoundExceeded)
             normalized = NormalizedEvidence.Incomplete(
-                $"Tool output exceeded the deterministic {MaximumCapturedBytesPerStream}-byte per-stream capture limit.");
+                "Tool output exceeded its deterministic per-plugin per-stream capture limit; no truncated output can authorize PASS.");
         else if (execution.TimedOut)
             normalized = NormalizedEvidence.Incomplete("Tool timed out before complete evidence was produced.");
         else if (execution.Cancelled)
@@ -281,6 +290,8 @@ public sealed class GateRunner
 
         var executedPlugin = DeterministicEvaluationPluginRegistry.Bind(
             request, plugin, EvaluationPluginStatus.Executed, OutcomeText(toolOutcome));
+        if (scopeValidation.InputSetIdentity is not null)
+            executedPlugin = executedPlugin with { InputSetIdentity = scopeValidation.InputSetIdentity };
         return await PersistAsync(
             request, gateDirectory, before, after, execution, artifactHashes, normalized, sourceChanged,
             executedPlugin, CancellationToken.None)
@@ -322,8 +333,8 @@ public sealed class GateRunner
         var limitations = normalized.Limitations
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.Ordinal).ToArray();
-        var provisional = new GateReceiptContract(
-            "1.0.0", "gate-receipt", $"sha256:{new string('0', 64)}",
+        var provisional = new AuthoritativeGateReceiptContract(
+            "2.0.0", "gate-receipt", $"sha256:{new string('0', 64)}",
             request.GateId, request.Policy.PolicyIdentity,
             before.BaseCommit, before.HeadCommit, before.TreeId,
             JsonSerializer.Serialize(new
@@ -511,8 +522,8 @@ public sealed class GateRunner
         var binding = request.Policy.RequiredGatePluginBindings.SingleOrDefault(candidate =>
             string.Equals(candidate.GateId, request.GateId, StringComparison.Ordinal));
         if (binding is null)
-            return NormalizedEvidence.Error(
-                "Protected required gate has no trusted code-owned plugin identity binding.");
+            return NormalizedEvidence.Incomplete(
+                "Protected required gate has no trusted code-owned plugin identity binding and is unsatisfied.");
         return string.Equals(binding.PluginId, plugin.Id, StringComparison.Ordinal) &&
                string.Equals(binding.PluginVersion, plugin.Version, StringComparison.Ordinal) &&
                string.Equals(binding.Tool, plugin.ExpectedTool, StringComparison.Ordinal) &&
@@ -522,35 +533,42 @@ public sealed class GateRunner
                 "Selected plugin identity/version/tool does not match the protected required-gate binding.");
     }
 
-    private async Task<NormalizedEvidence?> ValidateAutomaticScopeAsync(
+    private async Task<AutomaticScopeValidation> ValidateAutomaticScopeAsync(
         GateRequest request,
         IDeterministicEvaluationPlugin plugin,
         RepositoryIdentity repository,
         CancellationToken cancellationToken)
     {
         if (plugin is not Adapters.AntiSlopEvaluationPlugin)
-            return null;
+            return new(null, null);
         if (_repository is not IRepositoryEvaluationScopeReader scopeReader)
-            return NormalizedEvidence.Error(
-                "Anti-slop requires trusted frozen-tree scope and effective-ignore evidence.");
+            return new(NormalizedEvidence.Incomplete(
+                "Anti-slop requires trusted frozen-tree scope and blob evidence."), null);
         try
         {
             var scope = await scopeReader.ReadEvaluationScopeAsync(
                 repository.HeadCommit, cancellationToken).ConfigureAwait(false);
             var expected = DeterministicEvaluationPluginRegistry.NormalizeInputs(
-                plugin.DetectInputs(scope.TrackedFiles, scope.IgnoredFiles));
+                plugin.DetectInputs(scope.TrackedFiles, new HashSet<string>(StringComparer.Ordinal)));
             var requested = DeterministicEvaluationPluginRegistry.NormalizeInputs(request.Plugin?.Inputs ?? []);
-            return expected.SequenceEqual(requested, StringComparer.Ordinal)
-                ? null
-                : NormalizedEvidence.Incomplete(
-                    "Anti-slop requested inputs do not exactly match the complete frozen Git-tree scope after effective ignores.");
+            if (!expected.SequenceEqual(requested, StringComparer.Ordinal))
+                return new(NormalizedEvidence.Incomplete(
+                    "Anti-slop requested inputs do not exactly match every tracked JavaScript-family file in the frozen Git tree."),
+                    scope.InputSetIdentity);
+            if (scope.SuppressionViolations is { Count: > 0 })
+                return new(NormalizedEvidence.Incomplete(
+                    $"Anti-slop frozen inputs add or change inline suppression directives: {string.Join(", ", scope.SuppressionViolations)}."),
+                    scope.InputSetIdentity);
+            return new(null, scope.InputSetIdentity);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or EvidenceRepositoryException or EvaluationPluginException)
         {
-            return NormalizedEvidence.Error(
-                $"Anti-slop frozen-tree scope could not be derived: {exception.Message}");
+            return new(NormalizedEvidence.Incomplete(
+                $"Anti-slop frozen-tree scope could not be derived: {exception.Message}"), null);
         }
     }
+
+    private sealed record AutomaticScopeValidation(NormalizedEvidence? Failure, string? InputSetIdentity);
 
     private static string OutcomeText(GateOutcome outcome) => outcome switch
     {
@@ -562,6 +580,15 @@ public sealed class GateRunner
         _ => throw new ArgumentOutOfRangeException(nameof(outcome))
     };
 
+    private bool HasTrustedProductionExecution()
+    {
+        var process = _executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } ||
+            _executor is IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true };
+        var repository = _repository is GitRepositoryIdentityReader { SupportsCreationOwnedBoundedRead: true } ||
+            _repository is IBoundedRepositoryFixtureReader { SupportsCreationOwnedBoundedRead: true };
+        return process && repository;
+    }
+
     private static JsonSerializerOptions CreateContractJson()
     {
         var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
@@ -569,7 +596,7 @@ public sealed class GateRunner
         return options;
     }
 
-    private static byte[] SerializeReceipt(GateReceiptContract receipt)
+    private static byte[] SerializeReceipt(AuthoritativeGateReceiptContract receipt)
     {
         var node = JsonSerializer.SerializeToNode(receipt, ContractJson)?.AsObject()
             ?? throw new InvalidOperationException("Gate receipt serialization produced no object.");

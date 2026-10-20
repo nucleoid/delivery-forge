@@ -9,7 +9,7 @@ public sealed class ProtectedGitPolicyResolver(
     ICommandExecutor executor,
     string repositoryRoot,
     string protectedBaseCommit,
-    IReadOnlyList<RequiredGatePluginBinding>? trustedGatePluginBindings = null)
+    TrustedGatePluginRegistry? trustedGatePlugins = null)
 {
     private readonly string _repositoryRoot = Path.GetFullPath(repositoryRoot);
 
@@ -71,20 +71,12 @@ public sealed class ProtectedGitPolicyResolver(
 
     private IReadOnlyList<RequiredGatePluginBinding> ValidateBindings(IReadOnlyList<string> requiredGates)
     {
-        var supplied = trustedGatePluginBindings ?? RequiredGatePluginBindings.BuiltIns;
-        if (supplied.Any(binding =>
-                string.IsNullOrWhiteSpace(binding.GateId) ||
-                string.IsNullOrWhiteSpace(binding.PluginId) ||
-                string.IsNullOrWhiteSpace(binding.PluginVersion) ||
-                string.IsNullOrWhiteSpace(binding.Tool)) ||
-            supplied.GroupBy(binding => binding.GateId, StringComparer.Ordinal).Any(group => group.Count() != 1))
-            throw new EvidencePolicyException("Trusted required-gate plugin bindings are malformed or duplicated.");
-
+        var supplied = trustedGatePlugins ?? TrustedGatePluginRegistry.BuiltIns;
         return requiredGates
-            .Select(gate => supplied.SingleOrDefault(binding =>
-                string.Equals(binding.GateId, gate, StringComparison.Ordinal)))
+            .Select(gate => supplied.TryGet(gate, out var binding) ? binding : null)
             .Where(binding => binding is not null)
-            .Select(binding => binding!)
+            .Select(binding => new RequiredGatePluginBinding(
+                binding!.GateId, binding.PluginId, binding.PluginVersion, binding.Tool))
             .ToArray();
     }
 
@@ -92,11 +84,29 @@ public sealed class ProtectedGitPolicyResolver(
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken)
     {
-        var result = await executor.ExecuteAsync(
-            new CommandInvocation(
-                "git", arguments, _repositoryRoot,
-                new Dictionary<string, string> { ["GIT_OPTIONAL_LOCKS"] = "0" }),
-            TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+        var invocation = new CommandInvocation(
+            "git", arguments, _repositoryRoot,
+            new Dictionary<string, string> { ["GIT_OPTIONAL_LOCKS"] = "0" });
+        CommandResult result;
+        if (executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } owned)
+        {
+            var capture = await owned.ExecuteBoundedCaptureAsync(
+                invocation, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, cancellationToken).ConfigureAwait(false);
+            if (capture.CaptureBoundExceeded)
+                throw new EvidencePolicyException("Protected policy Git evidence exceeded the bounded capture limit.");
+            result = capture.Command;
+        }
+        else if (executor is IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true } fixture)
+        {
+            var capture = await fixture.ExecuteBoundedCaptureAsync(
+                invocation, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, cancellationToken).ConfigureAwait(false);
+            if (capture.CaptureBoundExceeded)
+                throw new EvidencePolicyException("Protected policy Git evidence exceeded the bounded capture limit.");
+            result = capture.Command;
+        }
+        else
+            result = await executor.ExecuteAsync(invocation, TimeSpan.FromSeconds(30), cancellationToken)
+                .ConfigureAwait(false);
         if (result.TimedOut || result.Cancelled || result.ExitCode != 0)
             throw new EvidencePolicyException($"Protected policy Git read failed: git {string.Join(" ", arguments)}");
         return result;
@@ -105,14 +115,4 @@ public sealed class ProtectedGitPolicyResolver(
     private static bool IsGitObject(string value) =>
         value.Length is 40 or 64 && value.All(character =>
             character is >= '0' and <= '9' or >= 'a' and <= 'f');
-}
-
-internal static class RequiredGatePluginBindings
-{
-    internal static IReadOnlyList<RequiredGatePluginBinding> BuiltIns { get; } =
-        GateReceiptAuthority.BuiltIns
-            .Where(binding => binding.GateId != "ci")
-            .Select(binding => new RequiredGatePluginBinding(
-                binding.GateId, binding.PluginId, binding.PluginVersion, binding.Tool))
-            .ToArray();
 }

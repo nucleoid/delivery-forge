@@ -1,7 +1,15 @@
 import { defineConfig } from "oxlint";
 
 export default defineConfig({
-  ignorePatterns: ["node_modules/**", "vendor/anti-slop/**"],
+  categories: {
+    correctness: "off",
+    nursery: "off",
+    pedantic: "off",
+    perf: "off",
+    restriction: "off",
+    style: "off",
+    suspicious: "off"
+  },
   jsPlugins: [
     { name: "anti-slop", specifier: "./vendor/anti-slop/index.ts" },
   ],

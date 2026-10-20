@@ -153,9 +153,10 @@ internal sealed class CancellingCommandExecutor : ICommandExecutor
         throw new OperationCanceledException(cancellationToken);
 }
 
-internal sealed class SequenceRepositoryIdentityReader(params RepositoryIdentity[] identities) : IRepositoryIdentityReader
+internal sealed class SequenceRepositoryIdentityReader(params RepositoryIdentity[] identities) : IBoundedRepositoryFixtureReader
 {
     private int _index;
+    public bool SupportsCreationOwnedBoundedRead => true;
     public Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken) =>
         Task.FromResult(identities[Math.Min(_index++, identities.Length - 1)]);
 }
@@ -163,9 +164,10 @@ internal sealed class SequenceRepositoryIdentityReader(params RepositoryIdentity
 internal sealed class ScopedSequenceRepositoryIdentityReader(
     RepositoryEvaluationScope scope,
     params RepositoryIdentity[] identities)
-    : IRepositoryIdentityReader, IRepositoryEvaluationScopeReader
+    : IBoundedRepositoryFixtureReader, IRepositoryEvaluationScopeReader
 {
     private int _index;
+    public bool SupportsCreationOwnedBoundedRead => true;
 
     public Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken) =>
         Task.FromResult(identities[Math.Min(_index++, identities.Length - 1)]);

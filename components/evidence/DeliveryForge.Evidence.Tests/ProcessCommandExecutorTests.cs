@@ -7,6 +7,22 @@ namespace DeliveryForge.Evidence.Tests;
 
 public sealed class ProcessCommandExecutorTests
 {
+    [Fact]
+    public async Task Bounded_capture_accepts_existing_gate_budgets_over_fifteen_minutes()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+
+        var executor = new ProcessCommandExecutor();
+        var result = await executor.ExecuteBoundedCaptureAsync(
+            new CommandInvocation("/usr/bin/true", [], System.IO.Path.GetTempPath()),
+            TimeSpan.FromMinutes(16),
+            1024,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.Command.ExitCode);
+        Assert.True(result.Command.OwnedProcessQuiescent);
+    }
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -31,7 +47,7 @@ public sealed class ProcessCommandExecutorTests
     }
 
     [Fact]
-    public async Task Gate_output_truncation_is_incomplete_after_owned_tree_cleanup()
+    public async Task Existing_gate_output_over_one_megabyte_is_not_silently_truncated()
     {
         using var temp = new TempDirectory();
         var request = TestEvidence.GateRequest(temp.Path);
@@ -50,9 +66,10 @@ public sealed class ProcessCommandExecutorTests
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
-        Assert.Contains("capture limit", result.Reason, StringComparison.Ordinal);
+        Assert.DoesNotContain("capture limit", result.Reason, StringComparison.Ordinal);
         Assert.True(result.Execution.OwnedProcessQuiescent);
-        Assert.True(Encoding.UTF8.GetByteCount(result.Execution.StandardOutput) <= GateRunner.MaximumCapturedBytesPerStream);
+        Assert.True(Encoding.UTF8.GetByteCount(result.Execution.StandardOutput) > 1024 * 1024);
+        Assert.True(Encoding.UTF8.GetByteCount(result.Execution.StandardOutput) <= GateRunner.ExistingGateMaximumCapturedBytesPerStream);
     }
 
     [Fact]

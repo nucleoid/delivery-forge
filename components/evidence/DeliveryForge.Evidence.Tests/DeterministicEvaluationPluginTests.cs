@@ -1,4 +1,5 @@
 using DeliveryForge.Evidence.Adapters;
+using DeliveryForge.Contracts.Validation;
 
 namespace DeliveryForge.Evidence.Tests;
 
@@ -76,7 +77,7 @@ public sealed class DeterministicEvaluationPluginTests
         var plugin = AntiSlopEvaluationPlugin.CreateBundled();
         var noInputs = plugin.NormalizeReport("[]"u8, analyzedInputs: [], processExitCode: 0);
         var noAnalyzedFiles = plugin.NormalizeReport(
-            "{\"diagnostics\":[],\"number_of_files\":0,\"number_of_rules\":115}"u8,
+            "{\"diagnostics\":[],\"number_of_files\":0,\"number_of_rules\":19}"u8,
             analyzedInputs: ["clean.ts"],
             processExitCode: 0);
 
@@ -98,7 +99,7 @@ public sealed class DeterministicEvaluationPluginTests
         var canonicalInvocation = original.Invocation with
         {
             FileName = nodePath,
-            Arguments = [entryPoint, "--config", config, "--format", "json", "src/app.ts"],
+            Arguments = [entryPoint, "--config", config, "--format", "json", "--no-ignore", "--disable-nested-config", "src/app.ts"],
             Environment = new Dictionary<string, string>(StringComparer.Ordinal),
             InheritEnvironment = false
         };
@@ -115,7 +116,7 @@ public sealed class DeterministicEvaluationPluginTests
             ConfigurationIdentity = configIdentity,
             Invocation = canonicalInvocation with
             {
-                Arguments = [entryPoint, "--fix", "--config", config, "--format", "json", "src/app.ts"]
+                Arguments = [entryPoint, "--fix", "--config", config, "--format", "json", "--no-ignore", "--disable-nested-config", "src/app.ts"]
             },
             Plugin = new EvaluationPluginSelection(
                 "dmmulroy.anti-slop", Enabled: true, Inputs: ["src/app.ts"])
@@ -170,7 +171,7 @@ public sealed class DeterministicEvaluationPluginTests
         var invocation = original.Invocation with
         {
             FileName = nodePath,
-            Arguments = [entryPoint, "--config", config, "--format", "json", "src/app.ts"],
+            Arguments = [entryPoint, "--config", config, "--format", "json", "--no-ignore", "--disable-nested-config", "src/app.ts"],
             Environment = new Dictionary<string, string>(StringComparer.Ordinal),
             InheritEnvironment = false
         };
@@ -201,23 +202,23 @@ public sealed class DeterministicEvaluationPluginTests
         var plugin = AntiSlopEvaluationPlugin.CreateBundled();
 
         var clean = plugin.NormalizeReport(
-            "{\"diagnostics\":[],\"number_of_files\":1,\"number_of_rules\":115}"u8,
+            "{\"diagnostics\":[],\"number_of_files\":1,\"number_of_rules\":19}"u8,
             ["clean.ts"],
             0);
         var violation = plugin.NormalizeReport(
-            "{\"diagnostics\":[{\"code\":\"anti-slop(no-runtime-typeof)\",\"severity\":\"error\",\"filename\":\"bad.ts\"}],\"number_of_files\":1,\"number_of_rules\":115}"u8,
+            "{\"diagnostics\":[{\"code\":\"anti-slop(no-runtime-typeof)\",\"severity\":\"error\",\"filename\":\"bad.ts\"}],\"number_of_files\":1,\"number_of_rules\":19}"u8,
             ["bad.ts"],
             1);
         var parserFailure = plugin.NormalizeReport(
-            "{\"diagnostics\":[{\"severity\":\"error\",\"filename\":\"broken.ts\"}],\"number_of_files\":1,\"number_of_rules\":115}"u8,
+            "{\"diagnostics\":[{\"severity\":\"error\",\"filename\":\"broken.ts\"}],\"number_of_files\":1,\"number_of_rules\":19}"u8,
             ["broken.ts"],
             1);
         var missingFile = plugin.NormalizeReport(
-            "{\"diagnostics\":[{\"code\":\"anti-slop(no-runtime-typeof)\",\"severity\":\"error\"}],\"number_of_files\":1,\"number_of_rules\":115}"u8,
+            "{\"diagnostics\":[{\"code\":\"anti-slop(no-runtime-typeof)\",\"severity\":\"error\"}],\"number_of_files\":1,\"number_of_rules\":19}"u8,
             ["bad.ts"],
             1);
         var dotDirectory = plugin.NormalizeReport(
-            "{\"diagnostics\":[{\"code\":\"anti-slop(no-runtime-typeof)\",\"severity\":\"error\",\"filename\":\".storybook/main.ts\"}],\"number_of_files\":1,\"number_of_rules\":115}"u8,
+            "{\"diagnostics\":[{\"code\":\"anti-slop(no-runtime-typeof)\",\"severity\":\"error\",\"filename\":\".storybook/main.ts\"}],\"number_of_files\":1,\"number_of_rules\":19}"u8,
             [".storybook/main.ts"],
             1);
         var fakeEslintShape = plugin.NormalizeReport(
@@ -237,13 +238,27 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
+    public void Anti_slop_rejects_unexpected_diagnostic_ids_as_incomplete()
+    {
+        var plugin = AntiSlopEvaluationPlugin.CreateBundled();
+
+        var result = plugin.NormalizeReport(
+            "{\"diagnostics\":[{\"code\":\"eslint(no-debugger)\",\"severity\":\"error\",\"filename\":\"bad.ts\"}],\"number_of_files\":1,\"number_of_rules\":19}"u8,
+            ["bad.ts"],
+            1);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("unexpected", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Anti_slop_normalizes_exact_pinned_oxlint_1_78_fixture_output()
     {
         var plugin = AntiSlopEvaluationPlugin.CreateBundled();
         const string clean = """
             { "diagnostics": [],
               "number_of_files": 1,
-              "number_of_rules": 115,
+              "number_of_rules": 19,
               "threads_count": 1,
               "start_time": 0.325023302
             }
@@ -252,7 +267,7 @@ public sealed class DeterministicEvaluationPluginTests
             { "diagnostics": [{"message": "Parameter `value` leaves input unparsed. Accept a named domain type; run the expected schema or parser at the I/O boundary before calling this function.","code": "anti-slop(no-unknown-parameters)","severity": "error","filename": "fixtures/violation.ts","labels": [{"span": {"offset": 33,"length": 7,"line": 1,"column": 34}}]},
             {"message": "A `typeof` check narrows a representation without establishing its contract. Parse input at its I/O boundary, then branch on the domain value.","code": "anti-slop(no-runtime-typeof)","severity": "error","filename": "fixtures/violation.ts","labels": [{"span": {"offset": 61,"length": 12,"line": 2,"column": 10}}]}],
               "number_of_files": 1,
-              "number_of_rules": 115,
+              "number_of_rules": 19,
               "threads_count": 1,
               "start_time": 0.504229757
             }
@@ -260,7 +275,7 @@ public sealed class DeterministicEvaluationPluginTests
         const string malformed = """
             { "diagnostics": [{"message": "Unexpected token","severity": "error","filename": "fixtures/malformed.ts","labels": [{"span": {"offset": 23,"length": 1,"line": 1,"column": 24}}]}],
               "number_of_files": 1,
-              "number_of_rules": 115,
+              "number_of_rules": 19,
               "threads_count": 1,
               "start_time": 0.343900535
             }
@@ -286,7 +301,7 @@ public sealed class DeterministicEvaluationPluginTests
         var invocation = original.Invocation with
         {
             FileName = nodePath,
-            Arguments = [entryPoint, "--config", config, "--format", "json", "src/app.ts"],
+            Arguments = [entryPoint, "--config", config, "--format", "json", "--no-ignore", "--disable-nested-config", "src/app.ts"],
             Environment = new Dictionary<string, string>(StringComparer.Ordinal),
             InheritEnvironment = false
         };
@@ -315,7 +330,7 @@ public sealed class DeterministicEvaluationPluginTests
         var runner = new GateRunner(
             new StubCommandExecutor(new CommandResult(
                 0,
-                "{\"diagnostics\":[],\"number_of_files\":1,\"number_of_rules\":115}",
+                "{\"diagnostics\":[],\"number_of_files\":1,\"number_of_rules\":19}",
                 string.Empty,
                 false,
                 false,
@@ -356,7 +371,7 @@ public sealed class DeterministicEvaluationPluginTests
         var invocation = original.Invocation with
         {
             FileName = nodePath,
-            Arguments = [entryPoint, "--config", config, "--format", "json", .. selected],
+            Arguments = [entryPoint, "--config", config, "--format", "json", "--no-ignore", "--disable-nested-config", .. selected],
             Environment = new Dictionary<string, string>(StringComparer.Ordinal),
             InheritEnvironment = false
         };
@@ -386,7 +401,7 @@ public sealed class DeterministicEvaluationPluginTests
         var runner = new GateRunner(
             new StubCommandExecutor(new CommandResult(
                 0,
-                $"{{\"diagnostics\":[],\"number_of_files\":{selected.Length},\"number_of_rules\":115}}",
+                $"{{\"diagnostics\":[],\"number_of_files\":{selected.Length},\"number_of_rules\":19}}",
                 string.Empty, false, false, now, now)),
             new ScopedSequenceRepositoryIdentityReader(
                 new RepositoryEvaluationScope(
@@ -403,7 +418,7 @@ public sealed class DeterministicEvaluationPluginTests
             result.Outcome == expectedOutcome,
             $"Expected {expectedOutcome}, received {result.Outcome}: {result.Reason}");
         if (omitTrackedInput)
-            Assert.Contains("complete frozen Git-tree scope", result.Reason, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("every tracked JavaScript-family file", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -462,14 +477,63 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.StartsWith("sha256:", result.Plugin.InputSetIdentity);
         Assert.Equal("INCOMPLETE", result.Plugin.ToolOutcome);
 
-        using var receipt = System.Text.Json.JsonDocument.Parse(await File.ReadAllBytesAsync(
-            result.ReceiptPath, TestContext.Current.CancellationToken));
+        var receiptBytes = await File.ReadAllBytesAsync(result.ReceiptPath, TestContext.Current.CancellationToken);
+        var validatedReceipt = ContractValidator.ParseAndValidate(receiptBytes);
+        Assert.Equal("2.0.0", validatedReceipt.SchemaVersion);
+        using var receipt = System.Text.Json.JsonDocument.Parse(receiptBytes);
         using var command = System.Text.Json.JsonDocument.Parse(
             receipt.RootElement.GetProperty("command").GetString()!);
         var plugin = command.RootElement.GetProperty("plugin");
         Assert.Equal("delivery-forge.dotnet", plugin.GetProperty("id").GetString());
         Assert.Equal(result.Plugin.InputSetIdentity, plugin.GetProperty("inputSetIdentity").GetString());
         Assert.Equal(TestEvidence.Repository().HeadCommit, receipt.RootElement.GetProperty("headCommit").GetString());
+    }
+
+    [Fact]
+    public async Task Anti_slop_fails_closed_when_both_output_streams_exceed_its_bound()
+    {
+        using var temp = new TempDirectory();
+        var (config, nodePath, entryPoint) = CreateFixtureAntiSlopClosure(temp.Path);
+        var original = TestEvidence.GateRequest(temp.Path);
+        var invocation = original.Invocation with
+        {
+            FileName = nodePath,
+            Arguments = [entryPoint, "--config", config, "--format", "json", "--no-ignore", "--disable-nested-config", "src/app.ts"],
+            Environment = new Dictionary<string, string>(),
+            InheritEnvironment = false
+        };
+        var executableIdentity = $"sha256:{Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(nodePath)))}";
+        var request = original with
+        {
+            Capability = ToolCapability.FromDetection(
+                "oxlint", "1.78.0", "oxlint-json-v1", false, [], nodePath,
+                executableIdentity, ["lint"], invocation.WorkingDirectory),
+            Adapter = EvidenceAdapterKind.External,
+            ConfigurationIdentity = AntiSlopEvaluationPlugin.ComputeConfigurationIdentity(invocation, false),
+            Invocation = invocation,
+            Plugin = new EvaluationPluginSelection("dmmulroy.anti-slop", true, ["src/app.ts"])
+        };
+        var oversized = new string('x', GateRunner.AntiSlopMaximumCapturedBytesPerStream + 1);
+        var now = DateTimeOffset.UtcNow;
+        var runner = new GateRunner(
+            new StubCommandExecutor(new CommandResult(0, oversized, oversized, false, false, now, now)),
+            new ScopedSequenceRepositoryIdentityReader(
+                new RepositoryEvaluationScope(["src/app.ts"], new HashSet<string>(StringComparer.Ordinal)),
+                TestEvidence.Repository(), TestEvidence.Repository()),
+            invocation.WorkingDirectory,
+            TestEvidence.Commit('a'),
+            DeterministicEvaluationPluginRegistry.CreateBuiltIns(
+                System.IO.Path.GetDirectoryName(config)!, nodePath));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("capture limit", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(GateRunner.AntiSlopMaximumCapturedBytesPerStream,
+            System.Text.Encoding.UTF8.GetByteCount(result.Execution.StandardOutput));
+        Assert.Equal(GateRunner.AntiSlopMaximumCapturedBytesPerStream,
+            System.Text.Encoding.UTF8.GetByteCount(result.Execution.StandardError));
     }
 
     [Fact]
@@ -483,6 +547,63 @@ public sealed class DeterministicEvaluationPluginTests
             new EvaluationPluginSelection("example.custom", Enabled: true)));
         Assert.Throws<EvaluationPluginException>(() =>
             new DeterministicEvaluationPluginRegistry([plugin, plugin]));
+    }
+
+    [Fact]
+    public async Task Unmapped_required_gate_is_unsatisfied_without_orchestration_error()
+    {
+        using var temp = new TempDirectory();
+        var original = TestEvidence.GateRequest(temp.Path);
+        var request = original with
+        {
+            GateId = "custom",
+            Policy = new ResolvedEvidencePolicy(
+                TestEvidence.Identity('1'), TestEvidence.Identity('2'), TestEvidence.Commit('a'),
+                PolicyAuthorityKind.ProtectedGitBase, 0m, ["custom"], authorityVerified: true,
+                sourceRepositoryRoot: original.Invocation.WorkingDirectory,
+                requiredGatePluginBindings: [])
+        };
+        var runner = new GateRunner(
+            new StubCommandExecutor(TestEvidence.CommandResult()),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
+            original.Invocation.WorkingDirectory,
+            TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("unsatisfied", result.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Caller_supplied_executor_cannot_authorize_a_non_fixture_required_gate()
+    {
+        using var temp = new TempDirectory();
+        var original = TestEvidence.GateRequest(temp.Path);
+        var request = original with
+        {
+            Policy = new ResolvedEvidencePolicy(
+                TestEvidence.Identity('1'), TestEvidence.Identity('2'), TestEvidence.Commit('a'),
+                PolicyAuthorityKind.ProtectedGitBase, 0m, ["test"], authorityVerified: true,
+                sourceRepositoryRoot: original.Invocation.WorkingDirectory,
+                requiredGatePluginBindings:
+                [new RequiredGatePluginBinding("test", "delivery-forge.dotnet", "1.0.0", "dotnet")]),
+            Capability = ToolCapability.FromDetection(
+                "dotnet", "10.0.401", "trx-v1", false, [],
+                original.Capability.ExecutablePath!, original.Capability.ExecutableIdentity!, ["test"],
+                original.Invocation.WorkingDirectory)
+        };
+        var runner = new GateRunner(
+            new QueueCommandExecutor(TestEvidence.CommandResult()),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            original.Invocation.WorkingDirectory,
+            TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("caller-supplied", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(result.Execution.ExitCode);
     }
 
     private sealed class StubEvaluationPlugin(string id, string version, string expectedTool)
@@ -524,6 +645,8 @@ public sealed class DeterministicEvaluationPluginTests
             ["node_modules/oxlint/dist/index.js"] = "export {};",
             ["node_modules/@oxlint/plugins/index.js"] = "export {};",
             ["node_modules/@oxlint/binding-fixture/binding.node"] = "fixture binding",
+            ["node_modules/tsx/index.js"] = "export {};",
+            ["node_modules/typescript/index.js"] = "export {};",
             ["runtime/node"] = "fixture node"
         };
         foreach (var (relative, contents) in files)

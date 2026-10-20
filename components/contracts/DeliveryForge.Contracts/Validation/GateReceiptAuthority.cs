@@ -3,34 +3,26 @@ using System.Text.Json;
 namespace DeliveryForge.Contracts.Validation;
 
 /// <summary>
-/// Code-owned authority boundary for gate receipts. Schema-v1 receipts without this additive
-/// binding remain readable historical data, but can never satisfy an authoritative PASS gate.
+/// Code-owned authority boundary for gate receipts. Schema-v1 receipts remain readable
+/// historical data, but can never satisfy an authoritative PASS gate.
 /// </summary>
 public static class GateReceiptAuthority
 {
-    private sealed record TrustedBinding(string PluginId, string PluginVersion, string Tool);
-
-    private static readonly IReadOnlyDictionary<string, TrustedBinding> TrustedBindings =
-        new Dictionary<string, TrustedBinding>(StringComparer.Ordinal)
-        {
-            ["build"] = new("delivery-forge.dotnet", "1.0.0", "dotnet"),
-            ["test"] = new("delivery-forge.dotnet", "1.0.0", "dotnet"),
-            ["coverage"] = new("delivery-forge.dotnet", "1.0.0", "dotnet"),
-            ["mutation"] = new("delivery-forge.mutate4csharp", "1.0.0", "mutate4csharp"),
-            ["anti-slop"] = new("dmmulroy.anti-slop", "0.1.2+13909c9e07590f5a85d93c62712259fe14a883f7", "oxlint"),
-            ["ci"] = new("delivery-forge.dotnet", "1.0.0", "dotnet")
-        };
-
-    public static bool TryValidateAuthoritativePass(JsonElement receipt, out string reason)
+    public static bool TryValidateAuthoritativePass(
+        JsonElement receipt,
+        out string reason,
+        TrustedGatePluginRegistry? registry = null)
     {
         reason = "Gate PASS lacks a canonical authority binding.";
-        if (receipt.GetProperty("outcome").GetString() != "PASS" ||
+        if (!receipt.TryGetProperty("schemaVersion", out var schemaVersion) ||
+            schemaVersion.GetString() != "2.0.0" ||
+            receipt.GetProperty("outcome").GetString() != "PASS" ||
             !receipt.TryGetProperty("authorityBinding", out var binding) ||
             binding.ValueKind != JsonValueKind.Object)
             return false;
 
         var gateId = receipt.GetProperty("gateId").GetString()!;
-        if (!TrustedBindings.TryGetValue(gateId, out var trusted))
+        if (!(registry ?? TrustedGatePluginRegistry.BuiltIns).TryGet(gateId, out var trusted))
         {
             reason = $"Gate '{gateId}' has no trusted code-owned plugin binding.";
             return false;
@@ -63,9 +55,6 @@ public static class GateReceiptAuthority
         reason = string.Empty;
         return true;
     }
-
-    public static IReadOnlyList<(string GateId, string PluginId, string PluginVersion, string Tool)> BuiltIns =>
-        TrustedBindings.Select(pair => (pair.Key, pair.Value.PluginId, pair.Value.PluginVersion, pair.Value.Tool)).ToArray();
 
     private static bool Same(JsonElement value, string name, string? expected) =>
         value.TryGetProperty(name, out var actual) && actual.ValueKind == JsonValueKind.String &&

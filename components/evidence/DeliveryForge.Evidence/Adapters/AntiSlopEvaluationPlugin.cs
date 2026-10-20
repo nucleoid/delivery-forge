@@ -14,6 +14,36 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
     private static readonly HashSet<string> AllowedEnvironment = new(
         ["SystemRoot", "WINDIR", "TMP", "TEMP"],
         StringComparer.OrdinalIgnoreCase);
+    private static readonly HashSet<string> BaseRuleIds = new(
+    [
+        "oxc(no-accumulating-spread)",
+        "anti-slop(no-array-filter-map)",
+        "anti-slop(no-reduce-accumulator-copy)",
+        "anti-slop(no-chained-type-assertions)",
+        "anti-slop(no-conditional-empty-object-spread)",
+        "anti-slop(no-known-value-widening)",
+        "anti-slop(no-module-mocking)",
+        "anti-slop(no-object-parameters)",
+        "anti-slop(no-reflect-apply)",
+        "anti-slop(no-reflect-get)",
+        "anti-slop(no-runtime-typeof)",
+        "anti-slop(no-shape-in-symbol-names)",
+        "anti-slop(no-unknown-parameters)",
+        "anti-slop(no-unknown-returns)",
+        "anti-slop(no-unknown-type-aliases)",
+        "anti-slop(no-unsafe-dictionary-type)",
+        "anti-slop(no-widen-then-assert)",
+        "anti-slop(require-readable-spacing)",
+        "anti-slop(require-safety-comment-for-type-assertion)"
+    ], StringComparer.Ordinal);
+    private static readonly HashSet<string> EffectRuleIds = new(
+    [
+        "anti-slop-effect(no-manual-effect-error-tag)",
+        "anti-slop-effect(no-manual-tag-comparison)",
+        "anti-slop-effect(no-manual-tagged-construction)",
+        "anti-slop-effect(no-service-constructor-imports)",
+        "anti-slop-effect(prefer-effect-match)"
+    ], StringComparer.Ordinal);
 
     private readonly string? _trustedBundleRoot;
     private readonly string? _trustedNodePath;
@@ -93,17 +123,19 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             return NormalizedEvidence.Incomplete(
                 "Anti-slop requires a cleared, allow-listed execution environment.");
 
-        if (arguments.Count != inputs.Count + 5 ||
+        if (arguments.Count != inputs.Count + 7 ||
             !Path.IsPathFullyQualified(request.Invocation.FileName) ||
             !Path.IsPathFullyQualified(arguments[0]) ||
             arguments[1] != "--config" ||
             arguments[3] != "--format" ||
-            arguments[4] != "json")
+            arguments[4] != "json" ||
+            arguments[5] != "--no-ignore" ||
+            arguments[6] != "--disable-nested-config")
             return NormalizedEvidence.Incomplete(
                 "Anti-slop requires absolute Node and Oxlint entrypoints with the canonical read-only JSON invocation.");
 
         var invocationInputs = arguments
-            .Skip(5)
+            .Skip(7)
             .Select(input => input.Replace('\\', '/'))
             .Order(StringComparer.Ordinal)
             .ToArray();
@@ -188,7 +220,8 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             System.Text.Encoding.UTF8.GetBytes(execution.StandardOutput),
             state.Inputs,
             execution.ExitCode ?? -1,
-            request.Invocation.WorkingDirectory);
+            request.Invocation.WorkingDirectory,
+            request.Plugin?.EnableEffectRules == true);
         if (normalized.Outcome == GateOutcome.Pass && HasExactTrustedPolicyBinding(request))
             return normalized with { ProductionCapable = true, Limitations = [] };
         return normalized;
@@ -206,7 +239,8 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         ReadOnlySpan<byte> report,
         IReadOnlyList<string> analyzedInputs,
         int processExitCode,
-        string? workingDirectory = null)
+        string? workingDirectory = null,
+        bool effectRulesEnabled = false)
     {
         if (analyzedInputs.Count == 0)
             return NormalizedEvidence.Incomplete("Anti-slop analyzed zero JavaScript-family inputs.");
@@ -219,7 +253,10 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             var reportData = ReadReport(document.RootElement);
             if (reportData is null)
                 return NormalizedEvidence.Incomplete("Oxlint JSON report shape is unsupported or incomplete.");
-            if (reportData.AnalyzedFileCount != analyzedInputs.Count || reportData.RuleCount <= 0)
+            var allowedRules = effectRulesEnabled
+                ? BaseRuleIds.Concat(EffectRuleIds).ToHashSet(StringComparer.Ordinal)
+                : BaseRuleIds;
+            if (reportData.AnalyzedFileCount != analyzedInputs.Count || reportData.RuleCount != allowedRules.Count)
                 return NormalizedEvidence.Incomplete(
                     "Oxlint report does not prove configured analysis of the complete frozen input set.");
             var findings = reportData.Findings;
@@ -229,6 +266,8 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
                 !analyzedInputs.Contains(
                     NormalizeReportedPath(finding.File, workingDirectory), StringComparer.Ordinal)))
                 return NormalizedEvidence.Incomplete("Oxlint report contains a finding outside the frozen input set.");
+            if (findings.Any(finding => finding.Rule is null || !allowedRules.Contains(finding.Rule)))
+                return NormalizedEvidence.Incomplete("Oxlint reported an unexpected diagnostic rule id outside the configured anti-slop policy.");
             if (findings.Count > 0)
             {
                 return new NormalizedEvidence(
@@ -326,6 +365,8 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         AppendClosureDirectory(hash, root, Path.Combine(root, "vendor", "anti-slop"));
         AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "oxlint"));
         AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "@oxlint", "plugins"));
+        AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "tsx"));
+        AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "typescript"));
 
         var bindingsRoot = Path.Combine(root, "node_modules", "@oxlint");
         var bindings = Directory.Exists(bindingsRoot)

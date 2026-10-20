@@ -195,9 +195,16 @@ public interface IRepositoryIdentityReader
     Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken);
 }
 
+internal interface IBoundedRepositoryFixtureReader : IRepositoryIdentityReader
+{
+    bool SupportsCreationOwnedBoundedRead { get; }
+}
+
 public sealed record RepositoryEvaluationScope(
     IReadOnlyList<string> TrackedFiles,
-    IReadOnlySet<string> IgnoredFiles);
+    IReadOnlySet<string> IgnoredFiles,
+    string? InputSetIdentity = null,
+    IReadOnlyList<string>? SuppressionViolations = null);
 
 public interface IRepositoryEvaluationScopeReader
 {

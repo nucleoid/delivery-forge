@@ -7,6 +7,33 @@ namespace DeliveryForge.Contracts.Tests;
 
 public sealed class SchemaValidationTests
 {
+    [Fact]
+    public void Canonical_v1_gate_receipt_rejects_v2_authority_binding()
+    {
+        var path = FixturePath("Valid", "gate-receipt.json");
+        var json = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+        json["authorityBinding"] = new JsonObject
+        {
+            ["gateId"] = json["gateId"]!.GetValue<string>(),
+            ["policyIdentity"] = json["policyIdentity"]!.GetValue<string>(),
+            ["headCommit"] = json["headCommit"]!.GetValue<string>(),
+            ["pluginId"] = "delivery-forge.dotnet",
+            ["pluginVersion"] = "1.0.0",
+            ["tool"] = "dotnet",
+            ["toolVersion"] = "10.0.401",
+            ["toolIdentity"] = "sha256:" + new string('a', 64),
+            ["configurationIdentity"] = "sha256:" + new string('b', 64),
+            ["inputSetIdentity"] = "sha256:" + new string('c', 64),
+            ["enabled"] = true,
+            ["status"] = "EXECUTED",
+            ["productionCapable"] = true,
+            ["authority"] = "production"
+        };
+        SetIdentity(json);
+
+        Assert.Throws<ContractValidationException>(() =>
+            ContractValidator.ParseAndValidate(Utf8(json.ToJsonString())));
+    }
     public static IEnumerable<object[]> ValidFixtures() =>
         Directory.EnumerateFiles(FixturePath("Valid"), "*.json")
             .Order(StringComparer.Ordinal)
@@ -23,7 +50,7 @@ public sealed class SchemaValidationTests
     {
         var bytes = File.ReadAllBytes(path);
         var result = ContractValidator.ParseAndValidate(bytes);
-        Assert.Equal(Path.GetFileNameWithoutExtension(path), result.SchemaName);
+        Assert.StartsWith(result.SchemaName, Path.GetFileNameWithoutExtension(path), StringComparison.Ordinal);
     }
 
     [Theory]
@@ -248,6 +275,7 @@ public sealed class SchemaValidationTests
     {
         var legacy = ReferenceBundle.Create();
         legacy.Gates[0].Remove("authorityBinding");
+        legacy.Gates[0]["schemaVersion"] = "1.0.0";
         legacy.Relink();
         AssertReferenceMessage("lacks a canonical authority binding", () =>
             ContractReferenceValidator.Validate(legacy.Documents()));
@@ -259,6 +287,45 @@ public sealed class SchemaValidationTests
         impersonated.Relink();
         AssertReferenceMessage("impersonates the trusted gate/plugin mapping", () =>
             ContractReferenceValidator.Validate(impersonated.Documents()));
+    }
+
+    [Fact]
+    public void Historical_v1_and_authoritative_v2_gate_receipts_are_jointly_inspectable()
+    {
+        var bundle = ReferenceBundle.Create();
+        var legacy = bundle.Gates[0].DeepClone().AsObject();
+        legacy.Remove("authorityBinding");
+        legacy["schemaVersion"] = "1.0.0";
+        SetIdentity(legacy);
+
+        ContractReferenceValidator.Validate(
+        [
+            Bytes(bundle.Policy),
+            Bytes(legacy),
+            Bytes(bundle.Gates[1])
+        ]);
+    }
+
+    [Fact]
+    public void One_trusted_registry_covers_crap_and_allows_code_owned_external_registration()
+    {
+        Assert.True(TrustedGatePluginRegistry.BuiltIns.TryGet("crap", out var crap));
+        Assert.Equal("delivery-forge.crap4csharp", crap.PluginId);
+
+        var policy = LoadNode("evidence-policy.json");
+        var gate = GateNode(policy, "custom");
+        gate["authorityBinding"]!["gateId"] = "custom";
+        gate["authorityBinding"]!["pluginId"] = "example.custom";
+        gate["authorityBinding"]!["pluginVersion"] = "2.1.0";
+        gate["authorityBinding"]!["tool"] = "custom-tool";
+        SetIdentity(gate);
+        using var document = System.Text.Json.JsonDocument.Parse(Bytes(gate));
+
+        Assert.False(GateReceiptAuthority.TryValidateAuthoritativePass(document.RootElement, out _));
+        var registry = new TrustedGatePluginRegistry(
+            [new TrustedGatePluginBinding("custom", "example.custom", "2.1.0", "custom-tool")]);
+        Assert.True(GateReceiptAuthority.TryValidateAuthoritativePass(
+            document.RootElement, out var reason, registry), reason);
     }
 
     [Fact]
@@ -506,6 +573,7 @@ public sealed class SchemaValidationTests
     private static JsonObject GateNode(JsonObject policy, string gateId)
     {
         var gate = LoadNode("gate-receipt.json");
+        gate["schemaVersion"] = "2.0.0";
         gate["policyIdentity"] = policy["identity"]!.GetValue<string>();
         gate["gateId"] = gateId;
         var (plugin, tool) = gateId == "mutation"

@@ -12,9 +12,9 @@ const oxlint = path.join(
 );
 
 type Diagnostic = { code?: string; severity?: string };
-type Report = { diagnostics: Diagnostic[]; number_of_files: number };
+type Report = { diagnostics: Diagnostic[]; number_of_files: number; number_of_rules: number };
 
-function run(fixture: "clean" | "violation" | "malformed"): {
+function run(fixture: "clean" | "violation" | "malformed" | "suppression"): {
   status: number | null;
   report: Report;
 } {
@@ -25,6 +25,8 @@ function run(fixture: "clean" | "violation" | "malformed"): {
       path.join(root, "oxlint.config.ts"),
       "--format",
       "json",
+      "--no-ignore",
+      "--disable-nested-config",
       path.join(root, "fixtures", `${fixture}.ts`),
     ],
     {
@@ -44,18 +46,27 @@ function run(fixture: "clean" | "violation" | "malformed"): {
 const clean = run("clean");
 assert.equal(clean.status, 0);
 assert.equal(clean.report.number_of_files, 1);
+assert.equal(clean.report.number_of_rules, 19);
 assert.deepEqual(clean.report.diagnostics, []);
 
 const violation = run("violation");
 assert.equal(violation.status, 1);
 assert.equal(violation.report.number_of_files, 1);
+assert.equal(violation.report.number_of_rules, 19);
 assert.ok(violation.report.diagnostics.length > 0);
 assert.ok(violation.report.diagnostics.every((diagnostic) => diagnostic.code?.startsWith("anti-slop(")));
 
 const malformed = run("malformed");
 assert.equal(malformed.status, 1);
 assert.equal(malformed.report.number_of_files, 1);
+assert.equal(malformed.report.number_of_rules, 19);
 assert.ok(malformed.report.diagnostics.length > 0);
 assert.ok(malformed.report.diagnostics.some((diagnostic) => !diagnostic.code));
 
-console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE evidence");
+const suppression = run("suppression");
+assert.equal(suppression.status, 0);
+assert.equal(suppression.report.number_of_files, 1);
+assert.equal(suppression.report.number_of_rules, 19);
+assert.deepEqual(suppression.report.diagnostics, []);
+
+console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, suppression attack reproduced");

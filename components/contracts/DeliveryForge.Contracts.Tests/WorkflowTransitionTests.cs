@@ -385,6 +385,7 @@ public sealed class WorkflowTransitionTests
 
         var antiSlop = MutatedFixture("gate-receipt.json", node =>
         {
+            node["schemaVersion"] = "2.0.0";
             node["policyIdentity"] = evidence.Policy!.Identity;
             node["gateId"] = "build";
             node["authorityBinding"] = JsonNode.Parse(evidence.GateReceipts![0].CanonicalBytes.Span)!["authorityBinding"]!.DeepClone();
@@ -514,6 +515,7 @@ public sealed class WorkflowTransitionTests
     private static ValidatedContract GateFixture(string policyIdentity, string gateId) =>
         MutatedFixture("gate-receipt.json", node =>
         {
+            node["schemaVersion"] = "2.0.0";
             node["policyIdentity"] = policyIdentity;
             node["gateId"] = gateId;
             var (plugin, tool) = gateId == "mutation"
