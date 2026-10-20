@@ -197,7 +197,8 @@ public sealed class InstalledLocalRealGoldenTests
                     "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "--no-optional-locks",
                     "-c", "core.hooksPath=" + nullDevice, "-c", "core.attributesFile=" + nullDevice,
                     "-c", "diff.external=", .. filterOverrides, .. arguments],
-                directory, gitEnvironment) { EnvironmentIsComplete = true }, left, 1048576, original.Token, new OwnedWorkPhaseBudget(original));
+                directory, gitEnvironment)
+            { EnvironmentIsComplete = true }, left, 1048576, original.Token, new OwnedWorkPhaseBudget(original));
             ActualOrdinaryCapture.Require(capture);
             Assert.True(capture.Command.ExitCode == 0 || allowNoMatches && capture.Command.ExitCode == 1);
             return capture.StandardOutputBytes;

@@ -101,10 +101,17 @@ public sealed class ProductionBatchTests
         var selected = Selection(); var node = selected.Nodes[0];
         var repo = Path.GetTempPath(); var git = Path.Combine(repo, "explicit-unused-git");
         var parent = new TrustedConfiguration("fixture/repo", repo, "refs/heads/main", git, MaximumCeiling: "implement", OperationSeconds: 1200, ProductionBatch: selected);
-        var leaf = parent with { ProductionBatch = null, StandaloneRoot = Pin("root"),
-            ExpectedBundleIdentity = "sha256:" + new string('b', 64), ExpectedContractIdentity = "sha256:" + new string('c', 64), ExpectedWorkItem = "#1", ExpectedPlanCeiling = "implement",
+        var leaf = parent with
+        {
+            ProductionBatch = null,
+            StandaloneRoot = Pin("root"),
+            ExpectedBundleIdentity = "sha256:" + new string('b', 64),
+            ExpectedContractIdentity = "sha256:" + new string('c', 64),
+            ExpectedWorkItem = "#1",
+            ExpectedPlanCeiling = "implement",
             Coordination = new(new Uri("https://example.invalid/mcp"), "project", "principal", Path.Combine(repo, "key"), Path.Combine(repo, "checkpoint"), Pin("deployment")),
-            LocalSingle = new(selected.Policy, node.Demand) };
+            LocalSingle = new(selected.Policy, node.Demand)
+        };
         // A separate JSON parse has different array objects. Demand equality is
         // structural; no identity/approval is inferred from record reference equality.
         var parsed = JsonSerializer.Deserialize<TrustedConfiguration>(JsonSerializer.SerializeToUtf8Bytes(leaf, BoundedFiles.Json), BoundedFiles.Json)!;
@@ -189,8 +196,12 @@ public sealed class ProductionBatchTests
             var argv = new[] { "--no-replace-objects", "-c", "core.hooksPath=" + nullPath, "-c", "core.fsmonitor=false", "-c", "user.name=BatchFixture", "-c", "user.email=fixture@example.invalid" }.Concat(arguments).ToArray();
             var actual = await executor.ExecuteAsync(new(git, argv, root, new Dictionary<string, string>
             {
-                ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_GLOBAL"] = nullPath, ["GIT_CONFIG_SYSTEM"] = nullPath,
-                ["GIT_NO_REPLACE_OBJECTS"] = "1", ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_OPTIONAL_LOCKS"] = "0"
+                ["GIT_CONFIG_NOSYSTEM"] = "1",
+                ["GIT_CONFIG_GLOBAL"] = nullPath,
+                ["GIT_CONFIG_SYSTEM"] = nullPath,
+                ["GIT_NO_REPLACE_OBJECTS"] = "1",
+                ["GIT_TERMINAL_PROMPT"] = "0",
+                ["GIT_OPTIONAL_LOCKS"] = "0"
             }), original.Remaining, original.Token);
             original.Check(); Assert.True(actual.OwnedProcessQuiescent && actual.ExitCode == 0 && !actual.TimedOut && !actual.Cancelled, root + ": " + actual.StandardError);
         }

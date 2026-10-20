@@ -71,7 +71,8 @@ public sealed class InstalledProductionBatchTests
             Assert.Equal(observations[^1].CompletedHeads[node.NodeId], completion.HeadCommit);
             var nodeFixture = fixture with
             {
-                Configuration = node.Configuration, Plan = node.Plan,
+                Configuration = node.Configuration,
+                Plan = node.Plan,
                 RunDirectory = Path.Combine(leaf.LocalRealGolden!.ArtifactRoot, actualRunId),
                 ResultDirectory = root.WorkerPaths.ResultDirectory
             };

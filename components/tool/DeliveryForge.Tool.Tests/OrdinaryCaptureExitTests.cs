@@ -27,7 +27,8 @@ public sealed class OrdinaryCaptureExitTests
                 ["-NoProfile", "-NonInteractive", "-Command", "[Console]::Out.Write('ordinary-outcome'); [Console]::Error.Write('expected-nonzero'); exit 7"],
                 Path.GetTempPath(), new Dictionary<string, string>
                 {
-                    ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000"
+                    ["DOTNET_PROCESSOR_COUNT"] = "2",
+                    ["DOTNET_GCHeapHardLimit"] = "0x100000000"
                 });
             session = ordinaryCapture ? OwnedDuplexProcess.OpenCapture(invocation, original, null, 65536) : OwnedDuplexProcess.Open(invocation, original);
             Assert.Null(session.StartupFailure);

@@ -27,8 +27,11 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
     {
         var value = config.ProductionBatch ?? throw new ToolUsageException("Explicit production batch required.");
         ValidateSelection(config, value);
-        return value with { Nodes = Array.AsReadOnly(value.Nodes.Select(node => node with
-        { Demand = node.Demand with { ExclusiveResources = Array.AsReadOnly(node.Demand.ExclusiveResources.ToArray()) } }).ToArray()) };
+        return value with
+        {
+            Nodes = Array.AsReadOnly(value.Nodes.Select(node => node with
+            { Demand = node.Demand with { ExclusiveResources = Array.AsReadOnly(node.Demand.ExclusiveResources.ToArray()) } }).ToArray())
+        };
     }
     void Retain(Task actual) { lock (stateGate) actualTasks.Add(actual); }
 
@@ -149,7 +152,9 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             await Observe(InitializeNode(actualOwner)).ConfigureAwait(false);
             var options = new Dictionary<string, string?>(StringComparer.Ordinal)
             {
-                ["plan"] = node.Selection.Plan.Path, ["config"] = node.Selection.Configuration.Path, ["json"] = null
+                ["plan"] = node.Selection.Plan.Path,
+                ["config"] = node.Selection.Configuration.Path,
+                ["json"] = null
             };
             _ = await Observe(actualOwner.Application.ExecuteAsync(new(ToolMode.Implement, options), original.Token)).ConfigureAwait(false);
             // Outcomes come from the exact actual owner frame, never from the
