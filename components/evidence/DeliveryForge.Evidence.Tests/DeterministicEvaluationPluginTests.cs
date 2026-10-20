@@ -67,6 +67,60 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
+    public async Task Executed_not_applicable_uses_v2_authority_status_with_rationale()
+    {
+        using var temp = new TempDirectory();
+        var executable = System.IO.Path.Combine(temp.Path, "custom-tool");
+        await File.WriteAllTextAsync(executable, "fixture executable", TestContext.Current.CancellationToken);
+        var executableIdentity = $"sha256:{Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(
+                executable, TestContext.Current.CancellationToken)))}";
+        var pluginRegistry = new DeterministicEvaluationPluginRegistry(
+            [new StubEvaluationPlugin(
+                "host.custom", "2.0.0", "custom-tool",
+                new NormalizedEvidence(
+                    GateOutcome.NotApplicable, "No applicable custom units.", false, true, [],
+                    "The frozen scope contains no custom units."))]);
+        var authorityRegistry = new TrustedGatePluginRegistry(
+            [new TrustedGatePluginBinding("custom", "host.custom", "2.0.0", "custom-tool", "3.0.0", "custom-v1")]);
+        var original = TestEvidence.GateRequest(temp.Path);
+        var request = original with
+        {
+            GateId = "custom",
+            Adapter = EvidenceAdapterKind.External,
+            Plugin = new EvaluationPluginSelection("host.custom", Enabled: true, Inputs: ["scope.custom"]),
+            Invocation = original.Invocation with { FileName = executable, Arguments = ["evaluate"] },
+            Capability = ToolCapability.FromDetection(
+                "custom-tool", "3.0.0", "custom-v1", false, [], executable,
+                executableIdentity, ["evaluate"], original.Invocation.WorkingDirectory),
+            Policy = new ResolvedEvidencePolicy(
+                TestEvidence.Identity('1'), TestEvidence.Identity('2'), TestEvidence.Commit('a'),
+                PolicyAuthorityKind.ProtectedGitBase, 0m, ["custom"], authorityVerified: true,
+                sourceRepositoryRoot: original.Invocation.WorkingDirectory,
+                requiredGatePluginBindings:
+                [new RequiredGatePluginBinding("custom", "host.custom", "2.0.0", "custom-tool")],
+                allowedNotApplicable: new HashSet<string>(["custom"], StringComparer.Ordinal))
+        };
+        var runner = new GateRunner(
+            new StubCommandExecutor(TestEvidence.CommandResult()),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
+            original.Invocation.WorkingDirectory, TestEvidence.Commit('a'), pluginRegistry,
+            emitAuthoritativeV2: true, authorityRegistry: authorityRegistry,
+            authoritativeReceiptStore: new HostOwnedReceiptStore(
+                System.IO.Path.Combine(temp.Path, "host-receipts")));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+        var receipt = ContractValidator.ParseAndValidate(await File.ReadAllBytesAsync(
+            result.ReceiptPath, TestContext.Current.CancellationToken));
+        using var document = System.Text.Json.JsonDocument.Parse(receipt.CanonicalBytes);
+
+        Assert.Equal(GateOutcome.NotApplicable, result.Outcome);
+        Assert.Equal(EvaluationPluginStatus.NotApplicable, result.Plugin.Status);
+        Assert.True(GateReceiptAuthority.TryValidateAuthoritativeOutcome(
+            document.RootElement, out var reason, authorityRegistry), reason);
+    }
+
+    [Fact]
     public async Task Disabled_plugin_is_distinct_and_cannot_satisfy_a_required_gate()
     {
         using var temp = new TempDirectory();
@@ -574,7 +628,9 @@ public sealed class DeterministicEvaluationPluginTests
             new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
             TestEvidence.WorkingDirectory(temp.Path),
             TestEvidence.Commit('a'),
-            emitAuthoritativeV2: true);
+            emitAuthoritativeV2: true,
+            authoritativeReceiptStore: new HostOwnedReceiptStore(
+                System.IO.Path.Combine(temp.Path, "host-receipts")));
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
@@ -589,6 +645,8 @@ public sealed class DeterministicEvaluationPluginTests
         var receiptBytes = await File.ReadAllBytesAsync(result.ReceiptPath, TestContext.Current.CancellationToken);
         var validatedReceipt = ContractValidator.ParseAndValidate(receiptBytes);
         Assert.Equal("2.0.0", validatedReceipt.SchemaVersion);
+        Assert.NotNull(result.TrustedReceiptProvenance);
+        Assert.True(result.TrustedReceiptProvenance.Contains(validatedReceipt.Identity));
         using var receipt = System.Text.Json.JsonDocument.Parse(receiptBytes);
         using var command = System.Text.Json.JsonDocument.Parse(
             receipt.RootElement.GetProperty("command").GetString()!);
@@ -715,7 +773,11 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.Null(result.Execution.ExitCode);
     }
 
-    private sealed class StubEvaluationPlugin(string id, string version, string expectedTool)
+    private sealed class StubEvaluationPlugin(
+        string id,
+        string version,
+        string expectedTool,
+        NormalizedEvidence? normalized = null)
         : IDeterministicEvaluationPlugin
     {
         public string Id => id;
@@ -729,7 +791,7 @@ public sealed class DeterministicEvaluationPluginTests
             GateRequest request,
             CommandResult execution,
             EvaluationPluginSnapshot snapshot) =>
-            NormalizedEvidence.Incomplete("stub");
+            normalized ?? NormalizedEvidence.Incomplete("stub");
 
         public void AppendBoundArtifacts(
             GateRequest request,

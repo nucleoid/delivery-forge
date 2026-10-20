@@ -184,6 +184,15 @@ internal sealed class ThrowingRepositoryIdentityReader : IRepositoryIdentityRead
         throw new EvidenceRepositoryException("fixture repository failure");
 }
 
+internal sealed class CancellingRepositoryIdentityReader : IRepositoryIdentityReader
+{
+    public async Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken)
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        throw new InvalidOperationException("unreachable");
+    }
+}
+
 internal sealed class FirstThenThrowRepositoryIdentityReader(RepositoryIdentity identity)
     : IRepositoryIdentityReader
 {

@@ -1,3 +1,5 @@
+using DeliveryForge.Contracts.Validation;
+
 namespace DeliveryForge.Evidence;
 
 public enum EvidenceAdapterKind
@@ -168,6 +170,7 @@ public sealed record GateRunResult(
     string? NotApplicableRationale)
 {
     public EvaluationPluginReceiptMetadata Plugin { get; init; } = EvaluationPluginReceiptMetadata.Unbound;
+    public TrustedReceiptProvenance? TrustedReceiptProvenance { get; init; }
 }
 
 public interface ICommandExecutor
@@ -195,6 +198,11 @@ public interface IRepositoryIdentityReader
     Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken);
 }
 
+internal interface IDeadlineRepositoryIdentityReader : IRepositoryIdentityReader
+{
+    Task<RepositoryIdentity> ReadAsync(TimeSpan timeout, CancellationToken cancellationToken);
+}
+
 internal interface IBoundedRepositoryFixtureReader : IRepositoryIdentityReader
 {
     bool SupportsCreationOwnedBoundedRead { get; }
@@ -206,7 +214,8 @@ public sealed record RepositoryEvaluationScope(
     string? InputSetIdentity = null,
     IReadOnlyList<string>? SuppressionViolations = null,
     IReadOnlyList<string>? InvalidInputs = null,
-    IReadOnlyList<string>? RetiredIgnoredFiles = null);
+    IReadOnlyList<string>? RetiredIgnoredFiles = null,
+    string? MaterializedRoot = null);
 
 public interface IRepositoryEvaluationScopeReader
 {

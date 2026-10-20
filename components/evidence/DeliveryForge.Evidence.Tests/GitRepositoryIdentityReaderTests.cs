@@ -29,6 +29,42 @@ public sealed class GitRepositoryIdentityReaderTests
         Assert.Contains("forbidden", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task Production_scope_materializes_exact_frozen_objects_outside_the_repository()
+    {
+        using var temp = new TempDirectory();
+        await Git(temp.Path, "init");
+        await Git(temp.Path, "config", "user.name", "Delivery Forge Test");
+        await Git(temp.Path, "config", "user.email", "forge@example.invalid");
+        var source = System.IO.Path.Combine(temp.Path, "src", "app.ts");
+        Directory.CreateDirectory(System.IO.Path.GetDirectoryName(source)!);
+        await File.WriteAllTextAsync(source, "export const before = 1;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "add", "src/app.ts");
+        await Git(temp.Path, "commit", "-m", "base");
+        var baseCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        await File.WriteAllTextAsync(source, "export const frozen = 2;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "commit", "-am", "head");
+        var headCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        var reader = new GitRepositoryIdentityReader(new ProcessCommandExecutor(), temp.Path, baseCommit);
+
+        var scope = await reader.ReadEvaluationScopeAsync(
+            headCommit, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+        try
+        {
+            Assert.NotNull(scope.MaterializedRoot);
+            Assert.DoesNotContain(temp.Path, scope.MaterializedRoot, StringComparison.Ordinal);
+            var frozen = System.IO.Path.Combine(scope.MaterializedRoot, "src", "app.ts");
+            Assert.Equal("export const frozen = 2;\n", await File.ReadAllTextAsync(
+                frozen, TestContext.Current.CancellationToken));
+            Assert.True(File.GetAttributes(frozen).HasFlag(FileAttributes.ReadOnly));
+        }
+        finally
+        {
+            GitRepositoryIdentityReader.DeleteMaterialization(scope.MaterializedRoot);
+        }
+    }
+
     [Theory]
     [InlineData("const view = <p>Don't panic</p>;\n", false)]
     [InlineData("if (ok) /'/.test(value);\n", false)]
@@ -152,6 +188,30 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Fact]
+    public async Task Unchanged_blanket_suppression_in_a_changed_file_cannot_authorize_pass()
+    {
+        var head = TestEvidence.Commit('b');
+        const string content = "/* oxlint-disable */\nexport const changed = 2;\n";
+        var reader = new GitRepositoryIdentityReader(
+            new QueueCommandExecutor(
+                Result(head + Environment.NewLine),
+                Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result(string.Empty, 128),
+                Result("src/app.ts\0"),
+                Result(content),
+                Result(TestEvidence.Commit('2') + Environment.NewLine),
+                Result(content),
+                Result(string.Empty)),
+            System.IO.Path.GetTempPath(),
+            TestEvidence.Commit('a'));
+
+        var scope = await reader.ReadEvaluationScopeAsync(
+            head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
+
+        Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
+    }
+
+    [Fact]
     public async Task Ordinary_eslint_or_oxlint_prose_is_not_a_directive()
     {
         var head = TestEvidence.Commit('b');
@@ -175,7 +235,40 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Fact]
-    public async Task Directive_looking_strings_urls_templates_and_comment_prose_are_not_suppressions()
+    public async Task Narrow_unrelated_directive_is_legitimate_and_protected_ignore_skips_scanning()
+    {
+        var head = TestEvidence.Commit('b');
+        var unrelated = new GitRepositoryIdentityReader(
+            new QueueCommandExecutor(
+                Result(head + Environment.NewLine),
+                Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result(string.Empty, 128),
+                Result("src/app.ts\0"),
+                Result("// eslint-disable-next-line no-console\nconsole.log('ok');\n"),
+                Result(TestEvidence.Commit('2') + Environment.NewLine),
+                Result("export const old = 1;\n"),
+                Result(string.Empty)),
+            System.IO.Path.GetTempPath(), TestEvidence.Commit('a'));
+        var ignored = new GitRepositoryIdentityReader(
+            new QueueCommandExecutor(
+                Result(head + Environment.NewLine),
+                Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result("src/app.ts\n"),
+                Result("src/app.ts\0")),
+            System.IO.Path.GetTempPath(), TestEvidence.Commit('a'));
+
+        var unrelatedScope = await unrelated.ReadEvaluationScopeAsync(
+            head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
+        var ignoredScope = await ignored.ReadEvaluationScopeAsync(
+            head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
+
+        Assert.Empty(unrelatedScope.SuppressionViolations!);
+        Assert.Empty(ignoredScope.SuppressionViolations!);
+        Assert.Contains("src/app.ts", ignoredScope.IgnoredFiles);
+    }
+
+    [Fact]
+    public async Task Ambiguous_directive_spellings_fail_closed_even_inside_literals_or_prose()
     {
         var head = TestEvidence.Commit('b');
         var reader = new GitRepositoryIdentityReader(
@@ -194,7 +287,33 @@ public sealed class GitRepositoryIdentityReaderTests
         var scope = await reader.ReadEvaluationScopeAsync(
             head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
 
-        Assert.Empty(scope.SuppressionViolations!);
+        Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
+    }
+
+    [Theory]
+    [InlineData("const a = b\n  / c /* oxlint-disable */ / d;\n")]
+    [InlineData("x = p.catch(e) / 2 /* oxlint-disable */ / 3;\n")]
+    [InlineData("[typeof'x' /* oxlint-disable */, 'z'in globalThis];\n")]
+    public async Task Conservative_scan_blocks_known_lexer_bypass_shapes(string content)
+    {
+        var head = TestEvidence.Commit('b');
+        var reader = new GitRepositoryIdentityReader(
+            new QueueCommandExecutor(
+                Result(head + Environment.NewLine),
+                Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result(string.Empty, 128),
+                Result("src/app.ts\0"),
+                Result(content),
+                Result(TestEvidence.Commit('2') + Environment.NewLine),
+                Result("export const old = 1;\n"),
+                Result(string.Empty)),
+            System.IO.Path.GetTempPath(),
+            TestEvidence.Commit('a'));
+
+        var scope = await reader.ReadEvaluationScopeAsync(
+            head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
+
+        Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
     }
 
     [Theory]

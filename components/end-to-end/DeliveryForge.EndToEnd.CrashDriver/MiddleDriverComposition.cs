@@ -336,7 +336,12 @@ internal static class MiddleDriverComposition
             frozenBase = input.RuntimeBaseCommit
         });
         var configPath = Path.Combine(input.ArtifactRoot, "actual-driver-gate-configuration.json"); await WriteBytes(configPath, configuration, token);
-        var gate = await new GateRunner(executor, reader, clone, input.RuntimeBaseCommit).RunAsync(new("test", policy, detection.Capability,
+        var hostReceiptStore = new HostOwnedReceiptStore(Path.Combine(
+            input.ArtifactRoot, "host-owned-gate-receipts"));
+        var gate = await new GateRunner(
+            executor, reader, clone, input.RuntimeBaseCommit,
+            emitAuthoritativeV2: true,
+            authoritativeReceiptStore: hostReceiptStore).RunAsync(new("test", policy, detection.Capability,
             EvidenceAdapterKind.DotNet, Hash(configuration), before, invocation, "actual-middle-driver",
             Remaining(input, 75), Path.Combine(input.ArtifactRoot, "actual-driver-gates")), token);
         var provenance = Path.Combine(input.ArtifactRoot, "actual-driver-gate-provenance.json");

@@ -26,6 +26,20 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
+    public void V2_flag_requires_host_owned_store_before_any_gate_can_run()
+    {
+        using var temp = new TempDirectory();
+
+        var error = Assert.Throws<ArgumentException>(() => new GateRunner(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'),
+            emitAuthoritativeV2: true));
+
+        Assert.Contains("host-owned", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Supported_capability_has_no_public_minting_or_record_copy_surface()
     {
         Assert.Empty(typeof(ToolCapability).GetConstructors(BindingFlags.Public | BindingFlags.Instance));
@@ -99,6 +113,27 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
+    public async Task Identity_deadline_persists_incomplete_and_releases_claim_for_retry()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path) with { Timeout = TimeSpan.FromMilliseconds(25) };
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new CancellingRepositoryIdentityReader(),
+            TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
+
+        var first = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+        var retry = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, first.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, retry.Outcome);
+        Assert.True(File.Exists(first.ReceiptPath));
+        Assert.True(File.Exists(retry.ReceiptPath));
+        Assert.Contains("retry-", retry.ReceiptPath, StringComparison.Ordinal);
+        Assert.False(File.Exists(System.IO.Path.Combine(temp.Path, request.GateId + ".claim")));
+    }
+
+    [Fact]
     public async Task Source_drift_is_error_and_append_only_output_is_not_overwritten()
     {
         using var temp = new TempDirectory();
@@ -112,8 +147,10 @@ public sealed class GateRunnerTests
 
         Assert.Equal(GateOutcome.Error, result.Outcome);
         Assert.True(result.SourceChanged);
-        await Assert.ThrowsAsync<EvidenceWriteException>(() => runner.RunAsync(
-            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken));
+        var retry = await runner.RunAsync(
+            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
+        Assert.Equal(GateOutcome.Error, retry.Outcome);
+        Assert.Contains("retry-", retry.ReceiptPath, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -165,7 +202,7 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
-    public async Task Executor_thrown_cancellation_is_nonquiescent_error()
+    public async Task Executor_thrown_cancellation_is_nonquiescent_incomplete()
     {
         using var temp = new TempDirectory();
         var runner = new GateRunner(
@@ -176,14 +213,14 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.False(result.Execution.OwnedProcessQuiescent);
         Assert.Contains("quiescent", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.True(File.Exists(result.ReceiptPath));
     }
 
     [Fact]
-    public async Task Repository_preflight_failure_is_recorded_as_error_receipt()
+    public async Task Repository_preflight_failure_is_recorded_as_incomplete_receipt()
     {
         using var temp = new TempDirectory();
         var runner = new GateRunner(
@@ -193,13 +230,13 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.True(File.Exists(result.ReceiptPath));
         Assert.Contains("could not be read", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public async Task Unexpected_executor_failure_is_recorded_as_error_receipt()
+    public async Task Unexpected_executor_failure_is_recorded_as_incomplete_receipt()
     {
         using var temp = new TempDirectory();
         var runner = new GateRunner(
@@ -209,13 +246,13 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.True(File.Exists(result.ReceiptPath));
         Assert.Null(result.Execution.ExitCode);
     }
 
     [Fact]
-    public async Task Repository_postflight_failure_is_recorded_as_error_receipt()
+    public async Task Repository_postflight_failure_is_recorded_as_incomplete_receipt()
     {
         using var temp = new TempDirectory();
         var runner = new GateRunner(
@@ -225,7 +262,7 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.True(result.SourceChanged);
         Assert.True(File.Exists(result.ReceiptPath));
         Assert.Contains("after evaluation", result.Reason, StringComparison.OrdinalIgnoreCase);
@@ -349,7 +386,7 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
-    public async Task Nonquiescent_owned_process_is_recorded_as_error()
+    public async Task Nonquiescent_owned_process_is_recorded_as_incomplete()
     {
         using var temp = new TempDirectory();
         var execution = TestEvidence.CommandResult() with
@@ -365,7 +402,7 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.Contains("quiescent", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.True(File.Exists(result.ReceiptPath));
     }

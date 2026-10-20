@@ -159,7 +159,7 @@ public sealed class ProcessCommandExecutorTests
     }
 
     [Fact]
-    public async Task Partial_tree_kill_failure_flows_through_real_executor_to_gate_error()
+    public async Task Partial_tree_kill_failure_flows_through_real_executor_to_gate_incomplete()
     {
         using var temp = new TempDirectory();
         var request = LongRunningRequest(temp.Path);
@@ -192,7 +192,7 @@ public sealed class ProcessCommandExecutorTests
         Assert.False(result.Execution.Cancelled);
         Assert.Same(killedProcess, observedProcess);
         Assert.False(result.Execution.OwnedProcessQuiescent);
-        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.Contains("identity could not be read after evaluation", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 

@@ -6,31 +6,44 @@ namespace DeliveryForge.Evidence;
 public sealed class GitRepositoryIdentityReader(
     ICommandExecutor executor,
     string repositoryRoot,
-    string protectedBaseCommit) : IRepositoryIdentityReader, IRepositoryEvaluationScopeReader
+    string protectedBaseCommit) : IDeadlineRepositoryIdentityReader, IRepositoryEvaluationScopeReader
 {
     internal const int MaximumGitListingBytes = 64 * 1024 * 1024;
+    internal const int MaximumSuppressionScanBytes = 4 * 1024 * 1024;
     private readonly string _repositoryRoot = Path.GetFullPath(repositoryRoot);
     internal bool SupportsCreationOwnedBoundedRead =>
         executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true };
 
     public async Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken)
+        => await ReadIdentityAsync(null, cancellationToken).ConfigureAwait(false);
+
+    public async Task<RepositoryIdentity> ReadAsync(TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        if (timeout <= TimeSpan.Zero)
+            throw new OperationCanceledException("The finite repository identity deadline expired.");
+        return await ReadIdentityAsync(DateTimeOffset.UtcNow + timeout, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<RepositoryIdentity> ReadIdentityAsync(
+        DateTimeOffset? deadline,
+        CancellationToken cancellationToken)
     {
         if (!Path.IsPathFullyQualified(_repositoryRoot) ||
             !IsGitObject(protectedBaseCommit))
             throw new EvidenceRepositoryException("Repository root and a full protected base commit are required.");
 
-        var head = await GitAsync(["rev-parse", "HEAD"], cancellationToken).ConfigureAwait(false);
+        var head = await GitAsync(["rev-parse", "HEAD"], cancellationToken, deadline).ConfigureAwait(false);
         var resolvedBase = await GitAsync(
-            ["rev-parse", "--verify", $"{protectedBaseCommit}^{{commit}}"], cancellationToken).ConfigureAwait(false);
+            ["rev-parse", "--verify", $"{protectedBaseCommit}^{{commit}}"], cancellationToken, deadline).ConfigureAwait(false);
         var headId = head.StandardOutput.Trim();
         var baseId = resolvedBase.StandardOutput.Trim();
         if (!string.Equals(baseId, protectedBaseCommit, StringComparison.Ordinal) || !IsGitObject(headId))
             throw new EvidenceRepositoryException("Git did not resolve the exact protected base/head identities.");
         await GitAsync(
-            ["merge-base", "--is-ancestor", baseId, headId], cancellationToken).ConfigureAwait(false);
-        var tree = await GitAsync(["rev-parse", "HEAD^{tree}"], cancellationToken).ConfigureAwait(false);
+            ["merge-base", "--is-ancestor", baseId, headId], cancellationToken, deadline).ConfigureAwait(false);
+        var tree = await GitAsync(["rev-parse", "HEAD^{tree}"], cancellationToken, deadline).ConfigureAwait(false);
         var status = await GitAsync(
-            ["status", "--porcelain=v1", "--untracked-files=all"], cancellationToken).ConfigureAwait(false);
+            ["status", "--porcelain=v1", "--untracked-files=all"], cancellationToken, deadline).ConfigureAwait(false);
         var treeId = tree.StandardOutput.Trim();
         if (!IsGitObject(treeId))
             throw new EvidenceRepositoryException("Git returned a malformed head or tree identity.");
@@ -86,7 +99,7 @@ public sealed class GitRepositoryIdentityReader(
         if (SupportsCreationOwnedBoundedRead)
             await VerifyWorkingTreeInputsAsync(javascript, ignores, cancellationToken, deadline).ConfigureAwait(false);
         var violations = new List<string>();
-        foreach (var entry in javascript.Where(entry => changedPaths.Contains(entry.Path)))
+        foreach (var entry in javascript.Where(entry => changedPaths.Contains(entry.Path) && !ignores.Contains(entry.Path)))
         {
             var headBlob = await GitAsync(["cat-file", "blob", "--end-of-options", entry.ObjectId], cancellationToken, deadline)
                 .ConfigureAwait(false);
@@ -96,12 +109,29 @@ public sealed class GitRepositoryIdentityReader(
             var baseBlob = baseObject is null ? null : await GitAsync(
                 ["cat-file", "blob", "--end-of-options", baseObject.StandardOutput.Trim()], cancellationToken, deadline)
                 .ConfigureAwait(false);
-            // Changed files containing a live directive are not grandfathered. This makes
-            // moved enable/disable and next-line directives fail closed because their coverage
-            // cannot be widened merely by preserving the directive text.
-            if (SuppressionDirectives(headBlob.StandardOutput).Count > 0 ||
-                (baseBlob is not null && SuppressionDirectives(baseBlob.StandardOutput).Count > 0))
+            var headDirectives = DangerousSuppressionDirectives(headBlob.StandardOutput, cancellationToken, deadline);
+            if (baseBlob is not null)
+                _ = DangerousSuppressionDirectives(baseBlob.StandardOutput, cancellationToken, deadline);
+            // Existing narrow directives for unrelated rules are legitimate. Blanket directives,
+            // anti-slop/oxc accumulation suppression, and any ambiguous directive-like spelling
+            // can never coexist with authoritative PASS. Base is still scanned so moved/removed
+            // coverage is explicit and a malformed/oversized base cannot silently affect comparison.
+            if (headDirectives.Count > 0)
                 violations.Add(entry.Path);
+        }
+
+        string? materializedRoot = null;
+        try
+        {
+            if (SupportsCreationOwnedBoundedRead)
+                materializedRoot = await MaterializeFrozenInputsAsync(
+                    javascript.Where(entry => !ignores.Contains(entry.Path)).ToArray(),
+                    cancellationToken, deadline).ConfigureAwait(false);
+        }
+        catch
+        {
+            DeleteMaterialization(materializedRoot);
+            throw;
         }
 
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -128,7 +158,8 @@ public sealed class GitRepositoryIdentityReader(
             $"sha256:{Convert.ToHexStringLower(hash.GetHashAndReset())}",
             violations,
             invalidInputs,
-            ignoreSelection.Retired);
+            ignoreSelection.Retired,
+            materializedRoot);
     }
 
     private static TreeEntry ParseTreeEntry(string value)
@@ -145,7 +176,57 @@ public sealed class GitRepositoryIdentityReader(
         return new TreeEntry(mode, path, objectId);
     }
 
-    private static IReadOnlyList<string> SuppressionDirectives(string content)
+    private static IReadOnlyList<string> DangerousSuppressionDirectives(
+        string content,
+        CancellationToken cancellationToken = default,
+        DateTimeOffset? deadline = null)
+    {
+        if (Encoding.UTF8.GetByteCount(content) > MaximumSuppressionScanBytes)
+            throw new EvidenceRepositoryException(
+                $"Changed JavaScript-family blob exceeds the {MaximumSuppressionScanBytes}-byte suppression scan ceiling.");
+        var directives = new List<string>();
+        var line = 1;
+        for (var index = 0; index < content.Length; index++)
+        {
+            if ((index & 0x3fff) == 0)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (deadline is not null && DateTimeOffset.UtcNow >= deadline)
+                    throw new OperationCanceledException("The finite suppression scan deadline expired.");
+            }
+            var marker = SuppressionDirectiveNames.FirstOrDefault(name =>
+                content.AsSpan(index).StartsWith(name, StringComparison.Ordinal));
+            if (marker is null)
+            {
+                if (content[index] == '\n') line++;
+                continue;
+            }
+            var end = index + marker.Length;
+            while (end < content.Length && content[end] is not ('\r' or '\n') &&
+                   !(content[end] == '*' && end + 1 < content.Length && content[end + 1] == '/'))
+                end++;
+            var tail = content[(index + marker.Length)..end].Trim();
+            var disables = marker.Contains("disable", StringComparison.Ordinal);
+            var rulesText = tail.Split("--", 2, StringSplitOptions.None)[0].Trim();
+            var blanket = disables && rulesText.Length == 0;
+            var protectedRule =
+                (rulesText.Contains("anti-slop", StringComparison.OrdinalIgnoreCase) ||
+                 rulesText.Contains("no-accumulating-spread", StringComparison.OrdinalIgnoreCase) ||
+                 rulesText.Contains("oxc/", StringComparison.OrdinalIgnoreCase));
+            var boundaryBefore = index == 0 || !IsIdentifierPart(content[index - 1]);
+            var boundaryAfter = index + marker.Length == content.Length ||
+                !IsIdentifierPart(content[index + marker.Length]);
+            if (blanket || protectedRule || !boundaryBefore || !boundaryAfter)
+                directives.Add($"{line}:{marker}:{rulesText}:{boundaryBefore}:{boundaryAfter}");
+            index += marker.Length - 1;
+        }
+        return directives;
+    }
+
+    internal static bool ContainsSuppressionDirective(string content) =>
+        LexedSuppressionDirectives(content).Count > 0;
+
+    private static IReadOnlyList<string> LexedSuppressionDirectives(string content)
     {
         var directives = new List<string>();
         var index = 0;
@@ -153,8 +234,54 @@ public sealed class GitRepositoryIdentityReader(
         return directives;
     }
 
-    internal static bool ContainsSuppressionDirective(string content) =>
-        SuppressionDirectives(content).Count > 0;
+    private async Task<string> MaterializeFrozenInputsAsync(
+        IReadOnlyList<TreeEntry> inputs,
+        CancellationToken cancellationToken,
+        DateTimeOffset deadline)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "delivery-forge-frozen-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        if (!OperatingSystem.IsWindows())
+            File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        try
+        {
+            foreach (var entry in inputs)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var blob = await GitAsync(
+                    ["cat-file", "blob", "--end-of-options", entry.ObjectId], cancellationToken, deadline)
+                    .ConfigureAwait(false);
+                var destination = Path.GetFullPath(Path.Combine(root, entry.Path.Replace('/', Path.DirectorySeparatorChar)));
+                if (!destination.StartsWith(root + Path.DirectorySeparatorChar, PathComparison))
+                    throw new EvidenceRepositoryException("Frozen input escaped the private materialization root.");
+                var parent = Path.GetDirectoryName(destination)!;
+                Directory.CreateDirectory(parent);
+                await File.WriteAllTextAsync(destination, blob.StandardOutput, new UTF8Encoding(false), cancellationToken)
+                    .ConfigureAwait(false);
+                var materializedObject = await GitAsync(
+                    ["hash-object", "--no-filters", "--", destination], cancellationToken, deadline)
+                    .ConfigureAwait(false);
+                if (!string.Equals(materializedObject.StandardOutput.Trim(), entry.ObjectId, StringComparison.Ordinal))
+                    throw new EvidenceRepositoryException(
+                        $"Private materialization does not match frozen Git object bytes: {entry.Path}");
+                File.SetAttributes(destination, File.GetAttributes(destination) | FileAttributes.ReadOnly);
+            }
+            return root;
+        }
+        catch
+        {
+            DeleteMaterialization(root);
+            throw;
+        }
+    }
+
+    internal static void DeleteMaterialization(string? root)
+    {
+        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root)) return;
+        foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+            File.SetAttributes(file, FileAttributes.Normal);
+        Directory.Delete(root, recursive: true);
+    }
 
     private static void ScanCode(
         string content,

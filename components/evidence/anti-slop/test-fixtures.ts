@@ -14,7 +14,14 @@ const oxlint = path.join(
 type Diagnostic = { code?: string; severity?: string };
 type Report = { diagnostics: Diagnostic[]; number_of_files: number; number_of_rules: number };
 
-function run(fixture: "clean" | "violation" | "malformed" | "suppression"): {
+function run(fixture:
+  | "clean"
+  | "violation"
+  | "malformed"
+  | "suppression"
+  | "suppression-line-division"
+  | "suppression-reserved-method"
+  | "suppression-adjacent-quote"): {
   status: number | null;
   report: Report;
 } {
@@ -69,4 +76,16 @@ assert.equal(suppression.report.number_of_files, 1);
 assert.equal(suppression.report.number_of_rules, 19);
 assert.deepEqual(suppression.report.diagnostics, []);
 
-console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, suppression attack reproduced");
+for (const bypass of [
+  "suppression-line-division",
+  "suppression-reserved-method",
+  "suppression-adjacent-quote",
+] as const) {
+  const result = run(bypass);
+  assert.equal(result.status, 0, `${bypass}: pinned Oxlint must demonstrate the suppression attack`);
+  assert.equal(result.report.number_of_files, 1);
+  assert.equal(result.report.number_of_rules, 19);
+  assert.deepEqual(result.report.diagnostics, []);
+}
+
+console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, four suppression attacks reproduced");
