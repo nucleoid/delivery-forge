@@ -158,6 +158,8 @@ internal sealed class ParentNativeContractComposition : IAsyncDisposable
         processes = new ProcessControl(); coordinator = new(new RunStore(store), git, processes, adapter); Bridge = new(coordinator, adapter, requireCoordination: true);
     }
     static readonly List<ParentNativeContractComposition> Retained = []; bool disposeEntered; readonly List<Task> lifecycle = [];
+    internal Task<ToolResult>? InterruptedBridgeCall { get; private set; }
+    internal Exception? InterruptedBridgeFailure { get; private set; }
     T Keep<T>(T task) where T : Task { lock (lifecycle) { if (lifecycle.Count >= 16) throw new IOException("Finite fixture composition ledger exhausted."); lifecycle.Add(task); } return task; }
     internal static async Task<ParentNativeContractComposition> CreateAsync(TrustedConfiguration config, ToolLifetime life, string store, StandaloneHostSelection image, IReadOnlyList<AdmissionFile> closure, LinuxScopeSelection? linux, ParentNativeContractMode selectedMode = ParentNativeContractMode.Complete)
     {
@@ -168,14 +170,35 @@ internal sealed class ParentNativeContractComposition : IAsyncDisposable
     {
         var assignment = await Keep(new LocalWorkerAssignmentPort(original, paths).SelectAsync(new(plan, config, null, null), original.Remaining, original.Token)).WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
         Bridge.BindCoordinationSelection(plan, assignment, config, original);
-        var result = await Keep(Bridge.ImplementAsync(assignment, HostInstructionContext.FromFrozenPlan(plan, assignment), original, original.Token)).WaitAsync(original.Remaining).ConfigureAwait(false);
+        var actualBridge = Keep(Bridge.ImplementAsync(assignment, HostInstructionContext.FromFrozenPlan(plan, assignment), original, original.Token));
+        ToolResult result;
         if (mode == ParentNativeContractMode.HoldUntilSameOriginalStop)
         {
+            // The public bridge observer must retain its expired-WORK fault.
+            // Only this closed fixture may inspect the original core's nonpass
+            // DATA after the same owner's stop has actually settled.
+            try { _ = await actualBridge.WaitAsync(original.Remaining).ConfigureAwait(false); throw new IOException("Interrupted bridge unexpectedly returned a result."); }
+            catch (TimeoutException error) when (actualBridge.IsFaulted && Bridge.RetainedFrames.Count == 1 &&
+                Bridge.RetainedFrames.Single().Worker.Primary is null && ReferenceEquals(Bridge.RetainedFrames.Single().Worker.Post, error))
+            { InterruptedBridgeCall = actualBridge; InterruptedBridgeFailure = error; }
             _ = original.CleanupRemaining; var stopped = Parent.ObserveContractFixtureData().StopTask ?? throw new IOException("Interrupted fixture has no original lease-loss Stop task.");
             await Keep(stopped).WaitAsync(original.CleanupRemaining).ConfigureAwait(false); _ = original.CleanupRemaining; var frame = Bridge.RetainedFrames.Single();
-            if (result.Outcome != "INCOMPLETE" || result.Code != "HOST_OPERATION_RETAINED" || !frame.OwnerStopped || frame.OwnerCompleted || frame.Unknown || !Native.ObserveOriginalSettled(assignment.RunId)) throw new IOException("Expected interrupted original fixture is not genuinely settled.");
+            if (!ExpectedStoppedBridgeFailure(actualBridge)) throw new IOException("Expected interrupted original fixture is not genuinely settled.");
+            result = frame.Worker.Actual!.Result; // Actual retained core DATA, never a successful bridge return.
         }
-        else original.Check(); return (result, assignment);
+        else { result = await actualBridge.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check(); }
+        return (result, assignment);
+    }
+    bool ExpectedStoppedBridgeFailure(Task actual)
+    {
+        if (mode != ParentNativeContractMode.HoldUntilSameOriginalStop || !ReferenceEquals(actual, InterruptedBridgeCall) ||
+            !actual.IsFaulted || InterruptedBridgeFailure is not TimeoutException ||
+            actual.Exception!.InnerExceptions.Count != 1 || !ReferenceEquals(actual.Exception.InnerExceptions[0], InterruptedBridgeFailure) ||
+            Bridge.RetainedFrames.Count != 1) return false;
+        var frame = Bridge.RetainedFrames.Single(); var core = frame.Worker.Actual;
+        return frame.Worker.Primary is null && ReferenceEquals(frame.Worker.Post, InterruptedBridgeFailure) &&
+            core is { IsCompletedSuccessfully: true } && core.Result.Outcome == "INCOMPLETE" && core.Result.Code == "HOST_OPERATION_RETAINED" &&
+            frame.OwnerStopped && !frame.OwnerCompleted && !frame.Unknown && Native.ObserveOriginalSettled(frame.RunId);
     }
     internal Task<WorktreeObservation> ObserveWorkAsync(string root) => Keep(actualGit.ObserveAsync(root, original.Token));
     internal async Task<WorktreeObservation> ObserveStoppedWorkAsync(string root, FileSnapshot before, IReadOnlyList<string> allowed)
@@ -189,7 +212,7 @@ internal sealed class ParentNativeContractComposition : IAsyncDisposable
         Exception? primary = null, post = null;
         try
         {
-            lock (lifecycle) if (lifecycle.Any(task => !task.IsCompletedSuccessfully)) throw new IOException("Original fixture composition operation remains failed/unsettled.");
+            lock (lifecycle) if (lifecycle.Any(task => !task.IsCompletedSuccessfully && !ExpectedStoppedBridgeFailure(task))) throw new IOException("Original fixture composition operation remains failed/unsettled.");
             if (Bridge.RetainedFrames.Any(frame => frame.Unknown)) throw new IOException("Original fixture work unsettled; owners retained.");
             if (Parent is null) throw new IOException("Original fixture parent construction did not return.");
             await Keep(Parent.DisposeAsync().AsTask()).WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
