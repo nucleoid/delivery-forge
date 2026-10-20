@@ -20,7 +20,7 @@ public sealed class LocalRealFakePublicationTests
         var intent = new PublicationIntent("unit-key", "unit-run", "unit-revision", PublicationAction.CreateOrUpdatePr,
             new("local-real/no-network", "refs/heads/local-real/unit", "refs/heads/base"),
             fixture.Patch.BaseCommit, fixture.Patch.HeadCommit, fixture.Patch.HeadTree, PublicationIntentState.Sent);
-        var node = System.Text.Json.Nodes.JsonNode.Parse(fixture.PublicationReceipt("PR_PUBLISHED").CanonicalBytes)!.AsObject();
+        var node = System.Text.Json.Nodes.JsonNode.Parse(fixture.PublicationReceipt("PR_PUBLISHED").CanonicalBytes.Span)!.AsObject();
         node["remoteRef"] = "local-ref:" + intent.Target.SourceRef;
         node["resultId"] = "local-fake-unit";
         if (change == "unmarked") node["remoteRef"] = intent.Target.SourceRef;

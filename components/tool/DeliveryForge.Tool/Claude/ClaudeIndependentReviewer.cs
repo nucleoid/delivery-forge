@@ -95,7 +95,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         phaseCancellation?.Token.ThrowIfCancellationRequested();
         if (uncertain || !sameCompletedWorker()) throw new WorkerEnvelopeException("Actual original completed author changed during independent review.");
     }
-    internal static void CheckPhaseAdmission(DeliveryForge.Coordination.ICoordinatedEffectAdmission actualParent,
+    internal static void CheckPhaseAdmission(DeliveryForge.Coordination.ICoordinatedSynchronousEffectAdmission actualParent,
         string runId, long existingPhaseStarted, TimeSpan existingPhaseLimit)
     {
         // The phase origin was created by RunAsync before its existing CTS. Carry

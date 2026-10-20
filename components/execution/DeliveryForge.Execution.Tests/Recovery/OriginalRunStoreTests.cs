@@ -14,7 +14,7 @@ public sealed class OriginalRunStoreTests
         // The first check returns immediately before the existing endpoint is
         // observed as elapsed; no fresh clock or cancellation allowance is made.
         original.Limit = TimeSpan.FromTicks(1);
-        await Assert.ThrowsAsync<TimeoutException>(() => store.AppendAsync("owned", "prepared", new { value = 1 }));
+        await Assert.ThrowsAsync<TimeoutException>(() => store.AppendAsync("owned", "prepared", new { value = 1 }, TestContext.Current.CancellationToken));
         Assert.False(Directory.Exists(store.RootPath));
     }
     [Fact]
