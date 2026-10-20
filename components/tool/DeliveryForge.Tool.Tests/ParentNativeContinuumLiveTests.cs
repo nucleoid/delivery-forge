@@ -76,7 +76,14 @@ public sealed class ParentNativeContinuumLiveTests
                 await Keep(Task.Delay(25, Original.Token));
             }
         }
-        internal async Task CloseOwner() { await Keep(Owner.DisposeAsync().AsTask()).WaitAsync(Original.CleanupRemaining, TestContext.Current.CancellationToken); OwnerDisposed = true; }
+        internal async Task CloseOwner()
+        {
+            // Revocation may still be completing its same-original stop. Await
+            // that actual retained task before sampling fixture quiescence.
+            var stop = Owner.Parent.ObserveContractFixtureData().StopTask;
+            if (stop is not null) await Keep(stop).WaitAsync(Original.CleanupRemaining, TestContext.Current.CancellationToken);
+            await Keep(Owner.DisposeAsync().AsTask()).WaitAsync(Original.CleanupRemaining, TestContext.Current.CancellationToken); OwnerDisposed = true;
+        }
         internal async Task Finish(object evidence)
         {
             Assert.True(OwnerDisposed); Assert.All(Tasks, task => Assert.True(task.IsCompletedSuccessfully));
