@@ -12,6 +12,10 @@ public sealed class OwnedCleanupObservationTests
     {
         internal static readonly List<LocalFrame> Retained = [];
         internal readonly ToolLifetime Original = new(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+        internal readonly string RunId = "run-" + Guid.NewGuid().ToString("N");
+        internal bool BindingCurrent = true;
+        internal ParentEffectAdmission Parent = null!;
+        internal WorktreeManager InitialGit = null!, AdmittedGit = null!;
         internal readonly List<Task> Tasks = []; internal ExecutionCoordinator? Coordinator; internal ProcessControl? Processes; internal OwnerHostBridge? Bridge; internal ParentNativeContractPort? Port; internal Exception? Failure;
         internal T Keep<T>(T task) where T : Task { Tasks.Add(task); if (Tasks.Count > 4096) throw new IOException("Finite local original task ledger exhausted; entered task retained."); return task; }
     }
@@ -23,17 +27,29 @@ public sealed class OwnedCleanupObservationTests
         {
             var path = Environment.GetEnvironmentVariable("DELIVERY_FORGE_PARENT_NATIVE_LOCAL") ?? throw new IOException("Exact Root-admitted local native control profile required."); var hash = Environment.GetEnvironmentVariable("DELIVERY_FORGE_PARENT_NATIVE_LOCAL_SHA256") ?? throw new IOException("Independent local profile digest required.");
             var raw = BoundedFiles.Read(path, f.Original, 65536); Assert.Equal(hash, BoundedFiles.Sha(raw)); _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(raw); var selected = JsonSerializer.Deserialize<LocalProfile>(raw, BoundedFiles.Json) ?? throw new IOException("Null local control profile.");
-            if (selected.Kind != "RootAdmittedLocalNativeCleanupControl-v1" || selected.NativeClosure.Count != 5 || selected.RelativePath.Length is < 1 or > 1024 || selected.RelativePath.Contains('\\') || selected.RelativePath.StartsWith('/') || selected.RelativePath.Split('/').Any(piece => piece is "" or "." or "..")) throw new IOException("Finite canonical local fixture task required.");
+            if (selected.Kind != "RootAdmittedLocalNativeCleanupControl-v2" || selected.NativeClosure.Count != 5 || selected.RelativePath.Length is < 1 or > 1024 || selected.RelativePath.Contains('\\') || selected.RelativePath.StartsWith('/') || selected.RelativePath.Split('/').Any(piece => piece is "" or "." or "..")) throw new IOException("Finite canonical local fixture task required.");
             foreach (var root in new[] { selected.ParentCheckout, selected.Worktree }) foreach (var privatePath in new[] { path, selected.RunStore, selected.ResultDirectory }) BoundedFiles.Separate(root, privatePath);
             foreach (var root in new[] { selected.ParentCheckout, selected.Worktree }) foreach (var pin in selected.NativeClosure.Append(selected.Git).Concat(selected.LinuxScope is AdmissionFile localScope ? new[] { localScope } : Array.Empty<AdmissionFile>())) BoundedFiles.Separate(root, pin.Path);
             BoundedFiles.Separate(selected.ParentCheckout, selected.Worktree); BoundedFiles.Separate(selected.RunStore, selected.ResultDirectory);
+            BoundedFiles.Plain(selected.Worktree, true);
+            if (Directory.Exists(selected.Worktree) || File.Exists(selected.Worktree))
+                throw new IOException("Local cleanup v2 requires the exact independently admitted absent worktree; no existing binding adoption.");
             foreach (var fresh in new[] { selected.RunStore, selected.ResultDirectory }) { BoundedFiles.Plain(fresh, true); if (!Directory.Exists(fresh) || Directory.EnumerateFileSystemEntries(fresh).Take(1).Any()) throw new IOException("Fresh existing empty local control stores required."); }
             _ = InstalledHostAdmission.ReadExact(selected.Git, f.Original, 268435456);
             LinuxScopeSelection? linux = null; if (OperatingSystem.IsLinux()) { var pin = selected.LinuxScope ?? throw new IOException("Actual local Linux scope required."); linux = JsonSerializer.Deserialize<LinuxScopeSelection>(InstalledHostAdmission.ReadExact(pin, f.Original, 65536), BoundedFiles.Json) ?? throw new IOException("Null local scope."); }
-            var executor = OperatingSystem.IsLinux() ? new ProcessCommandExecutor(linux!, f.Original) : new ProcessCommandExecutor(); var git = new WorktreeManager(selected.Git.Path, executor, f.Original);
+            var executor = OperatingSystem.IsLinux() ? new ProcessCommandExecutor(linux!, f.Original) : new ProcessCommandExecutor();
+            var git = f.InitialGit = new WorktreeManager(selected.Git.Path, executor, f.Original);
+            // A finite private fixture parent owns real provisioning/native Git,
+            // not Continuum or a production host capability. The initial view
+            // shares the actual binding but cannot acquire a writer.
+            f.Parent = new(new object(), run => f.BindingCurrent && run == f.RunId, _ => f.BindingCurrent = false);
+            var admitted = f.AdmittedGit = git.WithParentAdmission(f.Parent, f.RunId);
+            await f.Keep(admitted.PrepareAsync(selected.ParentCheckout, selected.Worktree, selected.BaseCommit,
+                f.Original.Token)).WaitAsync(f.Original.Remaining, TestContext.Current.CancellationToken);
+            f.Original.Check();
             var before = await f.Keep(git.ObserveAsync(selected.Worktree, f.Original.Token)).WaitAsync(f.Original.Remaining, TestContext.Current.CancellationToken); Assert.True(before.IsClean); Assert.Equal(selected.BaseCommit, before.HeadCommit);
-            f.Port = new ParentNativeContractPort(selected.Native, selected.NativeClosure, git, executor, selected.Git.Path, linux, ParentNativeContractMode.HoldUntilSameOriginalStop); var adapter = new ParentNativeContractAdapter(f.Port); f.Processes = new ProcessControl(); var store = new RunStore(selected.RunStore); f.Coordinator = new(store, git, f.Processes, adapter); f.Bridge = new(f.Coordinator, adapter);
-            var assignment = new FrozenWorkerPlan("run-" + Guid.NewGuid().ToString("N"), selected.PlanIdentity, selected.BaseCommit, selected.Repository, selected.ParentCheckout, selected.Worktree, selected.ResultDirectory, Convert.ToHexStringLower(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)), [selected.RelativePath], [], ParentNativeContractPort.AdapterId, ParentNativeContractPort.Version, [AgentCapability.Launch, AgentCapability.CompletionEvidence, AgentCapability.Stop, AgentCapability.EvidenceExport]);
+            f.Port = new ParentNativeContractPort(selected.Native, selected.NativeClosure, git, executor, selected.Git.Path, linux, ParentNativeContractMode.HoldUntilSameOriginalStop); var adapter = new ParentNativeContractAdapter(f.Port); f.Processes = new ProcessControl(); var store = new RunStore(selected.RunStore); f.Coordinator = new(store, admitted, f.Processes, adapter); f.Bridge = new(f.Coordinator, adapter);
+            var assignment = new FrozenWorkerPlan(f.RunId, selected.PlanIdentity, selected.BaseCommit, selected.Repository, selected.ParentCheckout, selected.Worktree, selected.ResultDirectory, Convert.ToHexStringLower(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32)), [selected.RelativePath], [], ParentNativeContractPort.AdapterId, ParentNativeContractPort.Version, [AgentCapability.Launch, AgentCapability.CompletionEvidence, AgentCapability.Stop, AgentCapability.EvidenceExport]);
             var request = WorkerEnvelope.PrepareWorker(assignment); var instructions = HostInstructionContext.FromParentSelection(request, selected.BundleIdentity, "deterministic genuine native contract fixture; await same-original Stop", ["only assigned nonce-bound file; no AI/provider/publication"], ["write assigned file then hold until original owner stop"]);
             var originalStarted = f.Original.OriginalStarted; var implementation = f.Keep(f.Bridge.ImplementAsync(assignment, instructions, f.Original, f.Original.Token));
             var started = System.Diagnostics.Stopwatch.GetTimestamp(); while (true) { f.Original.Check(); if (implementation.IsCompleted || System.Diagnostics.Stopwatch.GetElapsedTime(started) > TimeSpan.FromSeconds(20)) throw new IOException("Actual native pending task missing."); var frame = f.Bridge.RetainedFrames.SingleOrDefault(); if (frame?.Accepted is not null && f.Port.ActiveRead is { IsCompleted: false } && adapter.ActualCalls.Any(call => call.Kind == "Wait" && call.ActualTask is { IsCompleted: false }) && f.Port.OriginalProcess is { OriginalRetirementTask: null, HasRetainedOriginalOwner: true }) break; await f.Keep(Task.Delay(25, f.Original.Token)); }
