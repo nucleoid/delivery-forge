@@ -253,7 +253,11 @@ public static partial class GitPatchIdentity
                     : await File.ReadAllBytesAsync(file, cancellationToken);
                 actualMode = OperatingSystem.IsWindows()
                     ? entry.Mode
-                    : !(context.SourceRealm == ReviewAuthorityRealm.Production ? context.EnterOwnedSynchronous(() => File.GetUnixFileMode(file)) : File.GetUnixFileMode(file)).HasFlag(UnixFileMode.UserExecute)
+                    : !(context.SourceRealm == ReviewAuthorityRealm.Production
+                        ? context.EnterOwnedSynchronous(() => OperatingSystem.IsWindows()
+                            ? throw new PlatformNotSupportedException("Unix file modes require a non-Windows source.")
+                            : File.GetUnixFileMode(file))
+                        : File.GetUnixFileMode(file)).HasFlag(UnixFileMode.UserExecute)
                         ? "100644"
                         : "100755";
             }
