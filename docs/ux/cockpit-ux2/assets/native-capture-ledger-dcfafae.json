@@ -511,5 +511,15 @@
     "The owner's Codex hooks (hooks.json) and Pi settings remained active; nothing in them was read beyond key names.",
     "The terminal windows were driven by scripted keystrokes with the owner present at the machine; two incidents are recorded above and neither affects a published frame.",
     "The Claude frames were captured at e045e82; render-cockpit.mjs and hosts/claude are unchanged between e045e82 and the Pi/Codex source commit dcfafae (the commits in between fix Windows-only tests and the Pi widget)."
-  ]
+  ],
+  "parentReview": {
+    "status": "accepted",
+    "reviewedAt": "2026-10-20",
+    "reviewer": "parent session (Claude Fable 5.1) on behalf of the owner; owner authorised merge",
+    "method": "each PNG opened and inspected at ff1e53d; filenames and hashes were not used as a substitute",
+    "accepted": 13,
+    "rejected": 0,
+    "commentUrl": "https://github.com/nucleoid/delivery-forge/pull/45#issuecomment-6280208245",
+    "mergedAs": "117b181 on ux/ux2-cockpit-prototypes"
+  }
 }
