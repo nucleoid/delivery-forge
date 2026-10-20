@@ -12,12 +12,12 @@ internal sealed class StandaloneEntrypoint
     readonly TaskCompletionSource<int> unknownHold = new(TaskCreationOptions.RunContinuationsAsynchronously);
     readonly List<object> actualReferences = [];
     readonly TextWriter output, errors; readonly ToolFailureAttention attention;
-    StandaloneResources? resources; StandaloneOwnerComposition? composition; Task? delivery;
+    StandaloneResources? resources; StandaloneOwnerComposition? composition; ProductionBatchOwner? batch; Task? delivery;
     Exception? primary; readonly List<Exception> secondary = []; bool deliveryEntered, deliveryReturned;
     StandaloneEntrypoint(TextWriter output, TextWriter errors) { this.output = output; this.errors = errors; attention = new(original, errors); original.BindAttention(attention); actualReferences.Add(original); actualReferences.Add(unknownHold); lock (Retained) Retained.Add(this); }
     internal static Task<int> RunAsync(string[] args, TextWriter output, TextWriter errors) => new StandaloneEntrypoint(output, errors).Run(args);
     T ReadPinned<T>(AdmissionFile pin, int maximum) { var bytes = InstalledHostAdmission.ReadExact(pin, original, maximum); _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(bytes); original.Check(); var value = JsonSerializer.Deserialize<T>(bytes, BoundedFiles.Json) ?? throw new IOException("Independent selected root DATA is null."); original.Check(); return value; }
-    static void SeparateSelection(TrustedConfiguration config, string configPath, StandaloneRootSelection root)
+    internal static void SeparateSelection(TrustedConfiguration config, string configPath, StandaloneRootSelection root)
     {
         if (root.Kind != "DeliveryForgeStandaloneRoot-v1" || root.WorkerPaths is null || root.InstalledHostAdmission is null) throw new ToolUsageException("Explicit trusted standalone root shape required.");
         var work = BoundedFiles.Plain(root.WorkerPaths.Worktree, true); var result = BoundedFiles.Plain(root.WorkerPaths.ResultDirectory, true); var store = BoundedFiles.Plain(root.StoreRoot, true);
@@ -67,15 +67,25 @@ internal sealed class StandaloneEntrypoint
                 // Same-process embedded resume and dry-run history inspection keep
                 // their existing routes and all original binding checks.
                 if (command.Mode == ToolMode.Resume && !command.Has("dry-run")) result = ToolResult.Incomplete("ORIGINAL_OWNER_REQUIRED", "A fresh standalone process has no retained same-original native owner; saved run DATA cannot create one. Use dry-run only to inspect immutable history.");
+                else if (config.ProductionBatch is not null)
+                {
+                    batch = new(config, configPin, original, resources ?? throw new IOException("Actual aggregate resources unavailable.")); actualReferences.Add(batch);
+                    var actual = batch.RunAsync(command); actualReferences.Add(actual);
+                    try { result = await actual.WaitAsync(original.Remaining).ConfigureAwait(false); }
+                    finally { if (!actual.IsCompleted) original.RetainUnknown(); }
+                    original.Check();
+                }
                 else if (config.StandaloneRoot is null) result = ToolResult.Incomplete("STANDALONE_ROOT_REQUIRED", "An owner-reviewed installed root and actual selected Linux profile where applicable are required; no ambient host/Git fallback.");
                 else
                 {
                     var root = ReadPinned<StandaloneRootSelection>(config.StandaloneRoot, 65536); SeparateSelection(config, configPath, root); original.Check();
+                    var inspection = command.Mode == ToolMode.Plan || command.Has("dry-run") || command.Mode == ToolMode.Capabilities;
+                    if (!inspection) StandaloneOwnerComposition.RequireFreshExecutionStore(root.StoreRoot, original);
                     LinuxScopeSelection? scope = null;
                     if (OperatingSystem.IsLinux()) scope = ReadPinned<LinuxScopeSelection>(root.LinuxScopeProfile ?? throw new ToolUsageException("Exact Linux owner profile required before Git or host birth."), 65536);
                     ProcessCommandExecutor executor = OperatingSystem.IsLinux() ? new(scope!, original) : new();
                     ToolApplication application;
-                    if (command.Mode == ToolMode.Plan || command.Has("dry-run") || command.Mode == ToolMode.Capabilities) application = new(actualExecutor: executor, actualOriginal: original, actualConfigurationPin: configPin);
+                    if (inspection) application = new(actualExecutor: executor, actualOriginal: original, actualConfigurationPin: configPin);
                     else
                     {
                         var admission = InstalledHostAdmission.ReadRootAccepted(root.InstalledHostAdmission, config, original);
@@ -93,6 +103,7 @@ internal sealed class StandaloneEntrypoint
         // into a normal exit. The same actual caller is passively retained for
         // its containing owner to reconcile; this is a failed, over-budget state.
         if (!original.HasRetainedUnknown && composition is not null) { try { await composition.DisposeAsync().ConfigureAwait(false); } catch (Exception error) { secondary.Add(error); } }
+        if (!original.HasRetainedUnknown && batch is not null) { try { await batch.DisposeAsync().ConfigureAwait(false); } catch (Exception error) { secondary.Add(error); } }
         if (!original.HasRetainedUnknown && resources is not null) { try { resources.Close(); } catch (Exception error) { secondary.Add(error); } }
         if (original.HasRetainedUnknown || attention.Unknown) return await HoldUnknown().ConfigureAwait(false);
         if (secondary.Count != 0) { if (primary is null) primary = secondary[0]; var all = new List<Exception> { primary }; all.AddRange(secondary.Where(e => !ReferenceEquals(e, primary))); primary = all.Count == 1 ? primary : new AggregateException("Actual root failure and independent first dispositions.", all); exit = 1; }

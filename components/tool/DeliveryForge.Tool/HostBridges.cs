@@ -276,11 +276,20 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
     LocalRealGoldenOwner? localRealGolden;
     Func<FrozenPlan, FrozenWorkerPlan, ParentCoordinationHost, LocalSingleScheduler>? localSingleFactory;
     FrozenPlan? schedulingPlan;
+    ProductionBatchControl? batchControl;
+    internal void BindBatchControl(ProductionBatchControl actual)
+    {
+        lock (registration) { if (batchControl is not null || frames.Count != 0) throw new ToolUsageException("Batch birth restriction binds the idle bridge once."); batchControl = actual; }
+    }
     internal void BindLocalSingleFactory(Func<FrozenPlan, FrozenWorkerPlan, ParentCoordinationHost, LocalSingleScheduler> factory)
     {
         lock (registration) { if (localSingleFactory is not null || frames.Count != 0) throw new ToolUsageException("LocalSingle binds once before dispatch."); localSingleFactory = factory; }
     }
     internal bool HasInstalledQuality => installedQuality is not null;
+    // Additional forward-review restriction. ToolResult text/labels do not
+    // substitute for the actual private same-frame protected comparison.
+    internal static bool MayEnterIndependentReviewAfterQuality(ToolResult? actualResult, InstalledQualityHost? actualOwner, HostBridgeFrame? actualFrame) =>
+        actualResult is null || actualOwner is not null && actualFrame is not null && actualOwner.HasLocalRealCompletion(actualFrame);
     internal bool HasInstalledReview => installedReview is not null;
     internal bool HasLocalRealGolden => localRealGolden is not null;
     internal void BindLocalRealGolden(LocalRealGoldenOwner actual)
@@ -332,6 +341,68 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
     public string StoreRootPath => coordinator.StoreRootPath;
     public AgentAdapterProfile AdapterProfile => adapter.Profile;
     public HostObservationRealm Realm => adapter.Realm;
+    // Issued only from this concrete bridge's exact settled original frame.
+    // It is never serialized, imported or accepted as a substitute for that frame.
+    internal sealed class BatchNodeCompletion(OwnerHostBridge issuer, HostBridgeFrame frame, string phase)
+    {
+        internal OwnerHostBridge Issuer { get; } = issuer;
+        internal HostBridgeFrame Frame { get; } = frame;
+        internal string RunId => Frame.RunId;
+        internal string HeadCommit => Frame.Completion!.HeadCommit;
+        internal string Phase { get; } = phase;
+    }
+    BatchNodeCompletion? batchCompletion;
+    internal async Task<BatchNodeCompletion> ReadActualBatchCompletionAsync(ToolLifetime original)
+    {
+        original.Check();
+        if (frames.Count != 1) throw new IOException("Batch node requires exactly one actual original frame.");
+        var frame = frames.Values.Single();
+        if (batchCompletion is not null) { RequireActualBatchCompletion(batchCompletion, original); return batchCompletion; }
+        RequireSettledBatchFrame(frame, original);
+        var phases = new List<RetainedHostTask<ToolResult>> { frame.Worker, frame.Quality, frame.IndependentReview.Started ? frame.IndependentReview : frame.Review, frame.LocalReal };
+        var results = phases.Where(phase => phase.Started).Select(phase => phase.Actual!.Result).ToArray();
+        var quality = installedQuality is null || coordination is null ? null : await installedQuality.LocalRealEvidenceAsync(frame, coordination).ConfigureAwait(false);
+        var review = installedReview is null || coordination is null ? null : await installedReview.LocalRealEvidenceAsync(frame, coordination).ConfigureAwait(false);
+        var requiredGateIds = new HashSet<string>(StringComparer.Ordinal);
+        if (schedulingPlan is not null)
+        {
+            using var plan = System.Text.Json.JsonDocument.Parse(schedulingPlan.CanonicalBytes);
+            foreach (var gate in plan.RootElement.GetProperty("plan").GetProperty("gates").EnumerateArray()) requiredGateIds.Add(gate.GetProperty("id").GetString()!);
+        }
+        var actualGateIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var receipt in quality ?? Array.Empty<DeliveryForge.Contracts.Validation.ValidatedContract>())
+        {
+            using var document = System.Text.Json.JsonDocument.Parse(receipt.CanonicalBytes);
+            actualGateIds.Add(document.RootElement.GetProperty("gateId").GetString()!);
+        }
+        // Worker-local COMPLETE and source-preparation COMPLETE are never a
+        // substitute for protected quality, exact accepted independent review,
+        // and complete coverage of the frozen plan's required gate identities.
+        var gatesPassed = quality is not null && review is not null && requiredGateIds.Count != 0 && requiredGateIds.IsSubsetOf(actualGateIds);
+        var phase = results.Any(result => result.Outcome is "FAIL" or "BLOCKED") ? "Fail" : gatesPassed ? "Pass" :
+            installedQuality is null && installedReview is null ? "LocalComplete" : "Incomplete";
+        RequireSettledBatchFrame(frame, original);
+        return batchCompletion = new(this, frame, phase);
+    }
+    internal void RequireActualBatchCompletion(BatchNodeCompletion actual, ToolLifetime original)
+    {
+        if (!ReferenceEquals(actual, batchCompletion) || !ReferenceEquals(actual.Issuer, this) ||
+            !frames.TryGetValue(actual.RunId, out var retained) || !ReferenceEquals(retained, actual.Frame))
+            throw new IOException("Foreign or reconstructed batch completion cannot retire this original.");
+        RequireSettledBatchFrame(retained, original);
+    }
+    void RequireSettledBatchFrame(HostBridgeFrame frame, ToolLifetime original)
+    {
+        original.Check();
+        if (!ReferenceEquals(frame.Lifetime, original) || original.HasExplicitUnknown || frame.Unknown ||
+            !NativeCompletedAndQuiet(frame) || !ObserveCoordinationWorkSettled(frame.RunId) ||
+            frame.Scheduler is null || frame.Scheduler.HasRetainedReservation ||
+            frame.SchedulingCompletion.Actual is not { IsCompletedSuccessfully: true } settled || !settled.Result)
+            throw new IOException("Actual worker, writer, phases and scheduling reservation have not settled under this original.");
+        foreach (var phase in new[] { frame.Worker, frame.Quality, frame.Review, frame.IndependentReview, frame.LocalReal })
+            if (phase.Started && (phase.Actual is not { IsCompletedSuccessfully: true } || phase.Primary is not null || phase.Post is not null))
+                throw new IOException("An actual node phase remains failed or unsettled.");
+    }
     readonly object registration = new();
     bool Register(string runId, HostBridgeFrame frame) { lock (registration) { return frames.Count < 128 && frames.TryAdd(runId, frame); } }
     public Task<ToolResult> ImplementAsync(FrozenWorkerPlan plan, TimeSpan total, CancellationToken cancellationToken = default) => Task.FromResult(ToolResult.Incomplete("PARENT_INSTRUCTIONS_REQUIRED", "A taskless worker envelope cannot dispatch; supply the actual frozen plan or parent-selected immutable instruction context."));
@@ -395,7 +466,9 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
             }
             else request = (await frame.Enter(() => coordinator.PrepareWorkerAsync(plan, frame.Lifetime.Token)).ConfigureAwait(false)).Request;
             frame.Request = request;
-            frame.Accepted = await frame.Enter(() => adapter.StartAsync(request, frame.Lifetime.Remaining, frame.Lifetime.Token)).ConfigureAwait(false);
+            frame.Accepted = await frame.Enter(() => batchControl is null
+                ? adapter.StartAsync(request, frame.Lifetime.Remaining, frame.Lifetime.Token)
+                : batchControl.EnterNodeStart(() => adapter.StartAsync(request, frame.Lifetime.Remaining, frame.Lifetime.Token))).ConfigureAwait(false);
             await frame.Enter(() => coordinator.AcceptAsync(frame.Accepted ?? throw new WorkerEnvelopeException("Missing actual acceptance."), frame.Lifetime.Token)).ConfigureAwait(false);
             var a = frame.Accepted ?? throw new WorkerEnvelopeException("Missing actual acceptance."); var binding = new AgentRunBinding(a.AdapterId, a.AdapterVersion, a.RunId, a.RequestIdentity, a.RuntimeRunIdentity, a.RuntimeTaskIdentity);
             frame.Completion = await frame.Enter(() => adapter.WaitAsync(binding, frame.Lifetime.Remaining, frame.Lifetime.Token)).ConfigureAwait(false);
@@ -435,6 +508,7 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
             }
             if (localRealGolden is not null && installedQuality?.HasLocalRealCompletion(frame) != true)
                 return qualityResult ?? ToolResult.Incomplete("LOCAL_REAL_PROTECTED_BASELINE_REQUIRED", "Actual protected quality and independently approved baseline completion are required before local-real review/publication.");
+            if (!MayEnterIndependentReviewAfterQuality(qualityResult, installedQuality, frame)) return qualityResult!;
             if (installedReview?.HasIndependentReviewer == true)
             {
                 if (coordination is null || !NativeCompletedAndQuiet(frame) || frame.Quality.Unknown || installedQuality?.Unknown == true || frame.EnteredTasks.Any(task => !task.IsCompleted)) throw new WorkerEnvelopeException("Actual independent review requires its same original completed author and settled quality originals.");

@@ -276,6 +276,47 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
         }
     }
 
+    internal async Task RetireSettledBatchNodeAsync(string runId)
+    {
+        // This successful forward transition is deliberately separate from
+        // failure/final cleanup: CleanupRemaining permanently closes WORK.
+        while (true)
+        {
+            effects.CheckCurrent(runId);
+            lock (gate)
+            {
+                original.Check();
+                if (renewalHandoff.Snapshot(runId) is not null) continue;
+                if (parentRunId != runId || disposeEntered || closed || revoked || failure is not null || lossStop is not null ||
+                    original.HasExplicitUnknown || reducer is null || authority is null || !reducer.MayDispatch(authority) ||
+                    bridge is null || !bridge.ObserveCoordinationWorkSettled(runId) || !effects.AllKnownSettled)
+                    throw new CoordinationUncertainException("Only this known-settled current original can release a completed batch node.");
+                disposeEntered = true; closed = true;
+                renewalHandoff.Revoke(new CoordinationUncertainException("Completed batch node permanently closed admission."));
+                renewalStop.Cancel();
+                break;
+            }
+        }
+        try
+        {
+            if (renewal is not null) await renewal.WaitAsync(original.Remaining).ConfigureAwait(false);
+            original.Check();
+            lock (gate)
+                if (coordinationTasks.Any(task => !task.IsCompletedSuccessfully) || !effects.AllKnownSettled || original.HasExplicitUnknown)
+                    throw new CoordinationUncertainException("Completed node still has an unsettled original operation.");
+            var releasing = reducer!.ReleaseAllAsync(authority!, original.Token); lock (gate) coordinationTasks.Add(releasing);
+            var result = await releasing.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
+            if (result.Continuation is not null || result.Snapshot.Phase != CoordinationLifecyclePhase.Closed)
+                throw new CoordinationUncertainException("Completed node resource release did not close its actual lifecycle.");
+            transportClose = transport.DisposeAsync().AsTask(); await transportClose.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
+            checkpointClose = checkpoints.DisposeAsync().AsTask(); await checkpointClose.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
+            cancelled.Dispose(); renewalStop.Dispose(); disposed = true;
+            lock (Originals) Originals.Remove(this);
+            lock (Creations) if (creation is not null) Creations.Remove(creation);
+        }
+        catch (Exception error) { dispositionFailure = error; original.RetainUnknown(); throw; }
+    }
+
     public async ValueTask DisposeAsync()
     {
         lock (gate)

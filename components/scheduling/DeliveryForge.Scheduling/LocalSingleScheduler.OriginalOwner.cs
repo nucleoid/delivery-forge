@@ -53,13 +53,18 @@ public sealed partial class LocalSingleScheduler
         finally { _serial.Release(); }
     }
     void CheckOriginal() { original?.CheckWork(); parent?.CheckCurrent(_worker.RunId); }
-    TimeSpan OriginalRemaining() { CheckOriginal(); return original!.WorkLimit - Stopwatch.GetElapsedTime(original.OriginalStarted); }
+    TimeSpan OriginalRemaining()
+    {
+        CheckOriginal(); var remaining = original!.WorkLimit - Stopwatch.GetElapsedTime(original.OriginalStarted);
+        if (remaining <= TimeSpan.Zero) throw new TimeoutException("Original scheduling WORK endpoint expired.");
+        return remaining;
+    }
     static TimeSpan Min(TimeSpan left, TimeSpan right) => left < right ? left : right;
     CancellationTokenSource OriginalDeadline(CancellationToken caller)
     {
         var linked = CancellationTokenSource.CreateLinkedTokenSource(caller, original?.Token ?? default);
-        if (original is not null) linked.CancelAfter(OriginalRemaining());
-        return linked;
+        try { if (original is not null) linked.CancelAfter(OriginalRemaining()); return linked; }
+        catch { linked.Dispose(); throw; }
     }
     async Task WaitSerialAsync(CancellationToken token)
     {
@@ -77,6 +82,7 @@ public sealed partial class LocalSingleScheduler
         {
             CheckOriginal();
             if (original is null || !ReferenceEquals(ticket, _ticket) || !_laneHeld || !_prepared || _uncertain || !_nativeQuiescenceKnown ||
+                _store.HasUnsettledOriginalFiles || actualOriginalUnknown?.Invoke() != false ||
                 actualPipeline?.Invoke() is not { IsCompletedSuccessfully: true } || actualSettled?.Invoke() != true || _execution.HasPendingControlOperations(_worker.RunId))
                 throw new SchedulingException("Only the exact settled original pipeline can release its actual completed reservation.");
             terminalEntered = true;
@@ -84,7 +90,10 @@ public sealed partial class LocalSingleScheduler
             CheckOriginal();
             if (actualSettled!.Invoke() != true) throw new SchedulingException("Original settlement changed before writer disposition.");
             await releaseActualWriter().ConfigureAwait(false);
-            CheckOriginal(); MarkObservedClosed(); Release();
+            CheckOriginal();
+            if (_store.HasUnsettledOriginalFiles || actualOriginalUnknown?.Invoke() != false || actualSettled?.Invoke() != true || _execution.HasPendingControlOperations(_worker.RunId))
+                throw new SchedulingException("Original completed disposition acquired uncertainty; capacity remains retained.");
+            MarkObservedClosed(); Release();
         }
         catch { if (terminalEntered) _uncertain = true; throw; }
         finally { _serial.Release(); }
@@ -94,19 +103,23 @@ public sealed partial class LocalSingleScheduler
         if (original is null) throw new SchedulingException("No retained original cleanup owner.");
         using var deadline = new CancellationTokenSource(original.CleanupRemaining);
         await _serial.WaitAsync(deadline.Token).ConfigureAwait(false);
+        var writerDispositionEntered = false;
         try
         {
             _ = original.CleanupRemaining;
-            if (!ReferenceEquals(ticket, _ticket) || !_laneHeld || actualPipeline?.Invoke() is not { IsCompleted: true } || !actualStopped())
+            if (!ReferenceEquals(ticket, _ticket) || !_laneHeld || !StoppedOriginalKnown() || actualPipeline?.Invoke() is not { IsCompleted: true } || !actualStopped())
                 throw new SchedulingException("Cleanup release requires the exact settled pipeline and fresh same-owner stopped closure.");
+            writerDispositionEntered = true;
             await releaseActualWriter().ConfigureAwait(false);
             _ = original.CleanupRemaining;
-            if (!actualStopped()) throw new SchedulingException("Stopped closure changed during cleanup.");
+            if (!StoppedOriginalKnown() || !actualStopped()) throw new SchedulingException("Stopped closure or original uncertainty changed during cleanup; capacity remains retained.");
             // No forward checkpoint write or new dispatch authority under cleanup.
             // A fresh process must still reconcile the retained journal itself.
             MarkObservedClosed(); Release();
         }
-        catch { _uncertain = true; throw; }
+        catch { if (writerDispositionEntered) _uncertain = true; throw; }
         finally { _serial.Release(); }
     }
+    bool StoppedOriginalKnown() => _nativeQuiescenceKnown && !_uncertain && !_store.HasUnsettledOriginalFiles &&
+        actualOriginalUnknown?.Invoke() == false && !_execution.HasPendingControlOperations(_worker.RunId);
 }

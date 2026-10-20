@@ -12,12 +12,16 @@ public sealed record StandaloneHostSelection(string Executable, long Bytes, stri
 public sealed class StandaloneOwnerComposition : IAsyncDisposable
 {
     static readonly List<StandaloneOwnerComposition> Unknown = [];
-    readonly ToolLifetime original; readonly ProcessControl processes; readonly ExecutionCoordinator coordinator; readonly OwnerHostBridge bridge; readonly TrustedConfiguration configuration; ParentCoordinationHost? coordination; Task? coordinationCreation; bool coordinationEntered, disposeEntered;
+    readonly ToolLifetime original; readonly ProcessControl processes; readonly ExecutionCoordinator coordinator; readonly OwnerHostBridge bridge; readonly TrustedConfiguration configuration; ParentCoordinationHost? coordination; Task? coordinationCreation, batchProcessClose; bool coordinationEntered, disposeEntered;
     public ToolApplication Application { get; }
     public OwnerHostBridge ActualBridge => bridge;
     public StandaloneOwnerComposition(TrustedConfiguration config, string actualStoreRoot, LocalWorkerPaths workerPaths, ToolLifetime actualOriginal, StandaloneHostSelection selectedHost, AgentAdapterProfile actualConformedProfile, LinuxScopeSelection? selectedLinuxScope = null, AdmissionFile? actualConfigurationPin = null, StandaloneResources? actualResources = null)
+        : this(config, actualStoreRoot, workerPaths, actualOriginal, selectedHost, actualConformedProfile, selectedLinuxScope, actualConfigurationPin, actualResources, null, null) { }
+    internal StandaloneOwnerComposition(TrustedConfiguration config, string actualStoreRoot, LocalWorkerPaths workerPaths, ToolLifetime actualOriginal, StandaloneHostSelection selectedHost, AgentAdapterProfile actualConformedProfile, LinuxScopeSelection? selectedLinuxScope, AdmissionFile? actualConfigurationPin, StandaloneResources? actualResources, DeliveryForge.Scheduling.ResourceBudget? aggregateBudget, string? batchNodeId)
     {
         actualOriginal.Check(); original = actualOriginal; configuration = config;
+        RequireFreshExecutionStore(actualStoreRoot, actualOriginal);
+        if ((aggregateBudget is null) != (batchNodeId is null)) throw new ToolUsageException("Batch node binding and shared budget must be supplied together.");
         ArgumentNullException.ThrowIfNull(actualConformedProfile); ArgumentNullException.ThrowIfNull(selectedHost); ArgumentNullException.ThrowIfNull(config);
         if (actualConformedProfile.AdapterId != config.Adapter || actualConformedProfile.AdapterVersion != config.AdapterVersion || selectedHost.Version != config.AdapterVersion) throw new ToolUsageException("Actual independently conformed version/profile differs from trusted selection.");
         var executor = OperatingSystem.IsLinux() ? new ProcessCommandExecutor(selectedLinuxScope ?? throw new ToolUsageException("Actual selected Linux scope profile required before native use."), actualOriginal) : new ProcessCommandExecutor();
@@ -39,7 +43,8 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         {
             if (actualConfigurationPin is null || actualResources is null) throw new ToolUsageException("LocalSingle requires the independent exact configuration and actual measured caller owner.");
             var measured = actualResources.MeasureScheduling(actualOriginal);
-            var budget = DeliveryForge.Scheduling.ResourceBudget.Measure(measured, scheduling.Policy);
+            var budget = aggregateBudget ?? DeliveryForge.Scheduling.ResourceBudget.Measure(measured, scheduling.Policy);
+            if (budget.PolicyIdentity != scheduling.Policy.Identity) throw new ToolUsageException("Batch node differs from its same-original aggregate policy.");
             if (scheduling.Demand.TimeLimit > actualOriginal.WorkLimit || scheduling.Policy.MaximumTime > actualOriginal.WorkLimit || !budget.CanAllocate(scheduling.Demand)) throw new ToolUsageException("Scheduling selection exceeds the same original measured resource/time policy.");
             bridge.BindLocalSingleFactory((plan, assignment, parent) =>
             {
@@ -48,7 +53,9 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
                 var admitted = worktrees.WithParentAdmission(parent, assignment.RunId);
                 var admittedStore = coordinator.BindOriginalScheduling(actualOriginal, parent, assignment.RunId, admitted);
                 var reader = new DeliveryForge.Planning.GitRepositoryContextReader(config.GitExecutable, executor, actualOriginal).WithParentAdmission(parent, assignment.RunId);
-                return DeliveryForge.Scheduling.LocalSingleScheduler.Create(plan, assignment, scheduling.Demand, budget, admittedStore, coordinator, admitted, reader);
+                return batchNodeId is null
+                    ? DeliveryForge.Scheduling.LocalSingleScheduler.Create(plan, assignment, scheduling.Demand, budget, admittedStore, coordinator, admitted, reader)
+                    : DeliveryForge.Scheduling.LocalSingleScheduler.CreateCoordinatedNode(plan, assignment, scheduling.Demand, budget, admittedStore, coordinator, admitted, reader, batchNodeId);
             });
         }
         if (config.LocalRealGolden is not null && config.LocalSingle is null) throw new ToolUsageException("Local-real requires an independently approved finite LocalSingle policy; no direct execution fallback.");
@@ -63,6 +70,13 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         Application = new(bridge, assignments: new LocalWorkerAssignmentPort(actualOriginal, workerPaths), actualExecutor: executor, actualOriginal: actualOriginal, actualConfigurationPin: actualConfigurationPin);
         actualOriginal.Check();
     }
+    internal static void RequireFreshExecutionStore(string actualStoreRoot, ToolLifetime original)
+    {
+        original.Check(); var root = BoundedFiles.Plain(actualStoreRoot, true);
+        if (Directory.Exists(root) && Directory.EnumerateFileSystemEntries(root).Any())
+            throw new IOException("A new standalone owner requires a fresh execution store namespace; retained history is read-only recovery DATA, not a new live owner.");
+        original.Check();
+    }
     internal async Task InitializeCoordinationAsync()
     {
         original.Check(); if (coordinationEntered) throw new ToolUsageException("Original coordination initialization already entered; no retry."); coordinationEntered = true;
@@ -75,6 +89,23 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         var actual = ParentCoordinationHost.CreateAsync(settings, original); coordinationCreation = actual;
         try { coordination = await actual.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check(); bridge.BindCoordination(coordination); }
         catch { if (!actual.IsCompleted) original.RetainUnknown(); throw; }
+    }
+    internal async Task RetireSettledBatchNodeAsync(OwnerHostBridge.BatchNodeCompletion completion)
+    {
+        original.Check(); bridge.RequireActualBatchCompletion(completion, original);
+        if (disposeEntered || coordination is null || coordinationCreation is not { IsCompletedSuccessfully: true })
+            throw new IOException("Actual settled batch node cannot retire an uncreated or already disposed owner.");
+        disposeEntered = true;
+        try
+        {
+            bridge.DisposeInstalledReviewWhenSettled(); original.Check();
+            await coordination.RetireSettledBatchNodeAsync(completion.RunId).WaitAsync(original.Remaining).ConfigureAwait(false);
+            bridge.RequireActualBatchCompletion(completion, original);
+            coordinator.Dispose(); original.Check();
+            batchProcessClose = processes.DisposeAsync().AsTask();
+            await batchProcessClose.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
+        }
+        catch { original.RetainUnknown(); lock (Unknown) Unknown.Add(this); throw; }
     }
     public async ValueTask DisposeAsync()
     {

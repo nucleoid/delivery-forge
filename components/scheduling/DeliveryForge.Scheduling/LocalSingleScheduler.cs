@@ -57,6 +57,17 @@ public sealed partial class LocalSingleScheduler
 
     public static LocalSingleScheduler Create(FrozenPlan plan, FrozenWorkerPlan worker, RunDemand demand, ResourceBudget budget,
         RunStore store, ExecutionCoordinator execution, WorktreeManager worktrees, GitRepositoryContextReader reader, TimeSpan? controlTimeout = null)
+        => CreateCore(plan, worker, demand, budget, store, execution, worktrees, reader, null, controlTimeout);
+
+    // Tool's concrete coordinated composition supplies the independently pinned
+    // root-node binding. This changes neither public LocalSingle grammar nor
+    // ownership: actual parent admission still guards every provision/start.
+    internal static LocalSingleScheduler CreateCoordinatedNode(FrozenPlan plan, FrozenWorkerPlan worker, RunDemand demand, ResourceBudget budget,
+        RunStore store, ExecutionCoordinator execution, WorktreeManager worktrees, GitRepositoryContextReader reader, string rootNodeId)
+        => CreateCore(plan, worker, demand, budget, store, execution, worktrees, reader, rootNodeId, null);
+
+    private static LocalSingleScheduler CreateCore(FrozenPlan plan, FrozenWorkerPlan worker, RunDemand demand, ResourceBudget budget,
+        RunStore store, ExecutionCoordinator execution, WorktreeManager worktrees, GitRepositoryContextReader reader, string? coordinatedRoot, TimeSpan? controlTimeout)
     {
         ArgumentNullException.ThrowIfNull(plan); ArgumentNullException.ThrowIfNull(worker); ArgumentNullException.ThrowIfNull(demand);
         ArgumentNullException.ThrowIfNull(budget); ArgumentNullException.ThrowIfNull(store); ArgumentNullException.ThrowIfNull(execution);
@@ -78,10 +89,10 @@ public sealed partial class LocalSingleScheduler
             !paths.SequenceEqual(worker.AllowedPaths.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)) ||
             !excluded.SequenceEqual(worker.Exclusions.Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal)))
             throw new SchedulingException("Worker scope must exactly match the frozen change map and exclusions; unresolved glob maps are unavailable.");
-        var prerequisites = new List<string>();
+        var prerequisites = coordinatedRoot is null ? new List<string>() : ReadCoordinatedPrerequisites(plan, coordinatedRoot).Values.ToList();
         var dependencies = material.GetProperty("dependencyDag");
         if (dependencies.GetArrayLength() is < 1 or > 4096) throw new SchedulingException("Frozen dependencies exceed the scheduling bound.");
-        foreach (var node in dependencies.EnumerateArray())
+        foreach (var node in dependencies.EnumerateArray().Where(_ => coordinatedRoot is null))
         {
             var condition = node.GetProperty("integrationCondition").GetString()!;
             if (node.GetProperty("id").GetString() == plan.WorkItem && condition == "root") continue;
@@ -97,8 +108,30 @@ public sealed partial class LocalSingleScheduler
         return new(plan, captured, demand with { ExclusiveResources = Array.AsReadOnly(demand.ExclusiveResources.ToArray()) }, budget, store, execution, worktrees, reader, prerequisites.AsReadOnly(), timeout);
     }
 
+    internal static IReadOnlyDictionary<string, string> ReadCoordinatedPrerequisites(FrozenPlan plan, string rootNodeId)
+    {
+        using var document = JsonDocument.Parse(plan.CanonicalBytes);
+        var rows = document.RootElement.GetProperty("plan").GetProperty("dependencyDag").EnumerateArray()
+            .Select(row => new DependencyNode(row.GetProperty("id").GetString()!, row.GetProperty("dependsOn").EnumerateArray().Select(value => value.GetString()!).ToArray(), row.GetProperty("integrationCondition").GetString()!)).ToArray();
+        var graph = DependencyGraph.Build(rows, 4096);
+        var conditions = rows.ToDictionary(row => row.Id, row => row.IntegrationCondition, StringComparer.Ordinal);
+        var pending = new Stack<string>(graph.DependenciesOf(rootNodeId));
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        while (pending.TryPop(out var id))
+        {
+            if (result.ContainsKey(id)) continue;
+            var condition = conditions[id];
+            if (!condition.StartsWith("commit:", StringComparison.Ordinal) || condition.Length is not (47 or 71) || !condition[7..].All(Uri.IsHexDigit))
+                throw new SchedulingException("Required frozen dependency needs an exact commit integration condition; descriptive or open-PR claims are unavailable.");
+            result.Add(id, condition[7..]);
+            foreach (var dependency in graph.DependenciesOf(id)) pending.Push(dependency);
+        }
+        return new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(result);
+    }
+
     public async Task RelinquishPausedAsync(CancellationToken cancellationToken = default)
     {
+        if (RefuseGenericOriginalControl("paused transfer")) throw new SchedulingException(CleanupLimitation);
         await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -114,6 +147,7 @@ public sealed partial class LocalSingleScheduler
 
     public async Task<LocalDispatchReservation> RecoverPausedAsync(CancellationToken cancellationToken = default)
     {
+        if (RefuseGenericOriginalControl("cold paused adoption")) throw new SchedulingException(CleanupLimitation);
         await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -174,6 +208,7 @@ public sealed partial class LocalSingleScheduler
     {
         Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _stopped, 1);
+        if (RefuseGenericOriginalControl("cold terminal cleanup")) return false;
         await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         var cleanupLaneHeld = false;
         try
@@ -242,6 +277,7 @@ public sealed partial class LocalSingleScheduler
     {
         Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _stopped, 1);
+        if (RefuseGenericOriginalControl("generic cleanup")) return false;
         await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -378,6 +414,7 @@ public sealed partial class LocalSingleScheduler
     {
         Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _paused, 1);
+        if (RefuseGenericOriginalControl("native pause")) throw new SchedulingException(CleanupLimitation);
         await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -397,6 +434,7 @@ public sealed partial class LocalSingleScheduler
     {
         Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _stopped, 1);
+        if (RefuseGenericOriginalControl("generic stop")) return false;
         await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -454,6 +492,12 @@ public sealed partial class LocalSingleScheduler
         return original is null ? remaining : Min(remaining, OriginalRemaining());
     }
     private string JournalRunId => _worker.RunId + "-scheduler";
+    private bool RefuseGenericOriginalControl(string action)
+    {
+        if (original is null) return false;
+        CleanupLimitation = "The retained original's " + action + " requires its actual containing host control and same-owner settlement; this generic route cannot reopen WORK or adopt cleanup authority.";
+        return true;
+    }
     private void EnsureControls()
     {
         CheckOriginal();

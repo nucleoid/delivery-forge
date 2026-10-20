@@ -42,6 +42,7 @@ public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssue
         using var locallyOwnedLifetime = actualOriginal is null ? life : null;
         life.Check();
         var config = TrustedConfiguration.LoadSelected(configPath, life, actualConfigurationPin);
+        if (config.ProductionBatch is not null) return ToolResult.Incomplete("CONTAINING_BATCH_OWNER_REQUIRED", "Production batch selection requires the concrete installed containing owner; it cannot be ignored by a single-run embedding.");
         if (config.HistoricalQuality is not null && command.Mode != ToolMode.QualityBaseline) throw new ToolUsageException("Historical quality selection requires the explicit quality-baseline mode.");
         if ((config.InstalledQuality is not null || config.InstalledReview is not null || config.LocalRealGolden is not null || config.HistoricalQuality is not null) && actualOriginal is not null && actualConfigurationPin is not null)
         {

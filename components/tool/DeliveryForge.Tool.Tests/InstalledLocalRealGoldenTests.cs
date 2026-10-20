@@ -74,6 +74,33 @@ public sealed class InstalledLocalRealGoldenTests
         var outputRoot = Path.GetFullPath(config.LocalRealGolden.ArtifactRoot).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         Assert.StartsWith(outputRoot, Path.GetFullPath(receipt));
         Assert.Equal(Path.GetDirectoryName(receipt), runDirectory);
+        await AssertActualCompletedChainAsync(fixture, runDirectory, returned.RootElement.GetProperty("Data").GetProperty("RunId").GetString()!, executor, original);
+        _ = PackageLifecycle.Verify(fixture.Installation, original); // Retain prefix and all real artifacts; lifecycle removal is separate.
+    }
+
+    // Shared assertions over the independently selected real fixture and actual
+    // artifacts. This is test code, not a receipt validator or acceptance issuer.
+    internal static async Task AssertActualCompletedChainAsync(Fixture fixture, string runDirectory, string expectedRunId,
+        ProcessCommandExecutor executor, ToolLifetime original)
+    {
+        var config = TrustedConfiguration.LoadSelected(fixture.Configuration.Path, original, fixture.Configuration);
+        var planBytes = InstalledHostAdmission.ReadExact(fixture.Plan, original, 524288);
+        Assert.NotNull(config.LocalRealGolden); Assert.NotNull(config.InstalledQuality?.Registry); Assert.NotNull(config.InstalledReview?.IndependentReviewer);
+        var authorModel = fixture.ExpectedAuthorModel ?? throw new IOException("Root-pinned expected actual author model required.");
+        var reviewerModel = fixture.ExpectedReviewerModel ?? throw new IOException("Root-pinned expected configured reviewer model required.");
+        Assert.StartsWith("gpt-", authorModel); Assert.StartsWith("claude-", reviewerModel); Assert.NotEqual(authorModel, reviewerModel);
+        Assert.Equal("codex.cli", config.Adapter);
+        using var selectedPlan = JsonDocument.Parse(planBytes);
+        var selectedContract = selectedPlan.RootElement.GetProperty("contractIdentity").GetString();
+        var selectedRichPlan = selectedPlan.RootElement.GetProperty("identity").GetString();
+        Assert.Equal(config.ExpectedContractIdentity, selectedContract); Assert.Equal(config.ExpectedBundleIdentity, selectedRichPlan);
+        Assert.Equal(config.Repository, selectedPlan.RootElement.GetProperty("plan").GetProperty("repository").GetString());
+        var registrySelection = config.InstalledQuality.Registry!; registrySelection.Validate();
+        var approvalPin = new AdmissionFile(registrySelection.OwnerApproval.Path, registrySelection.OwnerApproval.Bytes, registrySelection.OwnerApproval.Sha256);
+        _ = InstalledHostAdmission.ReadExact(approvalPin, original, 65536);
+        Assert.Matches("^run-[a-f0-9]{32}$", expectedRunId);
+        Assert.Equal(Path.GetFullPath(Path.Combine(config.LocalRealGolden.ArtifactRoot, expectedRunId)), Path.GetFullPath(runDirectory));
+        var receipt = Path.Combine(runDirectory, "local-real-receipt.json");
         var actualSelection = BoundedFiles.ReadJson<RunSelection>(Path.Combine(runDirectory, "selection.json"), original, 65536);
         Assert.Equal(config.Repository, actualSelection.Repository); Assert.Equal(Path.GetFullPath(config.RepositoryRoot), Path.GetFullPath(actualSelection.RepositoryRoot));
         using var evidence = JsonDocument.Parse(BoundedFiles.Read(receipt, original, 1048576)); var row = evidence.RootElement;
@@ -218,7 +245,7 @@ public sealed class InstalledLocalRealGoldenTests
         Assert.Equal(registrySelection.RegistryIdentity, comparison.GetProperty("RegistryIdentity").GetString());
         Assert.Equal(declared.GetProperty("baselineSourceRevision").GetString(), comparison.GetProperty("BaselineSourceRevision").GetString());
         Assert.Equal(declared.GetProperty("artifactManifestIdentity").GetString(), comparison.GetProperty("ArtifactManifestIdentity").GetString());
-        _ = PackageLifecycle.Verify(fixture.Installation, original); // Retain prefix and all real artifacts; lifecycle removal is separate.
+        Assert.Equal(expectedRunId, actualSelection.RunId);
     }
 
     [Fact(Timeout = 150_000)]
