@@ -253,12 +253,14 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
                 restrictive.CleanupAvailable;
             // Never-created handles can be disposed without claiming helper exit/EOF.
             var mayDispose = owner is not null && ((!owner._creationAttempted && output is null && error is null) || quiescent);
+            var dispositionKnown = owner is null;
             if (mayDispose)
             {
-                var disposalKnown = owner!.DisposeBoundedKnown(started, entireBudget, retention, restrictive);
-                if (disposalKnown) retention.ReleaseKnown();
-                else { quiescent = false; failure ??= "Original bounded resource disposition was not timely and complete."; }
+                dispositionKnown = owner!.DisposeBoundedKnown(started, entireBudget, retention, restrictive);
+                if (!dispositionKnown) { quiescent = false; failure ??= "Original bounded resource disposition was not timely and complete."; }
             }
+            if (dispositionKnown) retention.ReleaseKnown();
+            else if (enclosing is IOwnedBudgetUnknownRetention actual) actual.PreserveUnknown();
             var outBytes = stdout.Snapshot(); var errBytes = stderr.Snapshot();
             var command = new CommandResult(exit, Encoding.UTF8.GetString(outBytes), Encoding.UTF8.GetString(errBytes), timedOut,
                 cancelled, began, DateTimeOffset.UtcNow, quiescent)

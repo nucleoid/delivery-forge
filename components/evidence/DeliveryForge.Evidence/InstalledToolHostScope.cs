@@ -104,7 +104,7 @@ public sealed class InstalledToolHostScope
             var result = await new InstalledToolGateProvider(repositoryRoot, protectedBaseCommit)
                 .RunOwnedAsync(profile, request, files, owner, cancellationToken).ConfigureAwait(false);
             InstalledBaselineComparison? comparison = null;
-            if (registry is not null)
+            if (registry is not null && result.Outcome == GateOutcome.Pass)
             {
                 // Consume the actual callable artifacts now, inside this gate's
                 // original finalization window, before host receipt/currentness I/O.

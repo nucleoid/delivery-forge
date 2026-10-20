@@ -350,7 +350,12 @@ public sealed class InstalledToolGateProvider
                     }
                     else files.RecordActualCleanup(actualTiming);
                 }
-                catch (Exception error) { files.PreserveUnknown(); failures.Add(error); }
+                catch (Exception error)
+                {
+                    // A missing stamp is a known accounting refusal, not proof
+                    // of an unclosed resource. The concrete creator owns that latch.
+                    files.RecordCaptureReturn(settledObservedAt); failures.Add(error);
+                }
                 // Timing facts are already recorded. A returned budget/admission
                 // refusal does not make a settled native resource unknown.
                 try { files.Check(); }
@@ -393,7 +398,7 @@ public sealed class InstalledToolGateProvider
             public TimeSpan WorkLimit => original.WorkLimit;
             public CancellationToken Token => cleanupAudit ? CancellationToken.None : original.Token;
             public void CheckWork() { if (cleanupAudit) _ = original.CleanupRemaining; else original.CheckWork(); }
-            public TimeSpan CleanupRemaining => cleanupAudit ? original.CleanupRemaining : original.Remaining;
+            public TimeSpan CleanupRemaining => cleanupAudit || original.IsClosing ? original.CleanupRemaining : original.Remaining;
         }
         internal byte[] OriginalOutput(CommandResult command) => _actual.TryGetValue(command, out var proof)
             ? proof.StandardOutputBytes : throw new EvidenceWriteException("Foreign result cannot supply actual diff bytes.");

@@ -104,6 +104,7 @@ public sealed class HostBridgeTests
         Assert.Throws<DirectoryNotFoundException>(() => BoundedFiles.WriteNew(Path.Combine(missingParent, "actual.bin"), new byte[] { 1 }, life));
         Assert.True(life.HasRetainedUnknown);
         var frame = new HostBridgeFrame("settled-file-failure", life, coordinator, () => false, true);
+        Assert.True(life.HasExplicitUnknown);
         Assert.False(frame.Unknown);
         life.Dispose();
 

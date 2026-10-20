@@ -131,6 +131,15 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
             if (_cleanup is null || observedAt < _cleanup) _cleanup = observedAt;
         }
     }
+    internal void RecordCaptureReturn(long observedAt)
+    {
+        lock (_timing)
+        {
+            if (observedAt < _phaseStarted || observedAt > Stopwatch.GetTimestamp())
+                throw new EvidenceWriteException("Concrete capture return observation is outside this original phase.");
+            if (_cleanup is null || observedAt < _cleanup) _cleanup = observedAt;
+        }
+    }
     internal void ImportActualCleanup(BoundedCaptureTimingObservation timing)
     {
         RecordActualCleanup(timing);

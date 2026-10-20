@@ -47,7 +47,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
         TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(5), true);
     internal static bool OriginalCanAdmitEffects(ToolLifetime actual)
     {
-        actual.Check(); return !actual.HasRetainedUnknown;
+        actual.Check(); return !actual.HasExplicitUnknown;
     }
 
     ParentCoordinationHost(ParentCoordinationConfiguration settings, ToolLifetime life,
@@ -201,7 +201,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
     public T EnterSynchronous<T>(string runId, Func<T> invoke) => effects.EnterSynchronous(runId, () =>
     {
         try { return invoke(); }
-        finally { if (original.HasRetainedUnknown) effects.RetainUncertain(runId, "Original retained an unknown resource during synchronous work."); }
+        finally { if (original.HasExplicitUnknown) effects.RetainUncertain(runId, "Original retained an unknown resource during synchronous work."); }
     });
     public void CheckCurrent(string runId) => effects.CheckCurrent(runId);
 
@@ -256,7 +256,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
             // Quiescence closes admission permanently for this single lifecycle, before the sample escapes the gate.
             revoked = true;
             // Only this coordination observation is excluded; actual effects remain.
-            var quiet = !original.HasRetainedUnknown && effects.AllKnownSettled &&
+            var quiet = !original.HasExplicitUnknown && effects.AllKnownSettled &&
                 bridge.ObserveCoordinationWorkSettled(parentRunId!);
             return Task.FromResult(new QuiescenceEvidence(owner, Binding.IssuerId, Binding.SourceId, DomainId,
                 Elapsed, Guid.NewGuid().ToString("D"), quiet));
@@ -276,7 +276,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
             if (lossStop is not null) await lossStop.WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
             lock (gate)
             {
-                if (original.HasRetainedUnknown || coordinationTasks.Any(task => !task.IsCompletedSuccessfully) || !effects.AllKnownSettled)
+                if (original.HasExplicitUnknown || coordinationTasks.Any(task => !task.IsCompletedSuccessfully) || !effects.AllKnownSettled)
                     throw new CoordinationUncertainException("Original effect/coordination task remains unsettled or failed; owners retained.");
             }
             Task<ReleaseResult>? releasing = null;

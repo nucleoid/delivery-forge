@@ -26,6 +26,7 @@ public sealed class ToolLifetime : IDisposable, DeliveryForge.Evidence.IOwnedDup
     public void Check() { lock (gate) { ObjectDisposedException.ThrowIf(disposed, this); linked.Token.ThrowIfCancellationRequested(); if (cleanup != 0 || Stopwatch.GetElapsedTime(started) >= work) throw new TimeoutException("Original tool WORK endpoint expired."); } }
     public TimeSpan CleanupRemaining { get { lock (gate) { ObjectDisposedException.ThrowIf(disposed, this); if (cleanup == 0) cleanup = Stopwatch.GetTimestamp(); var whole = total - Stopwatch.GetElapsedTime(started); var once = TimeSpan.FromSeconds(60) - Stopwatch.GetElapsedTime(cleanup); var left = whole < once ? whole : once; if (left <= TimeSpan.Zero) throw new TimeoutException("SAME original whole/earliest once60 endpoint expired."); return left; } } }
     internal bool HasRetainedUnknown { get { lock (gate) return retainedUnknown || retainedBridgeFrames.Count != 0; } }
+    internal bool HasExplicitUnknown { get { lock (gate) return retainedUnknown; } }
     internal void BindAttention(ToolFailureAttention actual) { lock (gate) { if (attention is not null) throw new IOException("Original failure attention already bound."); attention = actual; } }
     internal void BeginFailureCleanup() { _ = CleanupRemaining; attention?.EmitOnce(); }
     void DeliveryForge.Evidence.IOwnedFailureCleanup.BeginFailureCleanup() => BeginFailureCleanup();
