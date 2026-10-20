@@ -110,10 +110,9 @@ public sealed class ProtectedGitPolicyResolver(
 internal static class RequiredGatePluginBindings
 {
     internal static IReadOnlyList<RequiredGatePluginBinding> BuiltIns { get; } =
-    [
-        new("build", "delivery-forge.dotnet", "1.0.0", "dotnet"),
-        new("test", "delivery-forge.dotnet", "1.0.0", "dotnet"),
-        new("coverage", "delivery-forge.dotnet", "1.0.0", "dotnet"),
-        new("mutation", "delivery-forge.mutate4csharp", "1.0.0", "mutate4csharp")
-    ];
+        GateReceiptAuthority.BuiltIns
+            .Where(binding => binding.GateId != "ci")
+            .Select(binding => new RequiredGatePluginBinding(
+                binding.GateId, binding.PluginId, binding.PluginVersion, binding.Tool))
+            .ToArray();
 }

@@ -24,7 +24,28 @@
     "artifactHashes": { "type": "object", "additionalProperties": { "$ref": "#/$defs/identity" } },
     "sourceChanged": { "type": "boolean" },
     "limitations": { "$ref": "#/$defs/stringArray" },
-    "notApplicableRationale": { "$ref": "#/$defs/nonEmpty" }
+    "notApplicableRationale": { "$ref": "#/$defs/nonEmpty" },
+    "authorityBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gateId", "policyIdentity", "headCommit", "pluginId", "pluginVersion", "tool", "toolVersion", "toolIdentity", "configurationIdentity", "inputSetIdentity", "enabled", "status", "productionCapable", "authority"],
+      "properties": {
+        "gateId": { "$ref": "#/$defs/nonEmpty" },
+        "policyIdentity": { "$ref": "#/$defs/identity" },
+        "headCommit": { "$ref": "#/$defs/gitObject" },
+        "pluginId": { "$ref": "#/$defs/nonEmpty" },
+        "pluginVersion": { "$ref": "#/$defs/nonEmpty" },
+        "tool": { "$ref": "#/$defs/nonEmpty" },
+        "toolVersion": { "$ref": "#/$defs/nonEmpty" },
+        "toolIdentity": { "$ref": "#/$defs/identity" },
+        "configurationIdentity": { "$ref": "#/$defs/identity" },
+        "inputSetIdentity": { "$ref": "#/$defs/identity" },
+        "enabled": { "type": "boolean" },
+        "status": { "enum": ["SELECTED", "DISABLED", "EXECUTED"] },
+        "productionCapable": { "type": "boolean" },
+        "authority": { "enum": ["production", "advisory"] }
+      }
+    }
   },
   "allOf": [
     {

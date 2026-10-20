@@ -35,6 +35,7 @@ internal static class BoundedProcessCapture
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+            if (!invocation.InheritEnvironment) info.Environment.Clear();
             foreach (var argument in invocation.Arguments) info.ArgumentList.Add(argument);
             foreach (var pair in invocation.Environment ?? new Dictionary<string, string>()) info.Environment[pair.Key] = pair.Value;
             if (caller.IsCancellationRequested || !BoundedCaptureStream.Within(started, work))

@@ -178,6 +178,18 @@ public interface ICommandExecutor
         CancellationToken cancellationToken);
 }
 
+// Friend test assemblies may provide finite fixture captures without widening the production
+// authority surface. Actual code-owned capture is sealed in ProcessCommandExecutor.
+internal interface IBoundedGateFixtureExecutor : ICommandExecutor
+{
+    bool SupportsCreationOwnedBoundedCapture { get; }
+    Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+        CommandInvocation invocation,
+        TimeSpan entireBudget,
+        int maximumBytesPerStream,
+        CancellationToken cancellationToken);
+}
+
 public interface IRepositoryIdentityReader
 {
     Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken);

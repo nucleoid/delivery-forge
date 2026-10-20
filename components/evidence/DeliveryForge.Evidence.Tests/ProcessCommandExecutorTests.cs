@@ -1,11 +1,60 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace DeliveryForge.Evidence.Tests;
 
 public sealed class ProcessCommandExecutorTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Creation_owned_capture_bounds_large_stdout_and_stderr(bool standardError)
+    {
+        using var temp = new TempDirectory();
+        var invocation = await LargeOutputInvocationAsync(temp.Path, standardError);
+        const int quota = 4096;
+
+        var capture = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
+            invocation, TimeSpan.FromSeconds(10), quota, TestContext.Current.CancellationToken);
+
+        Assert.True(capture.CaptureBoundExceeded);
+        Assert.True(capture.StandardOutputBytes.Length <= quota);
+        Assert.True(capture.StandardErrorBytes.Length <= quota);
+        Assert.True(capture.Command.OwnedProcessQuiescent);
+        Assert.True(capture.RootExitObserved);
+        Assert.True(capture.StandardOutputDrainCompleted);
+        Assert.True(capture.StandardErrorDrainCompleted);
+        Assert.Equal(standardError ? 0 : quota, capture.StandardOutputBytes.Length);
+        Assert.Equal(standardError ? quota : 0, capture.StandardErrorBytes.Length);
+    }
+
+    [Fact]
+    public async Task Gate_output_truncation_is_incomplete_after_owned_tree_cleanup()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path);
+        var invocation = await LargeOutputInvocationAsync(request.Invocation.WorkingDirectory, standardError: false);
+        var capability = ToolCapability.FromDetection(
+            "dotnet", "10.0.401", "trx-v1", true, [], invocation.FileName,
+            $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(invocation.FileName)))}",
+            ["test"], request.Invocation.WorkingDirectory);
+        request = request with { Invocation = invocation, Capability = capability, Timeout = TimeSpan.FromSeconds(10) };
+        var runner = new GateRunner(
+            new ProcessCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory,
+            TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("capture limit", result.Reason, StringComparison.Ordinal);
+        Assert.True(result.Execution.OwnedProcessQuiescent);
+        Assert.True(Encoding.UTF8.GetByteCount(result.Execution.StandardOutput) <= GateRunner.MaximumCapturedBytesPerStream);
+    }
+
     [Fact]
     public async Task Lifecycle_diagnostics_preserve_partial_kill_exception_without_promoting_root_exit()
     {
@@ -230,5 +279,18 @@ public sealed class ProcessCommandExecutorTests
             Invocation = new CommandInvocation(fileName, arguments, request.Invocation.WorkingDirectory),
             Timeout = TimeSpan.FromMilliseconds(100)
         };
+    }
+
+    private static async Task<CommandInvocation> LargeOutputInvocationAsync(string directory, bool standardError)
+    {
+        var line = new string('x', 255);
+        var path = Path.Combine(directory, OperatingSystem.IsWindows() ? "large-output.cmd" : "large-output.sh");
+        var script = OperatingSystem.IsWindows()
+            ? $"@echo off\r\nfor /L %%i in (1,1,10000) do @echo {line}{(standardError ? " 1>&2" : "")}\r\n"
+            : $"i=0\nwhile [ \"$i\" -lt 10000 ]; do printf '{line}\\n'{(standardError ? " >&2" : "")}; i=$((i+1)); done\n";
+        await File.WriteAllTextAsync(path, script, TestContext.Current.CancellationToken);
+        return OperatingSystem.IsWindows()
+            ? new CommandInvocation(Environment.GetEnvironmentVariable("ComSpec")!, ["/d", "/s", "/c", path], directory)
+            : new CommandInvocation("/bin/sh", [path], directory);
     }
 }

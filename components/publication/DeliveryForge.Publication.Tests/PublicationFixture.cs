@@ -74,14 +74,21 @@ public sealed class PublicationFixture
           "resultId":"https://example.invalid/fixture/pr/10", "createdAt":"2026-10-11T00:00:01Z" }
         """);
 
-    public ValidatedContract Gate(string gateId, string outcome) => Contract($$"""
+    public ValidatedContract Gate(string gateId, string outcome,
+        string pluginId = "delivery-forge.dotnet", string tool = "dotnet") => Contract($$"""
         { "schemaVersion":"1.0.0", "kind":"gate-receipt", "identity":"{{Id('0')}}",
           "gateId":"{{gateId}}", "policyIdentity":"{{Policy.Identity}}",
           "baseCommit":"{{Commit('a')}}", "headCommit":"{{Commit('b')}}", "treeId":"{{Commit('c')}}",
           "command":"fixture command", "startedAt":"2026-10-11T00:00:00Z",
           "completedAt":"2026-10-11T00:00:01Z", "exitCode":{{(outcome == "PASS" ? 0 : 1)}},
           "outcome":"{{outcome}}", "reason":"fixture", "artifactHashes":{},
-          "sourceChanged":false, "limitations":["fixture"] }
+          "sourceChanged":false, "limitations":["fixture"],
+          "authorityBinding":{
+            "gateId":"{{gateId}}", "policyIdentity":"{{Policy.Identity}}", "headCommit":"{{Commit('b')}}",
+            "pluginId":"{{pluginId}}", "pluginVersion":"1.0.0", "tool":"{{tool}}",
+            "toolVersion":"10.0.401", "toolIdentity":"{{Id('a')}}",
+            "configurationIdentity":"{{Id('b')}}", "inputSetIdentity":"{{Id('c')}}",
+            "enabled":true, "status":"EXECUTED", "productionCapable":true, "authority":"production" } }
         """);
 
     private ValidatedContract IssueReview(ReviewPolicy policy, string family, ReviewAcceptanceContext context,

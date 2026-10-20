@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace DeliveryForge.Contracts.Models;
 
 public abstract record ContractDocument(string SchemaVersion, string Kind, string Identity);
@@ -32,8 +34,16 @@ public sealed record GateReceiptContract(
     string BaseCommit, string HeadCommit, string TreeId, string Command, DateTimeOffset StartedAt,
     DateTimeOffset CompletedAt, int? ExitCode, string Outcome, string Reason,
     IReadOnlyDictionary<string, string> ArtifactHashes, bool SourceChanged,
-    IReadOnlyList<string> Limitations, string? NotApplicableRationale)
+    IReadOnlyList<string> Limitations, string? NotApplicableRationale,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    GateAuthorityBindingContract? AuthorityBinding = null)
     : ContractDocument(SchemaVersion, Kind, Identity);
+
+public sealed record GateAuthorityBindingContract(
+    string GateId, string PolicyIdentity, string HeadCommit,
+    string PluginId, string PluginVersion, string Tool, string ToolVersion,
+    string ToolIdentity, string ConfigurationIdentity, string InputSetIdentity,
+    bool Enabled, string Status, bool ProductionCapable, string Authority);
 
 public sealed record ReviewReceiptContract(
     string SchemaVersion, string Kind, string Identity, string BaseCommit, string HeadCommit,

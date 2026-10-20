@@ -11,6 +11,7 @@ namespace DeliveryForge.Evidence;
 
 public sealed class GateRunner
 {
+    internal const int MaximumCapturedBytesPerStream = 1024 * 1024;
     private readonly ICommandExecutor _executor;
     private readonly IRepositoryIdentityReader _repository;
     private readonly string _trustedWorkingDirectory;
@@ -141,6 +142,15 @@ public sealed class GateRunner
                 request, gateDirectory, before, before, pluginValidation, pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
 
+        if (plugin is Adapters.AntiSlopEvaluationPlugin &&
+            _executor is not ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } &&
+            _executor is not IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true })
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before,
+                NormalizedEvidence.Error(
+                    "Anti-slop requires the code-owned bounded process executor; unbounded or caller-supplied capture cannot produce gate evidence."),
+                pluginBinding, CancellationToken.None).ConfigureAwait(false);
+
         Directory.CreateDirectory(gateDirectory);
         EvaluationPluginSnapshot evidenceSnapshot;
         try
@@ -160,10 +170,32 @@ public sealed class GateRunner
         }
 
         CommandResult execution;
+        var captureBoundExceeded = false;
         try
         {
-            execution = await _executor.ExecuteAsync(request.Invocation, request.Timeout, cancellationToken)
-                .ConfigureAwait(false);
+            if (_executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } ownedExecutor)
+            {
+                var capture = await ownedExecutor.ExecuteBoundedCaptureAsync(
+                    request.Invocation, request.Timeout, MaximumCapturedBytesPerStream, cancellationToken)
+                    .ConfigureAwait(false);
+                execution = capture.Command;
+                captureBoundExceeded = capture.CaptureBoundExceeded;
+            }
+            else if (_executor is IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true } fixtureExecutor)
+            {
+                var capture = await fixtureExecutor.ExecuteBoundedCaptureAsync(
+                    request.Invocation, request.Timeout, MaximumCapturedBytesPerStream, cancellationToken)
+                    .ConfigureAwait(false);
+                execution = capture.Command;
+                captureBoundExceeded = capture.CaptureBoundExceeded;
+            }
+            else
+            {
+                // Compatibility for deterministic in-memory/fixture executors. Actual gate tools
+                // use the creation-owned ProcessCommandExecutor path above.
+                execution = await _executor.ExecuteAsync(request.Invocation, request.Timeout, cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -229,6 +261,9 @@ public sealed class GateRunner
             normalized = postExecutionValidation;
         else if (!execution.OwnedProcessQuiescent)
             normalized = NormalizedEvidence.Error("Owned tool process did not become quiescent after interruption.");
+        else if (captureBoundExceeded)
+            normalized = NormalizedEvidence.Incomplete(
+                $"Tool output exceeded the deterministic {MaximumCapturedBytesPerStream}-byte per-stream capture limit.");
         else if (execution.TimedOut)
             normalized = NormalizedEvidence.Incomplete("Tool timed out before complete evidence was produced.");
         else if (execution.Cancelled)
@@ -324,7 +359,15 @@ public sealed class GateRunner
             }, ContractJson),
             execution.StartedAt, execution.CompletedAt, execution.ExitCode,
             OutcomeText(normalized.Outcome), normalized.Reason, artifactHashes,
-            sourceChanged, limitations, normalized.NotApplicableRationale);
+            sourceChanged, limitations, normalized.NotApplicableRationale,
+            new GateAuthorityBindingContract(
+                request.GateId, request.Policy.PolicyIdentity, before.HeadCommit,
+                plugin.Id, plugin.Version, request.Capability.Tool, request.Capability.Version,
+                request.Capability.ExecutableIdentity ?? "sha256:" + new string('0', 64),
+                request.ConfigurationIdentity, plugin.InputSetIdentity,
+                plugin.Enabled, plugin.Status.ToString().ToUpperInvariant(),
+                normalized.ProductionCapable,
+                normalized.ProductionCapable ? "production" : "advisory"));
 
         var provisionalBytes = SerializeReceipt(provisional);
         var receipt = provisional with { Identity = CanonicalJson.ComputeIdentity(provisionalBytes) };

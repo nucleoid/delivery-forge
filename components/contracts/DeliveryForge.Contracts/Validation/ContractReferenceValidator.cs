@@ -105,6 +105,8 @@ public static class ContractReferenceValidator
             {
                 throw new ContractReferenceException("run-manifest gate receipt is not a PASS under its immutable policy.");
             }
+            if (!GateReceiptAuthority.TryValidateAuthoritativePass(gate, out var authorityFailure))
+                throw new ContractReferenceException(authorityFailure);
 
             supplied.Add(gate.GetProperty("gateId").GetString()!);
         }
@@ -133,6 +135,9 @@ public static class ContractReferenceValidator
     {
         var policyIdentity = gate.GetProperty("policyIdentity").GetString()!;
         RequireReference(policyIdentity, identities, "policyIdentity", kind => kind == "evidence-policy");
+        if (gate.GetProperty("outcome").GetString() == "PASS" &&
+            !GateReceiptAuthority.TryValidateAuthoritativePass(gate, out var authorityFailure))
+            throw new ContractReferenceException(authorityFailure);
         if (gate.GetProperty("outcome").GetString() == "NOT_APPLICABLE")
         {
             var policy = identities[policyIdentity].Document.RootElement;

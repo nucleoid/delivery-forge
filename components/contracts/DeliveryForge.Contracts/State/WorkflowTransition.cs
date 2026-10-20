@@ -270,6 +270,11 @@ public static class WorkflowTransition
             document.Dispose();
             throw new InvalidWorkflowTransitionException("Gate receipt does not match the required policy or gate identity.");
         }
+        if (!GateReceiptAuthority.TryValidateAuthoritativePass(root, out var authorityFailure))
+        {
+            document.Dispose();
+            throw new InvalidWorkflowTransitionException(authorityFailure);
+        }
 
         return document;
     }

@@ -370,6 +370,35 @@ public sealed class WorkflowTransitionTests
     }
 
     [Fact]
+    public void Legacy_or_anti_slop_pass_cannot_impersonate_a_required_gate()
+    {
+        var evidence = FullEvidence();
+        var legacy = MutatedFixture("gate-receipt.json", node =>
+        {
+            node["policyIdentity"] = evidence.Policy!.Identity;
+            node["gateId"] = "build";
+        });
+        AssertMessage("lacks a canonical authority binding", () =>
+            WorkflowTransition.EnsureAllowedForIsolatedTest(
+                WorkflowState.Evaluating, WorkflowState.IndependentReview,
+                evidence with { GateReceipts = [legacy, .. evidence.GateReceipts!.Skip(1)] }));
+
+        var antiSlop = MutatedFixture("gate-receipt.json", node =>
+        {
+            node["policyIdentity"] = evidence.Policy!.Identity;
+            node["gateId"] = "build";
+            node["authorityBinding"] = JsonNode.Parse(evidence.GateReceipts![0].CanonicalBytes.Span)!["authorityBinding"]!.DeepClone();
+            node["authorityBinding"]!["pluginId"] = "delivery-forge.anti-slop";
+            node["authorityBinding"]!["tool"] = "oxlint";
+            node["authorityBinding"]!["toolVersion"] = "1.78.0";
+        });
+        AssertMessage("impersonates the trusted gate/plugin mapping", () =>
+            WorkflowTransition.EnsureAllowedForIsolatedTest(
+                WorkflowState.Evaluating, WorkflowState.IndependentReview,
+                evidence with { GateReceipts = [antiSlop, .. evidence.GateReceipts!.Skip(1)] }));
+    }
+
+    [Fact]
     public void Receipt_gated_authority_requires_an_evidence_policy()
     {
         var evidence = FullEvidence();
@@ -437,8 +466,12 @@ public sealed class WorkflowTransitionTests
 
     private static TransitionEvidence FullEvidence(bool merged = false)
     {
-        var policy = MutatedFixture("evidence-policy.json", node => node["authorizedCeiling"] = "merge");
-        var gates = new[] { "build", "test", "review" }
+        var policy = MutatedFixture("evidence-policy.json", node =>
+        {
+            node["authorizedCeiling"] = "merge";
+            node["requiredGates"] = new JsonArray("build", "test");
+        });
+        var gates = new[] { "build", "test" }
             .Select(gateId => GateFixture(policy.Identity, gateId))
             .ToArray();
         var review = ParseFixture("review-receipt.json");
@@ -483,6 +516,26 @@ public sealed class WorkflowTransitionTests
         {
             node["policyIdentity"] = policyIdentity;
             node["gateId"] = gateId;
+            var (plugin, tool) = gateId == "mutation"
+                ? ("delivery-forge.mutate4csharp", "mutate4csharp")
+                : ("delivery-forge.dotnet", "dotnet");
+            node["authorityBinding"] = new JsonObject
+            {
+                ["gateId"] = gateId,
+                ["policyIdentity"] = policyIdentity,
+                ["headCommit"] = "43113d9000000000000000000000000000000000",
+                ["pluginId"] = plugin,
+                ["pluginVersion"] = "1.0.0",
+                ["tool"] = tool,
+                ["toolVersion"] = "10.0.401",
+                ["toolIdentity"] = "sha256:" + new string('a', 64),
+                ["configurationIdentity"] = "sha256:" + new string('b', 64),
+                ["inputSetIdentity"] = "sha256:" + new string('c', 64),
+                ["enabled"] = true,
+                ["status"] = "EXECUTED",
+                ["productionCapable"] = true,
+                ["authority"] = "production"
+            };
         });
 
     private static ValidatedContract ParseFixture(string file) => ContractValidator.ParseAndValidate(

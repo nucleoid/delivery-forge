@@ -10,6 +10,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
     private readonly Func<Task, TimeSpan, Task> _waitForDrain;
     private readonly TimeSpan _waitTimeout;
     private readonly bool _creationOwnedWindows;
+    internal bool SupportsCreationOwnedBoundedCapture => _creationOwnedWindows;
 
     public ProcessCommandExecutor()
         : this(

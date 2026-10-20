@@ -121,10 +121,29 @@ internal sealed class DeletingProcessCommandExecutor : ICommandExecutor
     }
 }
 
-internal sealed class StubCommandExecutor(CommandResult result) : ICommandExecutor
+internal sealed class StubCommandExecutor(CommandResult result) : IBoundedGateFixtureExecutor
 {
+    public bool SupportsCreationOwnedBoundedCapture => true;
     public Task<CommandResult> ExecuteAsync(
         CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken) => Task.FromResult(result);
+
+    public Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+        CommandInvocation invocation, TimeSpan entireBudget, int maximumBytesPerStream,
+        CancellationToken cancellationToken)
+    {
+        var stdout = System.Text.Encoding.UTF8.GetBytes(result.StandardOutput);
+        var stderr = System.Text.Encoding.UTF8.GetBytes(result.StandardError);
+        var exceeded = stdout.Length > maximumBytesPerStream || stderr.Length > maximumBytesPerStream;
+        stdout = stdout[..Math.Min(stdout.Length, maximumBytesPerStream)];
+        stderr = stderr[..Math.Min(stderr.Length, maximumBytesPerStream)];
+        var command = result with
+        {
+            StandardOutput = System.Text.Encoding.UTF8.GetString(stdout),
+            StandardError = System.Text.Encoding.UTF8.GetString(stderr)
+        };
+        return Task.FromResult(new BoundedCommandCaptureResult(
+            command, stdout, stderr, exceeded, true, true, true));
+    }
 }
 
 internal sealed class CancellingCommandExecutor : ICommandExecutor
