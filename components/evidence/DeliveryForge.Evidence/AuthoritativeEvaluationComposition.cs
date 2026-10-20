@@ -38,13 +38,14 @@ public sealed class AuthoritativeEvaluationComposition(AuthoritativeEvaluationHo
             receipts.Add(host.ReadReceipt(
                 ContractValidator.ParseAndValidate(File.ReadAllBytes(result.ReceiptPath)).Identity));
         }
-        return new(receipts.AsReadOnly(), host.ReceiptProvenance);
+        return new(receipts.AsReadOnly(), host.ReceiptProvenance, host.AuthorityRegistry);
     }
 }
 
 public sealed record AuthoritativeGateBundle(
     IReadOnlyList<ValidatedContract> Receipts,
-    TrustedReceiptProvenance ReceiptProvenance)
+    TrustedReceiptProvenance ReceiptProvenance,
+    TrustedGatePluginRegistry AuthorityRegistry)
 {
     public TransitionEvidence BindTransition(
         AuthorizationCeiling ceiling,
@@ -52,8 +53,14 @@ public sealed record AuthoritativeGateBundle(
         string headCommit,
         string treeId,
         ValidatedContract policy,
-        TrustedGatePluginRegistry? authorityRegistry = null) =>
-        new(ceiling, baseCommit, headCommit, treeId, Policy: policy, GateReceipts: Receipts,
-            GateAuthorityRegistry: authorityRegistry ?? TrustedGatePluginRegistry.BuiltIns,
-            GateReceiptProvenance: ReceiptProvenance);
+        TrustedGatePluginRegistry? authorityRegistry = null)
+    {
+        if (authorityRegistry is not null && !ReferenceEquals(authorityRegistry, AuthorityRegistry))
+            throw new InvalidOperationException("The consumer registry differs from the producer-owned authority registry.");
+        return new(ceiling, baseCommit, headCommit, treeId, Policy: policy, GateReceipts: Receipts,
+            GateAuthorityRegistry: AuthorityRegistry,
+            GateReceiptProvenance: ReceiptProvenance,
+            EnforceAuthoritativeGateReceipts: true,
+            GateAuthorityRegistryIdentity: AuthorityRegistry.Identity);
+    }
 }

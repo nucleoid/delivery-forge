@@ -67,12 +67,18 @@ public sealed class PublicationFixture
 
     public PublicationRunDefinition Definition(AuthorizationCeiling ceiling = AuthorizationCeiling.Merge) => new(
         Root.RunIdentity, "revision-" + Guid.NewGuid().ToString("N"), null, ceiling, Target, Patch, Policy, Gates, Ci, Review, HostedReview, Receiver)
-    { GateReceiptProvenance = GateReceiptProvenance };
+    {
+        GateReceiptProvenance = GateReceiptProvenance,
+        EnforceAuthoritativeGateReceipts = true,
+        GateAuthorityRegistryIdentity = TrustedGatePluginRegistry.BuiltIns.Identity
+    };
 
     public TransitionEvidence Transition => new(permittedCeiling, Patch.BaseCommit, Patch.HeadCommit,
         Patch.HeadTree, Policy: Policy, GateReceipts: Gates, CiReceipt: Ci,
         ReviewReceipt: Review, HostReviewReceipt: HostedReview,
-        GateReceiptProvenance: GateReceiptProvenance);
+        GateReceiptProvenance: GateReceiptProvenance,
+        EnforceAuthoritativeGateReceipts: true,
+        GateAuthorityRegistryIdentity: TrustedGatePluginRegistry.BuiltIns.Identity);
 
     public ValidatedContract PublicationReceipt(string action) => Contract($$"""
         { "schemaVersion":"1.0.0", "kind":"publication-receipt", "identity":"{{Id('0')}}",

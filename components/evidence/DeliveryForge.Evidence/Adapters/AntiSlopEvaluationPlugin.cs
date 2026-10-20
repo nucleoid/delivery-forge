@@ -8,6 +8,11 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
 {
     public const string UpstreamCommit = "13909c9e07590f5a85d93c62712259fe14a883f7";
     public const string OxlintVersion = "1.78.0";
+    private const string ReviewedPackageSha256 = "7bb09c43863e87b3721e61f5891e3798949c346212dcb6c07f30cd666652ca1f";
+    private const string ReviewedLockSha256 = "556259ea811200192cd7dc75016408cf76a4718a813245cb9f3b820d74ed8567";
+    private const string ReviewedConfigSha256 = "5226e689d45cb10f4a25df0e31f52092f52b958fdd179862a0312815df9c8e10";
+    private const string ReviewedEffectConfigSha256 = "d4e372437c08bfc5d4db784bb78ae78b2e3950442379b526cede50b5f3c8e907";
+    private const string ReviewedBatchRunnerSha256 = "cc9853de43920adb20a9ec459f77ed072606c41b5ddf37d378db4abb98c74d01";
     internal const int MaximumDirectArgumentBytes = 24_000;
     private static readonly HashSet<string> SupportedExtensions = new(
         [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"],
@@ -48,11 +53,16 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
 
     private readonly string? _trustedBundleRoot;
     private readonly string? _trustedNodePath;
+    private readonly bool _enforceReviewedPins;
 
-    private AntiSlopEvaluationPlugin(string? trustedBundleRoot = null, string? trustedNodePath = null)
+    private AntiSlopEvaluationPlugin(
+        string? trustedBundleRoot = null,
+        string? trustedNodePath = null,
+        bool enforceReviewedPins = true)
     {
         _trustedBundleRoot = trustedBundleRoot is null ? null : Path.GetFullPath(trustedBundleRoot);
         _trustedNodePath = trustedNodePath is null ? null : Path.GetFullPath(trustedNodePath);
+        _enforceReviewedPins = enforceReviewedPins;
     }
 
     public string Id => "dmmulroy.anti-slop";
@@ -70,6 +80,9 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
                 "Anti-slop registration requires absolute code-owned bundle and Node paths.");
         return new(bundleRoot, nodePath);
     }
+
+    internal static AntiSlopEvaluationPlugin CreateBundledForFixture(string bundleRoot, string nodePath) =>
+        new(bundleRoot, nodePath, enforceReviewedPins: false);
 
     public static bool IsSupportedInput(string path) =>
         !string.IsNullOrWhiteSpace(path) && SupportedExtensions.Contains(Path.GetExtension(path));
@@ -161,11 +174,14 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
                 !string.Equals(Path.GetFullPath(request.Invocation.FileName), _trustedNodePath, PathComparison))
                 return NormalizedEvidence.Incomplete(
                     "Anti-slop invocation does not use the code-owned registered bundle and Node runtime.");
+            if (_enforceReviewedPins)
+                ValidateReviewedPins(_trustedBundleRoot, request.Plugin?.EnableEffectRules == true);
         }
-        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException or
+                                           IOException or UnauthorizedAccessException or InvalidOperationException or JsonException)
         {
             return NormalizedEvidence.Incomplete(
-                $"Anti-slop bundle/runtime path is malformed: {exception.Message}");
+                $"Anti-slop bundle/runtime pin or path is invalid: {exception.Message}");
         }
         string configIdentity;
         try
@@ -341,6 +357,30 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             string.Equals(binding.PluginId, Id, StringComparison.Ordinal) &&
             string.Equals(binding.PluginVersion, Version, StringComparison.Ordinal) &&
             string.Equals(binding.Tool, ExpectedTool, StringComparison.Ordinal));
+
+    private static void ValidateReviewedPins(string root, bool effectRulesEnabled)
+    {
+        var expected = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["package.json"] = ReviewedPackageSha256,
+            ["package-lock.json"] = ReviewedLockSha256,
+            ["oxlint.config.ts"] = ReviewedConfigSha256,
+            ["run-oxlint-batches.mjs"] = ReviewedBatchRunnerSha256
+        };
+        if (effectRulesEnabled)
+            expected["oxlint.effect.config.ts"] = ReviewedEffectConfigSha256;
+        foreach (var (relative, digest) in expected)
+        {
+            var bytes = File.ReadAllBytes(Path.Combine(root, relative));
+            if (!string.Equals(Convert.ToHexStringLower(SHA256.HashData(bytes)), digest, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"Anti-slop runtime file '{relative}' does not match its reviewed immutable pin.");
+        }
+        using var package = JsonDocument.Parse(File.ReadAllBytes(
+            Path.Combine(root, "node_modules", "oxlint", "package.json")));
+        if (package.RootElement.GetProperty("version").GetString() != OxlintVersion)
+            throw new InvalidOperationException("Installed Oxlint package version differs from the reviewed runtime pin.");
+    }
 
     internal static string ComputeConfigurationIdentity(
         CommandInvocation invocation,

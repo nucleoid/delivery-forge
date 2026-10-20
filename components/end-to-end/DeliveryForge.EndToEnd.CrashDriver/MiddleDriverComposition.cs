@@ -343,7 +343,8 @@ internal static class MiddleDriverComposition
         var configPath = Path.Combine(input.ArtifactRoot, "actual-driver-gate-configuration.json"); await WriteBytes(configPath, configuration, token);
         var authoritativeHost = new AuthoritativeEvaluationHost(
             executor, reader, clone, input.RuntimeBaseCommit,
-            Path.Combine(input.ArtifactRoot, "host-owned-gate-receipts"), FixtureReceiptSigningKey);
+            Path.Combine(input.ArtifactRoot, "host-owned-gate-receipts"), FixtureReceiptSigningKey,
+            new(true, true, "crash-driver-fixture", "isolated fixture process principal"));
         var gate = await authoritativeHost.RunAsync(new("test", policy, detection.Capability,
             EvidenceAdapterKind.DotNet, Hash(configuration), before, invocation, "actual-middle-driver",
             Remaining(input, 75), Path.Combine(input.ArtifactRoot, "actual-driver-gates")), token);
@@ -543,7 +544,13 @@ internal static class MiddleDriverComposition
                      Path.GetFullPath(receiptDirectory),
                      Path.GetFullPath(Path.Combine(input.ArtifactRoot, "host-owned-gate-receipts")),
                      PathComparison()))
-            gateDirectory = Path.Combine(input.ArtifactRoot, "actual-driver-gates", "test");
+        {
+            var gateRoot = Path.Combine(input.ArtifactRoot, "actual-driver-gates");
+            var attempts = Directory.GetDirectories(gateRoot, "test.attempt-*", SearchOption.TopDirectoryOnly);
+            if (attempts.Length != 1)
+                throw new IOException("Host-owned receipt does not identify exactly one immutable public gate attempt.");
+            gateDirectory = attempts[0];
+        }
         else
             throw new IOException("Public gate receipt directory differs.");
         Within(gateDirectory, input);

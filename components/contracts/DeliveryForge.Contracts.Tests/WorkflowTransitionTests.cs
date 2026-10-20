@@ -304,8 +304,46 @@ public sealed class WorkflowTransitionTests
             {
                 Policy = policy,
                 GateReceipts = [notApplicable],
-                GateReceiptProvenance = receiptStore.Provenance
+                GateReceiptProvenance = receiptStore.Provenance,
+                EnforceAuthoritativeGateReceipts = true,
+                GateAuthorityRegistryIdentity = TrustedGatePluginRegistry.BuiltIns.Identity
             });
+    }
+
+    [Fact]
+    public void V2_gate_authority_is_default_off_for_safe_producers_before_consumers_rollout()
+    {
+        var evidence = FullEvidence();
+        var policy = MutatedFixture("evidence-policy.json", node =>
+        {
+            node["requiredGates"] = new JsonArray("test");
+            node["allowedNotApplicable"] = new JsonArray();
+        });
+        var legacy = MutatedFixture("gate-receipt.json", node =>
+            node["policyIdentity"] = policy.Identity);
+
+        WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.Evaluating,
+            WorkflowState.IndependentReview,
+            evidence with
+            {
+                Policy = policy,
+                GateReceipts = [legacy],
+                GateReceiptProvenance = null,
+                EnforceAuthoritativeGateReceipts = false
+            });
+    }
+
+    [Fact]
+    public void Activated_gate_authority_rejects_a_registry_identity_mismatch()
+    {
+        var evidence = FullEvidence() with
+        {
+            GateAuthorityRegistryIdentity = "sha256:" + new string('0', 64)
+        };
+
+        AssertMessage("registry identity", () => WorkflowTransition.EnsureAllowedForIsolatedTest(
+            WorkflowState.Evaluating, WorkflowState.IndependentReview, evidence));
     }
 
     [Fact]
@@ -540,7 +578,9 @@ public sealed class WorkflowTransitionTests
             ReviewAuthority: authorityHost.Authority,
             ReviewContext: authorityHost.CreateConsumerContext(independentContext),
             HostReviewContext: authorityHost.CreateConsumerContext(hostedContext),
-            GateReceiptProvenance: receiptStore.Provenance);
+            GateReceiptProvenance: receiptStore.Provenance,
+            EnforceAuthoritativeGateReceipts: true,
+            GateAuthorityRegistryIdentity: TrustedGatePluginRegistry.BuiltIns.Identity);
     }
 
     private static ValidatedContract GateFixture(string policyIdentity, string gateId, bool notApplicable = false) =>

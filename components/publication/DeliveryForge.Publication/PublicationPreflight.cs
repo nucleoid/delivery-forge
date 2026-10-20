@@ -95,8 +95,11 @@ public static class PublicationPreflight
             r.GetProperty("headCommit").GetString() != d.Patch.HeadCommit || r.GetProperty("treeId").GetString() != d.Patch.HeadTree ||
             r.GetProperty("sourceChanged").GetBoolean()) return false;
         var outcome = r.GetProperty("outcome").GetString();
-        return d.GateReceiptProvenance?.Contains(receipt.Identity) == true &&
-            GateReceiptAuthority.TryValidateAuthoritativeOutcome(r, out _, d.GateAuthorityRegistry) &&
+        return (!d.EnforceAuthoritativeGateReceipts ||
+                string.Equals(d.GateAuthorityRegistryIdentity, d.GateAuthorityRegistry.Identity,
+                    StringComparison.Ordinal) &&
+                d.GateReceiptProvenance?.Contains(receipt.Identity) == true &&
+                GateReceiptAuthority.TryValidateAuthoritativeOutcome(r, out _, d.GateAuthorityRegistry)) &&
             (outcome == "PASS" || outcome == "NOT_APPLICABLE" && allowedNa.Contains(gateId));
     }
 

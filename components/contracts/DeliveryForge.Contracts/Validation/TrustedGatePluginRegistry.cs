@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+
 namespace DeliveryForge.Contracts.Validation;
 
 public sealed record TrustedGatePluginBinding(
@@ -50,4 +53,15 @@ public sealed class TrustedGatePluginRegistry
 
     public IReadOnlyList<TrustedGatePluginBinding> Bindings =>
         _bindings.Values.OrderBy(binding => binding.GateId, StringComparer.Ordinal).ToArray();
+
+    public string Identity
+    {
+        get
+        {
+            var canonical = string.Join('\n', Bindings.Select(binding => string.Join('\0',
+                binding.GateId, binding.PluginId, binding.PluginVersion, binding.Tool,
+                binding.ExpectedToolVersion ?? string.Empty, binding.ExpectedFormatVersion ?? string.Empty))) + "\n";
+            return "sha256:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
+        }
+    }
 }

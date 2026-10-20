@@ -56,7 +56,8 @@ public sealed class GateRunnerTests
             request.Invocation.WorkingDirectory,
             TestEvidence.Commit('a'),
             receiptRoot,
-            new byte[32]);
+            new byte[32],
+            new(true, true, "fixture-host", "gate process uses a distinct fixture principal"));
 
         var result = await host.RunAsync(request, TestContext.Current.CancellationToken);
         var receipt = ContractValidator.ParseAndValidate(await File.ReadAllBytesAsync(
@@ -67,6 +68,25 @@ public sealed class GateRunnerTests
         Assert.True(host.ReceiptProvenance.Contains(receipt.Identity));
         Assert.True(reopened.Provenance.Contains(receipt.Identity));
         Assert.Equal(receipt.Identity, host.ReadReceipt(receipt.Identity).Identity);
+    }
+
+    [Fact]
+    public void Authoritative_host_rejects_same_principal_or_unverified_isolation()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path);
+
+        var error = Assert.Throws<ArgumentException>(() => new AuthoritativeEvaluationHost(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory,
+            TestEvidence.Commit('a'),
+            System.IO.Path.Combine(temp.Path, "host-receipts"),
+            new byte[32],
+            new(Verified: true, SeparateSecurityPrincipal: false,
+                Issuer: "fixture-host", Evidence: "same uid")));
+
+        Assert.Contains("separate security principal", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -161,6 +181,62 @@ public sealed class GateRunnerTests
         Assert.True(File.Exists(retry.ReceiptPath));
         Assert.Contains(".attempt-", retry.ReceiptPath, StringComparison.Ordinal);
         Assert.False(File.Exists(System.IO.Path.Combine(temp.Path, request.GateId + ".claim")));
+    }
+
+    [Fact]
+    public async Task Disabled_attempt_does_not_block_later_immutable_pass_in_same_output_scope()
+    {
+        using var temp = new TempDirectory();
+        var identity = TestEvidence.Repository();
+        var request = TestEvidence.GateRequest(temp.Path);
+        var runner = new GateRunner(
+            new StubCommandExecutor(TestEvidence.CommandResult()),
+            new SequenceRepositoryIdentityReader(identity, identity, identity),
+            request.Invocation.WorkingDirectory, TestEvidence.Commit('a'));
+
+        var disabled = await runner.RunAsync(
+            request with { Plugin = new EvaluationPluginSelection("delivery-forge.dotnet", Enabled: false) },
+            TestContext.Current.CancellationToken);
+        var retry = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, disabled.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, retry.Outcome);
+        Assert.DoesNotContain("published", retry.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.NotEqual(System.IO.Path.GetDirectoryName(disabled.ReceiptPath),
+            System.IO.Path.GetDirectoryName(retry.ReceiptPath));
+        Assert.Contains(".attempt-", retry.ReceiptPath, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Host_owned_claim_excludes_same_gate_across_distinct_output_directories()
+    {
+        using var temp = new TempDirectory();
+        var identity = TestEvidence.Repository();
+        var firstRequest = TestEvidence.GateRequest(temp.Path);
+        var secondRequest = firstRequest with
+        {
+            OutputDirectory = System.IO.Path.Combine(temp.Path, "second-output")
+        };
+        var claimRoot = System.IO.Path.Combine(temp.Path, "host-claims");
+        var blocking = new BlockingCommandExecutor(TestEvidence.CommandResult());
+        var firstRunner = new GateRunner(blocking,
+            new SequenceRepositoryIdentityReader(identity, identity),
+            firstRequest.Invocation.WorkingDirectory, TestEvidence.Commit('a'),
+            hostOwnedClaimRoot: claimRoot);
+        var secondRunner = new GateRunner(new StubCommandExecutor(TestEvidence.CommandResult()),
+            new SequenceRepositoryIdentityReader(identity, identity),
+            firstRequest.Invocation.WorkingDirectory, TestEvidence.Commit('a'),
+            hostOwnedClaimRoot: claimRoot);
+
+        var firstTask = firstRunner.RunAsync(firstRequest, TestContext.Current.CancellationToken);
+        await blocking.Entered.WaitAsync(TestContext.Current.CancellationToken);
+        var excluded = await secondRunner.RunAsync(secondRequest, TestContext.Current.CancellationToken);
+        blocking.Release();
+        var first = await firstTask;
+
+        Assert.Equal(GateOutcome.Incomplete, excluded.Outcome);
+        Assert.Contains("live process", excluded.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(GateOutcome.Incomplete, first.Outcome);
     }
 
     [Fact]
@@ -272,7 +348,7 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
-    public async Task Missing_executable_is_recorded_as_error_receipt()
+    public async Task Missing_executable_is_recorded_as_incomplete_prerequisite_receipt()
     {
         using var temp = new TempDirectory();
         var request = TestEvidence.GateRequest(temp.Path);
@@ -282,7 +358,7 @@ public sealed class GateRunnerTests
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.True(File.Exists(result.ReceiptPath));
     }
 
@@ -435,7 +511,7 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Error, result.Outcome);
-        Assert.Contains("executable bytes changed", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("bound capability identity", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.True(File.Exists(result.ReceiptPath));
     }
 

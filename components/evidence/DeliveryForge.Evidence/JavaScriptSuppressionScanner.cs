@@ -40,7 +40,7 @@ internal static class JavaScriptSuppressionScanner
 
         var bytes = input.Span;
         var budget = new ScanBudget(cancellationToken, deadline);
-        var profile = new SuppressionProfile(input.ToArray());
+        var profile = new SuppressionProfile(input.Span);
         var index = 0;
         ScanCode(bytes, ref index, profile, budget, stopAtTemplateExpressionEnd: false);
         budget.Check(bytes.Length, force: true);
@@ -52,8 +52,7 @@ internal static class JavaScriptSuppressionScanner
     {
         foreach (var candidate in head.Coverages.Where(coverage => coverage.IsDangerous))
         {
-            if (@base is null || head.CoverageTouchesChangedLine(candidate, @base) ||
-                !@base.HasByteIdenticalDirective(candidate))
+            if (@base is null || !head.HasInheritedCoverage(candidate, @base))
                 return true;
         }
         return false;
@@ -83,10 +82,7 @@ internal static class JavaScriptSuppressionScanner
             if (current is (byte)'\'' or (byte)'"')
             {
                 if (IsLikelyJsxText(content, index))
-                {
-                    index++;
-                    continue;
-                }
+                    throw Ambiguous("JSX text cannot be distinguished from TypeScript syntax without parser evidence");
                 if (current == (byte)'\'' && !canStartRegularExpression && index > 0 && index + 1 < content.Length &&
                     IsAsciiAlphaNumeric(content[index - 1]) && IsAsciiAlphaNumeric(content[index + 1]))
                 {
@@ -103,10 +99,7 @@ internal static class JavaScriptSuppressionScanner
             if (current == (byte)'`')
             {
                 if (IsLikelyJsxText(content, index))
-                {
-                    index++;
-                    continue;
-                }
+                    throw Ambiguous("JSX text cannot be distinguished from TypeScript syntax without parser evidence");
                 if (!ScanTemplate(content, ref index, profile, budget))
                     throw Ambiguous("unterminated template literal");
                 canStartRegularExpression = false;
@@ -198,7 +191,7 @@ internal static class JavaScriptSuppressionScanner
                 var identifier = Encoding.ASCII.GetString(content.Slice(start, index - start));
                 expectControlParenthesis = keywordPosition &&
                     identifier is "if" or "while" or "for" or "with" or "switch" or "catch";
-                canStartRegularExpression = ExpressionPrefixKeywords.Contains(identifier);
+                canStartRegularExpression = keywordPosition && ExpressionPrefixKeywords.Contains(identifier);
                 continue;
             }
             if (current is >= (byte)'0' and <= (byte)'9')
@@ -554,8 +547,10 @@ internal static class JavaScriptSuppressionScanner
 
     private static readonly HashSet<string> ExpressionPrefixKeywords = new(StringComparer.Ordinal)
     {
-        "await", "case", "delete", "do", "else", "in", "instanceof", "new", "of", "return", "throw",
-        "typeof", "void", "yield"
+        // await/yield/of can be identifiers in supported JavaScript-family grammars. Treating
+        // a following slash as division may reject ambiguity, but cannot hide a directive.
+        "case", "delete", "do", "else", "in", "instanceof", "new", "return", "throw",
+        "typeof", "void"
     };
 
     private sealed record DirectiveName(
@@ -632,19 +627,19 @@ internal sealed record SuppressionCoverage(
     // suppression names without diagnostics, so unclassified bare names fail closed.
     private static readonly HashSet<string> KnownSafeBareRules = new(StringComparer.Ordinal)
     {
-        "no-console"
+        "no-console", "no-unused-vars", "eqeqeq", "prefer-const"
     };
 }
 
 internal sealed class SuppressionProfile
 {
-    private readonly byte[] source;
+    private readonly int sourceLength;
     private readonly int[] lineStarts;
-    private readonly string[] lines;
+    private readonly byte[][] lineHashes;
 
-    internal SuppressionProfile(byte[] source)
+    internal SuppressionProfile(ReadOnlySpan<byte> source)
     {
-        this.source = source;
+        sourceLength = source.Length;
         var starts = new List<int> { 0 };
         for (var index = 0; index < source.Length; index++)
         {
@@ -664,7 +659,7 @@ internal sealed class SuppressionProfile
             }
         }
         lineStarts = starts.ToArray();
-        lines = new string[lineStarts.Length];
+        lineHashes = new byte[lineStarts.Length][];
         for (var line = 0; line < lineStarts.Length; line++)
         {
             var end = line + 1 < lineStarts.Length ? lineStarts[line + 1] : source.Length;
@@ -673,7 +668,8 @@ internal sealed class SuppressionProfile
             if (end >= lineStarts[line] + 3 && source[end - 3] == 0xe2 && source[end - 2] == 0x80 &&
                 source[end - 1] is 0xa8 or 0xa9)
                 end -= 3;
-            lines[line] = Convert.ToHexString(source.AsSpan(lineStarts[line], end - lineStarts[line]));
+            lineHashes[line] = System.Security.Cryptography.SHA256.HashData(
+                source.Slice(lineStarts[line], end - lineStarts[line]));
         }
     }
 
@@ -683,14 +679,14 @@ internal sealed class SuppressionProfile
 
     internal int LineAt(int byteOffset)
     {
-        var line = Array.BinarySearch(lineStarts, Math.Clamp(byteOffset, 0, source.Length));
+        var line = Array.BinarySearch(lineStarts, Math.Clamp(byteOffset, 0, sourceLength));
         return line >= 0 ? line : ~line - 1;
     }
 
     internal string LineBytesAt(int byteOffset)
     {
         var line = LineAt(byteOffset);
-        return line < lines.Length ? lines[line] : string.Empty;
+        return line < lineHashes.Length ? Convert.ToHexString(lineHashes[line]) : string.Empty;
     }
 
     internal void FinalizeRanges()
@@ -700,7 +696,7 @@ internal sealed class SuppressionProfile
         {
             if (directive.Scope == SuppressionScope.Local && directive.Disables)
             {
-                var target = Math.Min(lines.Length - 1, directive.DirectiveLine + directive.TargetLineOffset);
+                var target = Math.Min(lineHashes.Length - 1, directive.DirectiveLine + directive.TargetLineOffset);
                 Coverages.Add(new(directive.Scope, directive.Rule, directive.DirectiveLine,
                     target, target, directive.DirectiveLineBytes));
                 continue;
@@ -724,25 +720,33 @@ internal sealed class SuppressionProfile
         }
         foreach (var disabled in open)
             Coverages.Add(new(disabled.Scope, disabled.Rule, disabled.DirectiveLine,
-                disabled.DirectiveLine, Math.Max(disabled.DirectiveLine, lines.Length - 1),
+                disabled.DirectiveLine, Math.Max(disabled.DirectiveLine, lineHashes.Length - 1),
                 disabled.DirectiveLineBytes));
     }
 
-    internal bool CoverageTouchesChangedLine(SuppressionCoverage coverage, SuppressionProfile @base)
+    internal bool HasInheritedCoverage(SuppressionCoverage candidate, SuppressionProfile @base)
     {
-        for (var line = coverage.StartLine; line <= coverage.EndLine; line++)
+        foreach (var inherited in @base.Coverages)
         {
-            if (line >= lines.Length || line >= @base.lines.Length ||
-                !string.Equals(lines[line], @base.lines[line], StringComparison.Ordinal))
+            if (inherited.Scope != candidate.Scope || inherited.Rule != candidate.Rule ||
+                !string.Equals(inherited.DirectiveLineBytes, candidate.DirectiveLineBytes, StringComparison.Ordinal))
+                continue;
+            var candidateLength = candidate.EndLine - candidate.StartLine + 1;
+            if (candidateLength != inherited.EndLine - inherited.StartLine + 1)
+                continue;
+            var identical = true;
+            for (var offset = 0; offset < candidateLength; offset++)
+            {
+                if (!lineHashes[candidate.StartLine + offset]
+                    .AsSpan().SequenceEqual(@base.lineHashes[inherited.StartLine + offset]))
+                {
+                    identical = false;
+                    break;
+                }
+            }
+            if (identical)
                 return true;
         }
         return false;
     }
-
-    internal bool HasByteIdenticalDirective(SuppressionCoverage candidate) =>
-        candidate.DirectiveLine < lines.Length &&
-        string.Equals(lines[candidate.DirectiveLine], candidate.DirectiveLineBytes, StringComparison.Ordinal) &&
-        Coverages.Any(value => value.Scope == candidate.Scope && value.Rule == candidate.Rule &&
-            value.DirectiveLine == candidate.DirectiveLine &&
-            string.Equals(value.DirectiveLineBytes, candidate.DirectiveLineBytes, StringComparison.Ordinal));
 }

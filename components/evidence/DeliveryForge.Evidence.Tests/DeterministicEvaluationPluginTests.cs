@@ -107,7 +107,8 @@ public sealed class DeterministicEvaluationPluginTests
             original.Invocation.WorkingDirectory, TestEvidence.Commit('a'), pluginRegistry,
             emitAuthoritativeV2: true, authorityRegistry: authorityRegistry,
             authoritativeReceiptStore: new HostOwnedReceiptStore(
-                System.IO.Path.Combine(temp.Path, "host-receipts"), new byte[32]));
+                System.IO.Path.Combine(temp.Path, "host-receipts"), new byte[32]),
+            hostOwnedClaimRoot: System.IO.Path.Combine(temp.Path, "host-claims"));
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
         var receipt = ContractValidator.ParseAndValidate(await File.ReadAllBytesAsync(
@@ -224,7 +225,7 @@ public sealed class DeterministicEvaluationPluginTests
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
-        Assert.Contains("advisory", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("runtime pin", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.False(result.ProductionCapable);
     }
 
@@ -287,15 +288,22 @@ public sealed class DeterministicEvaluationPluginTests
             new ProcessCommandExecutor(), reader, repository.Path, commit,
             System.IO.Path.Combine(artifacts.Path, "host-receipts"),
             new byte[32],
+            new(true, true, "fixture-host", "gate process uses a distinct fixture principal"),
             DeterministicEvaluationPluginRegistry.CreateBuiltIns(
                 antiSlopRoot, nodePath));
 
+        var interrupted = await host.RunAsync(
+            request with
+            {
+                Plugin = request.Plugin! with { Enabled = false }
+            }, TestContext.Current.CancellationToken);
         var bundle = await new AuthoritativeEvaluationComposition(host).RunRequiredAsync(
             [request], TestContext.Current.CancellationToken);
         var receipt = Assert.Single(bundle.Receipts);
         using var document = System.Text.Json.JsonDocument.Parse(receipt.CanonicalBytes);
 
         Assert.True(bundle.ReceiptProvenance.Contains(receipt.Identity));
+        Assert.Equal(GateOutcome.Incomplete, interrupted.Outcome);
         var restartedStore = new HostOwnedReceiptStore(
             System.IO.Path.Combine(artifacts.Path, "host-receipts"), new byte[32]);
         Assert.True(restartedStore.Provenance.Contains(receipt.Identity));
@@ -353,7 +361,7 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.Contains("autofix", result.Reason, StringComparison.OrdinalIgnoreCase);
 
-        var plugin = AntiSlopEvaluationPlugin.CreateBundled(
+        var plugin = AntiSlopEvaluationPlugin.CreateBundledForFixture(
             System.IO.Path.GetDirectoryName(config)!, nodePath);
         var canonical = request with
         {
@@ -402,7 +410,7 @@ public sealed class DeterministicEvaluationPluginTests
             ConfigurationIdentity = AntiSlopEvaluationPlugin.ComputeConfigurationIdentity(invocation, false),
             Plugin = new EvaluationPluginSelection("dmmulroy.anti-slop", true, ["src/app.ts"])
         };
-        var plugin = AntiSlopEvaluationPlugin.CreateBundled(root, nodePath);
+        var plugin = AntiSlopEvaluationPlugin.CreateBundledForFixture(root, nodePath);
 
         Assert.Null(plugin.ValidateBeforeExecution(request));
     }
@@ -428,7 +436,7 @@ public sealed class DeterministicEvaluationPluginTests
             Plugin = new EvaluationPluginSelection(
                 "dmmulroy.anti-slop", Enabled: true, Inputs: ["src/app.ts"])
         };
-        var plugin = AntiSlopEvaluationPlugin.CreateBundled(
+        var plugin = AntiSlopEvaluationPlugin.CreateBundledForFixture(
             System.IO.Path.GetDirectoryName(config)!, nodePath);
         var snapshot = plugin.CaptureBefore(request);
         File.AppendAllText(
@@ -603,7 +611,7 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Theory]
-    [InlineData(false, GateOutcome.Pass)]
+    [InlineData(false, GateOutcome.Incomplete)]
     [InlineData(true, GateOutcome.Incomplete)]
     public async Task Protected_anti_slop_binding_requires_the_complete_frozen_scope(
         bool omitTrackedInput,
@@ -664,6 +672,8 @@ public sealed class DeterministicEvaluationPluginTests
             $"Expected {expectedOutcome}, received {result.Outcome}: {result.Reason}");
         if (omitTrackedInput)
             Assert.Contains("protected-base scope", result.Reason, StringComparison.OrdinalIgnoreCase);
+        else
+            Assert.Contains("runtime pin", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -713,7 +723,8 @@ public sealed class DeterministicEvaluationPluginTests
             TestEvidence.Commit('a'),
             emitAuthoritativeV2: true,
             authoritativeReceiptStore: new HostOwnedReceiptStore(
-                System.IO.Path.Combine(temp.Path, "host-receipts"), new byte[32]));
+                System.IO.Path.Combine(temp.Path, "host-receipts"), new byte[32]),
+            hostOwnedClaimRoot: System.IO.Path.Combine(temp.Path, "host-claims"));
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
@@ -766,6 +777,14 @@ public sealed class DeterministicEvaluationPluginTests
         };
         var oversized = new string('x', GateRunner.AntiSlopMaximumCapturedBytesPerStream + 1);
         var now = DateTimeOffset.UtcNow;
+        var fixturePlugin = AntiSlopEvaluationPlugin.CreateBundledForFixture(
+            System.IO.Path.GetDirectoryName(config)!, nodePath);
+        var fixtureRegistry = new DeterministicEvaluationPluginRegistry([fixturePlugin]);
+        var fixtureAuthority = new TrustedGatePluginRegistry(
+        [
+            new("test", fixturePlugin.Id, fixturePlugin.Version, fixturePlugin.ExpectedTool,
+                "1.78.0", "oxlint-json-v1")
+        ]);
         var runner = new GateRunner(
             new StubCommandExecutor(new CommandResult(0, oversized, oversized, false, false, now, now)),
             new ScopedSequenceRepositoryIdentityReader(
@@ -773,8 +792,8 @@ public sealed class DeterministicEvaluationPluginTests
                 TestEvidence.Repository(), TestEvidence.Repository()),
             invocation.WorkingDirectory,
             TestEvidence.Commit('a'),
-            DeterministicEvaluationPluginRegistry.CreateBuiltIns(
-                System.IO.Path.GetDirectoryName(config)!, nodePath));
+            fixtureRegistry,
+            authorityRegistry: fixtureAuthority);
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 

@@ -35,6 +35,8 @@ public sealed record PublicationRunDefinition(
 {
     public TrustedGatePluginRegistry GateAuthorityRegistry { get; init; } = TrustedGatePluginRegistry.BuiltIns;
     public TrustedReceiptProvenance? GateReceiptProvenance { get; init; }
+    public bool EnforceAuthoritativeGateReceipts { get; init; }
+    public string? GateAuthorityRegistryIdentity { get; init; }
 }
 
 /// <summary>Opaque parent-issued authority; serialized documents cannot construct one.</summary>

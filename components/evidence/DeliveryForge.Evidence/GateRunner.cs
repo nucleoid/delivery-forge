@@ -21,6 +21,7 @@ public sealed class GateRunner
     private readonly DeterministicEvaluationPluginRegistry _plugins;
     private readonly bool _emitAuthoritativeV2;
     private readonly HostOwnedReceiptStore? _authoritativeReceiptStore;
+    private readonly string? _hostOwnedClaimRoot;
 
     public GateRunner(
         ICommandExecutor executor,
@@ -30,7 +31,8 @@ public sealed class GateRunner
         DeterministicEvaluationPluginRegistry? plugins = null,
         bool emitAuthoritativeV2 = false,
         TrustedGatePluginRegistry? authorityRegistry = null,
-        HostOwnedReceiptStore? authoritativeReceiptStore = null)
+        HostOwnedReceiptStore? authoritativeReceiptStore = null,
+        string? hostOwnedClaimRoot = null)
     {
         _executor = executor;
         _repository = repository;
@@ -40,8 +42,11 @@ public sealed class GateRunner
         _plugins.AssertMatchesAuthorityRegistry(authorityRegistry ?? TrustedGatePluginRegistry.BuiltIns);
         _emitAuthoritativeV2 = emitAuthoritativeV2;
         _authoritativeReceiptStore = authoritativeReceiptStore;
+        _hostOwnedClaimRoot = hostOwnedClaimRoot is null ? null : Path.GetFullPath(hostOwnedClaimRoot);
         if (_emitAuthoritativeV2 && _authoritativeReceiptStore is null)
             throw new ArgumentException("Authoritative v2 emission requires a host-owned receipt store.");
+        if (_emitAuthoritativeV2 && _hostOwnedClaimRoot is null)
+            throw new ArgumentException("Authoritative v2 emission requires a stable host-owned claim root.");
     }
     private static readonly JsonSerializerOptions ContractJson = CreateContractJson();
 
@@ -54,7 +59,13 @@ public sealed class GateRunner
             request, plugin,
             request.Plugin?.Enabled == false ? EvaluationPluginStatus.Disabled : EvaluationPluginStatus.Selected);
         Directory.CreateDirectory(request.OutputDirectory);
-        var claimPath = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId) + ".claim");
+        var claimRoot = _hostOwnedClaimRoot ?? request.OutputDirectory;
+        Directory.CreateDirectory(claimRoot);
+        var claimScope = _hostOwnedClaimRoot is null
+            ? SafeSegment(request.GateId)
+            : Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+                _trustedWorkingDirectory + "\0" + _trustedProtectedBaseCommit + "\0" + request.GateId)));
+        var claimPath = Path.Combine(claimRoot, claimScope + ".claim");
         var gateDirectoryPrefix = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
         // Every execution owns a fresh immutable attempt directory. A killed process may leave
         // that directory incomplete, but can never reserve the canonical gate name forever.
@@ -343,8 +354,8 @@ public sealed class GateRunner
             normalized = NormalizedEvidence.Incomplete("Repository identity could not be read after evaluation.");
         else if (sourceChanged)
             normalized = NormalizedEvidence.Error("Repository source/index/status identity changed during evaluation.");
-        else if (ValidateCapabilityBinding(request, plugin) is not null)
-            normalized = NormalizedEvidence.Error("The bound executable bytes changed during gate execution.");
+        else if (ValidateCapabilityBinding(request, plugin) is { } postCapabilityValidation)
+            normalized = postCapabilityValidation;
         else if (plugin.ValidateAfterExecution(request, evidenceSnapshot) is { } postExecutionValidation)
             normalized = postExecutionValidation;
         else if (!execution.OwnedProcessQuiescent)
@@ -378,6 +389,21 @@ public sealed class GateRunner
                   !normalized.ProductionCapable))
             normalized = NormalizedEvidence.Incomplete(
                 "Tool NOT_APPLICABLE is advisory unless policy permits it and rationale, protected binding, non-fixture capability, and certified producer evidence are complete.");
+
+        if (scopeValidation.MaterializedRoot is not null && scopeValidation.MaterializedObjectIds is not null)
+        {
+            try
+            {
+                GitRepositoryIdentityReader.VerifyMaterializedInputs(
+                    scopeValidation.MaterializedRoot, scopeValidation.MaterializedObjectIds, cancellationToken, deadline);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                               EvidenceRepositoryException or OperationCanceledException)
+            {
+                normalized = NormalizedEvidence.Incomplete(
+                    $"Frozen anti-slop inputs changed or became unverifiable during Oxlint execution: {exception.Message}");
+            }
+        }
 
         var executedPlugin = DeterministicEvaluationPluginRegistry.Bind(
             request, plugin,
@@ -421,28 +447,11 @@ public sealed class GateRunner
 
     private static string PublishAttemptDirectory(string attemptDirectory, out string? failure)
     {
-        const string marker = ".attempt-";
-        var markerIndex = attemptDirectory.LastIndexOf(marker, StringComparison.Ordinal);
-        if (markerIndex < 0)
-        {
-            failure = null;
-            return attemptDirectory;
-        }
-
-        var publishedDirectory = attemptDirectory[..markerIndex];
-        try
-        {
-            // Directory.Move is the same-filesystem atomic publication boundary. An existing
-            // canonical directory is immutable: retain this nonce attempt and fail closed.
-            Directory.Move(attemptDirectory, publishedDirectory);
-            failure = null;
-            return publishedDirectory;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-        {
-            failure = $"Gate attempt could not be atomically published to its immutable canonical directory: {exception.Message}";
-            return attemptDirectory;
-        }
+        // The nonce directory is itself the immutable publication unit. There is deliberately no
+        // canonical gate directory: an interrupted or completed attempt can never reserve the
+        // logical gate/output scope and prevent a later authoritative retry.
+        failure = null;
+        return attemptDirectory;
     }
 
     private async Task<GateRunResult> PersistAsync(
@@ -666,7 +675,8 @@ public sealed class GateRunner
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            return NormalizedEvidence.Error("The bound capability executable cannot be read.");
+            return NormalizedEvidence.Incomplete(
+                "The bound capability executable cannot be read on this host; tool evidence is incomplete.");
         }
     }
 
@@ -726,10 +736,10 @@ public sealed class GateRunner
         CancellationToken cancellationToken)
     {
         if (plugin is not Adapters.AntiSlopEvaluationPlugin)
-            return new(null, null, null);
+            return new(null, null, null, null);
         if (_repository is not IRepositoryEvaluationScopeReader scopeReader)
             return new(NormalizedEvidence.Incomplete(
-                "Anti-slop requires trusted frozen-tree scope and blob evidence."), null, null);
+                "Anti-slop requires trusted frozen-tree scope and blob evidence."), null, null, null);
         try
         {
             var scope = await scopeReader.ReadEvaluationScopeAsync(
@@ -740,21 +750,21 @@ public sealed class GateRunner
             if (scope.InvalidInputs is { Count: > 0 })
                 return new(NormalizedEvidence.Incomplete(
                     $"Anti-slop frozen scope contains non-regular JavaScript-family paths: {string.Join(", ", scope.InvalidInputs)}."),
-                    scope.InputSetIdentity, scope.MaterializedRoot);
+                    scope.InputSetIdentity, scope.MaterializedRoot, scope.MaterializedObjectIds);
             if (!expected.SequenceEqual(requested, StringComparer.Ordinal))
                 return new(NormalizedEvidence.Incomplete(
                     "Anti-slop requested inputs do not exactly match protected-base scope over the frozen Git tree."),
-                    scope.InputSetIdentity, scope.MaterializedRoot);
+                    scope.InputSetIdentity, scope.MaterializedRoot, scope.MaterializedObjectIds);
             if (scope.SuppressionViolations is { Count: > 0 })
                 return new(NormalizedEvidence.Incomplete(
                     $"Anti-slop frozen inputs add or change inline suppression directives: {string.Join(", ", scope.SuppressionViolations)}."),
-                    scope.InputSetIdentity, scope.MaterializedRoot);
+                    scope.InputSetIdentity, scope.MaterializedRoot, scope.MaterializedObjectIds);
             if (expected.Count == 0)
             {
                 if (!request.Policy.AllowedNotApplicable.Contains(request.GateId))
                     return new(NormalizedEvidence.Incomplete(
                         "Anti-slop selected zero inputs and protected policy does not permit NOT_APPLICABLE."),
-                        scope.InputSetIdentity, scope.MaterializedRoot);
+                        scope.InputSetIdentity, scope.MaterializedRoot, scope.MaterializedObjectIds);
                 return new(new NormalizedEvidence(
                         GateOutcome.NotApplicable,
                         "Protected anti-slop scope contains no applicable JavaScript-family files.",
@@ -762,21 +772,22 @@ public sealed class GateRunner
                         true,
                         [],
                         "The frozen tracked tree contains no non-ignored regular JavaScript-family files."),
-                    scope.InputSetIdentity, scope.MaterializedRoot);
+                    scope.InputSetIdentity, scope.MaterializedRoot, scope.MaterializedObjectIds);
             }
-            return new(null, scope.InputSetIdentity, scope.MaterializedRoot);
+            return new(null, scope.InputSetIdentity, scope.MaterializedRoot, scope.MaterializedObjectIds);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or EvidenceRepositoryException or EvaluationPluginException)
         {
             return new(NormalizedEvidence.Incomplete(
-                $"Anti-slop frozen-tree scope could not be derived: {exception.Message}"), null, null);
+                $"Anti-slop frozen-tree scope could not be derived: {exception.Message}"), null, null, null);
         }
     }
 
     private sealed record AutomaticScopeValidation(
         NormalizedEvidence? Failure,
         string? InputSetIdentity,
-        string? MaterializedRoot);
+        string? MaterializedRoot,
+        IReadOnlyDictionary<string, string>? MaterializedObjectIds);
 
     private Task<RepositoryIdentity> ReadRepositoryAsync(
         TimeSpan timeout,

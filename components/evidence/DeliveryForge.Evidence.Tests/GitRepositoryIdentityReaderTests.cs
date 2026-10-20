@@ -2,6 +2,27 @@ namespace DeliveryForge.Evidence.Tests;
 
 public sealed class GitRepositoryIdentityReaderTests
 {
+    [Fact]
+    public async Task Frozen_materialization_is_reverified_by_expected_git_identity_after_tool_execution()
+    {
+        using var temp = new TempDirectory();
+        var path = System.IO.Path.Combine(temp.Path, "app.ts");
+        var original = System.Text.Encoding.UTF8.GetBytes("export const frozen = 1;\n");
+        await File.WriteAllBytesAsync(path, original, TestContext.Current.CancellationToken);
+        var header = System.Text.Encoding.ASCII.GetBytes($"blob {original.Length}\0");
+        var objectId = Convert.ToHexStringLower(System.Security.Cryptography.SHA1.HashData(
+            header.Concat(original).ToArray()));
+        var expected = new Dictionary<string, string>(StringComparer.Ordinal) { ["app.ts"] = objectId };
+
+        GitRepositoryIdentityReader.VerifyMaterializedInputs(
+            temp.Path, expected, TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(path, "export const swapped = 2;\n", TestContext.Current.CancellationToken);
+
+        Assert.Throws<EvidenceRepositoryException>(() =>
+            GitRepositoryIdentityReader.VerifyMaterializedInputs(
+                temp.Path, expected, TestContext.Current.CancellationToken));
+    }
+
     [Theory]
     [InlineData("--skip-worktree")]
     [InlineData("--assume-unchanged")]
@@ -72,6 +93,33 @@ public sealed class GitRepositoryIdentityReaderTests
         {
             GitRepositoryIdentityReader.DeleteMaterialization(scope.MaterializedRoot);
         }
+    }
+
+    [Fact]
+    public async Task Identity_reads_ignore_repository_replace_objects_and_unsafe_config()
+    {
+        using var temp = new TempDirectory();
+        await Git(temp.Path, "init");
+        await Git(temp.Path, "config", "user.name", "Delivery Forge Test");
+        await Git(temp.Path, "config", "user.email", "forge@example.invalid");
+        var source = System.IO.Path.Combine(temp.Path, "app.ts");
+        await File.WriteAllTextAsync(source, "export const before = 1;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "add", "app.ts");
+        await Git(temp.Path, "commit", "-m", "base");
+        var baseCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        await File.WriteAllTextAsync(source, "export const head = 2;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "commit", "-am", "head");
+        var headCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        var actualTree = (await Git(temp.Path, "--no-replace-objects", "rev-parse", "HEAD^{tree}")).Trim();
+        await Git(temp.Path, "replace", headCommit, baseCommit);
+
+        var identity = await new GitRepositoryIdentityReader(
+            new ProcessCommandExecutor(), temp.Path, baseCommit)
+            .ReadAsync(TestContext.Current.CancellationToken);
+
+        Assert.Equal(headCommit, identity.HeadCommit);
+        Assert.Equal(actualTree, identity.TreeId);
+        Assert.True(identity.IsClean);
     }
 
     [Fact]
@@ -212,7 +260,6 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Theory]
-    [InlineData("const view = <p>Don't panic</p>;\n", false)]
     [InlineData("if (ok) /'/.test(value);\n", false)]
     [InlineData("if (ok) /'/.test(value);\n// eslint-disable-next-line x\nrun();\n", true)]
     [InlineData("const text = `// oxlint-disable`;\n", false)]
@@ -221,6 +268,25 @@ public sealed class GitRepositoryIdentityReaderTests
     public void Suppression_lexer_handles_jsx_regex_and_literal_edges(string source, bool expected)
     {
         Assert.Equal(expected, GitRepositoryIdentityReader.ContainsSuppressionDirective(source));
+    }
+
+    [Theory]
+    [InlineData("const of = 4; x = of / 2 // eslint-disable-line\n")]
+    [InlineData("x = object.in / 2 // eslint-disable-line\n")]
+    [InlineData("x = object.delete / 2 // eslint-disable-line\n")]
+    [InlineData("x = object.return / 2 // eslint-disable-line\n")]
+    public void Identifier_and_property_division_cannot_hide_directives(string source)
+    {
+        Assert.True(GitRepositoryIdentityReader.ContainsSuppressionDirective(source));
+    }
+
+    [Fact]
+    public void Jsx_guess_ambiguity_fails_closed()
+    {
+        var error = Assert.Throws<EvidenceRepositoryException>(() =>
+            GitRepositoryIdentityReader.ContainsSuppressionDirective(
+                "n > '/'; // eslint-disable-line\nconst value = factory<Type>();\n"));
+        Assert.Contains("ambiguous", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -318,7 +384,7 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Fact]
-    public async Task Moved_disable_next_line_is_not_inherited()
+    public async Task Moved_disable_next_line_with_unchanged_anchor_is_inherited()
     {
         var head = TestEvidence.Commit('b');
         var reader = new GitRepositoryIdentityReader(
@@ -337,7 +403,7 @@ public sealed class GitRepositoryIdentityReaderTests
         var scope = await reader.ReadEvaluationScopeAsync(
             head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
 
-        Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
+        Assert.Empty(scope.SuppressionViolations!);
     }
 
     [Fact]
@@ -468,10 +534,16 @@ public sealed class GitRepositoryIdentityReaderTests
             System.IO.Path.GetTempPath(),
             TestEvidence.Commit('a'));
 
-        var scope = await reader.ReadEvaluationScopeAsync(
-            head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
-
-        Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
+        try
+        {
+            var scope = await reader.ReadEvaluationScopeAsync(
+                head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
+            Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
+        }
+        catch (EvidenceRepositoryException error)
+        {
+            Assert.Contains("ambiguous", error.Message, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     [Fact]

@@ -12,6 +12,7 @@ public sealed class GitRepositoryIdentityReader(
     internal const int MaximumSuppressionScanBytes = JavaScriptSuppressionScanner.MaximumInputBytes;
     internal const int MaximumFrozenInputCount = 100_000;
     internal const long MaximumFrozenInputBytes = 512L * 1024 * 1024;
+    internal const long MaximumTotalSuppressionScanBytes = 64L * 1024 * 1024;
     internal const int MaximumFrozenObjectBytes = 64 * 1024 * 1024;
     internal const int MaximumBatchPayloadBytes = 16 * 1024 * 1024;
     private readonly string _repositoryRoot = Path.GetFullPath(repositoryRoot);
@@ -148,7 +149,11 @@ public sealed class GitRepositoryIdentityReader(
             violations,
             invalidInputs,
             ignoreSelection.Retired,
-            materializedRoot);
+            materializedRoot,
+            materializedRoot is null
+                ? null
+                : javascript.Where(entry => !ignores.Contains(entry.Path))
+                    .ToDictionary(entry => entry.Path, entry => entry.ObjectId, StringComparer.Ordinal));
     }
 
     private static TreeEntry ParseTreeEntry(string value)
@@ -244,12 +249,23 @@ public sealed class GitRepositoryIdentityReader(
         var sizes = await ReadBatchObjectSizesAsync(
             consumers.Keys.Order(StringComparer.Ordinal).ToArray(), cancellationToken, deadline).ConfigureAwait(false);
         long materializedBytes = 0;
+        long scannedBytes = 0;
         for (var inputIndex = 0; inputIndex < inputs.Count; inputIndex++)
         {
             CheckBatchBudget(inputIndex, cancellationToken, deadline);
             materializedBytes = checked(materializedBytes + sizes[inputs[inputIndex].ObjectId]);
+            if (changedPaths.Contains(inputs[inputIndex].Path))
+            {
+                scannedBytes = checked(scannedBytes + sizes[inputs[inputIndex].ObjectId]);
+                if (baseEntries.TryGetValue(inputs[inputIndex].Path, out var baseEntry) &&
+                    baseEntry.Mode is "100644" or "100755")
+                    scannedBytes = checked(scannedBytes + sizes[baseEntry.ObjectId]);
+            }
         }
         ValidateFrozenInputLimits(inputs.Count, materializedBytes);
+        if (scannedBytes > MaximumTotalSuppressionScanBytes)
+            throw new EvidenceRepositoryException(
+                $"Base plus head suppression input exceeds the {MaximumTotalSuppressionScanBytes}-byte aggregate ceiling.");
 
         var root = Path.Combine(Path.GetTempPath(), "delivery-forge-frozen-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
@@ -446,8 +462,7 @@ public sealed class GitRepositoryIdentityReader(
         var capture = await owned.ExecuteBoundedCaptureAsync(
             new CommandInvocation(
                 "git", arguments, _repositoryRoot,
-                new Dictionary<string, string> { ["GIT_OPTIONAL_LOCKS"] = "0" },
-                StandardInput: standardInput),
+                HardenedGitEnvironment(), InheritEnvironment: false, StandardInput: standardInput),
             budget, maximumBytes, cancellationToken).ConfigureAwait(false);
         if (capture.CaptureBoundExceeded || capture.Command.ExitCode != 0 ||
             capture.Command.TimedOut || capture.Command.Cancelled || !capture.Command.OwnedProcessQuiescent ||
@@ -483,6 +498,56 @@ public sealed class GitRepositoryIdentityReader(
         algorithm.TransformFinalBlock(bytes, 0, bytes.Length);
         if (!string.Equals(Convert.ToHexStringLower(algorithm.Hash!), objectId, StringComparison.Ordinal))
             throw new EvidenceRepositoryException("Git object batch bytes do not match the requested frozen object identity.");
+    }
+
+    internal static void VerifyMaterializedInputs(
+        string root,
+        IReadOnlyDictionary<string, string> expectedObjectIds,
+        CancellationToken cancellationToken = default,
+        DateTimeOffset? deadline = null)
+    {
+        var fullRoot = Path.GetFullPath(root);
+        var observed = Directory.EnumerateFiles(fullRoot, "*", SearchOption.AllDirectories).ToArray();
+        if (observed.Length != expectedObjectIds.Count)
+            throw new EvidenceRepositoryException("Frozen anti-slop materialization contains missing or unexpected files.");
+        foreach (var (relativePath, objectId) in expectedObjectIds.OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var path = Path.GetFullPath(Path.Combine(fullRoot,
+                relativePath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!path.StartsWith(fullRoot + Path.DirectorySeparatorChar, PathComparison) ||
+                !File.Exists(path) || File.GetAttributes(path).HasFlag(FileAttributes.ReparsePoint))
+                throw new EvidenceRepositoryException("Frozen anti-slop input identity is unavailable or unsafe.");
+            VerifyGitBlobFileIdentity(objectId, path, cancellationToken, deadline);
+        }
+    }
+
+    private static void VerifyGitBlobFileIdentity(
+        string objectId,
+        string path,
+        CancellationToken cancellationToken,
+        DateTimeOffset? deadline)
+    {
+        var length = new FileInfo(path).Length;
+        if (length < 0 || length > MaximumFrozenObjectBytes)
+            throw new EvidenceRepositoryException("Frozen anti-slop input exceeds its per-file identity ceiling.");
+        using var algorithm = IncrementalHash.CreateHash(
+            objectId.Length == 64 ? HashAlgorithmName.SHA256 : HashAlgorithmName.SHA1);
+        algorithm.AppendData(Encoding.ASCII.GetBytes($"blob {length}\0"));
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read,
+            64 * 1024, FileOptions.SequentialScan);
+        var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (deadline is not null && DateTimeOffset.UtcNow >= deadline)
+                throw new OperationCanceledException("Frozen-input re-verification exceeded the gate deadline.");
+            var read = stream.Read(buffer, 0, buffer.Length);
+            if (read == 0) break;
+            algorithm.AppendData(buffer, 0, read);
+        }
+        if (!string.Equals(Convert.ToHexStringLower(algorithm.GetHashAndReset()), objectId, StringComparison.Ordinal))
+            throw new EvidenceRepositoryException("Frozen anti-slop file no longer matches its expected Git object identity.");
     }
 
     private static string BatchInput(IEnumerable<string> objectIds) =>
@@ -564,7 +629,7 @@ public sealed class GitRepositoryIdentityReader(
             budget = TimeSpan.FromSeconds(30);
         var invocation = new CommandInvocation(
             "git", arguments, _repositoryRoot,
-            new Dictionary<string, string> { ["GIT_OPTIONAL_LOCKS"] = "0" });
+            HardenedGitEnvironment(), InheritEnvironment: false);
         if (executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } owned)
         {
             var capture = await owned.ExecuteBoundedCaptureAsync(
@@ -587,6 +652,23 @@ public sealed class GitRepositoryIdentityReader(
     private static bool IsGitObject(string value) =>
         value.Length is 40 or 64 && value.All(character =>
             character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static IReadOnlyDictionary<string, string> HardenedGitEnvironment() =>
+        new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["GIT_OPTIONAL_LOCKS"] = "0",
+            ["GIT_NO_REPLACE_OBJECTS"] = "1",
+            ["GIT_NO_LAZY_FETCH"] = "1",
+            ["GIT_TERMINAL_PROMPT"] = "0",
+            ["GIT_CONFIG_NOSYSTEM"] = "1",
+            ["GIT_CONFIG_SYSTEM"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
+            ["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
+            ["GIT_CONFIG_COUNT"] = "2",
+            ["GIT_CONFIG_KEY_0"] = "core.hooksPath",
+            ["GIT_CONFIG_VALUE_0"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
+            ["GIT_CONFIG_KEY_1"] = "core.fsmonitor",
+            ["GIT_CONFIG_VALUE_1"] = "false"
+        };
 
     private static StringComparison PathComparison => OperatingSystem.IsWindows()
         ? StringComparison.OrdinalIgnoreCase

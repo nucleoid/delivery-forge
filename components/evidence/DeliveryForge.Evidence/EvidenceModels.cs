@@ -216,7 +216,8 @@ public sealed record RepositoryEvaluationScope(
     IReadOnlyList<string>? SuppressionViolations = null,
     IReadOnlyList<string>? InvalidInputs = null,
     IReadOnlyList<string>? RetiredIgnoredFiles = null,
-    string? MaterializedRoot = null);
+    string? MaterializedRoot = null,
+    IReadOnlyDictionary<string, string>? MaterializedObjectIds = null);
 
 public interface IRepositoryEvaluationScopeReader
 {

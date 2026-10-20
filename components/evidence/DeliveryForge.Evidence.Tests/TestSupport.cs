@@ -153,6 +153,22 @@ internal sealed class CancellingCommandExecutor : ICommandExecutor
         throw new OperationCanceledException(cancellationToken);
 }
 
+internal sealed class BlockingCommandExecutor(CommandResult result) : ICommandExecutor
+{
+    private readonly TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal Task Entered => entered.Task;
+    internal void Release() => released.TrySetResult();
+
+    public async Task<CommandResult> ExecuteAsync(
+        CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        entered.TrySetResult();
+        await released.Task.WaitAsync(cancellationToken);
+        return result;
+    }
+}
+
 internal sealed class SequenceRepositoryIdentityReader(params RepositoryIdentity[] identities) : IBoundedRepositoryFixtureReader
 {
     private int _index;

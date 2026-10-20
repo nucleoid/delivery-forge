@@ -139,7 +139,9 @@ public sealed class QualityInterruptionScenarioTests(QualityInterruptionFixture 
         var receiptDirectory = Path.GetDirectoryName(Path.GetFullPath(gate.ReceiptPath))!;
         Assert.Equal("receipts", Path.GetFileName(receiptDirectory));
         var artifacts = Directory.GetParent(receiptDirectory)!.FullName;
-        Assert.Equal(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(phase.ProvenancePath))!, "test"), artifacts);
+        var expectedArtifactPrefix = Path.Combine(
+            Path.GetDirectoryName(Path.GetFullPath(phase.ProvenancePath))!, "test.attempt-");
+        Assert.StartsWith(expectedArtifactPrefix, artifacts, StringComparison.Ordinal);
         Assert.True(gate.ArtifactHashes.ContainsKey("stdout.txt"));
         Assert.True(gate.ArtifactHashes.ContainsKey("stderr.txt"));
         foreach (var artifact in gate.ArtifactHashes)

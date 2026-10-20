@@ -19,7 +19,9 @@ public sealed record TransitionEvidence(
     ReviewConsumerContext? ReviewContext = null,
     ReviewConsumerContext? HostReviewContext = null,
     TrustedGatePluginRegistry? GateAuthorityRegistry = null,
-    TrustedReceiptProvenance? GateReceiptProvenance = null);
+    TrustedReceiptProvenance? GateReceiptProvenance = null,
+    bool EnforceAuthoritativeGateReceipts = false,
+    string? GateAuthorityRegistryIdentity = null);
 
 public static class WorkflowTransition
 {
@@ -278,13 +280,24 @@ public static class WorkflowTransition
             document.Dispose();
             throw new InvalidWorkflowTransitionException("Gate receipt does not match the required policy, gate identity, or allowed outcome.");
         }
-        if (!GateReceiptAuthority.TryValidateAuthoritativeOutcome(
+        if (evidence.EnforceAuthoritativeGateReceipts &&
+            !string.Equals(evidence.GateAuthorityRegistryIdentity,
+                (evidence.GateAuthorityRegistry ?? TrustedGatePluginRegistry.BuiltIns).Identity,
+                StringComparison.Ordinal))
+        {
+            document.Dispose();
+            throw new InvalidWorkflowTransitionException(
+                "Gate authority registry identity differs from the producer-owned registry.");
+        }
+        if (evidence.EnforceAuthoritativeGateReceipts &&
+            !GateReceiptAuthority.TryValidateAuthoritativeOutcome(
                 root, out var authorityFailure, evidence.GateAuthorityRegistry))
         {
             document.Dispose();
             throw new InvalidWorkflowTransitionException(authorityFailure);
         }
-        if (evidence.GateReceiptProvenance?.Contains(gate.Identity) != true)
+        if (evidence.EnforceAuthoritativeGateReceipts &&
+            evidence.GateReceiptProvenance?.Contains(gate.Identity) != true)
         {
             document.Dispose();
             throw new InvalidWorkflowTransitionException(
