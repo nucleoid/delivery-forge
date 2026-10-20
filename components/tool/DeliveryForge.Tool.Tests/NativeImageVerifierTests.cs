@@ -64,7 +64,7 @@ public sealed class NativeImageVerifierTests : IDisposable
         var held = BoundedFiles.RetainVerifiedNativeImage(pin, life, TestContext.Current.CancellationToken);
         try
         {
-            for (var observation = 0; observation < 6; observation++) held.Check();
+            for (var observation = 0; observation < 6; observation++) held.Check(TestContext.Current.CancellationToken);
             Assert.Throws<IOException>(() => { using var writer = new FileStream(Image, FileMode.Open, FileAccess.Write, FileShare.ReadWrite | FileShare.Delete); writer.WriteByte(42); });
             Assert.Throws<IOException>(() => File.Delete(Image));
             Assert.Throws<IOException>(() => File.Move(Image, Image + ".moved"));
@@ -72,7 +72,7 @@ public sealed class NativeImageVerifierTests : IDisposable
             Assert.False(held.Unknown);
         }
         finally { held.Close(false); }
-        Assert.Throws<IOException>(() => held.Check());
+        Assert.Throws<IOException>(() => held.Check(TestContext.Current.CancellationToken));
         using var exclusive = new FileStream(Image, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
     }
 
