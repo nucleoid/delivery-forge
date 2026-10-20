@@ -47,16 +47,16 @@ public sealed class ProductionReviewFiniteAdmissionTests
             const string policy = """
                 {"Fixture":false,"Advisory":false,"AllowedFamilies":[{"Author":"gpt","Reviewer":"claude"}],"AllowedScopes":["source"],"AllowExactReuse":false,"Budget":{"MaximumRounds":2,"MaximumDuration":"00:00:30","MaximumTokens":4096,"MaximumCost":1.0},"ExemptionApprovers":[]}
                 """;
-            await File.WriteAllTextAsync(Path.Combine(repository, "review.json"), policy);
+            await File.WriteAllTextAsync(Path.Combine(repository, "review.json"), policy, TestContext.Current.CancellationToken);
             for (var index = 0; index < 12; index++)
             {
-                await File.WriteAllTextAsync(Path.Combine(repository, "subject.txt"), $"history-{index}\n");
+                await File.WriteAllTextAsync(Path.Combine(repository, "subject.txt"), $"history-{index}\n", TestContext.Current.CancellationToken);
                 await Git(repository, "add", "--", "review.json", "subject.txt");
                 await Git(repository, "-c", "user.name=SourceBuilder", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", $"history-{index}");
             }
             var baseCommit = await Git(repository, "rev-parse", "HEAD");
             await Git(repository, "worktree", "add", "--detach", worker, baseCommit);
-            await File.WriteAllTextAsync(Path.Combine(worker, "subject.txt"), "candidate\n");
+            await File.WriteAllTextAsync(Path.Combine(worker, "subject.txt"), "candidate\n", TestContext.Current.CancellationToken);
             await Git(worker, "add", "--", "subject.txt");
             await Git(worker, "-c", "user.name=SourceBuilder", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "candidate");
             var head = await Git(worker, "rev-parse", "HEAD");
@@ -69,14 +69,14 @@ public sealed class ProductionReviewFiniteAdmissionTests
             while (source is not null && !File.Exists(Path.Combine(source.FullName, "DeliveryForge.slnx"))) source = source.Parent;
             Assert.NotNull(source);
             var contracts = Path.Combine(source.FullName, "components", "contracts", "DeliveryForge.Contracts.Tests", "Fixtures", "Valid");
-            var plan = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(contracts, "plan.json")))!.AsObject();
+            var plan = JsonNode.Parse(await File.ReadAllTextAsync(Path.Combine(contracts, "plan.json"), TestContext.Current.CancellationToken))!.AsObject();
             plan["baseCommit"] = baseCommit;
             plan["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(plan.ToJsonString()));
             var planBytes = CanonicalJson.Canonicalize(Encoding.UTF8.GetBytes(plan.ToJsonString()));
-            var evidenceBytes = await File.ReadAllBytesAsync(Path.Combine(contracts, "evidence-policy.json"));
+            var evidenceBytes = await File.ReadAllBytesAsync(Path.Combine(contracts, "evidence-policy.json"), TestContext.Current.CancellationToken);
             var planIdentity = ContractValidator.ParseAndValidate(planBytes).Identity;
             var evidenceIdentity = ContractValidator.ParseAndValidate(evidenceBytes).Identity;
-            var image = await File.ReadAllBytesAsync(git);
+            var image = await File.ReadAllBytesAsync(git, TestContext.Current.CancellationToken);
             var owner = new ProductionReviewSourceOwner(executor, original, parent, "owned", worker, workerGit, commonGit,
                 git, image.Length, Convert.ToHexStringLower(SHA256.HashData(image)), await Git(worker, "--version"),
                 baseCommit, head, () => true, planIdentity, evidenceIdentity, "review.json", 1048576);
