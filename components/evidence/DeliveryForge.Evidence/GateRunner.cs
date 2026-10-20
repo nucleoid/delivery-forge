@@ -57,19 +57,29 @@ public sealed class GateRunner
         var claimPath = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId) + ".claim");
         var gateDirectory = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
         var gateDirectoryPreexisted = Directory.Exists(gateDirectory);
-        FileStream claim;
+        GateClaimAcquisition claim;
         try
         {
-            claim = new FileStream(
-                claimPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1,
-                FileOptions.WriteThrough | FileOptions.DeleteOnClose);
-            claim.Flush(true);
+            claim = GateClaimLease.Acquire(claimPath);
         }
-        catch (IOException exception)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or EvidenceWriteException)
         {
-            throw new EvidenceWriteException($"Gate claim already exists or cannot be created: {exception.Message}");
+            claim = new(null, $"Gate claim could not be established: {exception.Message}", null);
         }
-        await using var claimLease = claim;
+        if (claim.Lease is null)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory + ".claim-incomplete-" + Guid.NewGuid().ToString("N"),
+                request.ExpectedRepository, request.ExpectedRepository,
+                NormalizedEvidence.Incomplete(claim.UnavailableReason ?? "Gate claim is unavailable."),
+                pluginBinding, CancellationToken.None).ConfigureAwait(false);
+        await using var claimLease = claim.Lease;
+        if (claim.InterruptedClaimPath is not null)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory + ".interrupted-" + Guid.NewGuid().ToString("N"),
+                request.ExpectedRepository, request.ExpectedRepository,
+                NormalizedEvidence.Incomplete(
+                    "Recovered a stale gate claim from an interrupted owner; retry is permitted after this durable receipt."),
+                pluginBinding, CancellationToken.None).ConfigureAwait(false);
         if (gateDirectoryPreexisted)
         {
             var priorReceipts = Path.Combine(gateDirectory, "receipts");
@@ -79,10 +89,10 @@ public sealed class GateRunner
                     File.Exists(Path.Combine(gateDirectory, "stderr.txt"));
             if (!completedAttempt)
             {
-                var failureDirectory = gateDirectory + ".claim-error-" + Guid.NewGuid().ToString("N");
+                var failureDirectory = gateDirectory + ".claim-incomplete-" + Guid.NewGuid().ToString("N");
                 return await PersistWithoutExecutionAsync(
                     request, failureDirectory, request.ExpectedRepository, request.ExpectedRepository,
-                    NormalizedEvidence.Error("Gate artifact directory existed before the atomic claim."),
+                    NormalizedEvidence.Incomplete("Gate artifact directory was left incomplete before the atomic claim."),
                     pluginBinding, CancellationToken.None).ConfigureAwait(false);
             }
             gateDirectory += ".retry-" + Guid.NewGuid().ToString("N");
@@ -218,7 +228,7 @@ public sealed class GateRunner
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            pluginValidation = NormalizedEvidence.Error(
+            pluginValidation = NormalizedEvidence.Incomplete(
                 $"Plugin configuration or inputs could not be read: {exception.Message}");
         }
         if (pluginValidation is not null)
@@ -576,7 +586,8 @@ public sealed class GateRunner
             throw new ArgumentException("Gate output directory cannot be a reparse point.");
 
         if (string.IsNullOrWhiteSpace(request.Invocation.FileName) ||
-            request.Invocation.Arguments.Any(argument => argument is null))
+            request.Invocation.Arguments.Any(argument => argument is null) ||
+            request.Invocation.StandardInput is not null)
             throw new ArgumentException("Executable and immutable argument list are required.");
     }
 
@@ -670,11 +681,24 @@ public sealed class GateRunner
     {
         if (ValidateCapabilityBinding(request, plugin) is { } capabilityFailure)
             return capabilityFailure;
+        NormalizedEvidence? pluginAuthorityFailure;
+        try
+        {
+            pluginAuthorityFailure = plugin.ValidateAuthorityWithoutExecution(request);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            pluginAuthorityFailure = NormalizedEvidence.Incomplete(
+                $"No-execution plugin authority could not be verified: {exception.Message}");
+        }
+        if (pluginAuthorityFailure is not null)
+            return pluginAuthorityFailure;
         if (!request.Policy.AuthorityVerified ||
             !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
-            request.Capability.Fixture || !HasTrustedProductionExecution())
+            request.Capability.Fixture || !HasTrustedProductionExecution() ||
+            !_emitAuthoritativeV2 || _authoritativeReceiptStore is null)
             return NormalizedEvidence.Incomplete(
-                "NOT_APPLICABLE is advisory unless the same trusted production capability, required-gate, and code-owned execution bindings as PASS are present.");
+                "NOT_APPLICABLE is advisory unless the same trusted production capability, required-gate, code-owned execution, and durable v2 provenance bindings as PASS are present.");
         return null;
     }
 

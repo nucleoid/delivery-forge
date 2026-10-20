@@ -107,7 +107,8 @@ public sealed record CommandInvocation(
     IReadOnlyList<string> Arguments,
     string WorkingDirectory,
     IReadOnlyDictionary<string, string>? Environment = null,
-    bool InheritEnvironment = true);
+    bool InheritEnvironment = true,
+    string? StandardInput = null);
 
 public sealed record CommandResult(
     int? ExitCode,

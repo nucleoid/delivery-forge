@@ -61,8 +61,9 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
-        if (_creationOwnedWindows && OperatingSystem.IsWindows())
-            return await WindowsCommandLifetime.ExecuteAsync(invocation, timeout, cancellationToken).ConfigureAwait(false);
+        if (_creationOwnedWindows && (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()))
+            return (await ExecuteBoundedCaptureAsync(
+                invocation, timeout, 64 * 1024 * 1024, cancellationToken).ConfigureAwait(false)).Command;
         var startInfo = new ProcessStartInfo
         {
             FileName = invocation.FileName,
@@ -94,7 +95,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
                 null, string.Empty, $"Process start failed: {exception.Message}",
                 false, false, startedAt, DateTimeOffset.UtcNow);
         }
-        process.StandardInput.Close();
+        var inputTask = WriteStandardInputAsync(process.StandardInput, invocation.StandardInput);
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
 
@@ -134,7 +135,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         var drainCompleted = true;
         try
         {
-            await _waitForDrain(Task.WhenAll(stdoutTask, stderrTask), _waitTimeout).ConfigureAwait(false);
+            await _waitForDrain(Task.WhenAll(stdoutTask, stderrTask, inputTask), _waitTimeout).ConfigureAwait(false);
             stdout = await stdoutTask.ConfigureAwait(false);
             stderr = await stderrTask.ConfigureAwait(false);
         }
@@ -153,7 +154,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             cancelled,
             startedAt,
             DateTimeOffset.UtcNow,
-            drainCompleted && processExited &&
+            drainCompleted && inputTask.Status == TaskStatus.RanToCompletion && processExited &&
             (!timedOut && !cancelled || killSucceeded && exitWaitCompleted))
         {
             LifecycleDiagnostics = new(killAttempted, killAttempted && killSucceeded, killExceptionType, killExceptionDetail,
@@ -161,6 +162,20 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
                 (int)Math.Clamp(_waitTimeout.TotalMilliseconds, 0, int.MaxValue),
                 ObserveStream(stdoutTask), ObserveStream(stderrTask))
         };
+    }
+
+    internal static async Task WriteStandardInputAsync(StreamWriter writer, string? input)
+    {
+        try
+        {
+            if (input is not null)
+                await writer.WriteAsync(input.AsMemory(), CancellationToken.None).ConfigureAwait(false);
+            await writer.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        finally
+        {
+            writer.Close();
+        }
     }
 
     private bool TryKillTree(Process process, out bool attempted, out string? exceptionType,

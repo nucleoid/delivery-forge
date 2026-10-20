@@ -5,7 +5,7 @@ public sealed class GitRepositoryIdentityReaderTests
     [Theory]
     [InlineData("--skip-worktree")]
     [InlineData("--assume-unchanged")]
-    public async Task Production_scope_rejects_status_hidden_bytes(string flag)
+    public async Task Production_scope_ignores_status_hidden_worktree_bytes_and_materializes_commit(string flag)
     {
         using var temp = new TempDirectory();
         await Git(temp.Path, "init");
@@ -23,10 +23,19 @@ public sealed class GitRepositoryIdentityReaderTests
         await File.WriteAllTextAsync(source, "export const hidden = 3;\n", TestContext.Current.CancellationToken);
         var reader = new GitRepositoryIdentityReader(new ProcessCommandExecutor(), temp.Path, baseCommit);
 
-        var error = await Assert.ThrowsAsync<EvidenceRepositoryException>(() =>
-            reader.ReadEvaluationScopeAsync(headCommit, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+        var scope = await reader.ReadEvaluationScopeAsync(
+            headCommit, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
 
-        Assert.Contains("forbidden", error.Message, StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            Assert.Equal("export const head = 2;\n", await File.ReadAllTextAsync(
+                System.IO.Path.Combine(scope.MaterializedRoot!, "app.ts"),
+                TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            GitRepositoryIdentityReader.DeleteMaterialization(scope.MaterializedRoot);
+        }
     }
 
     [Fact]
@@ -63,6 +72,143 @@ public sealed class GitRepositoryIdentityReaderTests
         {
             GitRepositoryIdentityReader.DeleteMaterialization(scope.MaterializedRoot);
         }
+    }
+
+    [Fact]
+    public async Task Production_scope_batches_many_objects_and_preserves_weird_paths()
+    {
+        using var temp = new TempDirectory();
+        await Git(temp.Path, "init");
+        await Git(temp.Path, "config", "user.name", "Delivery Forge Test");
+        await Git(temp.Path, "config", "user.email", "forge@example.invalid");
+        Directory.CreateDirectory(System.IO.Path.Combine(temp.Path, "src"));
+        var weirdPaths = OperatingSystem.IsWindows()
+            ? new[] { "src/space name.ts", "src/ünicode.ts" }
+            : ["src/space name.ts", "src/tab\tname.ts", "src/line\nname.ts", "src/ünicode.ts"];
+        var paths = Enumerable.Range(0, 40).Select(index => $"src/file-{index:D2}.ts")
+            .Concat(weirdPaths).ToArray();
+        foreach (var path in paths)
+            await File.WriteAllTextAsync(System.IO.Path.Combine(temp.Path, path),
+                $"export const value{paths.ToList().IndexOf(path)} = 1;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "add", "--", ".");
+        await Git(temp.Path, "commit", "-m", "base");
+        var baseCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        await File.AppendAllTextAsync(System.IO.Path.Combine(temp.Path, paths[0]),
+            "export const changed = 2;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "commit", "-am", "head");
+        var headCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        var reader = new GitRepositoryIdentityReader(new ProcessCommandExecutor(), temp.Path, baseCommit);
+
+        var scope = await reader.ReadEvaluationScopeAsync(
+            headCommit, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+        try
+        {
+            Assert.Equal(paths.Length, scope.TrackedFiles.Count);
+            var materialized = Directory.EnumerateFiles(scope.MaterializedRoot!, "*", SearchOption.AllDirectories)
+                .Select(path => System.IO.Path.GetRelativePath(scope.MaterializedRoot!, path)).ToArray();
+            Assert.All(paths, path => Assert.True(
+                File.Exists(System.IO.Path.Combine(scope.MaterializedRoot!, path)),
+                $"Missing {path}; materialized: {string.Join(" | ", materialized)}"));
+            Assert.InRange(reader.ObjectBatchInvocationCount, 2, 3);
+        }
+        finally
+        {
+            GitRepositoryIdentityReader.DeleteMaterialization(scope.MaterializedRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Production_scope_reports_missing_batch_object_as_incomplete_evidence()
+    {
+        using var temp = new TempDirectory();
+        await Git(temp.Path, "init");
+        await Git(temp.Path, "config", "user.name", "Delivery Forge Test");
+        await Git(temp.Path, "config", "user.email", "forge@example.invalid");
+        var source = System.IO.Path.Combine(temp.Path, "app.ts");
+        await File.WriteAllTextAsync(source, "export const before = 1;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "add", "app.ts");
+        await Git(temp.Path, "commit", "-m", "base");
+        var baseCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        await File.WriteAllTextAsync(source, "export const head = 2;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "commit", "-am", "head");
+        var headCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        var objectId = (await Git(temp.Path, "rev-parse", "HEAD:app.ts")).Trim();
+        var objectPath = System.IO.Path.Combine(temp.Path, ".git", "objects", objectId[..2], objectId[2..]);
+        Assert.True(File.Exists(objectPath));
+        File.Delete(objectPath);
+
+        var error = await Assert.ThrowsAsync<EvidenceRepositoryException>(() =>
+            new GitRepositoryIdentityReader(new ProcessCommandExecutor(), temp.Path, baseCommit)
+                .ReadEvaluationScopeAsync(headCommit, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+
+        Assert.Contains("batch", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Suppression_scan_caps_directive_bodies_without_suffix_copies()
+    {
+        var source = "/* eslint-disable " + new string('x',
+            JavaScriptSuppressionScanner.MaximumDirectiveBodyBytes + 1) + " */";
+
+        var error = Assert.Throws<EvidenceRepositoryException>(() =>
+            GitRepositoryIdentityReader.ContainsSuppressionDirective(source));
+
+        Assert.Contains("ceiling", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Batch_parser_rejects_malformed_or_truncated_object_frames()
+    {
+        var objectId = TestEvidence.Commit('a');
+        var sizes = new Dictionary<string, int>(StringComparer.Ordinal) { [objectId] = 4 };
+        var malformed = System.Text.Encoding.ASCII.GetBytes($"{objectId} blob 4\nabc\n");
+
+        var error = Assert.Throws<EvidenceRepositoryException>(() =>
+            GitRepositoryIdentityReader.ParseBatchObjects(
+                malformed, [objectId], sizes, TestContext.Current.CancellationToken));
+
+        Assert.Contains("truncated", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Batch_parser_honors_cancellation_before_materializing_objects()
+    {
+        var objectId = TestEvidence.Commit('a');
+        var sizes = new Dictionary<string, int>(StringComparer.Ordinal) { [objectId] = 0 };
+        using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+            TestContext.Current.CancellationToken);
+        cancellation.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() =>
+            GitRepositoryIdentityReader.ParseBatchObjects(
+                System.Text.Encoding.ASCII.GetBytes($"{objectId} blob 0\n\n"),
+                [objectId], sizes, cancellation.Token));
+    }
+
+    [Fact]
+    public void Frozen_input_count_and_byte_caps_fail_closed()
+    {
+        Assert.Throws<EvidenceRepositoryException>(() =>
+            GitRepositoryIdentityReader.ValidateFrozenInputLimits(
+                GitRepositoryIdentityReader.MaximumFrozenInputCount + 1, 0));
+        Assert.Throws<EvidenceRepositoryException>(() =>
+            GitRepositoryIdentityReader.ValidateFrozenInputLimits(
+                1, GitRepositoryIdentityReader.MaximumFrozenInputBytes + 1));
+    }
+
+    [Fact]
+    public async Task Production_scope_honors_cancellation_before_git_batching()
+    {
+        using var temp = new TempDirectory();
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        var reader = new GitRepositoryIdentityReader(
+            new ProcessCommandExecutor(), temp.Path, TestEvidence.Commit('a'));
+
+        await Assert.ThrowsAsync<OperationCanceledException>(() =>
+            reader.ReadEvaluationScopeAsync(
+                TestEvidence.Commit('b'), TimeSpan.FromSeconds(30), cancellation.Token));
     }
 
     [Theory]
@@ -165,7 +311,7 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Fact]
-    public async Task Existing_or_repositioned_suppression_in_a_changed_file_is_never_grandfathered()
+    public async Task Existing_semantically_identical_suppression_in_a_changed_file_is_inherited()
     {
         var head = TestEvidence.Commit('b');
         var reader = new GitRepositoryIdentityReader(
@@ -184,11 +330,11 @@ public sealed class GitRepositoryIdentityReaderTests
         var scope = await reader.ReadEvaluationScopeAsync(
             head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
 
-        Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
+        Assert.Empty(scope.SuppressionViolations!);
     }
 
     [Fact]
-    public async Task Unchanged_blanket_suppression_in_a_changed_file_cannot_authorize_pass()
+    public async Task Unchanged_blanket_suppression_in_a_changed_file_is_inherited()
     {
         var head = TestEvidence.Commit('b');
         const string content = "/* oxlint-disable */\nexport const changed = 2;\n";
@@ -208,7 +354,7 @@ public sealed class GitRepositoryIdentityReaderTests
         var scope = await reader.ReadEvaluationScopeAsync(
             head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
 
-        Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
+        Assert.Empty(scope.SuppressionViolations!);
     }
 
     [Fact]
@@ -268,7 +414,7 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Fact]
-    public async Task Ambiguous_directive_spellings_fail_closed_even_inside_literals_or_prose()
+    public async Task Directive_spellings_inside_literals_or_non_directive_prose_are_ignored()
     {
         var head = TestEvidence.Commit('b');
         var reader = new GitRepositoryIdentityReader(
@@ -287,7 +433,7 @@ public sealed class GitRepositoryIdentityReaderTests
         var scope = await reader.ReadEvaluationScopeAsync(
             head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
 
-        Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
+        Assert.Empty(scope.SuppressionViolations!);
     }
 
     [Theory]
@@ -317,11 +463,15 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Theory]
-    [InlineData("const value = 1; // eslint-disable-line anti-slop/no-chained-type-assertions\n")]
-    [InlineData("// oxlint-disable-next-line anti-slop/no-chained-type-assertions\nconst value = 1;\n")]
-    [InlineData("/* eslint-disable anti-slop/no-chained-type-assertions */\nconst value = 1;\n")]
-    [InlineData("/* oxlint-enable anti-slop/no-chained-type-assertions */\nconst value = 1;\n")]
-    public async Task Actual_supported_directive_comment_forms_are_suppressions(string content)
+    [InlineData("const value = 1; // eslint-disable-line anti-slop/no-chained-type-assertions\n", true)]
+    [InlineData("// oxlint-disable-next-line anti-slop/no-chained-type-assertions\nconst value = 1;\n", true)]
+    [InlineData("/* eslint-disable anti-slop/no-chained-type-assertions */\nconst value = 1;\n", true)]
+    [InlineData("/* oxlint-enable anti-slop/no-chained-type-assertions */\nconst value = 1;\n", false)]
+    [InlineData("// eslint-disable-next-line no-console */, anti-slop/no-object-parameters\nexport function value(input: { x: number }) { return input.x; }\n", true)]
+    [InlineData("/* eslint-disable no-console,\n anti-slop/no-object-parameters */\nexport function value(input: { x: number }) { return input.x; }\n", true)]
+    public async Task Actual_supported_directive_comment_forms_have_semantic_coverage(
+        string content,
+        bool expectedViolation)
     {
         var head = TestEvidence.Commit('b');
         var reader = new GitRepositoryIdentityReader(
@@ -340,7 +490,78 @@ public sealed class GitRepositoryIdentityReaderTests
         var scope = await reader.ReadEvaluationScopeAsync(
             head, TimeSpan.FromMinutes(1), TestContext.Current.CancellationToken);
 
-        Assert.Equal(["src/app.ts"], scope.SuppressionViolations);
+        Assert.Equal(expectedViolation ? ["src/app.ts"] : [], scope.SuppressionViolations);
+    }
+
+    [Theory]
+    [InlineData("// eslint-disable-next-line no-console */, anti-slop/no-object-parameters\nexport function value(input: { x: number }) { return input.x; }\n")]
+    [InlineData("/* eslint-disable no-console,\n anti-slop/no-object-parameters */\nexport function value(input: { x: number }) { return input.x; }\n")]
+    public async Task Production_scope_detects_full_comment_body_suppression_attacks(string attack)
+    {
+        using var temp = new TempDirectory();
+        await Git(temp.Path, "init");
+        await Git(temp.Path, "config", "user.name", "Delivery Forge Test");
+        await Git(temp.Path, "config", "user.email", "forge@example.invalid");
+        var source = System.IO.Path.Combine(temp.Path, "app.ts");
+        await File.WriteAllTextAsync(source, "export const before = 1;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "add", "app.ts");
+        await Git(temp.Path, "commit", "-m", "base");
+        var baseCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        await File.WriteAllTextAsync(source, attack, TestContext.Current.CancellationToken);
+        await Git(temp.Path, "commit", "-am", "head");
+        var headCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+
+        var scope = await new GitRepositoryIdentityReader(
+            new ProcessCommandExecutor(), temp.Path, baseCommit).ReadEvaluationScopeAsync(
+            headCommit, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+        try
+        {
+            Assert.Equal(["app.ts"], scope.SuppressionViolations);
+        }
+        finally
+        {
+            GitRepositoryIdentityReader.DeleteMaterialization(scope.MaterializedRoot);
+        }
+    }
+
+    [Fact]
+    public async Task Production_scope_lints_frozen_git_bytes_despite_checkout_eol_conversion()
+    {
+        if (OperatingSystem.IsWindows())
+            return;
+        using var temp = new TempDirectory();
+        await Git(temp.Path, "init");
+        await Git(temp.Path, "config", "user.name", "Delivery Forge Test");
+        await Git(temp.Path, "config", "user.email", "forge@example.invalid");
+        await File.WriteAllTextAsync(System.IO.Path.Combine(temp.Path, ".gitattributes"),
+            "*.ts text eol=crlf\n", TestContext.Current.CancellationToken);
+        var source = System.IO.Path.Combine(temp.Path, "app.ts");
+        await File.WriteAllTextAsync(source, "export const before = 1;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "add", ".gitattributes", "app.ts");
+        await Git(temp.Path, "commit", "-m", "base");
+        var baseCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        await File.WriteAllTextAsync(source, "export const head = 2;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "commit", "-am", "head");
+        var headCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        File.Delete(source);
+        await Git(temp.Path, "checkout", "--", "app.ts");
+        Assert.Contains("\r\n", await File.ReadAllTextAsync(source, TestContext.Current.CancellationToken));
+
+        var scope = await new GitRepositoryIdentityReader(
+            new ProcessCommandExecutor(), temp.Path, baseCommit).ReadEvaluationScopeAsync(
+            headCommit, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+
+        try
+        {
+            Assert.Equal("export const head = 2;\n", await File.ReadAllTextAsync(
+                System.IO.Path.Combine(scope.MaterializedRoot!, "app.ts"),
+                TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            GitRepositoryIdentityReader.DeleteMaterialization(scope.MaterializedRoot);
+        }
     }
 
     [Fact]

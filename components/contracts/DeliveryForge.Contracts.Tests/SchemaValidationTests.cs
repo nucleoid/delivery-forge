@@ -232,7 +232,7 @@ public sealed class SchemaValidationTests
     }
 
     [Fact]
-    public void Host_receipt_store_is_create_once_and_detects_replacement()
+    public void Host_receipt_store_is_durable_across_instances_and_detects_replacement()
     {
         var policy = LoadNode("evidence-policy.json");
         var receipt = ContractValidator.ParseAndValidate(Bytes(GateNode(policy, "test")).Span);
@@ -241,10 +241,14 @@ public sealed class SchemaValidationTests
         {
             var store = new HostOwnedReceiptStore(root);
             var path = store.Append(receipt);
+            var reopened = new HostOwnedReceiptStore(root);
+            Assert.True(reopened.Provenance.Contains(receipt.Identity));
+            Assert.Equal(receipt.Identity, reopened.Read(receipt.Identity).Identity);
             File.WriteAllText(path, "replaced");
 
             Assert.Throws<IOException>(() => store.Append(receipt));
-            Assert.True(store.Provenance.Contains(receipt.Identity));
+            Assert.False(store.Provenance.Contains(receipt.Identity));
+            Assert.False(reopened.Provenance.Contains(receipt.Identity));
         }
         finally
         {

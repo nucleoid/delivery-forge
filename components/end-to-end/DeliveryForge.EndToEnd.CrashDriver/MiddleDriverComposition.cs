@@ -114,6 +114,9 @@ internal static class MiddleDriverComposition
                     actual.SourceChanged || actual.Execution.TimedOut || actual.Execution.Cancelled || !actual.Execution.OwnedProcessQuiescent)
                     throw new InvalidOperationException("Genuine advisory test/TRX gate prerequisite was not established.");
                 files.Add(boundary); files.AddRange(actual.ArtifactHashes.Keys.Select(name => Path.Combine(gateDirectory, name)));
+                var persistedReceipt = ContractValidator.ParseAndValidate(await Read(boundary, input, token));
+                files.Add(Path.Combine(input.ArtifactRoot, "host-owned-gate-receipts", ".provenance",
+                    persistedReceipt.Identity.Replace(':', '-') + ".entry"));
                 files.Add(Path.Combine(input.ArtifactRoot, "actual-driver-gate-configuration.json"));
                 files.Add(Path.Combine(input.ArtifactRoot, "actual-driver-gate-provenance.json"));
                 var gateObservation = Path.Combine(input.ArtifactRoot, "actual-driver-gate-observation.json");
@@ -336,14 +339,16 @@ internal static class MiddleDriverComposition
             frozenBase = input.RuntimeBaseCommit
         });
         var configPath = Path.Combine(input.ArtifactRoot, "actual-driver-gate-configuration.json"); await WriteBytes(configPath, configuration, token);
-        var hostReceiptStore = new HostOwnedReceiptStore(Path.Combine(
-            input.ArtifactRoot, "host-owned-gate-receipts"));
-        var gate = await new GateRunner(
+        var authoritativeHost = new AuthoritativeEvaluationHost(
             executor, reader, clone, input.RuntimeBaseCommit,
-            emitAuthoritativeV2: true,
-            authoritativeReceiptStore: hostReceiptStore).RunAsync(new("test", policy, detection.Capability,
+            Path.Combine(input.ArtifactRoot, "host-owned-gate-receipts"));
+        var gate = await authoritativeHost.RunAsync(new("test", policy, detection.Capability,
             EvidenceAdapterKind.DotNet, Hash(configuration), before, invocation, "actual-middle-driver",
             Remaining(input, 75), Path.Combine(input.ArtifactRoot, "actual-driver-gates")), token);
+        var receipt = ContractValidator.ParseAndValidate(await Read(gate.ReceiptPath, input, token));
+        if (!authoritativeHost.ReceiptProvenance.Contains(receipt.Identity) ||
+            authoritativeHost.ReadReceipt(receipt.Identity).Identity != receipt.Identity)
+            throw new IOException("Authoritative host could not re-open its durable receipt provenance.");
         var provenance = Path.Combine(input.ArtifactRoot, "actual-driver-gate-provenance.json");
         await Write(provenance, new
         {
@@ -528,9 +533,19 @@ internal static class MiddleDriverComposition
     {
         Within(receiptPath, input);
         var receiptDirectory = Path.GetDirectoryName(receiptPath)!;
-        if (Path.GetFileName(receiptDirectory) != "receipts") throw new IOException("Public gate receipt directory differs.");
-        var gateDirectory = Path.GetDirectoryName(receiptDirectory) ?? throw new IOException("Public gate artifact directory is missing.");
+        string gateDirectory;
+        if (Path.GetFileName(receiptDirectory) == "receipts")
+            gateDirectory = Path.GetDirectoryName(receiptDirectory) ??
+                throw new IOException("Public gate artifact directory is missing.");
+        else if (string.Equals(
+                     Path.GetFullPath(receiptDirectory),
+                     Path.GetFullPath(Path.Combine(input.ArtifactRoot, "host-owned-gate-receipts")),
+                     PathComparison()))
+            gateDirectory = Path.Combine(input.ArtifactRoot, "actual-driver-gates", "test");
+        else
+            throw new IOException("Public gate receipt directory differs.");
         Within(gateDirectory, input);
+        if (!Directory.Exists(gateDirectory)) throw new IOException("Public gate artifact directory is missing.");
         return gateDirectory; // GateRunner stores raw artifacts beside its receipts subdirectory.
     }
 
@@ -540,6 +555,10 @@ internal static class MiddleDriverComposition
         var bytes = await Read(receiptPath, input, token);
         var receipt = ContractValidator.ParseAndValidate(bytes);
         if (receipt.SchemaName != "gate-receipt") throw new IOException("Actual boundary is not a canonical gate receipt.");
+        var durable = new HostOwnedReceiptStore(Path.Combine(input.ArtifactRoot, "host-owned-gate-receipts"))
+            .Read(receipt.Identity);
+        if (!durable.CanonicalBytes.Span.SequenceEqual(bytes))
+            throw new IOException("Fresh consumer could not verify the durable host receipt provenance.");
         using var document = JsonDocument.Parse(receipt.CanonicalBytes);
         var gate = document.RootElement;
         var artifactDirectory = GateArtifactDirectory(receiptPath, input);

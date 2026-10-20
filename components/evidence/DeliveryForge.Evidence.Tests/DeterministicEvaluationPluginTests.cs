@@ -184,6 +184,13 @@ public sealed class DeterministicEvaluationPluginTests
         var original = TestEvidence.GateRequest(temp.Path);
         var executableIdentity = $"sha256:{Convert.ToHexStringLower(
             System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(nodePath)))}";
+        var invocation = original.Invocation with
+        {
+            FileName = nodePath,
+            Arguments = [entryPoint, "--config", config, "--format", "json", "--no-ignore", "--disable-nested-config"],
+            Environment = new Dictionary<string, string>(StringComparer.Ordinal),
+            InheritEnvironment = false
+        };
         var request = original with
         {
             GateId = "anti-slop",
@@ -200,7 +207,8 @@ public sealed class DeterministicEvaluationPluginTests
                 "oxlint", "1.78.0", "oxlint-json-v1", true, [], nodePath,
                 executableIdentity, ["lint"], original.Invocation.WorkingDirectory),
             Adapter = EvidenceAdapterKind.External,
-            Invocation = original.Invocation with { FileName = nodePath, Arguments = [entryPoint] },
+            ConfigurationIdentity = AntiSlopEvaluationPlugin.ComputeConfigurationIdentity(invocation, false),
+            Invocation = invocation,
             Plugin = new EvaluationPluginSelection("dmmulroy.anti-slop", true, [])
         };
         var runner = new GateRunner(
@@ -218,6 +226,69 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.Contains("advisory", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.False(result.ProductionCapable);
+    }
+
+    [Fact]
+    public async Task Authoritative_anti_slop_not_applicable_validates_pin_bundle_config_scope_and_provenance()
+    {
+        using var repository = new TempDirectory();
+        using var artifacts = new TempDirectory();
+        await Git(repository.Path, "init");
+        await Git(repository.Path, "config", "user.name", "Delivery Forge Test");
+        await Git(repository.Path, "config", "user.email", "forge@example.invalid");
+        await File.WriteAllTextAsync(System.IO.Path.Combine(repository.Path, "Subject.cs"),
+            "public static class Subject { }\n", TestContext.Current.CancellationToken);
+        await Git(repository.Path, "add", "Subject.cs");
+        await Git(repository.Path, "commit", "-m", "base");
+        var commit = (await Git(repository.Path, "rev-parse", "HEAD")).Trim();
+        var (config, nodePath, entryPoint) = CreateFixtureAntiSlopClosure(artifacts.Path);
+        var invocation = new CommandInvocation(
+            nodePath,
+            [entryPoint, "--config", config, "--format", "json", "--no-ignore", "--disable-nested-config"],
+            repository.Path,
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            InheritEnvironment: false);
+        var reader = new GitRepositoryIdentityReader(new ProcessCommandExecutor(), repository.Path, commit);
+        var expected = await reader.ReadAsync(TestContext.Current.CancellationToken);
+        var executableIdentity = $"sha256:{Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(nodePath)))}";
+        var request = new GateRequest(
+            "anti-slop",
+            new ResolvedEvidencePolicy(
+                TestEvidence.Identity('1'), TestEvidence.Identity('2'), commit,
+                PolicyAuthorityKind.ProtectedGitBase, 0m, ["anti-slop"], authorityVerified: true,
+                sourceRepositoryRoot: repository.Path,
+                requiredGatePluginBindings:
+                [new RequiredGatePluginBinding(
+                    "anti-slop", "dmmulroy.anti-slop",
+                    $"0.1.2+{AntiSlopEvaluationPlugin.UpstreamCommit}", "oxlint")],
+                allowedNotApplicable: new HashSet<string>(["anti-slop"], StringComparer.Ordinal)),
+            ToolCapability.FromDetection(
+                "oxlint", AntiSlopEvaluationPlugin.OxlintVersion, "oxlint-json-v1", false, [],
+                nodePath, executableIdentity, ["lint"], repository.Path),
+            EvidenceAdapterKind.External,
+            AntiSlopEvaluationPlugin.ComputeConfigurationIdentity(invocation, effectRulesEnabled: false),
+            expected,
+            invocation,
+            "frozen-javascript-family",
+            TimeSpan.FromSeconds(30),
+            System.IO.Path.Combine(artifacts.Path, "gate-output"),
+            new EvaluationPluginSelection("dmmulroy.anti-slop", Enabled: true, Inputs: []));
+        var host = new AuthoritativeEvaluationHost(
+            new ProcessCommandExecutor(), reader, repository.Path, commit,
+            System.IO.Path.Combine(artifacts.Path, "host-receipts"),
+            DeterministicEvaluationPluginRegistry.CreateBuiltIns(
+                System.IO.Path.GetDirectoryName(config)!, nodePath));
+
+        var result = await host.RunAsync(request, TestContext.Current.CancellationToken);
+        var receipt = ContractValidator.ParseAndValidate(File.ReadAllBytes(result.ReceiptPath));
+        using var document = System.Text.Json.JsonDocument.Parse(receipt.CanonicalBytes);
+
+        Assert.Equal(GateOutcome.NotApplicable, result.Outcome);
+        Assert.True(result.ProductionCapable);
+        Assert.True(host.ReceiptProvenance.Contains(receipt.Identity));
+        Assert.True(GateReceiptAuthority.TryValidateAuthoritativeOutcome(
+            document.RootElement, out var reason), reason);
     }
 
     [Fact]
@@ -831,5 +902,15 @@ public sealed class DeterministicEvaluationPluginTests
             System.IO.Path.Combine(root, "oxlint.config.ts"),
             System.IO.Path.Combine(nodeDirectory, "node"),
             System.IO.Path.Combine(root, "node_modules", "oxlint", "bin", "oxlint"));
+    }
+
+    private static async Task<string> Git(string root, params string[] arguments)
+    {
+        var result = await new ProcessCommandExecutor().ExecuteAsync(
+            new CommandInvocation("git", arguments, root,
+                new Dictionary<string, string> { ["GIT_OPTIONAL_LOCKS"] = "0" }),
+            TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        Assert.Equal(0, result.ExitCode);
+        return result.StandardOutput;
     }
 }

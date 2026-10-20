@@ -21,7 +21,9 @@ function run(fixture:
   | "suppression"
   | "suppression-line-division"
   | "suppression-reserved-method"
-  | "suppression-adjacent-quote"): {
+  | "suppression-adjacent-quote"
+  | "suppression-line-comment-terminator"
+  | "suppression-multiline-block"): {
   status: number | null;
   report: Report;
 } {
@@ -80,6 +82,8 @@ for (const bypass of [
   "suppression-line-division",
   "suppression-reserved-method",
   "suppression-adjacent-quote",
+  "suppression-line-comment-terminator",
+  "suppression-multiline-block",
 ] as const) {
   const result = run(bypass);
   assert.equal(result.status, 0, `${bypass}: pinned Oxlint must demonstrate the suppression attack`);
@@ -88,4 +92,4 @@ for (const bypass of [
   assert.deepEqual(result.report.diagnostics, []);
 }
 
-console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, four suppression attacks reproduced");
+console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, six suppression attacks reproduced");

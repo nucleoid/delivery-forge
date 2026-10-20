@@ -104,13 +104,22 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
 
     public NormalizedEvidence? ValidateBeforeExecution(GateRequest request)
     {
+        var authorityFailure = ValidateAuthorityWithoutExecution(request);
+        if (authorityFailure is not null)
+            return authorityFailure;
+        var inputs = DeterministicEvaluationPluginRegistry.NormalizeInputs(request.Plugin?.Inputs ?? []);
+        return inputs.Count == 0
+            ? NormalizedEvidence.Incomplete("Anti-slop selected zero JavaScript-family inputs.")
+            : null;
+    }
+
+    public NormalizedEvidence? ValidateAuthorityWithoutExecution(GateRequest request)
+    {
         if (!string.Equals(request.Capability.Version, OxlintVersion, StringComparison.Ordinal) ||
             !string.Equals(request.Capability.FormatVersion, "oxlint-json-v1", StringComparison.Ordinal))
             return NormalizedEvidence.Incomplete(
                 "Anti-slop requires the exact pinned Oxlint 1.78.0 JSON capability.");
         var inputs = DeterministicEvaluationPluginRegistry.NormalizeInputs(request.Plugin?.Inputs ?? []);
-        if (inputs.Count == 0)
-            return NormalizedEvidence.Incomplete("Anti-slop selected zero JavaScript-family inputs.");
         var unsupported = inputs.Where(input => !IsSupportedInput(input)).ToArray();
         if (unsupported.Length > 0)
             return NormalizedEvidence.Incomplete(

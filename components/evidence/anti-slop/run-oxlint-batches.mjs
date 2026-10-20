@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 
 const fail = (reason) => {
@@ -16,11 +16,14 @@ if (args.length !== 6 || args[0] !== "--oxlint" || args[2] !== "--config" || arg
 
 let inputs;
 try {
+  if (statSync(args[5]).size > 8 * 1024 * 1024)
+    fail("input manifest exceeds the 8 MiB ceiling");
   inputs = JSON.parse(readFileSync(args[5], "utf8"));
 } catch (error) {
   fail(`input manifest unavailable: ${error.message}`);
 }
-if (!Array.isArray(inputs) || inputs.some((value) => typeof value !== "string"))
+if (!Array.isArray(inputs) || inputs.length > 100_000 ||
+    inputs.some((value) => typeof value !== "string" || Buffer.byteLength(value) > 4096))
   fail("input manifest must be a JSON string array");
 
 const prefix = ["--config", args[3], "--format", "json", "--no-ignore", "--disable-nested-config"];
@@ -39,20 +42,28 @@ for (const input of inputs) {
 }
 if (batch.length > 0) batches.push(batch);
 if (batches.length === 0) fail("zero inputs cannot be executed");
+if (batches.length > 4096) fail("input manifest requires too many bounded Oxlint batches");
 
 const diagnostics = [];
 let numberOfFiles = 0;
 let numberOfRules;
 let exitCode = 0;
+let diagnosticBytes = 0;
+const deadline = Date.now() + 15 * 60_000;
 for (const paths of batches) {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) fail("shared Oxlint batch deadline expired");
   const result = spawnSync(process.execPath, [args[1], ...prefix, ...paths], {
     cwd: process.cwd(),
     env: process.env,
     encoding: "utf8",
     maxBuffer: 1024 * 1024,
+    timeout: remaining,
+    killSignal: "SIGKILL",
     windowsHide: true
   });
-  if (result.error) fail(`Oxlint batch failed to start: ${result.error.message}`);
+  if (result.error) fail(`Oxlint batch failed to start or settle before the shared deadline: ${result.error.message}`);
+  if (result.signal) fail(`Oxlint batch was terminated by ${result.signal}`);
   let report;
   try {
     report = JSON.parse(result.stdout);
@@ -64,6 +75,11 @@ for (const paths of batches) {
     fail("Oxlint batch returned an unsupported report");
   if (numberOfRules !== undefined && numberOfRules !== report.number_of_rules)
     fail("Oxlint rule count changed between batches");
+  const batchDiagnosticBytes = Buffer.byteLength(JSON.stringify(report.diagnostics));
+  diagnosticBytes += batchDiagnosticBytes;
+  if (report.diagnostics.length > 10_000 || diagnostics.length + report.diagnostics.length > 10_000 ||
+      diagnosticBytes > 768 * 1024)
+    fail("Oxlint diagnostics exceed the deterministic aggregate ceiling");
   numberOfRules = report.number_of_rules;
   diagnostics.push(...report.diagnostics);
   numberOfFiles += report.number_of_files;

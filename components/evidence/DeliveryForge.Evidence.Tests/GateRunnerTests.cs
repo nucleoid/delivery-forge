@@ -1,6 +1,8 @@
 namespace DeliveryForge.Evidence.Tests;
 
+using DeliveryForge.Contracts.Validation;
 using System.Reflection;
+using System.Diagnostics;
 using System.Text.Json;
 
 public sealed class GateRunnerTests
@@ -37,6 +39,33 @@ public sealed class GateRunnerTests
             emitAuthoritativeV2: true));
 
         Assert.Contains("host-owned", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Authoritative_host_composition_emits_v2_and_reopens_durable_provenance()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path) with
+        {
+            Plugin = new EvaluationPluginSelection("delivery-forge.dotnet", Enabled: false)
+        };
+        var receiptRoot = System.IO.Path.Combine(temp.Path, "host-receipts");
+        var host = new AuthoritativeEvaluationHost(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory,
+            TestEvidence.Commit('a'),
+            receiptRoot);
+
+        var result = await host.RunAsync(request, TestContext.Current.CancellationToken);
+        var receipt = ContractValidator.ParseAndValidate(await File.ReadAllBytesAsync(
+            result.ReceiptPath, TestContext.Current.CancellationToken));
+        var reopened = new HostOwnedReceiptStore(receiptRoot);
+
+        Assert.Equal("2.0.0", receipt.SchemaVersion);
+        Assert.True(host.ReceiptProvenance.Contains(receipt.Identity));
+        Assert.True(reopened.Provenance.Contains(receipt.Identity));
+        Assert.Equal(receipt.Identity, host.ReadReceipt(receipt.Identity).Identity);
     }
 
     [Fact]
@@ -131,6 +160,74 @@ public sealed class GateRunnerTests
         Assert.True(File.Exists(retry.ReceiptPath));
         Assert.Contains("retry-", retry.ReceiptPath, StringComparison.Ordinal);
         Assert.False(File.Exists(System.IO.Path.Combine(temp.Path, request.GateId + ".claim")));
+    }
+
+    [Fact]
+    public async Task Live_claim_is_never_stolen_and_exited_child_claim_is_recovered_for_retry()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path) with
+        {
+            Plugin = new EvaluationPluginSelection("delivery-forge.dotnet", Enabled: false)
+        };
+        using var child = Process.Start(new ProcessStartInfo
+        {
+            FileName = OperatingSystem.IsWindows() ? Environment.GetEnvironmentVariable("ComSpec")! : "/bin/sh",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            ArgumentList =
+            {
+                OperatingSystem.IsWindows() ? "/d" : "-c",
+                OperatingSystem.IsWindows() ? "/s" : "sleep 1",
+                OperatingSystem.IsWindows() ? "/c" : string.Empty,
+                OperatingSystem.IsWindows() ? "ping -n 3 127.0.0.1 >NUL" : string.Empty
+            }
+        }) ?? throw new InvalidOperationException("Child claim fixture did not start.");
+        var claimPath = System.IO.Path.Combine(temp.Path, request.GateId + ".claim");
+        await File.WriteAllBytesAsync(
+            claimPath, GateClaimLease.CreatePayloadForProcess(child.Id), TestContext.Current.CancellationToken);
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory, TestEvidence.Commit('a'));
+
+        var live = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+        Assert.Equal(GateOutcome.Incomplete, live.Outcome);
+        Assert.Contains("live process", live.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(claimPath));
+
+        await child.WaitForExitAsync(TestContext.Current.CancellationToken);
+        var recovered = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+        Assert.Equal(GateOutcome.Incomplete, recovered.Outcome);
+        Assert.Contains("interrupted", recovered.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(recovered.ReceiptPath));
+        Assert.False(File.Exists(claimPath));
+
+        var retry = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+        Assert.Equal(GateOutcome.Incomplete, retry.Outcome);
+        Assert.Contains("disabled", retry.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(retry.ReceiptPath));
+    }
+
+    [Fact]
+    public async Task Ambiguous_oversized_claim_persists_incomplete_without_takeover()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path);
+        var claimPath = System.IO.Path.Combine(temp.Path, request.GateId + ".claim");
+        await File.WriteAllBytesAsync(
+            claimPath, new byte[GateClaimLease.MaximumClaimBytes + 1], TestContext.Current.CancellationToken);
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory, TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("ambiguous", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(GateClaimLease.MaximumClaimBytes + 1, new FileInfo(claimPath).Length);
+        Assert.True(File.Exists(result.ReceiptPath));
     }
 
     [Fact]
@@ -367,7 +464,7 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
-    public async Task Preexisting_gate_directory_gets_a_separate_error_receipt_without_execution()
+    public async Task Preexisting_incomplete_gate_directory_gets_a_separate_incomplete_receipt_without_execution()
     {
         using var temp = new TempDirectory();
         var request = TestEvidence.GateRequest(temp.Path);
@@ -379,9 +476,9 @@ public sealed class GateRunnerTests
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
-        Assert.Contains("existed", result.Reason, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("claim-error", result.ReceiptPath, StringComparison.Ordinal);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("incomplete", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("claim-incomplete", result.ReceiptPath, StringComparison.Ordinal);
         Assert.True(File.Exists(result.ReceiptPath));
     }
 

@@ -57,6 +57,8 @@ public interface IDeterministicEvaluationPlugin
 
     NormalizedEvidence? ValidateBeforeExecution(GateRequest request) => null;
 
+    NormalizedEvidence? ValidateAuthorityWithoutExecution(GateRequest request) => null;
+
     NormalizedEvidence? ValidateAfterExecution(
         GateRequest request,
         EvaluationPluginSnapshot snapshot) => null;

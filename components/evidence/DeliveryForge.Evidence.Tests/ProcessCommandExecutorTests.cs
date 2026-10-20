@@ -8,6 +8,50 @@ namespace DeliveryForge.Evidence.Tests;
 public sealed class ProcessCommandExecutorTests
 {
     [Fact]
+    public async Task Creation_owned_capture_writes_bounded_standard_input()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+        const string input = "first\nsecond\n";
+
+        var result = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
+            new CommandInvocation(
+                "/bin/sh", ["-c", "cat"], System.IO.Path.GetTempPath(), StandardInput: input),
+            TimeSpan.FromSeconds(10), 1024, TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.Command.ExitCode);
+        Assert.Equal(input, result.Command.StandardOutput);
+        Assert.True(result.Command.OwnedProcessQuiescent);
+    }
+
+    [Fact]
+    public async Task Linux_timeout_kills_exited_roots_remaining_process_group_children()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+        using var temp = new TempDirectory();
+        var childPath = Path.Combine(temp.Path, "child.pid");
+        var script = Path.Combine(temp.Path, "descendant.sh");
+        await File.WriteAllTextAsync(
+            script,
+            $"sleep 30 &\nprintf '%s' \"$!\" > '{childPath.Replace("'", "'\\''", StringComparison.Ordinal)}'\nexit 0\n",
+            TestContext.Current.CancellationToken);
+
+        var result = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
+            new CommandInvocation("/bin/sh", [script], temp.Path),
+            TimeSpan.FromSeconds(2), 1024, TestContext.Current.CancellationToken);
+
+        Assert.True(result.Command.TimedOut);
+        Assert.True(result.Command.OwnedProcessQuiescent);
+        Assert.True(result.Command.LifecycleDiagnostics?.KillAttempted);
+        Assert.True(result.Command.LifecycleDiagnostics?.KillSucceeded);
+        var childPid = int.Parse(await File.ReadAllTextAsync(childPath, TestContext.Current.CancellationToken));
+        Assert.True(SpinWait.SpinUntil(
+            () => !Directory.Exists($"/proc/{childPid}"), TimeSpan.FromSeconds(2)),
+            $"Owned descendant {childPid} survived process-group cleanup.");
+    }
+
+    [Fact]
     public async Task Bounded_capture_accepts_existing_gate_budgets_over_fifteen_minutes()
     {
         if (!OperatingSystem.IsLinux())
