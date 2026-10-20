@@ -205,7 +205,8 @@ public sealed record RepositoryEvaluationScope(
     IReadOnlySet<string> IgnoredFiles,
     string? InputSetIdentity = null,
     IReadOnlyList<string>? SuppressionViolations = null,
-    IReadOnlyList<string>? InvalidInputs = null);
+    IReadOnlyList<string>? InvalidInputs = null,
+    IReadOnlyList<string>? RetiredIgnoredFiles = null);
 
 public interface IRepositoryEvaluationScopeReader
 {

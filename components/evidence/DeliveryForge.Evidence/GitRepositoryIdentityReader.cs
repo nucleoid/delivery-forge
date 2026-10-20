@@ -8,6 +8,7 @@ public sealed class GitRepositoryIdentityReader(
     string repositoryRoot,
     string protectedBaseCommit) : IRepositoryIdentityReader, IRepositoryEvaluationScopeReader
 {
+    internal const int MaximumGitListingBytes = 64 * 1024 * 1024;
     private readonly string _repositoryRoot = Path.GetFullPath(repositoryRoot);
     internal bool SupportsCreationOwnedBoundedRead =>
         executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true };
@@ -67,8 +68,10 @@ public sealed class GitRepositoryIdentityReader(
         var javascriptPaths = entries
             .Where(entry => Adapters.AntiSlopEvaluationPlugin.IsSupportedInput(entry.Path))
             .ToArray();
+        var ignoreSelection = await ReadProtectedIgnoresAsync(entries, cancellationToken, deadline).ConfigureAwait(false);
+        var ignores = ignoreSelection.Active;
         var invalidInputs = javascriptPaths
-            .Where(entry => entry.Mode is not ("100644" or "100755"))
+            .Where(entry => entry.Mode is not ("100644" or "100755") && !ignores.Contains(entry.Path))
             .Select(entry => entry.Path)
             .ToArray();
         var javascript = javascriptPaths
@@ -80,13 +83,18 @@ public sealed class GitRepositoryIdentityReader(
             .ConfigureAwait(false);
         var changedPaths = changed.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries)
             .Select(path => path.Replace('\\', '/')).ToHashSet(StringComparer.Ordinal);
+        if (SupportsCreationOwnedBoundedRead)
+            await VerifyWorkingTreeInputsAsync(javascript, ignores, cancellationToken, deadline).ConfigureAwait(false);
         var violations = new List<string>();
         foreach (var entry in javascript.Where(entry => changedPaths.Contains(entry.Path)))
         {
-            var headBlob = await GitAsync(["show", $"{expectedHeadCommit}:{entry.Path}"], cancellationToken, deadline)
+            var headBlob = await GitAsync(["cat-file", "blob", "--end-of-options", entry.ObjectId], cancellationToken, deadline)
                 .ConfigureAwait(false);
-            var baseBlob = await TryGitAsync(
-                ["show", $"{protectedBaseCommit}:{entry.Path}"], cancellationToken, deadline)
+            var baseObject = await TryGitAsync(
+                ["rev-parse", "--verify", $"{protectedBaseCommit}:{entry.Path}"], cancellationToken, deadline)
+                .ConfigureAwait(false);
+            var baseBlob = baseObject is null ? null : await GitAsync(
+                ["cat-file", "blob", "--end-of-options", baseObject.StandardOutput.Trim()], cancellationToken, deadline)
                 .ConfigureAwait(false);
             // Changed files containing a live directive are not grandfathered. This makes
             // moved enable/disable and next-line directives fail closed because their coverage
@@ -95,8 +103,6 @@ public sealed class GitRepositoryIdentityReader(
                 (baseBlob is not null && SuppressionDirectives(baseBlob.StandardOutput).Count > 0))
                 violations.Add(entry.Path);
         }
-
-        var ignores = await ReadProtectedIgnoresAsync(entries, cancellationToken, deadline).ConfigureAwait(false);
 
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         foreach (var entry in javascriptPaths)
@@ -109,12 +115,20 @@ public sealed class GitRepositoryIdentityReader(
             hash.AppendData([0]);
             hash.AppendData([ignores.Contains(entry.Path) ? (byte)1 : (byte)0]);
         }
+        foreach (var retired in ignoreSelection.Retired)
+        {
+            hash.AppendData(Encoding.UTF8.GetBytes("retired-ignore"));
+            hash.AppendData([0]);
+            hash.AppendData(Encoding.UTF8.GetBytes(retired));
+            hash.AppendData([0]);
+        }
         return new RepositoryEvaluationScope(
             files,
             ignores,
             $"sha256:{Convert.ToHexStringLower(hash.GetHashAndReset())}",
             violations,
-            invalidInputs);
+            invalidInputs,
+            ignoreSelection.Retired);
     }
 
     private static TreeEntry ParseTreeEntry(string value)
@@ -139,6 +153,9 @@ public sealed class GitRepositoryIdentityReader(
         return directives;
     }
 
+    internal static bool ContainsSuppressionDirective(string content) =>
+        SuppressionDirectives(content).Count > 0;
+
     private static void ScanCode(
         string content,
         ref int index,
@@ -157,13 +174,22 @@ public sealed class GitRepositoryIdentityReader(
             }
             if (current is '\'' or '"')
             {
-                SkipQuoted(content, ref index, current);
+                if (current == '\'' && index > 0 && index + 1 < content.Length &&
+                    char.IsLetterOrDigit(content[index - 1]) && char.IsLetterOrDigit(content[index + 1]))
+                {
+                    // JSX text contractions are not JavaScript string delimiters.
+                    index++;
+                    continue;
+                }
+                if (!SkipQuoted(content, ref index, current))
+                    directives.Add("ambiguous-unterminated-string-or-regex");
                 canStartRegularExpression = false;
                 continue;
             }
             if (current == '`')
             {
-                ScanTemplate(content, ref index, directives);
+                if (!ScanTemplate(content, ref index, directives))
+                    directives.Add("ambiguous-unterminated-template");
                 canStartRegularExpression = false;
                 continue;
             }
@@ -186,9 +212,11 @@ public sealed class GitRepositoryIdentityReader(
                 AddDirective(content[start..end], directives);
                 continue;
             }
-            if (current == '/' && canStartRegularExpression)
+            if (current == '/' && (index == 0 || content[index - 1] != '<') &&
+                (canStartRegularExpression || FollowsControlCondition(content, index) || StartsStatementLine(content, index)))
             {
-                SkipRegularExpression(content, ref index);
+                if (!SkipRegularExpression(content, ref index))
+                    directives.Add("ambiguous-unterminated-regex");
                 canStartRegularExpression = false;
                 continue;
             }
@@ -240,7 +268,7 @@ public sealed class GitRepositoryIdentityReader(
         }
     }
 
-    private static void ScanTemplate(string content, ref int index, List<string> directives)
+    private static bool ScanTemplate(string content, ref int index, List<string> directives)
     {
         index++;
         while (index < content.Length)
@@ -253,7 +281,7 @@ public sealed class GitRepositoryIdentityReader(
             if (content[index] == '`')
             {
                 index++;
-                return;
+                return true;
             }
             if (content[index] == '$' && index + 1 < content.Length && content[index + 1] == '{')
             {
@@ -263,24 +291,33 @@ public sealed class GitRepositoryIdentityReader(
             }
             index++;
         }
+        return false;
     }
 
-    private static void SkipQuoted(string content, ref int index, char quote)
+    private static bool SkipQuoted(string content, ref int index, char quote)
     {
         index++;
         while (index < content.Length)
         {
             if (content[index] == '\\')
             {
+                if (index + 1 < content.Length && content[index + 1] is '\r' or '\n')
+                {
+                    index += content[index + 1] == '\r' && index + 2 < content.Length && content[index + 2] == '\n' ? 3 : 2;
+                    continue;
+                }
                 index = Math.Min(content.Length, index + 2);
                 continue;
             }
+            if (content[index] is '\r' or '\n')
+                return false;
             if (content[index++] == quote)
-                return;
+                return true;
         }
+        return false;
     }
 
-    private static void SkipRegularExpression(string content, ref int index)
+    private static bool SkipRegularExpression(string content, ref int index)
     {
         index++;
         var inCharacterClass = false;
@@ -300,10 +337,11 @@ public sealed class GitRepositoryIdentityReader(
                 index++;
                 while (index < content.Length && IsIdentifierPart(content[index]))
                     index++;
-                return;
+                return true;
             }
             index++;
         }
+        return false;
     }
 
     private static void AddDirective(string commentBody, List<string> directives)
@@ -325,6 +363,32 @@ public sealed class GitRepositoryIdentityReader(
     private static bool IsIdentifierPart(char value) =>
         char.IsLetterOrDigit(value) || value is '_' or '$';
 
+    private static bool StartsStatementLine(string content, int index)
+    {
+        for (var cursor = index - 1; cursor >= 0 && content[cursor] is not ('\r' or '\n'); cursor--)
+            if (!char.IsWhiteSpace(content[cursor])) return false;
+        return true;
+    }
+
+    private static bool FollowsControlCondition(string content, int index)
+    {
+        var cursor = index - 1;
+        while (cursor >= 0 && char.IsWhiteSpace(content[cursor])) cursor--;
+        if (cursor < 0 || content[cursor] != ')') return false;
+        var depth = 1;
+        cursor--;
+        while (cursor >= 0 && depth > 0)
+        {
+            if (content[cursor] == ')') depth++;
+            else if (content[cursor] == '(') depth--;
+            cursor--;
+        }
+        while (cursor >= 0 && char.IsWhiteSpace(content[cursor])) cursor--;
+        var end = cursor + 1;
+        while (cursor >= 0 && IsIdentifierPart(content[cursor])) cursor--;
+        return content[(cursor + 1)..end] is "if" or "while" or "for" or "with" or "switch" or "catch";
+    }
+
     private static readonly HashSet<string> ExpressionPrefixKeywords = new(StringComparer.Ordinal)
     {
         "await", "case", "delete", "do", "else", "in", "instanceof", "new", "of", "return", "throw",
@@ -337,7 +401,7 @@ public sealed class GitRepositoryIdentityReader(
         "oxlint-disable-next-line", "oxlint-disable-line", "oxlint-disable", "oxlint-enable"
     ];
 
-    private async Task<HashSet<string>> ReadProtectedIgnoresAsync(
+    private async Task<ProtectedIgnoreSelection> ReadProtectedIgnoresAsync(
         IReadOnlyList<TreeEntry> entries,
         CancellationToken cancellationToken,
         DateTimeOffset deadline)
@@ -346,24 +410,76 @@ public sealed class GitRepositoryIdentityReader(
         var result = await TryGitAsync(["show", $"{protectedBaseCommit}:{path}"], cancellationToken, deadline)
             .ConfigureAwait(false);
         if (result is null)
-            return new HashSet<string>(StringComparer.Ordinal);
+            return new(new HashSet<string>(StringComparer.Ordinal), []);
         var trackedJavascript = entries
             .Where(entry => Adapters.AntiSlopEvaluationPlugin.IsSupportedInput(entry.Path))
             .Select(entry => entry.Path)
             .ToHashSet(StringComparer.Ordinal);
         var ignored = new HashSet<string>(StringComparer.Ordinal);
+        var retired = new List<string>();
         foreach (var raw in result.StandardOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries))
         {
             var value = raw.Trim().Replace('\\', '/');
             if (value.Length == 0 || value.StartsWith('#'))
                 continue;
             var normalized = DeterministicEvaluationPluginRegistry.NormalizeInputs([value]).Single();
-            if (!trackedJavascript.Contains(normalized))
-                throw new EvidenceRepositoryException(
-                    $"Protected anti-slop ignore names a non-tracked JavaScript-family path: {normalized}");
-            ignored.Add(normalized);
+            if (trackedJavascript.Contains(normalized))
+                ignored.Add(normalized);
+            else
+                retired.Add(normalized);
         }
-        return ignored;
+        return new(ignored, retired.Order(StringComparer.Ordinal).ToArray());
+    }
+
+    private async Task VerifyWorkingTreeInputsAsync(
+        IReadOnlyList<TreeEntry> javascript,
+        IReadOnlySet<string> ignores,
+        CancellationToken cancellationToken,
+        DateTimeOffset deadline)
+    {
+        var flags = await GitAsync(["ls-files", "-v", "-z", "--"], cancellationToken, deadline)
+            .ConfigureAwait(false);
+        var flagged = flags.StandardOutput.Split('\0', StringSplitOptions.RemoveEmptyEntries)
+            .Where(value => value.Length > 2 && value[1] == ' ' && value[0] is 'h' or 'S')
+            .Select(value => value[2..].Replace('\\', '/'))
+            .ToHashSet(StringComparer.Ordinal);
+        foreach (var entry in javascript.Where(entry => !ignores.Contains(entry.Path)))
+        {
+            if (flagged.Contains(entry.Path))
+                throw new EvidenceRepositoryException(
+                    $"Frozen anti-slop input uses a forbidden assume-unchanged/skip-worktree index flag: {entry.Path}");
+            var fullPath = Path.GetFullPath(Path.Combine(_repositoryRoot, entry.Path.Replace('/', Path.DirectorySeparatorChar)));
+            if (!fullPath.StartsWith(_repositoryRoot + Path.DirectorySeparatorChar, PathComparison) ||
+                !File.Exists(fullPath) || File.GetAttributes(fullPath).HasFlag(FileAttributes.ReparsePoint))
+                throw new EvidenceRepositoryException($"Frozen anti-slop input is not a regular working-tree file: {entry.Path}");
+            var actual = await ComputeGitBlobIdentityAsync(fullPath, entry.ObjectId.Length, cancellationToken)
+                .ConfigureAwait(false);
+            if (!string.Equals(actual, entry.ObjectId, StringComparison.Ordinal))
+                throw new EvidenceRepositoryException(
+                    $"Working-tree bytes do not match the frozen Git blob for anti-slop input: {entry.Path}");
+        }
+    }
+
+    private static async Task<string> ComputeGitBlobIdentityAsync(
+        string path,
+        int objectIdLength,
+        CancellationToken cancellationToken)
+    {
+        var length = new FileInfo(path).Length;
+        using HashAlgorithm algorithm = objectIdLength == 64 ? SHA256.Create() : SHA1.Create();
+        var header = Encoding.ASCII.GetBytes($"blob {length}\0");
+        algorithm.TransformBlock(header, 0, header.Length, null, 0);
+        await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024,
+            FileOptions.Asynchronous | FileOptions.SequentialScan);
+        var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            var read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+            if (read == 0) break;
+            algorithm.TransformBlock(buffer, 0, read, null, 0);
+        }
+        algorithm.TransformFinalBlock([], 0, 0);
+        return Convert.ToHexStringLower(algorithm.Hash!);
     }
 
     private async Task<CommandResult> GitAsync(
@@ -408,7 +524,7 @@ public sealed class GitRepositoryIdentityReader(
         if (executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } owned)
         {
             var capture = await owned.ExecuteBoundedCaptureAsync(
-                invocation, budget, 16 * 1024 * 1024, cancellationToken).ConfigureAwait(false);
+                invocation, budget, MaximumGitListingBytes, cancellationToken).ConfigureAwait(false);
             if (capture.CaptureBoundExceeded)
                 throw new EvidenceRepositoryException("Frozen Git evidence exceeded the bounded capture limit.");
             return capture.Command;
@@ -416,7 +532,7 @@ public sealed class GitRepositoryIdentityReader(
         if (executor is IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true } fixture)
         {
             var capture = await fixture.ExecuteBoundedCaptureAsync(
-                invocation, budget, 16 * 1024 * 1024, cancellationToken).ConfigureAwait(false);
+                invocation, budget, MaximumGitListingBytes, cancellationToken).ConfigureAwait(false);
             if (capture.CaptureBoundExceeded)
                 throw new EvidenceRepositoryException("Frozen Git evidence exceeded the bounded capture limit.");
             return capture.Command;
@@ -427,8 +543,13 @@ public sealed class GitRepositoryIdentityReader(
     private static bool IsGitObject(string value) =>
         value.Length is 40 or 64 && value.All(character =>
             character is >= '0' and <= '9' or >= 'a' and <= 'f');
+
+    private static StringComparison PathComparison => OperatingSystem.IsWindows()
+        ? StringComparison.OrdinalIgnoreCase
+        : StringComparison.Ordinal;
 }
 
 internal sealed record TreeEntry(string Mode, string Path, string ObjectId);
+internal sealed record ProtectedIgnoreSelection(HashSet<string> Active, IReadOnlyList<string> Retired);
 
 public sealed class EvidenceRepositoryException(string message) : Exception(message);

@@ -193,7 +193,7 @@ public sealed class ProcessCommandExecutorTests
         Assert.Same(killedProcess, observedProcess);
         Assert.False(result.Execution.OwnedProcessQuiescent);
         Assert.Equal(GateOutcome.Error, result.Outcome);
-        Assert.Contains("quiescent", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("identity could not be read after evaluation", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

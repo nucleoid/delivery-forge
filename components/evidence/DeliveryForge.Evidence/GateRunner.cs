@@ -6,6 +6,7 @@ using System.Text.Json.Nodes;
 using DeliveryForge.Contracts.Models;
 using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Contracts.State;
+using DeliveryForge.Contracts.Validation;
 
 namespace DeliveryForge.Evidence;
 
@@ -26,13 +27,15 @@ public sealed class GateRunner
         string trustedWorkingDirectory,
         string trustedProtectedBaseCommit,
         DeterministicEvaluationPluginRegistry? plugins = null,
-        bool emitAuthoritativeV2 = true)
+        bool emitAuthoritativeV2 = false,
+        TrustedGatePluginRegistry? authorityRegistry = null)
     {
         _executor = executor;
         _repository = repository;
         _trustedWorkingDirectory = Path.GetFullPath(trustedWorkingDirectory);
         _trustedProtectedBaseCommit = trustedProtectedBaseCommit;
         _plugins = plugins ?? DeterministicEvaluationPluginRegistry.CreateBuiltIns();
+        _plugins.AssertMatchesAuthorityRegistry(authorityRegistry ?? TrustedGatePluginRegistry.BuiltIns);
         _emitAuthoritativeV2 = emitAuthoritativeV2;
     }
     private static readonly JsonSerializerOptions ContractJson = CreateContractJson();
@@ -40,6 +43,7 @@ public sealed class GateRunner
     public async Task<GateRunResult> RunAsync(GateRequest request, CancellationToken cancellationToken = default)
     {
         ValidateRequest(request);
+        var deadline = DateTimeOffset.UtcNow + request.Timeout;
         var plugin = _plugins.Resolve(request.Adapter, request.Plugin);
         var pluginBinding = DeterministicEvaluationPluginRegistry.Bind(
             request, plugin,
@@ -124,13 +128,20 @@ public sealed class GateRunner
                 CancellationToken.None).ConfigureAwait(false);
 
         var scopeValidation = await ValidateAutomaticScopeAsync(
-            request, plugin, before, request.Timeout, cancellationToken).ConfigureAwait(false);
+            request, plugin, before, Remaining(deadline), cancellationToken).ConfigureAwait(false);
         if (scopeValidation.InputSetIdentity is not null)
             pluginBinding = pluginBinding with { InputSetIdentity = scopeValidation.InputSetIdentity };
         if (scopeValidation.Failure is not null)
         {
             if (scopeValidation.Failure.Outcome == GateOutcome.NotApplicable)
+            {
                 pluginBinding = pluginBinding with { Status = EvaluationPluginStatus.NotApplicable };
+                var authorityFailure = ValidateAuthoritativeNoExecution(request, plugin);
+                if (authorityFailure is not null)
+                    return await PersistWithoutExecutionAsync(
+                        request, gateDirectory, before, before, authorityFailure, pluginBinding,
+                        CancellationToken.None).ConfigureAwait(false);
+            }
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, before, before, scopeValidation.Failure, pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
@@ -194,7 +205,7 @@ public sealed class GateRunner
                     ? AntiSlopMaximumCapturedBytesPerStream
                     : ExistingGateMaximumCapturedBytesPerStream;
                 var capture = await ownedExecutor.ExecuteBoundedCaptureAsync(
-                    request.Invocation, request.Timeout, captureLimit, cancellationToken)
+                    request.Invocation, Remaining(deadline), captureLimit, cancellationToken)
                     .ConfigureAwait(false);
                 execution = capture.Command;
                 captureBoundExceeded = capture.CaptureBoundExceeded;
@@ -205,7 +216,7 @@ public sealed class GateRunner
                     ? AntiSlopMaximumCapturedBytesPerStream
                     : ExistingGateMaximumCapturedBytesPerStream;
                 var capture = await fixtureExecutor.ExecuteBoundedCaptureAsync(
-                    request.Invocation, request.Timeout, captureLimit, cancellationToken)
+                    request.Invocation, Remaining(deadline), captureLimit, cancellationToken)
                     .ConfigureAwait(false);
                 execution = capture.Command;
                 captureBoundExceeded = capture.CaptureBoundExceeded;
@@ -214,7 +225,7 @@ public sealed class GateRunner
             {
                 // Compatibility for deterministic in-memory/fixture executors. Actual gate tools
                 // use the creation-owned ProcessCommandExecutor path above.
-                execution = await _executor.ExecuteAsync(request.Invocation, request.Timeout, cancellationToken)
+                execution = await _executor.ExecuteAsync(request.Invocation, Remaining(deadline), cancellationToken)
                     .ConfigureAwait(false);
             }
         }
@@ -247,7 +258,7 @@ public sealed class GateRunner
         var identityReadFailed = false;
         try
         {
-            using var finalReadDeadline = new CancellationTokenSource(request.Timeout);
+            using var finalReadDeadline = new CancellationTokenSource(Remaining(deadline));
             after = await _repository.ReadAsync(finalReadDeadline.Token).ConfigureAwait(false);
         }
         catch
@@ -564,6 +575,20 @@ public sealed class GateRunner
                 "Selected plugin identity/version/tool does not match the protected required-gate binding.");
     }
 
+    private NormalizedEvidence? ValidateAuthoritativeNoExecution(
+        GateRequest request,
+        IDeterministicEvaluationPlugin plugin)
+    {
+        if (ValidateCapabilityBinding(request, plugin) is { } capabilityFailure)
+            return capabilityFailure;
+        if (!request.Policy.AuthorityVerified ||
+            !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
+            request.Capability.Fixture || !HasTrustedProductionExecution())
+            return NormalizedEvidence.Incomplete(
+                "NOT_APPLICABLE is advisory unless the same trusted production capability, required-gate, and code-owned execution bindings as PASS are present.");
+        return null;
+    }
+
     private async Task<AutomaticScopeValidation> ValidateAutomaticScopeAsync(
         GateRequest request,
         IDeterministicEvaluationPlugin plugin,
@@ -638,6 +663,14 @@ public sealed class GateRunner
         var repository = _repository is GitRepositoryIdentityReader { SupportsCreationOwnedBoundedRead: true } ||
             _repository is IBoundedRepositoryFixtureReader { SupportsCreationOwnedBoundedRead: true };
         return process && repository;
+    }
+
+    private static TimeSpan Remaining(DateTimeOffset deadline)
+    {
+        var remaining = deadline - DateTimeOffset.UtcNow;
+        if (remaining <= TimeSpan.Zero)
+            throw new OperationCanceledException("The finite gate deadline expired.");
+        return remaining;
     }
 
     private static JsonSerializerOptions CreateContractJson()

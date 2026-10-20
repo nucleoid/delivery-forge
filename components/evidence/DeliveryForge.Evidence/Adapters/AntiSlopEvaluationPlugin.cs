@@ -360,8 +360,6 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         AppendClosureDirectory(hash, root, Path.Combine(root, "vendor", "anti-slop"));
         AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "oxlint"));
         AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "@oxlint", "plugins"));
-        AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "tsx"));
-        AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "typescript"));
 
         var bindingsRoot = Path.Combine(root, "node_modules", "@oxlint");
         var bindings = Directory.Exists(bindingsRoot)
@@ -418,7 +416,15 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         if (!File.Exists(path))
             throw new InvalidOperationException($"Required anti-slop closure file is unavailable: {path}");
         AppendValue(hash, logicalPath ?? Path.GetRelativePath(root, path).Replace('\\', '/'), string.Empty);
-        hash.AppendData(File.ReadAllBytes(path));
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024,
+            FileOptions.SequentialScan);
+        var buffer = new byte[64 * 1024];
+        while (true)
+        {
+            var read = stream.Read(buffer, 0, buffer.Length);
+            if (read == 0) break;
+            hash.AppendData(buffer, 0, read);
+        }
         hash.AppendData([0]);
     }
 

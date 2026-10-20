@@ -32,6 +32,41 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
+    public async Task Custom_registry_is_one_truth_for_runner_and_authority_binding()
+    {
+        using var temp = new TempDirectory();
+        var pluginRegistry = new DeterministicEvaluationPluginRegistry(
+            [new StubEvaluationPlugin("host.custom", "2.0.0", "custom-tool")]);
+        var authorityRegistry = new TrustedGatePluginRegistry(
+            [new TrustedGatePluginBinding("custom", "host.custom", "2.0.0", "custom-tool", "3.0.0", "custom-v1")]);
+        var request = TestEvidence.GateRequest(temp.Path) with
+        {
+            GateId = "custom",
+            Adapter = EvidenceAdapterKind.External,
+            Plugin = new EvaluationPluginSelection("host.custom", Enabled: false)
+        };
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            TestEvidence.WorkingDirectory(temp.Path),
+            TestEvidence.Commit('a'),
+            pluginRegistry,
+            authorityRegistry: authorityRegistry);
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal("host.custom", result.Plugin.Id);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Throws<EvaluationPluginException>(() => new GateRunner(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            TestEvidence.WorkingDirectory(temp.Path),
+            TestEvidence.Commit('a'),
+            pluginRegistry,
+            authorityRegistry: TrustedGatePluginRegistry.BuiltIns));
+    }
+
+    [Fact]
     public async Task Disabled_plugin_is_distinct_and_cannot_satisfy_a_required_gate()
     {
         using var temp = new TempDirectory();
@@ -85,6 +120,50 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.Contains("zero", noInputs.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.Equal(GateOutcome.Incomplete, noAnalyzedFiles.Outcome);
         Assert.Contains("complete frozen input set", noAnalyzedFiles.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Anti_slop_not_applicable_requires_non_fixture_production_authority()
+    {
+        using var temp = new TempDirectory();
+        var (config, nodePath, entryPoint) = CreateFixtureAntiSlopClosure(temp.Path);
+        var original = TestEvidence.GateRequest(temp.Path);
+        var executableIdentity = $"sha256:{Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(nodePath)))}";
+        var request = original with
+        {
+            GateId = "anti-slop",
+            Policy = new ResolvedEvidencePolicy(
+                TestEvidence.Identity('1'), TestEvidence.Identity('2'), TestEvidence.Commit('a'),
+                PolicyAuthorityKind.ProtectedGitBase, 0m, ["anti-slop"], authorityVerified: true,
+                sourceRepositoryRoot: original.Invocation.WorkingDirectory,
+                requiredGatePluginBindings:
+                [new RequiredGatePluginBinding(
+                    "anti-slop", "dmmulroy.anti-slop",
+                    $"0.1.2+{AntiSlopEvaluationPlugin.UpstreamCommit}", "oxlint")],
+                allowedNotApplicable: new HashSet<string>(["anti-slop"], StringComparer.Ordinal)),
+            Capability = ToolCapability.FromDetection(
+                "oxlint", "1.78.0", "oxlint-json-v1", true, [], nodePath,
+                executableIdentity, ["lint"], original.Invocation.WorkingDirectory),
+            Adapter = EvidenceAdapterKind.External,
+            Invocation = original.Invocation with { FileName = nodePath, Arguments = [entryPoint] },
+            Plugin = new EvaluationPluginSelection("dmmulroy.anti-slop", true, [])
+        };
+        var runner = new GateRunner(
+            new StubCommandExecutor(TestEvidence.CommandResult()),
+            new ScopedSequenceRepositoryIdentityReader(
+                new RepositoryEvaluationScope([], new HashSet<string>(StringComparer.Ordinal)),
+                TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory,
+            TestEvidence.Commit('a'),
+            DeterministicEvaluationPluginRegistry.CreateBuiltIns(
+                System.IO.Path.GetDirectoryName(config)!, nodePath));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("advisory", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.False(result.ProductionCapable);
     }
 
     [Fact]
@@ -494,7 +573,8 @@ public sealed class DeterministicEvaluationPluginTests
             new StubCommandExecutor(TestEvidence.CommandResult()),
             new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
             TestEvidence.WorkingDirectory(temp.Path),
-            TestEvidence.Commit('a'));
+            TestEvidence.Commit('a'),
+            emitAuthoritativeV2: true);
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 

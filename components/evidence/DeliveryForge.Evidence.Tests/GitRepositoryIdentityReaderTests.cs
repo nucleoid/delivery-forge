@@ -2,6 +2,46 @@ namespace DeliveryForge.Evidence.Tests;
 
 public sealed class GitRepositoryIdentityReaderTests
 {
+    [Theory]
+    [InlineData("--skip-worktree")]
+    [InlineData("--assume-unchanged")]
+    public async Task Production_scope_rejects_status_hidden_bytes(string flag)
+    {
+        using var temp = new TempDirectory();
+        await Git(temp.Path, "init");
+        await Git(temp.Path, "config", "user.name", "Delivery Forge Test");
+        await Git(temp.Path, "config", "user.email", "forge@example.invalid");
+        var source = System.IO.Path.Combine(temp.Path, "app.ts");
+        await File.WriteAllTextAsync(source, "export const before = 1;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "add", "app.ts");
+        await Git(temp.Path, "commit", "-m", "base");
+        var baseCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        await File.WriteAllTextAsync(source, "export const head = 2;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "commit", "-am", "head");
+        var headCommit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        await Git(temp.Path, "update-index", flag, "app.ts");
+        await File.WriteAllTextAsync(source, "export const hidden = 3;\n", TestContext.Current.CancellationToken);
+        var reader = new GitRepositoryIdentityReader(new ProcessCommandExecutor(), temp.Path, baseCommit);
+
+        var error = await Assert.ThrowsAsync<EvidenceRepositoryException>(() =>
+            reader.ReadEvaluationScopeAsync(headCommit, TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken));
+
+        Assert.Contains("forbidden", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("const view = <p>Don't panic</p>;\n", false)]
+    [InlineData("if (ok) /'/.test(value);\n", false)]
+    [InlineData("if (ok) /'/.test(value);\n// eslint-disable-next-line x\nrun();\n", true)]
+    [InlineData("}\n/'/.test(value);\n", false)]
+    [InlineData("const text = `// oxlint-disable`;\n", false)]
+    [InlineData("const text = '/* eslint-disable */';\n", false)]
+    [InlineData("/* oxlint-disable */\n", true)]
+    public void Suppression_lexer_handles_jsx_regex_and_literal_edges(string source, bool expected)
+    {
+        Assert.Equal(expected, GitRepositoryIdentityReader.ContainsSuppressionDirective(source));
+    }
+
     [Fact]
     public async Task Reads_exact_head_tree_and_clean_status_from_git()
     {
@@ -46,6 +86,7 @@ public sealed class GitRepositoryIdentityReaderTests
             new QueueCommandExecutor(
                 Result(head + Environment.NewLine),
                 Result($"100644\t{TestEvidence.Commit('1')}\t.gitignore\0100644\t{TestEvidence.Commit('2')}\t.oxlintignore\0100644\t{TestEvidence.Commit('3')}\tgenerated/out.ts\0100644\t{TestEvidence.Commit('4')}\tsrc/app.ts\0100644\t{TestEvidence.Commit('5')}\tsrc/git-ignored.ts\0100644\t{TestEvidence.Commit('6')}\tsrc/tool-ignored.ts\0100644\t{TestEvidence.Commit('7')}\tsrc/app.cs\0"),
+                Result(string.Empty, 128),
                 Result(string.Empty),
                 Result(string.Empty),
                 Result(string.Empty),
@@ -72,10 +113,12 @@ public sealed class GitRepositoryIdentityReaderTests
             new QueueCommandExecutor(
                 Result(head + Environment.NewLine),
                 Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result(string.Empty, 128),
                 Result("src/app.ts\0"),
                 Result("/* eslint-disable */\nexport const value = 1;\n"),
+                Result(TestEvidence.Commit('2') + Environment.NewLine),
                 Result("export const value = 1;\n"),
-                Result(string.Empty, 128)),
+                Result(string.Empty)),
             System.IO.Path.GetTempPath(),
             TestEvidence.Commit('a'));
 
@@ -93,10 +136,12 @@ public sealed class GitRepositoryIdentityReaderTests
             new QueueCommandExecutor(
                 Result(head + Environment.NewLine),
                 Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result(string.Empty, 128),
                 Result("src/app.ts\0"),
                 Result("export const unsafe = value as unknown as string;\n// eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const old = 1;\n"),
+                Result(TestEvidence.Commit('2') + Environment.NewLine),
                 Result("// eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const old = 1;\n"),
-                Result(string.Empty, 128)),
+                Result(string.Empty)),
             System.IO.Path.GetTempPath(),
             TestEvidence.Commit('a'));
 
@@ -114,10 +159,12 @@ public sealed class GitRepositoryIdentityReaderTests
             new QueueCommandExecutor(
                 Result(head + Environment.NewLine),
                 Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result(string.Empty, 128),
                 Result("src/app.ts\0"),
                 Result("// run oxlint before commit\nexport const eslintName = 'eslint config';\n"),
+                Result(TestEvidence.Commit('2') + Environment.NewLine),
                 Result("export const eslintName = 'old';\n"),
-                Result(string.Empty, 128)),
+                Result(string.Empty)),
             System.IO.Path.GetTempPath(),
             TestEvidence.Commit('a'));
 
@@ -135,10 +182,12 @@ public sealed class GitRepositoryIdentityReaderTests
             new QueueCommandExecutor(
                 Result(head + Environment.NewLine),
                 Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result(string.Empty, 128),
                 Result("src/app.ts\0"),
                 Result("const url = \"http://eslint-disable\";\nconst text = '/* oxlint-disable */';\nconst template = `// eslint-disable-next-line`;\n// Documentation mentions eslint-disable but does not activate it.\n/* Use oxlint-disable only after approval. */\n"),
+                Result(TestEvidence.Commit('2') + Environment.NewLine),
                 Result("export const old = 1;\n"),
-                Result(string.Empty, 128)),
+                Result(string.Empty)),
             System.IO.Path.GetTempPath(),
             TestEvidence.Commit('a'));
 
@@ -160,10 +209,12 @@ public sealed class GitRepositoryIdentityReaderTests
             new QueueCommandExecutor(
                 Result(head + Environment.NewLine),
                 Result($"100644\t{TestEvidence.Commit('1')}\tsrc/app.ts\0"),
+                Result(string.Empty, 128),
                 Result("src/app.ts\0"),
                 Result(content),
+                Result(TestEvidence.Commit('2') + Environment.NewLine),
                 Result("export const old = 1;\n"),
-                Result(string.Empty, 128)),
+                Result(string.Empty)),
             System.IO.Path.GetTempPath(),
             TestEvidence.Commit('a'));
 
@@ -181,8 +232,8 @@ public sealed class GitRepositoryIdentityReaderTests
             new QueueCommandExecutor(
                 Result(head + Environment.NewLine),
                 Result($"120000\t{TestEvidence.Commit('1')}\tsrc/link.ts\0"),
-                Result(string.Empty),
-                Result(string.Empty, 128)),
+                Result(string.Empty, 128),
+                Result(string.Empty)),
             System.IO.Path.GetTempPath(),
             TestEvidence.Commit('a'));
 
@@ -201,8 +252,8 @@ public sealed class GitRepositoryIdentityReaderTests
             new QueueCommandExecutor(
                 Result(head + Environment.NewLine),
                 Result($"100644\t{TestEvidence.Commit('1')}\t.gitignore\0100644\t{TestEvidence.Commit('2')}\tnode_modules/owned.ts\0100644\t{TestEvidence.Commit('3')}\tvendor/anti-slop/owned.ts\0"),
-                Result(".gitignore\0"),
-                Result(string.Empty, 128)),
+                Result(string.Empty, 128),
+                Result(".gitignore\0")),
             System.IO.Path.GetTempPath(),
             TestEvidence.Commit('a'));
 
@@ -216,4 +267,14 @@ public sealed class GitRepositoryIdentityReaderTests
 
     private static CommandResult Result(string stdout, int exitCode = 0) =>
         new(exitCode, stdout, string.Empty, false, false, TestEvidence.Time(0), TestEvidence.Time(1));
+
+    private static async Task<string> Git(string root, params string[] arguments)
+    {
+        var result = await new ProcessCommandExecutor().ExecuteAsync(
+            new CommandInvocation("git", arguments, root,
+                new Dictionary<string, string> { ["GIT_OPTIONAL_LOCKS"] = "0" }),
+            TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        Assert.Equal(0, result.ExitCode);
+        return result.StandardOutput;
+    }
 }

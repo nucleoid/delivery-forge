@@ -6,6 +6,26 @@ using System.Text.Json;
 public sealed class GateRunnerTests
 {
     [Fact]
+    public async Task Default_writer_preserves_v1_for_readers_first_rollout()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path);
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            TestEvidence.WorkingDirectory(temp.Path),
+            TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(
+            request with { Plugin = new EvaluationPluginSelection("delivery-forge.dotnet", false) },
+            TestContext.Current.CancellationToken);
+
+        using var receipt = JsonDocument.Parse(await File.ReadAllBytesAsync(
+            result.ReceiptPath, TestContext.Current.CancellationToken));
+        Assert.Equal("1.0.0", receipt.RootElement.GetProperty("schemaVersion").GetString());
+    }
+
+    [Fact]
     public void Supported_capability_has_no_public_minting_or_record_copy_surface()
     {
         Assert.Empty(typeof(ToolCapability).GetConstructors(BindingFlags.Public | BindingFlags.Instance));
