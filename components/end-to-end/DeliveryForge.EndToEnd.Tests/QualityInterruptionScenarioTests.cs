@@ -95,9 +95,12 @@ public sealed class QualityInterruptionScenarioTests(QualityInterruptionFixture 
         Assert.Equal(root.GetProperty("capturedArtifactHashesBeforeLate").GetRawText(), root.GetProperty("capturedArtifactHashesAfterLate").GetRawText());
         Assert.Equal(root.GetProperty("receiptSha256BeforeLateActivity").GetString(), root.GetProperty("receiptSha256AfterLateActivity").GetString());
         AssertFileHash(phase.Gate.ReceiptPath, root.GetProperty("receiptSha256AfterLateActivity").GetString()!);
-        Assert.True(root.GetProperty("outputReclaimDenied").GetBoolean());
-        Assert.Equal(0, root.GetProperty("outputReclaimSdkCommandCount").GetInt32());
-        Assert.NotEqual("Pass", root.GetProperty("outputReclaimOutcome").GetString());
+        Assert.True(root.GetProperty("immutableRetryPermitted").GetBoolean());
+        Assert.Equal(1, root.GetProperty("immutableRetrySdkCommandCount").GetInt32());
+        Assert.NotEqual("Pass", root.GetProperty("immutableRetryOutcome").GetString());
+        Assert.NotEqual("NotApplicable", root.GetProperty("immutableRetryOutcome").GetString());
+        Assert.True(root.GetProperty("immutableRetryReceiptDistinct").GetBoolean());
+        Assert.Contains(".attempt-", root.GetProperty("immutableRetryReceiptPath").GetString(), StringComparison.Ordinal);
         Assert.False(root.GetProperty("lateReportAttributedToPrimary").GetBoolean());
     }
 
