@@ -145,9 +145,20 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             var failure = new IOException("Actual reviewer observation is incomplete.");
             // The exact capture remains on this private owner's retained Task.
             // Account output is never copied into public exception/log DATA.
-            failure.Data["ReviewerObservation"] = new { Arguments = arguments, capture.Command.ExitCode, capture.Command.Cancelled,
-                capture.Command.TimedOut, capture.RootExitObserved, capture.StandardOutputDrainCompleted, capture.StandardErrorDrainCompleted,
-                capture.OwnershipKind, capture.CaptureBoundExceeded, StandardOutputHash = Hash(capture.StandardOutputBytes), StandardErrorHash = Hash(capture.StandardErrorBytes) };
+            failure.Data["ReviewerObservation"] = new
+            {
+                Arguments = arguments,
+                capture.Command.ExitCode,
+                capture.Command.Cancelled,
+                capture.Command.TimedOut,
+                capture.RootExitObserved,
+                capture.StandardOutputDrainCompleted,
+                capture.StandardErrorDrainCompleted,
+                capture.OwnershipKind,
+                capture.CaptureBoundExceeded,
+                StandardOutputHash = Hash(capture.StandardOutputBytes),
+                StandardErrorHash = Hash(capture.StandardErrorBytes)
+            };
             throw failure;
         }
         Current(); VerifyImage(); return capture;
@@ -248,7 +259,8 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
                 lock (tasks) { _ = Remaining(started); nativeBirthEntered = true; }
                 var actual = OwnedDuplexProcess.Open(new(selection.Image.Path,
                     ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--no-session-persistence", "--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob", "--permission-mode", "dontAsk", "--max-budget-usd", bootstrap.Policy.Budget.MaximumCost.ToString(CultureInfo.InvariantCulture)], sourceRoot, environment), original, linuxScope);
-                lock (tasks) { process = actual; nativeBirthReturned = true; } return actual;
+                lock (tasks) { process = actual; nativeBirthReturned = true; }
+                return actual;
             });
             if (process.StartupFailure is Exception startup) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(startup).Throw();
             protocol = new(process.Input, process.Output, original); pump = Keep(Pump(phaseStop.Token)); process.AttachOriginalOutputConsumer(pump);

@@ -99,16 +99,29 @@ public sealed class InstalledNativeHostConformanceTests
             var io = native.ActualIo; var first = io.Take(128).Select(x => new { x.Kind, x.Entered, x.InvocationReturned, TaskStatus = x.ActualTask?.Status, PrimaryType = x.Primary?.GetType().FullName, PostType = x.Post?.GetType().FullName, x.Unknown }).ToArray();
             var value = new
             {
-                Kind = "ActualNativeHostFailureSnapshot-v1", Selected.Adapter, Selected.CaseKind,
-                OriginalStarted = Original.OriginalStarted, Frequency = System.Diagnostics.Stopwatch.Frequency, ElapsedTicks = System.Diagnostics.Stopwatch.GetTimestamp() - Original.OriginalStarted,
-                StartupPhaseStarted, StartupPhaseLimitTicks = StartupPhaseLimit.Ticks, StartupPhaseTaskStatus = StartupCall?.Status, StartupPhaseCancellationRequested = StartupPhase?.IsCancellationRequested,
-                PrimaryType = Failure?.GetType().FullName, PostType = Post?.GetType().FullName,
+                Kind = "ActualNativeHostFailureSnapshot-v1",
+                Selected.Adapter,
+                Selected.CaseKind,
+                OriginalStarted = Original.OriginalStarted,
+                Frequency = System.Diagnostics.Stopwatch.Frequency,
+                ElapsedTicks = System.Diagnostics.Stopwatch.GetTimestamp() - Original.OriginalStarted,
+                StartupPhaseStarted,
+                StartupPhaseLimitTicks = StartupPhaseLimit.Ticks,
+                StartupPhaseTaskStatus = StartupCall?.Status,
+                StartupPhaseCancellationRequested = StartupPhase?.IsCancellationRequested,
+                PrimaryType = Failure?.GetType().FullName,
+                PostType = Post?.GetType().FullName,
                 Startup = Port is DeliveryForge.Tool.Codex.CodexAppServerPort codex ? codex.SnapshotStartupDiagnostics() : null,
                 StandardError = new { Bytes = stderr.Length, Sha256 = BoundedFiles.Sha(stderr), Signals = signals, TextExported = false },
                 Native = new { Retirement.KnownClosed, Retirement.RootExited, Retirement.ActiveProcesses, Retirement.OutputEof, Retirement.ErrorEof, Retirement.InputCloseReturned, Retirement.DispositionReturned, Retirement.ExitCode, FailureCount = Retirement.Failures.Count },
-                ActualIoCount = io.Count, ActualIo = first, IoMetadataBoundExceeded = io.Count > first.Length,
-                FrameTasks = ActualCalls.Take(128).Select(t => t.Status).ToArray(), FrameTaskCount = ActualCalls.Count,
-                Accepted = false, RuntimeCertified = false, RawAccountOrPromptExported = false
+                ActualIoCount = io.Count,
+                ActualIo = first,
+                IoMetadataBoundExceeded = io.Count > first.Length,
+                FrameTasks = ActualCalls.Take(128).Select(t => t.Status).ToArray(),
+                FrameTaskCount = ActualCalls.Count,
+                Accepted = false,
+                RuntimeCertified = false,
+                RawAccountOrPromptExported = false
             };
             _ = Original.CleanupRemaining; var bytes = JsonSerializer.SerializeToUtf8Bytes(value, BoundedFiles.Json); _ = Original.CleanupRemaining;
             FailureSnapshot = new(Original); FailureSnapshot.Write(Path.Combine(Selected.ResultDirectory, "native-host-failure.json"), bytes); _ = Original.CleanupRemaining;

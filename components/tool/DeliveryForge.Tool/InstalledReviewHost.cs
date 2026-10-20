@@ -175,7 +175,8 @@ internal sealed class InstalledReviewHost : IDisposable
             environment["LC_ALL"] = "C"; environment["LANG"] = "C";
             var invocation = new CommandInvocation(selection.GitImage.Path,
                 ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false",
-                    "-c", "core.hooksPath=" + nul, .. arguments], run.Worktree, environment) { EnvironmentIsComplete = true };
+                    "-c", "core.hooksPath=" + nul, .. arguments], run.Worktree, environment)
+            { EnvironmentIsComplete = true };
             BoundedCommandCaptureResult capture;
             Task<BoundedCommandCaptureResult>? actualCapture = null; var dispatchEntered = false;
             try
@@ -247,10 +248,18 @@ internal sealed class InstalledReviewHost : IDisposable
             Directory.CreateDirectory(output);
             BoundedFiles.WriteNew(path, JsonSerializer.SerializeToUtf8Bytes(new
             {
-                Kind = "OwnedImmutableReviewSourceData-v1", run.RunId, run.PlanIdentity, run.BaseCommit,
-                completion.HeadCommit, completion.TreeId, EvidencePolicyIdentity = evidence.Identity,
-                preparedBootstrap.RootContext.SourceAuthorityIdentity, preparedBootstrap.RootContext.ProtectedObjectViewIdentity,
-                ReviewPolicyIdentity = preparedBootstrap.Policy.PolicyIdentity, ReviewerAccepted = false, PublicationAuthority = false
+                Kind = "OwnedImmutableReviewSourceData-v1",
+                run.RunId,
+                run.PlanIdentity,
+                run.BaseCommit,
+                completion.HeadCommit,
+                completion.TreeId,
+                EvidencePolicyIdentity = evidence.Identity,
+                preparedBootstrap.RootContext.SourceAuthorityIdentity,
+                preparedBootstrap.RootContext.ProtectedObjectViewIdentity,
+                ReviewPolicyIdentity = preparedBootstrap.Policy.PolicyIdentity,
+                ReviewerAccepted = false,
+                PublicationAuthority = false
             }), original);
             return true;
         });

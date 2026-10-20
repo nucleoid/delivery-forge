@@ -32,9 +32,14 @@ public sealed class HistoricalQualityTests
         HistoricalQualityHost.ValidateSelection(config, historical);
         if (changed == "head") historical = historical with { HeadCommit = "HEAD" };
         if (changed == "tree") historical = historical with { TreeId = new string('G', 40) };
-        if (changed == "registry") historical = historical with { Quality = historical.Quality with {
-            Registry = new(new string('3', 40), new string('4', 40), "refs/heads/main", "registry.json", "sha256:" + new string('c', 64),
-                Path.Combine(Path.GetTempPath(), "registry-artifacts"), new("unused", 1, new string('d', 64))) } };
+        if (changed == "registry") historical = historical with
+        {
+            Quality = historical.Quality with
+            {
+                Registry = new(new string('3', 40), new string('4', 40), "refs/heads/main", "registry.json", "sha256:" + new string('c', 64),
+                Path.Combine(Path.GetTempPath(), "registry-artifacts"), new("unused", 1, new string('d', 64)))
+            }
+        };
         if (changed == "mixed-current-quality") config = config with { InstalledQuality = historical.Quality };
         if (changed == "gate-count") historical = historical with { Quality = historical.Quality with { Gates = historical.Quality.Gates.Take(1).ToArray() } };
         Assert.Throws<ToolUsageException>(() => HistoricalQualityHost.ValidateSelection(config, historical));
@@ -61,8 +66,13 @@ public sealed class HistoricalQualityTests
     {
         var root = Path.Combine(Path.GetTempPath(), "historical-plan-only-" + Guid.NewGuid().ToString("N"));
         var path = root + ".json"; var missingPlan = Path.Combine(root, "must-not-read.json");
-        var config = Configuration() with { ExpectedBundleIdentity = "sha256:" + new string('a', 64),
-            ExpectedContractIdentity = "sha256:" + new string('b', 64), ExpectedWorkItem = "#17", ExpectedPlanCeiling = "plan" };
+        var config = Configuration() with
+        {
+            ExpectedBundleIdentity = "sha256:" + new string('a', 64),
+            ExpectedContractIdentity = "sha256:" + new string('b', 64),
+            ExpectedWorkItem = "#17",
+            ExpectedPlanCeiling = "plan"
+        };
         Assert.Equal("implement", config.MaximumCeiling); Assert.Null(config.LocalSingle);
         Assert.False(File.Exists(missingPlan));
         File.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(config, BoundedFiles.Json));

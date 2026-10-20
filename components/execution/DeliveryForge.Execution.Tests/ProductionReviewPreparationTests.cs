@@ -113,7 +113,8 @@ public sealed class ProductionReviewPreparationTests : IDisposable
             environment["GIT_CONFIG_NOSYSTEM"] = "1"; environment["GIT_CONFIG_GLOBAL"] = nul; environment["GIT_CONFIG_SYSTEM"] = nul;
             environment["GIT_NO_REPLACE_OBJECTS"] = "1"; environment["GIT_NO_LAZY_FETCH"] = "1"; environment["GIT_TERMINAL_PROMPT"] = "0";
             var capture = await executor.ExecuteBoundedCaptureAsync(new(fixture.Git,
-                ["-c", "core.hooksPath=NUL", "-c", "core.fsmonitor=false", .. arguments], fixture.Root, environment) { EnvironmentIsComplete = true },
+                ["-c", "core.hooksPath=NUL", "-c", "core.fsmonitor=false", .. arguments], fixture.Root, environment)
+            { EnvironmentIsComplete = true },
                 TimeSpan.FromSeconds(15), 1048576, bound.Token, new OwnedWorkPhaseBudget(original));
             Assert.Equal(0, capture.Command.ExitCode); Assert.True(capture.Command.OwnedProcessQuiescent);
             Assert.True(capture.RootExitObserved); Assert.True(capture.StandardOutputDrainCompleted); Assert.True(capture.StandardErrorDrainCompleted);

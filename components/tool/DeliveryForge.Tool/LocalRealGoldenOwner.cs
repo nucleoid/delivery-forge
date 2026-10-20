@@ -107,15 +107,32 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
             Current();
             BoundedFiles.WriteNew(path, JsonSerializer.SerializeToUtf8Bytes(new
             {
-                Kind = "ActualInstalledLocalRealChainData-v1", Outcome = "PASS", Platform = OperatingSystem.IsWindows() ? "windows" : "linux",
-                frame.RunId, PlanIdentity = frozen.ContractIdentity, RichPlanIdentity = frozen.Identity, assignment.BaseCommit,
-                accepted.Patch.HeadCommit, accepted.Patch.HeadTree, accepted.Patch.PatchSha256,
-                ProtectedPolicy = policy.Identity, GateReceipts = gates.Select(row => row.Identity).ToArray(),
-                IndependentReview = accepted.Receipt.Identity, PublicationReceipt = published.Receipt?.Identity,
-                OriginalStarted = original.OriginalStarted, Frequency = System.Diagnostics.Stopwatch.Frequency,
-                ActualWorker = true, ActualQualityWithOwnerBaseline = true, ActualOppositeFamilyReview = true,
-                FakePublication = true, RemoteWrites = 0, MergeCalls = 0, ProductionPublicationAuthority = false,
-                RecoveryCertified = false, SchedulingCertified = false, WholeIssueCertified = false
+                Kind = "ActualInstalledLocalRealChainData-v1",
+                Outcome = "PASS",
+                Platform = OperatingSystem.IsWindows() ? "windows" : "linux",
+                frame.RunId,
+                PlanIdentity = frozen.ContractIdentity,
+                RichPlanIdentity = frozen.Identity,
+                assignment.BaseCommit,
+                accepted.Patch.HeadCommit,
+                accepted.Patch.HeadTree,
+                accepted.Patch.PatchSha256,
+                ProtectedPolicy = policy.Identity,
+                GateReceipts = gates.Select(row => row.Identity).ToArray(),
+                IndependentReview = accepted.Receipt.Identity,
+                PublicationReceipt = published.Receipt?.Identity,
+                OriginalStarted = original.OriginalStarted,
+                Frequency = System.Diagnostics.Stopwatch.Frequency,
+                ActualWorker = true,
+                ActualQualityWithOwnerBaseline = true,
+                ActualOppositeFamilyReview = true,
+                FakePublication = true,
+                RemoteWrites = 0,
+                MergeCalls = 0,
+                ProductionPublicationAuthority = false,
+                RecoveryCertified = false,
+                SchedulingCertified = false,
+                WholeIssueCertified = false
             }, BoundedFiles.Json), original);
             Current(); return true;
         });

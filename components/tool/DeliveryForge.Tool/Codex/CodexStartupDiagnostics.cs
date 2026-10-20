@@ -19,12 +19,17 @@ internal sealed class CodexStartupJournal(long originalStarted)
     internal void SetStage(CodexStartupStage value) { lock (gate) stage = value; }
     static CodexWireMethod Method(string? method) => method switch
     {
-        "initialize" => CodexWireMethod.Initialize, "initialized" => CodexWireMethod.Initialized,
+        "initialize" => CodexWireMethod.Initialize,
+        "initialized" => CodexWireMethod.Initialized,
         "account/read" => CodexWireMethod.AccountRead,
-        "thread/start" => CodexWireMethod.ThreadStart, "thread/started" => CodexWireMethod.ThreadStarted,
-        "turn/start" => CodexWireMethod.TurnStart, "turn/started" => CodexWireMethod.TurnStarted,
-        "turn/completed" => CodexWireMethod.TurnCompleted, "turn/interrupt" => CodexWireMethod.TurnInterrupt,
-        null => CodexWireMethod.None, _ => CodexWireMethod.Other
+        "thread/start" => CodexWireMethod.ThreadStart,
+        "thread/started" => CodexWireMethod.ThreadStarted,
+        "turn/start" => CodexWireMethod.TurnStart,
+        "turn/started" => CodexWireMethod.TurnStarted,
+        "turn/completed" => CodexWireMethod.TurnCompleted,
+        "turn/interrupt" => CodexWireMethod.TurnInterrupt,
+        null => CodexWireMethod.None,
+        _ => CodexWireMethod.Other
     };
     internal void Client(string method, long? id, CodexWireState state) => Add(CodexWireDirection.Client, Method(method), state, id is null ? CodexWireIdKind.None : CodexWireIdKind.ClientNumber, id, false, null);
     internal void Server(JsonElement message)

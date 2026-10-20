@@ -89,7 +89,7 @@ public sealed partial class RunStore
             using var document = JsonDocument.Parse(await ReadOriginalAsync(first, cancellationToken).ConfigureAwait(false));
             var runId = document.RootElement.GetProperty("runId").GetString() ?? throw new RunStoreCorruptionException("Run identity is missing.");
             CheckOriginal();
-        ValidateName(runId, nameof(runId));
+            ValidateName(runId, nameof(runId));
             if (!string.Equals(Path.GetFullPath(directory), GetRunDirectory(runId), OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
                 throw new RunStoreCorruptionException("Run identity does not match its hashed storage namespace.");
             await RecoverAsync(runId, cancellationToken).ConfigureAwait(false);

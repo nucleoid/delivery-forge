@@ -75,9 +75,15 @@ internal static class LocalRealFakePublication
                 throw new IOException("Exact local fake readback is incomplete; no resend.");
             var node = new JsonObject
             {
-                ["schemaVersion"] = "1.0.0", ["kind"] = "publication-receipt", ["identity"] = "sha256:" + new string('0', 64),
-                ["baseCommit"] = intent.BaseCommit, ["headCommit"] = intent.HeadCommit, ["treeId"] = intent.TreeId,
-                ["action"] = "PR_PUBLISHED", ["remoteRef"] = target.SourceRef, ["resultId"] = mutation.ResultId,
+                ["schemaVersion"] = "1.0.0",
+                ["kind"] = "publication-receipt",
+                ["identity"] = "sha256:" + new string('0', 64),
+                ["baseCommit"] = intent.BaseCommit,
+                ["headCommit"] = intent.HeadCommit,
+                ["treeId"] = intent.TreeId,
+                ["action"] = "PR_PUBLISHED",
+                ["remoteRef"] = target.SourceRef,
+                ["resultId"] = mutation.ResultId,
                 ["createdAt"] = intent.CreatedAt.UtcDateTime.ToString("O", CultureInfo.InvariantCulture)
             };
             node["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(node.ToJsonString()));

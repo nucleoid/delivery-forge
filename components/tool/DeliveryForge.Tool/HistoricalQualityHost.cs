@@ -116,10 +116,18 @@ internal sealed class HistoricalQualityHost
                 var gateRoot = Path.GetDirectoryName(Path.GetDirectoryName(result.ReceiptPath))!;
                 result.ArtifactHashes.TryGetValue("producer-report.json", out var report);
                 result.ArtifactHashes.TryGetValue("producer-current-binding.json", out var binding);
-                references.Add(new { gate.Tool, gate.GateId, result.Outcome, result.Fixture, result.ProductionCapable,
+                references.Add(new
+                {
+                    gate.Tool,
+                    gate.GateId,
+                    result.Outcome,
+                    result.Fixture,
+                    result.ProductionCapable,
                     Receipt = new AdmissionFile(result.ReceiptPath, bytes.LongLength, BoundedFiles.Sha(bytes)),
-                    ArtifactRoot = gateRoot, Report = new { Path = Path.Combine(gateRoot, "producer-report.json"), Identity = report },
-                    Binding = new { Path = Path.Combine(gateRoot, "producer-current-binding.json"), Identity = binding } });
+                    ArtifactRoot = gateRoot,
+                    Report = new { Path = Path.Combine(gateRoot, "producer-report.json"), Identity = report },
+                    Binding = new { Path = Path.Combine(gateRoot, "producer-current-binding.json"), Identity = binding }
+                });
                 return true;
             });
             if (result.Fixture || result.SourceChanged || !result.Execution.OwnedProcessQuiescent || result.Outcome != GateOutcome.Pass)
@@ -128,9 +136,20 @@ internal sealed class HistoricalQualityHost
         return parent.EnterSynchronous(run.RunId, () =>
         {
             Current();
-            var data = new { Kind = "HistoricalQualityCandidate-DATA-v1", run.RunId, FrozenPlan = actualPlan.ContractIdentity, Repository = expected,
-                selection.Quality.PolicyIdentity, Gates = references.ToArray(), WorkerStarted = false, BaselineApproved = false,
-                RegistryIssued = false, ProductionAuthority = false, SchedulingCertified = false };
+            var data = new
+            {
+                Kind = "HistoricalQualityCandidate-DATA-v1",
+                run.RunId,
+                FrozenPlan = actualPlan.ContractIdentity,
+                Repository = expected,
+                selection.Quality.PolicyIdentity,
+                Gates = references.ToArray(),
+                WorkerStarted = false,
+                BaselineApproved = false,
+                RegistryIssued = false,
+                ProductionAuthority = false,
+                SchedulingCertified = false
+            };
             var path = Path.Combine(output, "baseline-candidate-DATA.json");
             BoundedFiles.WriteNew(path, JsonSerializer.SerializeToUtf8Bytes(data, BoundedFiles.Json), original);
             return ToolResult.Incomplete("HISTORICAL_BASELINE_CANDIDATE_UNAPPROVED", "Both real historical gates passed. Complete immutable artifacts are a baseline candidate requiring independent owner review and approval.", new { Candidate = path, Data = data });

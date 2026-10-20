@@ -9,9 +9,13 @@ public sealed class MutationPolicyBindingTests
     const string SparseConfiguration = """{"policy":{"maxWorkers":1,"mutationCap":100,"overallDeadlineSeconds":600}}""";
     static JsonObject Complete() => new()
     {
-        ["maxWorkers"] = 1, ["mutationCap"] = 100, ["baselineTimeoutSeconds"] = 600,
-        ["mutantTimeoutSeconds"] = 120, ["overallDeadlineSeconds"] = 600,
-        ["allowNotApplicable"] = false, ["stabilityRepetitions"] = 1
+        ["maxWorkers"] = 1,
+        ["mutationCap"] = 100,
+        ["baselineTimeoutSeconds"] = 600,
+        ["mutantTimeoutSeconds"] = 120,
+        ["overallDeadlineSeconds"] = 600,
+        ["allowNotApplicable"] = false,
+        ["stabilityRepetitions"] = 1
     };
     static void Join(string configuration, JsonNode policy)
     {
@@ -54,9 +58,12 @@ public sealed class MutationPolicyBindingTests
         var policy = Complete();
         policy[field] = field switch
         {
-            "maxWorkers" => JsonValue.Create(2), "mutationCap" => JsonValue.Create(99),
-            "baselineTimeoutSeconds" => JsonValue.Create(599), "mutantTimeoutSeconds" => JsonValue.Create(121),
-            "overallDeadlineSeconds" => JsonValue.Create(599), "allowNotApplicable" => JsonValue.Create(true),
+            "maxWorkers" => JsonValue.Create(2),
+            "mutationCap" => JsonValue.Create(99),
+            "baselineTimeoutSeconds" => JsonValue.Create(599),
+            "mutantTimeoutSeconds" => JsonValue.Create(121),
+            "overallDeadlineSeconds" => JsonValue.Create(599),
+            "allowNotApplicable" => JsonValue.Create(true),
             _ => JsonValue.Create(2)
         };
         Assert.Throws<EvidenceWriteException>(() => Join(SparseConfiguration, policy));
