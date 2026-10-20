@@ -115,7 +115,8 @@ public sealed class ReviewBudgetLedger
     private BudgetDecision Exhausted() => new(
         ReviewOutcome.Incomplete,
         "The explicit review budget is exhausted; review is paused without discarding findings.",
-        _findings.ToArray()) { IsExhausted = true };
+        _findings.ToArray())
+    { IsExhausted = true };
 
     private static void ValidateCost(ReviewCost cost)
     {

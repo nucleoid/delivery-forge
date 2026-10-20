@@ -20,10 +20,17 @@ internal sealed class HistoricalGitInput
     internal string Identity { get; }
     internal object Data => new
     {
-        Kind = "HistoricalGitInput-DATA-v1", Root, GitDirectory,
-        CommonDirectory = GitDirectory, IndexPath, ObjectsPath,
-        Expected = expected, MetadataIdentity = Identity,
-        ProvisionedWorker = false, WriterAuthority = false, BaselineAuthority = false
+        Kind = "HistoricalGitInput-DATA-v1",
+        Root,
+        GitDirectory,
+        CommonDirectory = GitDirectory,
+        IndexPath,
+        ObjectsPath,
+        Expected = expected,
+        MetadataIdentity = Identity,
+        ProvisionedWorker = false,
+        WriterAuthority = false,
+        BaselineAuthority = false
     };
 
     internal HistoricalGitInput(InstalledToolFiles actualFiles, string root, RepositoryIdentity actualExpected)
@@ -48,7 +55,11 @@ internal sealed class HistoricalGitInput
         });
         Identity = InstalledToolFiles.Identity(JsonSerializer.SerializeToUtf8Bytes(new
         {
-            Root, GitDirectory, IndexPath, ObjectsPath, expected,
+            Root,
+            GitDirectory,
+            IndexPath,
+            ObjectsPath,
+            expected,
             Files = metadata.OrderBy(row => row.Key, StringComparer.Ordinal).ToArray()
         }));
         Check();
@@ -86,14 +97,26 @@ internal sealed class HistoricalGitInput
         var closed = new Dictionary<string, string>(actual.Environment ?? new Dictionary<string, string>(), StringComparer.Ordinal);
         foreach (var pair in new Dictionary<string, string>
         {
-            ["GIT_DIR"] = GitDirectory, ["GIT_COMMON_DIR"] = GitDirectory, ["GIT_WORK_TREE"] = Root,
-            ["GIT_OBJECT_DIRECTORY"] = ObjectsPath, ["GIT_INDEX_FILE"] = IndexPath,
-            ["GIT_CONFIG"] = Path.Combine(GitDirectory, "config"), ["GIT_CONFIG_NOSYSTEM"] = "1",
-            ["GIT_CONFIG_GLOBAL"] = nullDevice, ["GIT_CONFIG_SYSTEM"] = nullDevice,
-            ["GIT_CONFIG_COUNT"] = "0", ["GIT_CONFIG_PARAMETERS"] = "", ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "",
-            ["GIT_NAMESPACE"] = "", ["GIT_NO_REPLACE_OBJECTS"] = "1", ["GIT_GRAFT_FILE"] = nullDevice,
-            ["GIT_NO_LAZY_FETCH"] = "1", ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_OPTIONAL_LOCKS"] = "0",
-            ["GIT_ATTR_NOSYSTEM"] = "1", ["GIT_SHALLOW_FILE"] = nullDevice
+            ["GIT_DIR"] = GitDirectory,
+            ["GIT_COMMON_DIR"] = GitDirectory,
+            ["GIT_WORK_TREE"] = Root,
+            ["GIT_OBJECT_DIRECTORY"] = ObjectsPath,
+            ["GIT_INDEX_FILE"] = IndexPath,
+            ["GIT_CONFIG"] = Path.Combine(GitDirectory, "config"),
+            ["GIT_CONFIG_NOSYSTEM"] = "1",
+            ["GIT_CONFIG_GLOBAL"] = nullDevice,
+            ["GIT_CONFIG_SYSTEM"] = nullDevice,
+            ["GIT_CONFIG_COUNT"] = "0",
+            ["GIT_CONFIG_PARAMETERS"] = "",
+            ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "",
+            ["GIT_NAMESPACE"] = "",
+            ["GIT_NO_REPLACE_OBJECTS"] = "1",
+            ["GIT_GRAFT_FILE"] = nullDevice,
+            ["GIT_NO_LAZY_FETCH"] = "1",
+            ["GIT_TERMINAL_PROMPT"] = "0",
+            ["GIT_OPTIONAL_LOCKS"] = "0",
+            ["GIT_ATTR_NOSYSTEM"] = "1",
+            ["GIT_SHALLOW_FILE"] = nullDevice
         })
         {
             // Emit the exact uppercase Git variable even on case-sensitive
