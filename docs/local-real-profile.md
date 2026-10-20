@@ -51,6 +51,9 @@ The separately admitted fresh-process recovery Fact uses
 is independently known closed. It requires a real new installed process to
 return `ORIGINAL_OWNER_REQUIRED` and leave the complete stored record hashes
 unchanged. It neither replays a worker nor reconciles old native uncertainty.
+The fresh executable refuses non-dry-run resume immediately after trusted
+configuration parsing, before forward host admission or coordination setup;
+external proof expiry cannot turn this no-owner check into an unrelated failure.
 
 Use the existing real stop conformance route for same-original stop. A new CLI
 process cannot resume an old native owner from saved JSON; that refusal is a

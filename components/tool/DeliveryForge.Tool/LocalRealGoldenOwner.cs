@@ -123,16 +123,19 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
         return new("COMPLETE", "ACTUAL_LOCAL_REAL_CHAIN_PASSED", "Actual worker, protected quality/baseline and production-accepted independent review passed with local fake publication; scheduling, recovery and production publication remain separate.", new { frame.RunId, Receipt = path, RunDirectory = output, FakePublication = true, RemoteWrites = 0, RecoveryCertified = false, SchedulingCertified = false });
     }
 
-    private sealed class LocalJournal(string root, ToolLifetime original, ParentCoordinationHost parent, string runId, Action current) : IPublicationJournal
+    internal sealed class LocalJournal(string root, ToolLifetime original, DeliveryForge.Coordination.ICoordinatedSynchronousEffectAdmission parent, string runId, Action current) : ILocalRealAdmittedJournal
     {
         readonly Dictionary<string, PublicationIntent> latest = new(StringComparer.Ordinal); int sequence;
-        public Task<PublicationIntent?> ReadAsync(string key, CancellationToken token)
-        { token.ThrowIfCancellationRequested(); current(); latest.TryGetValue(key, out var row); return Task.FromResult<PublicationIntent?>(row); }
-        public Task AppendAsync(PublicationIntent row, CancellationToken token)
+        public Task<PublicationIntent?> ReadAdmittedAsync(string key, CancellationToken token)
+        {
+            var row = parent.EnterSynchronous(runId, () => { token.ThrowIfCancellationRequested(); current(); latest.TryGetValue(key, out var found); return found; });
+            return Task.FromResult<PublicationIntent?>(row);
+        }
+        public Task AppendAdmittedAsync(PublicationIntent row, CancellationToken token)
         {
             Write("intent", JsonSerializer.SerializeToUtf8Bytes(row, BoundedFiles.Json), token); latest[row.IdempotencyKey] = row; return Task.CompletedTask;
         }
-        public Task AppendReceiptAsync(ValidatedContract receipt, CancellationToken token)
+        public Task AppendReceiptAdmittedAsync(ValidatedContract receipt, CancellationToken token)
         { Write("receipt", receipt.CanonicalBytes.ToArray(), token); return Task.CompletedTask; }
         void Write(string kind, byte[] bytes, CancellationToken token) => parent.EnterSynchronous(runId, () =>
         {

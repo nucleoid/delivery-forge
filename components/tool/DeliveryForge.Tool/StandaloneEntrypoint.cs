@@ -55,7 +55,13 @@ internal sealed class StandaloneEntrypoint
             else
             {
                 var config = TrustedConfiguration.LoadBound(configPath, original, out var configPin); original.Restrict(TimeSpan.FromSeconds(config.OperationSeconds));
-                if (config.StandaloneRoot is null) result = ToolResult.Incomplete("STANDALONE_ROOT_REQUIRED", "An owner-reviewed installed root and actual selected Linux profile where applicable are required; no ambient host/Git fallback.");
+                // This newly constructed executable owner has no retained bridge.
+                // Refuse adoption before any forward host/coordination setup;
+                // expired external proofs must not mask the actual no-owner fact.
+                // Same-process embedded resume and dry-run history inspection keep
+                // their existing routes and all original binding checks.
+                if (command.Mode == ToolMode.Resume && !command.Has("dry-run")) result = ToolResult.Incomplete("ORIGINAL_OWNER_REQUIRED", "A fresh standalone process has no retained same-original native owner; saved run DATA cannot create one. Use dry-run only to inspect immutable history.");
+                else if (config.StandaloneRoot is null) result = ToolResult.Incomplete("STANDALONE_ROOT_REQUIRED", "An owner-reviewed installed root and actual selected Linux profile where applicable are required; no ambient host/Git fallback.");
                 else
                 {
                     var root = ReadPinned<StandaloneRootSelection>(config.StandaloneRoot, 65536); SeparateSelection(config, configPath, root); original.Check();

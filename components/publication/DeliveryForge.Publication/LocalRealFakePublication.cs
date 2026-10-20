@@ -11,6 +11,16 @@ using DeliveryForge.Publication.GitHost;
 
 namespace DeliveryForge.Publication;
 
+// Internal contract for the actual containing journal. Every operation admits
+// its own synchronous effect with the SAME original parent before file birth.
+// The caller must not wrap its synchronous prefix in EnterAsync's gate.
+internal interface ILocalRealAdmittedJournal
+{
+    Task<PublicationIntent?> ReadAdmittedAsync(string key, CancellationToken token);
+    Task AppendAdmittedAsync(PublicationIntent row, CancellationToken token);
+    Task AppendReceiptAdmittedAsync(ValidatedContract receipt, CancellationToken token);
+}
+
 // Internal containing-root composition only. The actual production review
 // receiver is checked unchanged; the ONLY transport is this private local fake.
 // No adapter/factory/URL/remote target can be selected by configuration or DATA.
@@ -18,7 +28,7 @@ internal static class LocalRealFakePublication
 {
     internal static async Task<PublicationResult> ExecuteAsync(string runId, string revision,
         TransitionEvidence evidence, ReviewTransitionReceiver receiver, IOwnedDuplexBudget original,
-        ICoordinatedSynchronousEffectAdmission parent, Func<Task> verifyCurrent, IPublicationJournal journal)
+        ICoordinatedSynchronousEffectAdmission parent, Func<Task> verifyCurrent, ILocalRealAdmittedJournal journal)
     {
         if (!System.Text.RegularExpressions.Regex.IsMatch(runId, "^run-[a-f0-9]{32}$") ||
             revision.Length is < 1 or > 256 || revision.Any(char.IsControl))
@@ -35,13 +45,16 @@ internal static class LocalRealFakePublication
         async Task Append(PublicationIntent row)
         {
             await Verify().ConfigureAwait(false);
-            await parent.EnterAsync(runId, async () => { await journal.AppendAsync(row, original.Token).ConfigureAwait(false); return true; }).ConfigureAwait(false);
+            // The actual journal enrolls the synchronous invocation itself.
+            // EnterAsync here would hold the revocation monitor through its
+            // synchronous file/write/Flush prefix despite nested admission.
+            await journal.AppendAdmittedAsync(row, original.Token).ConfigureAwait(false);
             Current();
         }
         await Verify().ConfigureAwait(false); // No journal or fake mutation before both genuine barriers.
         var target = new PublicationTarget("local-real/no-network", "refs/heads/local-real/" + runId, "refs/heads/local-real-base");
         var key = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(runId + "\0" + revision + "\0local-fake-pr")));
-        if (await parent.EnterAsync(runId, () => journal.ReadAsync(key, original.Token)).ConfigureAwait(false) is not null)
+        if (await journal.ReadAdmittedAsync(key, original.Token).ConfigureAwait(false) is not null)
             throw new InvalidOperationException("Local-real publication cannot replay or adopt journal DATA.");
         Current();
         var intent = new PublicationIntent(key, runId, revision, PublicationAction.CreateOrUpdatePr, target,
@@ -71,7 +84,7 @@ internal static class LocalRealFakePublication
             var receipt = ContractValidator.ParseAndValidate(Encoding.UTF8.GetBytes(node.ToJsonString()));
             await Verify().ConfigureAwait(false);
             WorkflowTransition.EnsureAllowed(WorkflowState.PrAuthorized, WorkflowState.PrPublished, evidence with { PublicationReceipt = receipt }, receiver);
-            await parent.EnterAsync(runId, async () => { await journal.AppendReceiptAsync(receipt, original.Token).ConfigureAwait(false); return true; }).ConfigureAwait(false);
+            await journal.AppendReceiptAdmittedAsync(receipt, original.Token).ConfigureAwait(false);
             await Append(intent with { State = PublicationIntentState.Confirmed, ResultId = mutation.ResultId, ReceiptIdentity = receipt.Identity }).ConfigureAwait(false);
             await Verify().ConfigureAwait(false);
             return new(PublicationOutcome.PublishedFixture, PublicationDenial.None,
