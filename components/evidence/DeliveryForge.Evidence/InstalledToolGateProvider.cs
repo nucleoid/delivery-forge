@@ -398,7 +398,7 @@ public sealed class InstalledToolGateProvider
             public TimeSpan WorkLimit => original.WorkLimit;
             public CancellationToken Token => cleanupAudit ? CancellationToken.None : original.Token;
             public void CheckWork() { if (cleanupAudit) _ = original.CleanupRemaining; else original.CheckWork(); }
-            public TimeSpan CleanupRemaining => cleanupAudit || original.IsClosing ? original.CleanupRemaining : original.Remaining;
+            public TimeSpan CleanupRemaining => cleanupAudit ? original.CleanupRemaining : original.NativeDispositionRemaining;
         }
         internal byte[] OriginalOutput(CommandResult command) => _actual.TryGetValue(command, out var proof)
             ? proof.StandardOutputBytes : throw new EvidenceWriteException("Foreign result cannot supply actual diff bytes.");

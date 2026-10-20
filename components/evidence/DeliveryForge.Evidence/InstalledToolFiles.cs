@@ -159,6 +159,19 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     {
         get { Check(); lock (_timing) return _cleanup is null ? WorkLimit - Stopwatch.GetElapsedTime(_started) : CleanupRemaining; }
     }
+    // Existing native disposition needs no new lease authority. A successful
+    // preflight close still spends WORK; actual failure spends the same MIN cleanup.
+    internal TimeSpan NativeDispositionRemaining
+    {
+        get
+        {
+            lock (_timing)
+            {
+                if (_cleanup is not null) return CleanupRemaining;
+                CheckWorkCore(); return WorkLimit - Stopwatch.GetElapsedTime(_started);
+            }
+        }
+    }
     internal void Check()
     {
         // Never acquire the parent monitor while holding this timing lock: native

@@ -9,6 +9,20 @@ namespace DeliveryForge.Tool.Tests;
 public sealed class ParentOriginalAdmissionTests
 {
     [Fact]
+    public void Revoked_admission_blocks_forward_work_but_not_existing_native_disposition_within_work()
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var current = true;
+        var admission = new ParentEffectAdmission(new object(), _ => current, _ => current = false);
+        var files = new InstalledToolFiles(life, TimeSpan.FromSeconds(20), new InstalledToolHostScope.Credits(), admission, "owned");
+        current = false;
+        Assert.Throws<DeliveryForge.Coordination.CoordinationUncertainException>(() => files.CheckWork());
+        Assert.True(files.NativeDispositionRemaining > TimeSpan.Zero);
+        Assert.False(files.IsClosing);
+        Assert.False(life.HasExplicitUnknown);
+    }
+
+    [Fact]
     public async Task Active_bridge_frame_keeps_its_obligation_without_denying_parent_admission()
     {
         await using var processes = new ProcessControl();
