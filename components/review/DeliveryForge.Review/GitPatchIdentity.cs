@@ -7,6 +7,9 @@ using DeliveryForge.Contracts.State;
 
 namespace DeliveryForge.Review;
 
+internal delegate Task<GitProcessResult> OwnedReviewGit(string gitDirectory, IReadOnlyList<string> arguments,
+    CancellationToken token, byte[]? input = null, IReadOnlyDictionary<string, string>? environment = null);
+
 public sealed class ControlledGitEvidenceContext : IDisposable
 {
     private readonly Action? _dispose;
@@ -25,7 +28,13 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         byte[] workerIndexHash,
         object quiescenceAuthority,
         Action? dispose = null,
-        Action? beforeFinalRecheck = null)
+        Action? beforeFinalRecheck = null,
+        OwnedReviewGit? ownedGit = null,
+        Func<bool>? mayCleanOwnedFiles = null,
+        Action? checkOwnedWork = null,
+        Action<string>? deleteOwnedScratch = null,
+        Func<Func<object?>, object?>? ownedSynchronous = null,
+        Func<string, int, CancellationToken, Task<byte[]>>? readOwnedFile = null)
     {
         SourceRoot = Path.GetFullPath(sourceRoot);
         WorkerGitDirectory = Path.GetFullPath(workerGitDirectory);
@@ -41,6 +50,12 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         QuiescenceAuthority = quiescenceAuthority;
         _dispose = dispose;
         BeforeFinalRecheck = beforeFinalRecheck;
+        OwnedGit = ownedGit;
+        MayCleanOwnedFiles = mayCleanOwnedFiles;
+        CheckOwnedWork = checkOwnedWork;
+        DeleteOwnedScratch = deleteOwnedScratch;
+        OwnedSynchronous = ownedSynchronous;
+        ReadOwnedFile = readOwnedFile;
     }
 
     public string SourceRoot { get; }
@@ -56,6 +71,17 @@ public sealed class ControlledGitEvidenceContext : IDisposable
     internal byte[] WorkerIndexHash { get; }
     internal object QuiescenceAuthority { get; }
     internal Action? BeforeFinalRecheck { get; }
+    internal OwnedReviewGit? OwnedGit { get; }
+    internal Func<bool>? MayCleanOwnedFiles { get; }
+    internal Action? CheckOwnedWork { get; }
+    internal Action<string>? DeleteOwnedScratch { get; }
+    internal Func<Func<object?>, object?>? OwnedSynchronous { get; }
+    internal Func<string, int, CancellationToken, Task<byte[]>>? ReadOwnedFile { get; }
+    internal T EnterOwnedSynchronous<T>(Func<T> invoke)
+    {
+        if (OwnedSynchronous is null) throw new ReviewPreflightException("Original source file admission is absent.");
+        return (T)OwnedSynchronous(() => invoke())!;
+    }
 
     public void Dispose() => _dispose?.Invoke();
 }
@@ -114,7 +140,7 @@ public static partial class GitPatchIdentity
             artifactIdentities.Any(pair => string.IsNullOrWhiteSpace(pair.Key) || !IdentityPattern().IsMatch(pair.Value)))
             throw new ReviewPreflightException("Controlled Git evidence and supplied identities must be explicit and well formed.");
 
-        ValidateControlledMetadata(context);
+        await ValidateControlledMetadataAsync(context, cancellationToken).ConfigureAwait(false);
         var version = Text(await ControlledGit(context, ["--version"], cancellationToken));
         if (!string.Equals(version, context.ExpectedGitVersion, StringComparison.Ordinal))
             throw new ReviewPreflightException("Trusted Git version does not match the frozen host context.");
@@ -146,6 +172,7 @@ public static partial class GitPatchIdentity
         var after = await VerifySourceSnapshotAsync(context, headCommit, headTree, cancellationToken);
         if (!CryptographicOperations.FixedTimeEquals(before, after))
             throw new ReviewPreflightException("Source changed while controlled review evidence was captured.");
+        if (context.SourceRealm == ReviewAuthorityRealm.Production) context.CheckOwnedWork?.Invoke();
 
         string[] recorded =
         [
@@ -167,18 +194,21 @@ public static partial class GitPatchIdentity
             recorded));
     }
 
-    private static void ValidateControlledMetadata(ControlledGitEvidenceContext context)
+    private static async Task ValidateControlledMetadataAsync(ControlledGitEvidenceContext context, CancellationToken token)
     {
         var objects = Path.Combine(context.ControlledGitDirectory, "objects");
-        if (!Directory.Exists(objects) ||
+        bool InvalidObjects() => !Directory.Exists(objects) ||
             File.Exists(Path.Combine(objects, "info", "alternates")) ||
             File.Exists(Path.Combine(context.ControlledGitDirectory, "info", "grafts")) ||
             File.Exists(Path.Combine(context.ControlledGitDirectory, "shallow")) ||
-            Directory.Exists(Path.Combine(context.ControlledGitDirectory, "refs", "replace")))
+            Directory.Exists(Path.Combine(context.ControlledGitDirectory, "refs", "replace"));
+        if (context.SourceRealm == ReviewAuthorityRealm.Production ? context.EnterOwnedSynchronous(InvalidObjects) : InvalidObjects())
             throw new ReviewPreflightException("Controlled Git metadata contains incomplete or external object authority.");
 
         var configPath = Path.Combine(context.ControlledGitDirectory, "config");
-        var config = File.Exists(configPath) ? File.ReadAllText(configPath) : string.Empty;
+        var config = context.SourceRealm == ReviewAuthorityRealm.Production
+            ? new UTF8Encoding(false, true).GetString(await ReadOwnedBoundedAsync(context, configPath, 1048576, token).ConfigureAwait(false))
+            : File.Exists(configPath) ? File.ReadAllText(configPath) : string.Empty;
         var forbidden = new[] { "promisor", "partialclone", "fsmonitor", "textconv", "[filter", "[diff ", "alternates" };
         if (forbidden.Any(value => config.Contains(value, StringComparison.OrdinalIgnoreCase)))
             throw new ReviewPreflightException("Controlled Git metadata contains executable or remote configuration.");
@@ -198,7 +228,7 @@ public static partial class GitPatchIdentity
         var tracked = ParseTree(listing.StandardOutput);
         using var fingerprint = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var file in EnumerateSourceEntries(context.SourceRoot))
+        foreach (var file in EnumerateSourceEntries(context, cancellationToken))
         {
             var relative = Path.GetRelativePath(context.SourceRoot, file).Replace('\\', '/');
             if (!tracked.TryGetValue(relative, out var entry))
@@ -210,17 +240,20 @@ public static partial class GitPatchIdentity
             byte[] bytes;
             string actualMode;
             var info = new FileInfo(file);
-            if (!string.IsNullOrEmpty(info.LinkTarget))
+            var linkTarget = context.SourceRealm == ReviewAuthorityRealm.Production ? context.EnterOwnedSynchronous(() => info.LinkTarget) : info.LinkTarget;
+            if (!string.IsNullOrEmpty(linkTarget))
             {
-                bytes = Encoding.UTF8.GetBytes(info.LinkTarget);
+                bytes = Encoding.UTF8.GetBytes(linkTarget);
                 actualMode = "120000";
             }
             else
             {
-                bytes = await File.ReadAllBytesAsync(file, cancellationToken);
+                bytes = context.SourceRealm == ReviewAuthorityRealm.Production
+                    ? await ReadOwnedBoundedAsync(context, file, context.MaximumEvidenceBytes, cancellationToken).ConfigureAwait(false)
+                    : await File.ReadAllBytesAsync(file, cancellationToken);
                 actualMode = OperatingSystem.IsWindows()
                     ? entry.Mode
-                    : !File.GetUnixFileMode(file).HasFlag(UnixFileMode.UserExecute)
+                    : !(context.SourceRealm == ReviewAuthorityRealm.Production ? context.EnterOwnedSynchronous(() => File.GetUnixFileMode(file)) : File.GetUnixFileMode(file)).HasFlag(UnixFileMode.UserExecute)
                         ? "100644"
                         : "100755";
             }
@@ -250,29 +283,61 @@ public static partial class GitPatchIdentity
             throw new ReviewPreflightException("Worker HEAD changed after the parent-owned source snapshot was frozen.");
 
         var indexPath = Path.Combine(context.WorkerGitDirectory, "index");
-        if (!File.Exists(indexPath))
+        if (!(context.SourceRealm == ReviewAuthorityRealm.Production ? context.EnterOwnedSynchronous(() => File.Exists(indexPath)) : File.Exists(indexPath)))
             throw new ReviewPreflightException("Worker index is unavailable for source snapshot verification.");
-        var currentIndexHash = SHA256.HashData(await File.ReadAllBytesAsync(indexPath, cancellationToken));
+        var indexBytes = context.SourceRealm == ReviewAuthorityRealm.Production
+            ? await ReadOwnedBoundedAsync(context, indexPath, 16 * 1024 * 1024, cancellationToken).ConfigureAwait(false)
+            : await File.ReadAllBytesAsync(indexPath, cancellationToken);
+        var currentIndexHash = SHA256.HashData(indexBytes);
         if (!CryptographicOperations.FixedTimeEquals(currentIndexHash, context.WorkerIndexHash))
             throw new ReviewPreflightException("Worker index changed after the parent-owned source snapshot was frozen.");
     }
 
-    private static IEnumerable<string> EnumerateSourceEntries(string root)
+    private static async Task<byte[]> ReadOwnedBoundedAsync(ControlledGitEvidenceContext context, string path, long maximum, CancellationToken token)
     {
-        var stack = new Stack<string>();
-        stack.Push(root);
+        if (context.CheckOwnedWork is null || context.ReadOwnedFile is null || maximum is < 1 or > 16777216)
+            throw new ReviewPreflightException("Production source read requires its original finite owner.");
+        context.CheckOwnedWork();
+        var bytes = await context.ReadOwnedFile(path, checked((int)maximum), token).ConfigureAwait(false);
+        context.CheckOwnedWork(); return bytes;
+    }
+
+    private static IEnumerable<string> EnumerateSourceEntries(ControlledGitEvidenceContext context, CancellationToken token)
+    {
+        var root = context.SourceRoot;
+        var production = context.SourceRealm == ReviewAuthorityRealm.Production;
+        var stack = new Stack<(string Path, int Depth)>();
+        stack.Push((root, 0));
+        var entries = 0;
+        void Check()
+        {
+            if (!production) return;
+            token.ThrowIfCancellationRequested();
+            if (context.CheckOwnedWork is null) throw new ReviewPreflightException("Original source traversal owner is absent.");
+            context.CheckOwnedWork();
+        }
         while (stack.Count > 0)
         {
-            var directory = stack.Pop();
-            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+            Check();
+            var (directory, depth) = stack.Pop();
+            using var iterator = production
+                ? context.EnterOwnedSynchronous(() => Directory.EnumerateFileSystemEntries(directory).GetEnumerator())
+                : Directory.EnumerateFileSystemEntries(directory).GetEnumerator();
+            while (production ? context.EnterOwnedSynchronous(iterator.MoveNext) : iterator.MoveNext())
             {
+                Check();
+                if (production && ++entries > 100000) throw new ReviewPreflightException("Owned source traversal exceeds100000 entries.");
+                var entry = iterator.Current;
                 if (string.Equals(entry, Path.Combine(root, ".git"), StringComparison.Ordinal))
                     continue;
-                var attributes = File.GetAttributes(entry);
+                var attributes = production ? context.EnterOwnedSynchronous(() => File.GetAttributes(entry)) : File.GetAttributes(entry);
                 if (attributes.HasFlag(FileAttributes.ReparsePoint))
                     yield return entry;
                 else if (attributes.HasFlag(FileAttributes.Directory))
-                    stack.Push(entry);
+                {
+                    if (production && depth >= 64) throw new ReviewPreflightException("Owned source traversal exceeds64 directory levels.");
+                    stack.Push((entry, depth + 1));
+                }
                 else
                     yield return entry;
             }
@@ -316,6 +381,7 @@ public static partial class GitPatchIdentity
     {
         var reverseIndex = Path.Combine(Path.GetTempPath(), $"delivery-forge-review-index-{Guid.NewGuid():N}");
         var forwardIndex = Path.Combine(Path.GetTempPath(), $"delivery-forge-review-index-{Guid.NewGuid():N}");
+        var verified = false;
         try
         {
             var reverseEnvironment = new Dictionary<string, string> { ["GIT_INDEX_FILE"] = reverseIndex };
@@ -345,13 +411,29 @@ public static partial class GitPatchIdentity
                 context, ["write-tree"], cancellationToken, environment: forwardEnvironment));
             if (!string.Equals(forward, expectedHeadTree, StringComparison.Ordinal))
                 throw new ReviewPreflightException("Binary patch does not reconstruct the exact controlled head tree.");
+            verified = true;
+        }
+        catch (Exception failure) when (context.SourceRealm == ReviewAuthorityRealm.Production)
+        {
+            failure.Data["ProductionReviewReverseIndex"] = reverseIndex;
+            failure.Data["ProductionReviewForwardIndex"] = forwardIndex;
+            throw;
         }
         finally
         {
-            foreach (var indexPath in new[] { reverseIndex, forwardIndex })
+            foreach (var indexPath in context.SourceRealm != ReviewAuthorityRealm.Production || verified && context.MayCleanOwnedFiles?.Invoke() == true
+                ? new[] { reverseIndex, forwardIndex } : Array.Empty<string>())
             {
-                if (File.Exists(indexPath)) File.Delete(indexPath);
-                if (File.Exists(indexPath + ".lock")) File.Delete(indexPath + ".lock");
+                if (context.SourceRealm == ReviewAuthorityRealm.Production)
+                {
+                    if (context.DeleteOwnedScratch is null) throw new ReviewPreflightException("Original source scratch retirement owner is absent.");
+                    context.DeleteOwnedScratch(indexPath); context.DeleteOwnedScratch(indexPath + ".lock");
+                }
+                else
+                {
+                    if (File.Exists(indexPath)) File.Delete(indexPath);
+                    if (File.Exists(indexPath + ".lock")) File.Delete(indexPath + ".lock");
+                }
             }
         }
     }
@@ -378,6 +460,12 @@ public static partial class GitPatchIdentity
         byte[]? input = null,
         IReadOnlyDictionary<string, string>? environment = null)
     {
+        if (context.SourceRealm == ReviewAuthorityRealm.Production)
+        {
+            if (context.OwnedGit is null)
+                throw new ReviewPreflightException("Production review requires its original owned Git backend.");
+            return await context.OwnedGit(gitDirectory, args, cancellationToken, input, environment).ConfigureAwait(false);
+        }
         var prefix = new[]
         {
             "--no-replace-objects",

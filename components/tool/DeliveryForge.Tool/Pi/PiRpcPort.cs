@@ -70,7 +70,7 @@ public sealed class PiRpcPort : IHostToolSessionPort, IOriginalBoundHostPort, IH
         try
         {
             if (actual.AdapterId != "pi.cli" || actual.AdapterVersion != selection.Version || remaining <= TimeSpan.Zero || remaining > Original.WorkLimit) throw new WorkerEnvelopeException("Pi request/version/deadline differs from containing original.");
-            if (selection.Bytes is <= 0 or > 268435456) throw new IOException("Explicit Pi executable exceeds256MiB profile."); var bytes = BoundedFiles.Read(selection.Executable, Original, 268435456); if (bytes.LongLength != selection.Bytes || BoundedFiles.Sha(bytes) != selection.Sha256) throw new IOException("Selected Pi executable changed.");
+            BoundedFiles.VerifyNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), Original);
             var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1" };
             process = OwnedDuplexProcess.Open(new(selection.Executable, ["--mode", "rpc", "--no-session"], actual.Worktree, environment), Original, linuxScope); if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             framing = new(process.Input, process.Output, Original); pump = Begin(() => Pump(Original.Token)); process.AttachOriginalOutputConsumer(pump);

@@ -3,7 +3,7 @@ namespace DeliveryForge.Tool;
 // Configuration selects trusted inputs; it never contains capability/accepted receipt flags.
 public sealed record TrustedConfiguration(string Repository, string RepositoryRoot, string MutableReference, string GitExecutable,
     string Adapter = "codex.cli", string AdapterVersion = "unverified", string MaximumCeiling = "plan", int OperationSeconds = 120,
-    string? ExpectedBundleIdentity = null, string? ExpectedContractIdentity = null, string? ExpectedWorkItem = null, string? ExpectedPlanCeiling = null, string? PolicyFile = null, AdmissionFile? StandaloneRoot = null, ParentCoordinationConfiguration? Coordination = null, InstalledQualitySelection? InstalledQuality = null)
+    string? ExpectedBundleIdentity = null, string? ExpectedContractIdentity = null, string? ExpectedWorkItem = null, string? ExpectedPlanCeiling = null, string? PolicyFile = null, AdmissionFile? StandaloneRoot = null, ParentCoordinationConfiguration? Coordination = null, InstalledQualitySelection? InstalledQuality = null, InstalledReviewSelection? InstalledReview = null)
 {
     public static TrustedConfiguration Load(string path, ToolLifetime life)
     {
@@ -26,7 +26,8 @@ public sealed record TrustedConfiguration(string Repository, string RepositoryRo
         if (string.IsNullOrWhiteSpace(value.Repository) || string.IsNullOrWhiteSpace(value.MutableReference) || value.OperationSeconds is < 1 or > 1200) throw new ToolUsageException("Trusted configuration identity/budget is incomplete.");
         BoundedFiles.Plain(value.RepositoryRoot, true); BoundedFiles.Plain(value.GitExecutable);
         if (value.Adapter is not ("codex.cli" or "claude-code.cli" or "pi.cli" or "openclaw.sessions")) throw new ToolUsageException("Unknown adapter id.");
-        _ = Ceiling(value.MaximumCeiling); if (value.InstalledQuality is { } quality) InstalledQualityHost.ValidateSelection(quality); return value;
+        _ = Ceiling(value.MaximumCeiling); if (value.InstalledQuality is { } quality) InstalledQualityHost.ValidateSelection(quality);
+        if (value.InstalledReview is { } review) InstalledReviewHost.ValidateSelection(review); return value;
     }
     public static AuthorizationCeiling Ceiling(string value) => value switch { "plan" => AuthorizationCeiling.Plan, "implement" => AuthorizationCeiling.Implement, "pr" => AuthorizationCeiling.Pr, "merge" => AuthorizationCeiling.Merge, _ => throw new ToolUsageException("Unknown immutable ceiling.") };
 }

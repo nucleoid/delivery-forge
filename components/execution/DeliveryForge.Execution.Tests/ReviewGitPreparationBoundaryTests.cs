@@ -303,7 +303,7 @@ public sealed class ReviewGitPreparationBoundaryTests
     {
         var bound = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken); bound.CancelAfter(TimeSpan.FromSeconds(30)); return bound;
     }
-    private sealed record Fixture(string Root, string GitDirectory, string Git, string Head, string Version,
+    internal sealed record Fixture(string Root, string GitDirectory, string Git, string Head, string Version,
         string IndexSha256, string SpecSha256, string Nonce, string? Helper)
     {
         public string EnteredPath => Path.Combine(GitDirectory, "helper-entered-" + Nonce);

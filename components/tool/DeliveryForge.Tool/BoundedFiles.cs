@@ -127,6 +127,50 @@ public static class BoundedFiles
         catch (Exception error) { frame.Primary = error; }
         CloseFile(frame); return frame.Bytes ?? throw new IOException("Complete actual file result missing.");
     }
+    internal const long MaximumNativeImageBytes = 512L * 1024 * 1024;
+    // Native images have a separate finite extent profile. Retain the existing
+    // original read credit and first-close protocol; never allocate the image.
+    internal static void VerifyNativeImage(AdmissionFile pin, ToolLifetime life)
+    {
+        life.Check();
+        if (pin is null || pin.Bytes is < 1 or > MaximumNativeImageBytes || pin.Sha256 is not { Length: 64 } ||
+            pin.Sha256.Any(c => !char.IsAsciiHexDigitLower(c)))
+            throw new ToolUsageException("Finite exact lowercase native image pin required.");
+        var path = Plain(pin.Path); life.Check();
+        if (!File.Exists(path)) throw new IOException("Required plain native image is absent.");
+        var frame = new FileFrame { Path = path, Original = life };
+        try
+        {
+            Credit(life, 0, false); frame.AcquisitionEntered = true;
+            frame.Stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
+            frame.AcquisitionReturned = true; life.Check();
+            var length = frame.Stream.Length; life.Check();
+            var written = File.GetLastWriteTimeUtc(path); life.Check();
+            if (length != pin.Bytes || length > MaximumNativeImageBytes)
+                throw new IOException("Native image extent differs from its finite selected pin.");
+            Credit(life, length + 1, false);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var buffer = new byte[65536]; long read = 0;
+            while (read < length)
+            {
+                life.Check();
+                var count = frame.Stream.Read(buffer, 0, (int)Math.Min(buffer.Length, length - read));
+                life.Check();
+                if (count == 0) throw new IOException("Native image ended before its complete selected extent.");
+                hash.AppendData(buffer, 0, count); read += count; life.Check();
+            }
+            var eof = frame.Stream.ReadByte(); life.Check();
+            var after = frame.Stream.Length; life.Check(); _ = Plain(path); life.Check();
+            var currentLength = new FileInfo(path).Length; life.Check();
+            var currentWritten = File.GetLastWriteTimeUtc(path); life.Check();
+            if (eof != -1 || after != length || currentLength != length || currentWritten != written)
+                throw new IOException("Native image changed complete extent, EOF or namespace metadata.");
+            var actual = Convert.ToHexStringLower(hash.GetHashAndReset()); life.Check();
+            if (actual != pin.Sha256) throw new IOException("Complete selected native image SHA256 differs.");
+        }
+        catch (Exception error) { frame.Primary = error; }
+        CloseFile(frame);
+    }
     public static T ReadJson<T>(string path, ToolLifetime life, int maximum = 16 * 1024 * 1024)
     {
         var bytes = Read(path, life, maximum); life.Check(); _ = CanonicalJson.Canonicalize(bytes); life.Check(); var value = JsonSerializer.Deserialize<T>(bytes, Json) ?? throw new IOException("JSON value is null."); life.Check(); return value;

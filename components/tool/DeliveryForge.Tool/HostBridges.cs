@@ -186,11 +186,12 @@ internal sealed class RetainedHostTask<T>(ToolLifetime original)
 
 public sealed class HostBridgeFrame
 {
-    internal HostBridgeFrame(string runId, ToolLifetime life, ExecutionCoordinator owner, Func<bool> externalUnknown, bool ownsOriginal) { RunId = runId; Lifetime = life; Owner = owner; ExternalUnknown = externalUnknown; OwnsOriginal = ownsOriginal; Worker = new(life); Quality = new(life); }
+    internal HostBridgeFrame(string runId, ToolLifetime life, ExecutionCoordinator owner, Func<bool> externalUnknown, bool ownsOriginal) { RunId = runId; Lifetime = life; Owner = owner; ExternalUnknown = externalUnknown; OwnsOriginal = ownsOriginal; Worker = new(life); Quality = new(life); Review = new(life); }
     readonly Func<bool> ExternalUnknown; readonly bool OwnsOriginal;
     internal readonly object ReconciliationGate = new();
     internal RetainedHostTask<ToolResult> Worker { get; }
     internal RetainedHostTask<ToolResult> Quality { get; }
+    internal RetainedHostTask<ToolResult> Review { get; }
     readonly List<(QuiescenceResult Pause, RetainedHostTask<ResumeResult> Control)> resumeControls = [];
     QuiescenceResult? actualPause;
     internal QuiescenceResult? ActualPause { get { lock (ReconciliationGate) return actualPause; } }
@@ -232,7 +233,7 @@ public sealed class HostBridgeFrame
     public AgentCompletionReceipt? Completion { get; internal set; }
     public bool OwnerCompleted { get; internal set; }
     public bool OwnerStopped { get; internal set; }
-    public bool Unknown => Worker.Unknown || Quality.Unknown || ResumeControls.Any(control => control.Unknown) || RouteActive || InvocationUnknown || EnteredTasks.Any(t => !t.IsCompleted) || Owner.HasPendingControlOperations(RunId) || ExternalUnknown() || (Accepted is not null && !OwnerCompleted && !OwnerStopped);
+    public bool Unknown => Worker.Unknown || Quality.Unknown || Review.Unknown || ResumeControls.Any(control => control.Unknown) || RouteActive || InvocationUnknown || EnteredTasks.Any(t => !t.IsCompleted) || Owner.HasPendingControlOperations(RunId) || ExternalUnknown() || (Accepted is not null && !OwnerCompleted && !OwnerStopped);
     internal async Task<T> Enter<T>(Func<Task<T>> invoke)
     {
         Lifetime.Check(); T value = default!; Exception? primary = null; Exception? post = null; var operation = AdmitOperation();
@@ -260,7 +261,18 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
 {
     ParentCoordinationHost? coordination;
     InstalledQualityHost? installedQuality;
+    InstalledReviewHost? installedReview;
     internal bool HasInstalledQuality => installedQuality is not null;
+    internal bool HasInstalledReview => installedReview is not null;
+    internal void BindInstalledReview(InstalledReviewHost actual)
+    {
+        lock (registration) { if (installedReview is not null || frames.Count != 0) throw new ToolUsageException("Installed review binds the idle actual bridge once."); installedReview = actual; }
+    }
+    internal void DisposeInstalledReviewWhenSettled()
+    {
+        if (frames.Values.Any(frame => frame.Unknown)) throw new IOException("Actual worker/review frames are not settled; retain the review object view.");
+        installedReview?.Dispose();
+    }
     internal void BindInstalledQuality(InstalledQualityHost actual)
     {
         lock (registration) { if (installedQuality is not null || frames.Count != 0) throw new ToolUsageException("Installed quality binds the idle actual bridge once."); installedQuality = actual; }
@@ -274,6 +286,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
         if (coordination is null) { if (config.Coordination is not null || requireCoordination) throw new ToolUsageException("Configured production coordination owner is unavailable."); return; }
         coordination.BindSelection(plan, assignment, config, original);
         installedQuality?.Bind(plan, assignment, config, original);
+        installedReview?.Bind(plan, assignment, config, original);
     }
     internal bool ObserveCoordinationWorkSettled(string runId)
     {
@@ -282,7 +295,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
         // CurrentAsync/EnterAsync admission. Every actual containing phase and
         // child/control remains an obligation; only this observation route is
         // excluded. In particular an unreturned phase invocation is not quiet.
-        if (actual.Worker.Unknown || actual.Quality.Unknown || actual.ResumeControls.Any(control => control.Unknown) || actual.InvocationUnknown || actual.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(runId) || !adapter.ObserveBoundNativeQuiescence(runId) || !coordinator.ObserveOriginalProcessesSettled(runId)) return false;
+        if (actual.Worker.Unknown || actual.Quality.Unknown || actual.Review.Unknown || actual.ResumeControls.Any(control => control.Unknown) || actual.InvocationUnknown || actual.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(runId) || !adapter.ObserveBoundNativeQuiescence(runId) || !coordinator.ObserveOriginalProcessesSettled(runId)) return false;
         return actual.OwnerCompleted || actual.OwnerStopped || actual.Accepted is null && !adapter.ActualCalls.Any(call => call.RunId == runId && call.Kind == "Start");
     }
     readonly ConcurrentDictionary<string, HostBridgeFrame> frames = new(StringComparer.Ordinal);
@@ -298,7 +311,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
     {
         if (requireCoordination && coordination is null) return ToolResult.Incomplete("CONTINUUM_PARENT_REQUIRED", "Actual standalone dispatch requires the explicitly configured original Continuum parent.");
         try { instructions.Require(WorkerEnvelope.PrepareWorker(plan)); adapter.BindInstructions(instructions); adapter.BindOriginal(original); } catch { if (ownsOriginal) original.Dispose(); throw; }
-        var frame = new HostBridgeFrame(plan.RunId, original, coordinator, () => adapter.HasUnknownCalls(plan.RunId) || installedQuality?.Unknown == true, ownsOriginal);
+        var frame = new HostBridgeFrame(plan.RunId, original, coordinator, () => adapter.HasUnknownCalls(plan.RunId) || installedQuality?.Unknown == true || installedReview?.Unknown == true, ownsOriginal);
         if (!Register(plan.RunId, frame)) { if (ownsOriginal) original.Dispose(); throw new WorkerEnvelopeException("Run already entered or finite host frame allowance exhausted; no replay."); }
         frame.EnterRoute(); // Retain the actual original before phase factory entry.
         try
@@ -322,6 +335,22 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
             WorkerEnvelope.ValidateCompletion(prepared.Request, a, frame.Completion ?? throw new WorkerEnvelopeException("Missing actual completion."));
             if (frame.OwnerStopped) throw new WorkerEnvelopeException("Stopped original cannot enter completion or installed quality.");
             var committed = await frame.Enter(() => coordinator.CompleteAsync(frame.Completion ?? throw new WorkerEnvelopeException("Missing actual completion."), frame.Lifetime.Token)).ConfigureAwait(false); lock (frame.ReconciliationGate) frame.OwnerCompleted = true; adapter.MarkOwnerCompleted(binding);
+            ToolResult? reviewPreparation = null;
+            if (installedReview is not null)
+            {
+                foreach (var enteredControl in frame.ResumeControls)
+                {
+                    var actualResume = await enteredControl.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
+                    if (actualResume.Reconciliation.Action != ReconciliationAction.ResumeDispatch || actualResume.Record is null)
+                        throw new WorkerEnvelopeException("Actual owner resume did not authorize immutable review preparation.");
+                }
+                if (coordination is null || frame.Primary is not null || frame.Post is not null || frame.InvocationUnknown ||
+                    frame.EnteredTasks.Any(task => !task.IsCompleted) || !NativeCompletedAndQuiet(frame))
+                    throw new WorkerEnvelopeException("Immutable review preparation requires the actual completed native worker and current parent owner.");
+                frame.Review.Start(frame.Lifetime, () => installedReview.PrepareCompletedAsync(frame, coordination,
+                    () => NativeCompletedAndQuiet(frame)));
+                reviewPreparation = await frame.Review.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
+            }
             if (installedQuality is not null)
             {
                 foreach (var enteredControl in frame.ResumeControls)
@@ -334,13 +363,19 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
                 if (frame.Primary is not null || frame.Post is not null || coordination is null || adapter.Realm == HostObservationRealm.ContractFixture || frame.InvocationUnknown || frame.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(plan.RunId) || !adapter.ObserveBoundNativeQuiescence(plan.RunId) || !coordinator.ObserveOriginalProcessesSettled(plan.RunId))
                     throw new WorkerEnvelopeException("Installed quality requires the genuine original completed native worker and current parent owner.");
                 frame.Quality.Start(frame.Lifetime, () => installedQuality.RunCompletedAsync(frame, coordination));
-                return await frame.Quality.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
+                var quality = await frame.Quality.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
+                return reviewPreparation is null ? quality : quality with { Data = new { Quality = quality.Data, ReviewPreparation = reviewPreparation } };
             }
+            if (reviewPreparation is not null) return reviewPreparation;
             return new("COMPLETE", adapter.Realm == HostObservationRealm.ContractFixture ? "CONTRACT_FIXTURE_COMPLETE" : "OWNER_COMPLETED_REQUIRES_PROFILE_AUDIT", "Actual owner completion recorded; quality/review/publication and installed certification remain separate.", new { committed.RunId, committed.Sequence, committed.Sha256, Realm = adapter.Realm.ToString() });
         }
         catch (Exception error) { frame.Primary ??= error; return ToolResult.Incomplete("HOST_OPERATION_RETAINED", "Actual host/owner operation failed or remains unknown; no retry or invented quiescence.", new { frame.RunId, frame.Unknown, Type = error.GetType().FullName, OwnerCompleted = frame.OwnerCompleted }); }
         finally { frame.LeaveRoute(); frame.CloseWhenSettled(); }
     }
+    bool NativeCompletedAndQuiet(HostBridgeFrame frame) => frame.OwnerCompleted && !frame.OwnerStopped &&
+        frame.Primary is null && frame.Post is null && frame.Completion is not null &&
+        adapter.Realm != HostObservationRealm.ContractFixture && !adapter.HasUnknownCalls(frame.RunId) &&
+        adapter.ObserveBoundNativeQuiescence(frame.RunId) && coordinator.ObserveOriginalProcessesSettled(frame.RunId);
     public async Task<ToolResult> StopRetainedAsync(string runId)
     {
         if (!frames.TryGetValue(runId, out var frame)) return ToolResult.Incomplete("ORIGINAL_OWNER_REQUIRED", "No retained same-original owner frame exists; saved DATA is not a session.");
@@ -381,6 +416,8 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
             return ToolResult.Incomplete("ORIGINAL_OWNER_REQUIRED", "Resume cannot replace or renew the actual original.");
         if (installedQuality is not null && !installedQuality.MatchesRetained(frame, actualConfiguration, actualOriginal))
             return ToolResult.Incomplete("ORIGINAL_QUALITY_BINDING_REQUIRED", "Same retained original/configuration/plan/assignment is required.");
+        if (installedReview is not null && !installedReview.MatchesRetained(frame, actualConfiguration, actualOriginal))
+            return ToolResult.Incomplete("ORIGINAL_REVIEW_BINDING_REQUIRED", "Same retained original/configuration/plan/assignment is required for review.");
         frame.EnterRoute();
         try
         {

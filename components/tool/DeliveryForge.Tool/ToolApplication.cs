@@ -42,7 +42,7 @@ public sealed class ToolApplication(OwnerHostBridge? host = null, IIssueContentP
         using var locallyOwnedLifetime = actualOriginal is null ? life : null;
         life.Check();
         var config = TrustedConfiguration.LoadSelected(configPath, life, actualConfigurationPin);
-        if (config.InstalledQuality is not null && actualOriginal is not null && actualConfigurationPin is not null)
+        if ((config.InstalledQuality is not null || config.InstalledReview is not null) && actualOriginal is not null && actualConfigurationPin is not null)
         {
             // Reload verifies the exact current admitted bytes; retain the same
             // actual selected configuration object rather than adopt saved DATA.
@@ -131,6 +131,7 @@ public sealed class ToolApplication(OwnerHostBridge? host = null, IIssueContentP
         // from imported plan fields. A typed bridge must be supplied by that embedding composition.
         if (host is null || assignments is null) return ToolResult.Incomplete(host is null ? "HOST_BRIDGE_UNAVAILABLE" : "OWNED_ASSIGNMENT_REQUIRED", "A real host bridge and parent-owned FrozenWorkerPlan assignment are required; no assignment is reconstructed from JSON.", new { imported.Plan.Identity, Adapter = config.Adapter });
         if (config.InstalledQuality is not null && !host.HasInstalledQuality) return ToolResult.Incomplete("CONTAINING_QUALITY_OWNER_REQUIRED", "Selected installed quality requires the actual closed standalone owner composition; the selection cannot be ignored by an embedding.");
+        if (config.InstalledReview is not null && !host.HasInstalledReview) return ToolResult.Incomplete("CONTAINING_REVIEW_OWNER_REQUIRED", "Selected installed review requires the actual closed standalone owner composition.");
         var request = new ParentAssignmentRequest(imported.Plan, config, command.Get("run-dir"), command.Get("result-dir"));
         var assignment = await SelectAssignmentAsync(request, life).ConfigureAwait(false);
         RequireAssignment(assignment, request); life.Check();
@@ -163,6 +164,7 @@ public sealed class ToolApplication(OwnerHostBridge? host = null, IIssueContentP
     async Task<ToolResult> RunAsync(ToolCommand command, TrustedConfiguration config, ToolLifetime life)
     {
         if (command.Mode == ToolMode.Resume && config.InstalledQuality is not null && !command.Has("dry-run") && (actualOriginal is null || actualConfigurationPin is null || host is null)) return ToolResult.Incomplete("ORIGINAL_QUALITY_BINDING_REQUIRED", "The exact live containing owner/configuration is required; a new process cannot adopt it from JSON.");
+        if (command.Mode == ToolMode.Resume && config.InstalledReview is not null && !command.Has("dry-run") && (actualOriginal is null || actualConfigurationPin is null || host is null)) return ToolResult.Incomplete("ORIGINAL_REVIEW_BINDING_REQUIRED", "The exact live containing owner/configuration is required for review; a new process cannot adopt it from JSON.");
         var directory = BoundedFiles.Plain(command.Get("run-dir")!, true); var selection = BoundedFiles.ReadJson<RunSelection>(Path.Combine(directory, "selection.json"), life, 65536);
         if (selection.Repository != config.Repository || !Same(selection.RepositoryRoot, config.RepositoryRoot)) throw new ToolUsageException("Stored run identity differs from protected repository selection.");
         var ceiling = TrustedConfiguration.Ceiling(selection.StoredCeiling); if (ceiling > TrustedConfiguration.Ceiling(config.MaximumCeiling)) throw new ToolUsageException("Stored ceiling exceeds current protected ceiling.");

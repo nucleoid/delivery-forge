@@ -60,7 +60,7 @@ public sealed class ClaudeStreamPort : IHostToolSessionPort, IOriginalBoundHostP
         try
         {
             if (actual.AdapterId != "claude-code.cli" || actual.AdapterVersion != selection.Version || remaining <= TimeSpan.Zero || remaining > Original.WorkLimit) throw new WorkerEnvelopeException("Actual Claude request/version/deadline differs.");
-            if (selection.Bytes is <= 0 or > 268435456) throw new IOException("Selected Claude image exceeds finite profile."); var bytes = BoundedFiles.Read(selection.Executable, Original, 268435456); if (bytes.LongLength != selection.Bytes || BoundedFiles.Sha(bytes) != selection.Sha256) throw new IOException("Actual selected Claude image changed.");
+            BoundedFiles.VerifyNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), Original);
             var prompt = HostAssignmentPrompt.Create(actual, instructions); promptId = Guid.NewGuid().ToString(); state = new(promptId, prompt);
             var inherited = Environment.GetEnvironmentVariable("CLAUDE_CODE_SDK_READS_SESSION_STATE"); if (inherited is not null && inherited != "1") throw new ToolUsageException("Existing session-state selection differs; no configuration override.");
             var env = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1", ["CLAUDE_CODE_SDK_READS_SESSION_STATE"] = "1" };

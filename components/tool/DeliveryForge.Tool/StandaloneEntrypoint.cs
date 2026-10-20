@@ -32,6 +32,14 @@ internal sealed class StandaloneEntrypoint
                 foreach (var source in new[] { config.RepositoryRoot, work, result, quality.ArtifactRoot })
                     foreach (var input in new[] { registry.OwnerApproval.Path, registry.ArtifactRoot }) BoundedFiles.Separate(source, input);
         }
+        if (config.InstalledReview is { } review)
+        {
+            foreach (var source in new[] { config.RepositoryRoot, work, result, store })
+                BoundedFiles.Separate(source, review.ArtifactRoot);
+            BoundedFiles.Separate(work, review.GitImage.Path); BoundedFiles.Separate(result, review.GitImage.Path);
+            BoundedFiles.Separate(review.ArtifactRoot, configPath);
+            if (config.InstalledQuality is { } otherQuality) BoundedFiles.Separate(review.ArtifactRoot, otherQuality.ArtifactRoot);
+        }
     }
     async Task<int> Run(string[] args)
     {

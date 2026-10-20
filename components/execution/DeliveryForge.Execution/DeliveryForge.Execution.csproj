@@ -9,6 +9,8 @@
     <ProjectReference Include="../../evidence/DeliveryForge.Evidence/DeliveryForge.Evidence.csproj" />
   </ItemGroup>
   <ItemGroup>
+    <InternalsVisibleTo Include="DeliveryForge.Tool" />
+    <InternalsVisibleTo Include="DeliveryForge.Execution.Tests" />
     <ProjectReference Include="../../coordination/DeliveryForge.Coordination/DeliveryForge.Coordination.csproj" />
   </ItemGroup>
 </Project>

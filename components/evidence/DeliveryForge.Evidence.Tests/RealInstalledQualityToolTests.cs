@@ -56,5 +56,22 @@ public sealed class RealInstalledQualityToolTests
         // Genuine fixture PASS is still not a verified final gate or publication authority.
         if (normalized.Outcome == GateOutcome.Pass) Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.Contains("producer-current-binding.json", result.ArtifactHashes.Keys);
+        if (scenario == "crap-pass")
+        {
+            // The expected advisory fixture outcome must not hide missing or failed
+            // changed-LINE evidence from the genuine installed invocation.
+            Assert.DoesNotContain("producer-binding-failure.json", result.ArtifactHashes.Keys);
+            Assert.Contains("producer-changed-line-coverage.json", result.ArtifactHashes.Keys);
+            Assert.Contains("producer-changed-lines.diff", result.ArtifactHashes.Keys);
+            var coverage = JsonSerializer.Deserialize<ChangedLineCoverage.Result>(artifactIo.Read(
+                Path.Combine(gateDirectory, "producer-changed-line-coverage.json"), 1024 * 1024));
+            Assert.NotNull(coverage);
+            Assert.Equal(GateOutcome.Pass, coverage.Outcome);
+            Assert.True(coverage.ChangedExecutableLines > 0);
+            Assert.InRange(coverage.CoveredChangedLines, 1, coverage.ChangedExecutableLines);
+            Assert.InRange(coverage.Percent.GetValueOrDefault(), 80m, 100m);
+            Assert.Equal(InstalledToolFiles.Identity(artifactIo.Read(
+                Path.Combine(gateDirectory, "producer-changed-lines.diff"), ProducerJson.MaximumBytes)), coverage.DiffSha256);
+        }
     }
 }
