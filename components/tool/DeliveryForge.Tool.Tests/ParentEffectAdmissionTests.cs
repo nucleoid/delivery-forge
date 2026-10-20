@@ -168,10 +168,13 @@ public sealed class ParentEffectAdmissionTests
     public void Nested_pending_check_refuses_instead_of_waiting_under_outer_original_gate()
     {
         using var fixture = new RenewalFixture(TestContext.Current.CancellationToken);
-        Assert.Throws<CoordinationUncertainException>(() => { _ = fixture.Admission.EnterAsync("owned", () =>
+        Assert.Throws<CoordinationUncertainException>(() =>
         {
-            fixture.Begin(); fixture.Admission.CheckCurrent("owned"); return Task.FromResult(1);
-        }); });
+            _ = fixture.Admission.EnterAsync("owned", () =>
+            {
+                fixture.Begin(); fixture.Admission.CheckCurrent("owned"); return Task.FromResult(1);
+            });
+        });
         Assert.True(fixture.Revoked); Assert.False(fixture.Admission.AllKnownSettled);
     }
 
