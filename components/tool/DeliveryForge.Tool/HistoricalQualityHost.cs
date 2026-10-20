@@ -80,6 +80,9 @@ internal sealed class HistoricalQualityHost
         var actualTools = new InstalledToolHostScope(original, parent, run.RunId, linuxScope); tools = actualTools;
         var output = Path.Combine(selection.Quality.ArtifactRoot, run.RunId);
         var expected = new RepositoryIdentity(run.BaseCommit, selection.HeadCommit, selection.TreeId, true);
+        // The H0 input is independently selected, not worker-provisioned. Bind
+        // its finite physical Git roles before policy resolution or native Git.
+        actualTools.BindHistoricalInput(run.Worktree, expected);
         var references = new List<object>();
         void Current()
         {
@@ -142,6 +145,7 @@ internal sealed class HistoricalQualityHost
                 run.RunId,
                 FrozenPlan = actualPlan.ContractIdentity,
                 Repository = expected,
+                HistoricalInput = actualTools.HistoricalInputData,
                 selection.Quality.PolicyIdentity,
                 Gates = references.ToArray(),
                 WorkerStarted = false,

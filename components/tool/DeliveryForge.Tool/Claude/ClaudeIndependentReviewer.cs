@@ -223,6 +223,11 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         if (authorFamily != "gpt" || !bootstrap.Policy.AllowedFamilies.Any(pair => pair.Author.Equals("gpt", StringComparison.OrdinalIgnoreCase) && pair.Reviewer.Equals("claude", StringComparison.OrdinalIgnoreCase)) ||
             !bootstrap.Policy.AllowedScopes.Contains("source", StringComparer.Ordinal) || !bootstrap.Policy.Budget.IsFinite)
             return ToolResult.Incomplete("INDEPENDENT_REVIEW_POLICY_REQUIRED", "Actual author provenance and protected opposite-family source policy are required.");
+        // Creation-owned Linux scope proves process ownership, not immutable
+        // hash-to-launch image identity. No observation/paid review may reach
+        // production acceptance until that exact-image launch primitive exists.
+        if (OperatingSystem.IsLinux())
+            return ToolResult.Incomplete("INDEPENDENT_REVIEW_IMAGE_IDENTITY_UNSUPPORTED", "Linux independent review requires an immutable exact-image execution primitive; no native reviewer observation or review was dispatched.");
         ClaudeIndependentReviewData.RequireSubscriptionEnvironment(Environment.GetEnvironmentVariable);
         var ledger = ReviewBudgetLedger.FromTrustedPolicy(bootstrap.Policy);
         if (!ledger.TryReserve(new(bootstrap.Policy.Budget.MaximumDuration, bootstrap.Policy.Budget.MaximumTokens, bootstrap.Policy.Budget.MaximumCost), out var reservation, out var decision))
@@ -302,7 +307,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             parent.EnterSynchronous(runId, () => { Current(); actualWorkingDirectory.Check(); return true; });
             Current(); VerifyImage(); verifyProtectedConfiguration(); Current();
             var budget = ledger.Settle(reservation!, new(Stopwatch.GetElapsedTime(started), usage.Tokens, usage.Cost));
-            if (budget.Reason.Contains("exhausted", StringComparison.OrdinalIgnoreCase)) return ToolResult.Incomplete("INDEPENDENT_REVIEW_BUDGET", budget.Reason);
+            if (budget.IsExhausted) return ToolResult.Incomplete("INDEPENDENT_REVIEW_BUDGET", budget.Reason);
             var rawHash = Hash(native);
             var proof = Hash(JsonSerializer.SerializeToUtf8Bytes(new { requestId, Model = model, RouteHash = authHash, selection.Image, selection.Version, Native = rawHash }));
             if (DateTimeOffset.UtcNow > validUntil) return ToolResult.Incomplete("INDEPENDENT_REVIEW_PROOF_EXPIRED", "Actual reviewer proof expired inside its original frozen allowance.");

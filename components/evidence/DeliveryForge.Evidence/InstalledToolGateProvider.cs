@@ -266,7 +266,7 @@ public sealed class InstalledToolGateProvider
     }
 
     // This class has no injectable owner and retains each exact creator result, not a copied DTO.
-    internal sealed class ActualExecutor(InstalledToolFiles files, IReadOnlyDictionary<string, string> environment, string gitExecutable, ICoordinatedEffectAdmission? actualAdmission = null, string? actualRunId = null, LinuxScopeSelection? selectedLinuxScope = null, string? installedTool = null) : ICommandExecutor
+    internal sealed class ActualExecutor(InstalledToolFiles files, IReadOnlyDictionary<string, string> environment, string gitExecutable, ICoordinatedEffectAdmission? actualAdmission = null, string? actualRunId = null, LinuxScopeSelection? selectedLinuxScope = null, string? installedTool = null, HistoricalGitInput? historicalInput = null) : ICommandExecutor
     {
         private readonly ProcessCommandExecutor _owner = new();
         internal bool OwnsScopedFiles(InstalledToolFiles actualFiles) =>
@@ -302,6 +302,13 @@ public sealed class InstalledToolGateProvider
                 Arguments = invocation.FileName == "git" ? ["-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "--no-optional-locks", .. invocation.Arguments] : invocation.Arguments,
                 Environment = effectiveEnvironment
             };
+            // Historical input was selected from the actual H0 checkout before
+            // policy Git. Keep its fixed roles; never rediscover a worker binding.
+            if (historicalInput is not null)
+            {
+                if (invocation.FileName == "git") effective = historicalInput.Configure(effective);
+                else historicalInput.Check();
+            }
             // Deterministic policy refusal is known before effect entry; it
             // must not create an entered/unreturned native invocation row.
             InstalledToolProfile.RequireInstalledGraphDeploymentEnvironment(installedTool, effectiveEnvironment.Keys);
@@ -373,6 +380,9 @@ public sealed class InstalledToolGateProvider
                 try { files.Check(); }
                 catch (Exception error) { failures.Add(error); }
             }
+            // Record the returned capture above before independent input drift
+            // can refuse it. Metadata refusal never fabricates native unknown.
+            try { historicalInput?.Check(); } catch (Exception error) { failures.Add(error); }
             if (failures.Count > 0)
             {
                 if (failures.Count == 1) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failures[0]).Throw();

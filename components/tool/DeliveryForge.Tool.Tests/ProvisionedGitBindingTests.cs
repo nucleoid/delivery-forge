@@ -28,8 +28,16 @@ public sealed class ProvisionedGitBindingTests
             _ => Path.Combine(binding.GitDirectory, "commondir")
         };
         var before = fixture.Manager.ActualOwnedGitInvocations;
-        if (role == "marker") File.SetAttributes(path, File.GetAttributes(path) & ~FileAttributes.ReadOnly);
-        File.WriteAllText(path, role == "marker" ? "gitdir: " + fixture.Foreign + "\n" : fixture.Foreign + "\n");
+        // Git marks the linked-worktree marker Hidden on Windows. Open that
+        // existing fixture file rather than FileMode.Create, preserving its
+        // attributes and actually installing the selected negative metadata.
+        var changed = Encoding.UTF8.GetBytes(role == "marker" ? "gitdir: " + fixture.Foreign + "\n" : fixture.Foreign + "\n");
+        using (var metadata = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read))
+        {
+            metadata.SetLength(0);
+            metadata.Write(changed);
+        }
+        Assert.Equal(changed, File.ReadAllBytes(path));
         if (role != "marker") Assert.Equal(marker, File.ReadAllBytes(Path.Combine(fixture.Worker, ".git")));
         Assert.Equal(WriterNamespaceIdentityOutcome.Match, writer.ObserveCurrentNamespaceIdentity().Outcome);
         await Assert.ThrowsAsync<WorktreeBoundaryException>(() => fixture.Manager.ObserveAsync(fixture.Worker, TestContext.Current.CancellationToken));

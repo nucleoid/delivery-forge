@@ -29,6 +29,25 @@ public sealed class InstalledToolHostScope
         internal InstalledBaselineComparison? Comparison;
     }
     readonly List<OriginalRun> runs = [];
+    HistoricalGitInput? historicalInput;
+    bool historicalInputEntered;
+    // Source DATA selection binds before any gate/policy Git.
+    // It selects source DATA; it does not adopt a worker writer/provisioning.
+    public void BindHistoricalInput(string root, RepositoryIdentity expected)
+    {
+        original.CheckWork();
+        InstalledToolFiles files;
+        lock (gate)
+        {
+            if (historicalInputEntered || runs.Count != 0) throw new EvidenceWriteException("Historical input binds once before gates.");
+            historicalInputEntered = true;
+            files = Files(original.WholeLimit);
+        }
+        var actual = new HistoricalGitInput(files, root, expected);
+        lock (gate) { retained.Add(actual); historicalInput = actual; }
+        actual.Check();
+    }
+    public object HistoricalInputData => historicalInput?.Data ?? throw new EvidenceWriteException("Historical source input was not captured.");
     public InstalledToolHostScope(IOwnedDuplexBudget actualOriginal)
     {
         ArgumentNullException.ThrowIfNull(actualOriginal);
@@ -71,12 +90,14 @@ public sealed class InstalledToolHostScope
             throw new EvidenceWriteException("Containing installed quality requires Windows or an explicitly selected Linux creation-owned scope.");
         if (profile.Fixture) throw new EvidenceWriteException("Fixture profiles cannot enter the standalone real quality path.");
         if (admission is null || runId is null) throw new EvidenceWriteException("Actual containing coordination admission is required before any Git/tool birth.");
+        if (historicalInputEntered && historicalInput is null) throw new EvidenceWriteException("Historical source binding failed; no gate retry.");
+        historicalInput?.Require(repositoryRoot, expected);
         InstalledToolFiles files; InstalledToolGateProvider.ActualExecutor owner; OriginalRun row;
         lock (gate)
         {
             if (runs.Count >= 8 || runs.Any(r => r.Task is { IsFaulted: true } or { IsCanceled: true })) throw new EvidenceWriteException("Containing installed route exhausted or a prior original failed; no retry.");
             files = Files(maximum);
-            owner = new InstalledToolGateProvider.ActualExecutor(files, profile.Data.Environment, profile.Data.GitExecutablePath, admission, runId, linuxScope, installedTool: profile.Tool);
+            owner = new InstalledToolGateProvider.ActualExecutor(files, profile.Data.Environment, profile.Data.GitExecutablePath, admission, runId, linuxScope, installedTool: profile.Tool, historicalInput: historicalInput);
             retained.Add(owner);
             row = new OriginalRun { Entered = true, Files = files, Owner = owner }; runs.Add(row);
         }

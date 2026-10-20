@@ -15,7 +15,12 @@ public sealed record ReviewCost(TimeSpan Duration, long Tokens, decimal Cost);
 public sealed record BudgetDecision(
     ReviewOutcome Outcome,
     string Reason,
-    IReadOnlyList<ReviewFinding> Findings);
+    IReadOnlyList<ReviewFinding> Findings)
+{
+    // Issued by the actual ledger, independently of diagnostic wording. This
+    // does not issue review/owner authority or enforce a provider token cap.
+    public bool IsExhausted { get; internal init; }
+}
 
 public sealed class ReviewBudgetReservation
 {
@@ -110,7 +115,7 @@ public sealed class ReviewBudgetLedger
     private BudgetDecision Exhausted() => new(
         ReviewOutcome.Incomplete,
         "The explicit review budget is exhausted; review is paused without discarding findings.",
-        _findings.ToArray());
+        _findings.ToArray()) { IsExhausted = true };
 
     private static void ValidateCost(ReviewCost cost)
     {
