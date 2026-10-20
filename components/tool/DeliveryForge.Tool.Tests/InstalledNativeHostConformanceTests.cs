@@ -21,6 +21,8 @@ public sealed class InstalledNativeHostConformanceTests
         internal readonly ToolLifetime Original = new(TimeSpan.FromSeconds(600), TestContext.Current.CancellationToken);
         internal readonly List<Task> ActualCalls = []; internal Fixture Selected = null!; internal IHostToolSessionPort Port = null!; internal WorktreeManager Git = null!; internal ProcessCommandExecutor Executor = null!; internal WriterLease? Lease; internal AgentRequest Request = null!;
         internal DuplexRetirement? Retirement; internal bool LeaseCloseEntered, LeaseClosed, DispositionEntered, AcceptanceAssertionsReturned; internal Exception? Failure, Post; internal NativeFailureSnapshotWriter? FailureSnapshot;
+        internal Task<AgentAcceptedReceipt>? StartupCall; internal CancellationTokenSource? StartupPhase;
+        internal long StartupPhaseStarted; internal TimeSpan StartupPhaseLimit; internal bool StartupPhaseCloseEntered, StartupPhaseClosed;
         internal OwnedDuplexProcess? Native => Port switch { DeliveryForge.Tool.Codex.CodexAppServerPort p => p.OriginalProcess, DeliveryForge.Tool.Claude.ClaudeStreamPort p => p.OriginalProcess, DeliveryForge.Tool.Pi.PiRpcPort p => p.OriginalProcess, _ => null };
         internal async Task<T> Call<T>(Func<Task<T>> invoke) { Original.Check(); var actual = invoke(); ActualCalls.Add(actual); try { var result = await actual.WaitAsync(Original.Remaining, TestContext.Current.CancellationToken); Original.Check(); return result; } catch (Exception error) { Failure ??= error; throw; } }
         internal static Frame Prepare(string adapter, bool stop)
@@ -61,7 +63,22 @@ public sealed class InstalledNativeHostConformanceTests
             Lease = Git.AcquireWriter(f.Worktree, run, token); Original.Check();
             var assignment = new FrozenWorkerPlan(run, plan.ContractIdentity, f.BaseCommit, f.Repository, f.ParentCheckout, f.Worktree, f.ResultDirectory, token, [f.RelativePath], [], f.Adapter, f.Host.Version, [AgentCapability.Launch, AgentCapability.CompletionEvidence]); Request = WorkerEnvelope.PrepareWorker(assignment);
             var instructions = HostInstructionContext.FromFrozenPlan(plan, assignment);
-            ((IHostInstructionPort)Port).BindInstructions(instructions); var accepted = await Call(() => Port.StartAsync(Request, Original.Remaining, TestContext.Current.CancellationToken));
+            ((IHostInstructionPort)Port).BindInstructions(instructions);
+            // A narrower startup phase consumes the SAME600s original. Its
+            // cancellation reaches only this Start call; the actual port pump
+            // remains owned by Original.Token and settles through its own owner.
+            Original.Check(); StartupPhaseLimit = Original.Remaining < TimeSpan.FromSeconds(120) ? Original.Remaining : TimeSpan.FromSeconds(120);
+            StartupPhaseStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+            StartupPhase = CancellationTokenSource.CreateLinkedTokenSource(Original.Token, TestContext.Current.CancellationToken); StartupPhase.CancelAfter(StartupPhaseLimit);
+            AgentAcceptedReceipt accepted;
+            try
+            {
+                StartupCall = Port.StartAsync(Request, StartupPhaseLimit, StartupPhase.Token); ActualCalls.Add(StartupCall);
+                accepted = await StartupCall.WaitAsync(StartupPhaseLimit, StartupPhase.Token);
+                Original.Check(); StartupPhase.Token.ThrowIfCancellationRequested();
+                if (System.Diagnostics.Stopwatch.GetElapsedTime(StartupPhaseStarted) >= StartupPhaseLimit) throw new TimeoutException("Actual conformance startup phase exceeded its original bounded allowance.");
+            }
+            catch (Exception error) { Failure ??= error; throw; }
             Assert.Equal(Request.RequestIdentity, accepted.RequestIdentity); Assert.Equal(Request.RunId, accepted.RunId); Assert.Equal(Request.PlanIdentity, accepted.PlanIdentity); Assert.Equal(Request.BaseCommit, accepted.BaseCommit); Assert.Equal(Request.Worktree, accepted.Worktree); Assert.Equal(Request.AdapterId, accepted.AdapterId); Assert.Equal(Request.AdapterVersion, accepted.AdapterVersion); Assert.False(string.IsNullOrWhiteSpace(accepted.RuntimeRunIdentity)); Assert.False(string.IsNullOrWhiteSpace(accepted.RuntimeTaskIdentity)); Assert.All(accepted.Capabilities, c => Assert.Equal(AgentCapabilityStatus.Unverified, c.Status));
             Assert.Throws<AgentCapabilityIncompleteException>(() => WorkerEnvelope.ValidateAccepted(Request, accepted)); return accepted;
         }
@@ -84,6 +101,7 @@ public sealed class InstalledNativeHostConformanceTests
             {
                 Kind = "ActualNativeHostFailureSnapshot-v1", Selected.Adapter, Selected.CaseKind,
                 OriginalStarted = Original.OriginalStarted, Frequency = System.Diagnostics.Stopwatch.Frequency, ElapsedTicks = System.Diagnostics.Stopwatch.GetTimestamp() - Original.OriginalStarted,
+                StartupPhaseStarted, StartupPhaseLimitTicks = StartupPhaseLimit.Ticks, StartupPhaseTaskStatus = StartupCall?.Status, StartupPhaseCancellationRequested = StartupPhase?.IsCancellationRequested,
                 PrimaryType = Failure?.GetType().FullName, PostType = Post?.GetType().FullName,
                 Startup = Port is DeliveryForge.Tool.Codex.CodexAppServerPort codex ? codex.SnapshotStartupDiagnostics() : null,
                 StandardError = new { Bytes = stderr.Length, Sha256 = BoundedFiles.Sha(stderr), Signals = signals, TextExported = false },
@@ -101,8 +119,17 @@ public sealed class InstalledNativeHostConformanceTests
             try
             {
                 if (Native is not null) { var actual = Native.RetireAsync(Retirement is null); ActualCalls.Add(actual); Retirement = await actual.WaitAsync(Original.CleanupRemaining); }
+                // An outer phase timeout never substitutes for the actual Start
+                // task. After native retirement, observe that original task's
+                // real terminal result within the SAME cleanup endpoint.
+                if (StartupCall is not null)
+                {
+                    try { await StartupCall.WaitAsync(Original.CleanupRemaining); }
+                    catch (Exception error) { if (!StartupCall.IsCompleted) throw; Failure ??= error; }
+                }
                 if (!AcceptanceAssertionsReturned && Native is not null) CaptureFailureAfterNativeSettlement();
                 if (Retirement is { KnownClosed: false } || ActualCalls.Any(t => !t.IsCompleted)) throw new IOException("Actual native conformance remains UNKNOWN; original graph retained, no passing cleanup.");
+                if (StartupPhase is not null) { _ = Original.CleanupRemaining; StartupPhaseCloseEntered = true; StartupPhase.Dispose(); StartupPhaseClosed = true; _ = Original.CleanupRemaining; }
                 if (Lease is not null) { _ = Original.CleanupRemaining; LeaseCloseEntered = true; Lease.Dispose(); LeaseClosed = true; _ = Original.CleanupRemaining; }
                 Original.Dispose(); lock (Unknown) Unknown.Remove(this);
             }
