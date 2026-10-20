@@ -57,6 +57,30 @@ public sealed class HistoricalQualityTests
     }
 
     [Fact]
+    public async Task Plan_only_immutable_ceiling_refuses_before_plan_read_or_assignment_without_optional_scheduler()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "historical-plan-only-" + Guid.NewGuid().ToString("N"));
+        var path = root + ".json"; var missingPlan = Path.Combine(root, "must-not-read.json");
+        var config = Configuration() with { ExpectedBundleIdentity = "sha256:" + new string('a', 64),
+            ExpectedContractIdentity = "sha256:" + new string('b', 64), ExpectedWorkItem = "#17", ExpectedPlanCeiling = "plan" };
+        Assert.Equal("implement", config.MaximumCeiling); Assert.Null(config.LocalSingle);
+        Assert.False(File.Exists(missingPlan));
+        File.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(config, BoundedFiles.Json));
+        try
+        {
+            var application = new ToolApplication();
+            var refusal = await Assert.ThrowsAsync<ToolUsageException>(() => application.ExecuteAsync(
+                CommandLine.Parse(["quality-baseline", "--plan", missingPlan, "--config", path]), TestContext.Current.CancellationToken));
+            Assert.Contains("immutable ceiling", refusal.Message);
+            Assert.Empty(application.RetainedExternalCalls); Assert.Empty(application.RetainedAssignments);
+            // A plan read would throw IOException instead. Even a completely
+            // valid plan-only bundle cannot grant the missing execution ceiling.
+            Assert.False(Directory.Exists(root));
+        }
+        finally { File.Delete(path); }
+    }
+
+    [Fact]
     public async Task Actual_quality_task_retains_original_until_settled_without_worker_completion()
     {
         await using var processes = new ProcessControl();
