@@ -8,6 +8,110 @@ namespace DeliveryForge.Tool.Tests;
 // No live lease, native result, deployment or production authority is invented.
 public sealed class ParentOriginalAdmissionTests
 {
+    [Theory(Timeout = 15000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Existing_files_cleanup_remains_valid_after_work_but_bounds_a_pending_parent(bool pendingRenewal)
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var gate = new object(); var current = true; var revoked = false;
+        var handoff = new ParentRenewalHandoff(gate, life);
+        void Revoke(Exception failure) { lock (gate) { current = false; revoked = true; handoff.Revoke(failure); } }
+        var admission = new ParentEffectAdmission(gate, _ => current && !revoked, Revoke, handoff);
+        var files = new InstalledToolFiles(life, TimeSpan.FromSeconds(4), new InstalledToolHostScope.Credits(), admission, "owned");
+        var originalCleanup = files.CleanupRemaining; // Explicitly enter this same files phase only; root WORK remains open.
+        while (System.Diagnostics.Stopwatch.GetElapsedTime(files.OriginalStarted) < files.WorkLimit)
+            await Task.Delay(5, TestContext.Current.CancellationToken);
+        life.CheckWork(); Assert.True(files.IsClosing); Assert.True(files.CleanupRemaining > TimeSpan.Zero);
+        if (pendingRenewal)
+        {
+            ParentRenewalHandoff.Pending pending;
+            lock (gate) { pending = handoff.Begin("owned", handoff.Elapsed + TimeSpan.FromSeconds(10)); current = false; }
+            var waiting = Task.Run(() => files.Check(), TestContext.Current.CancellationToken);
+            await ParentEffectAdmissionTests.WaitForWaiters(pending, 1, waiting);
+            await Assert.ThrowsAnyAsync<TimeoutException>(() => waiting.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+            Assert.True(revoked); Assert.False(pending.Installed); Assert.True(handoff.Elapsed < pending.SafeDeadline);
+        }
+        else
+        {
+            files.Check(); Assert.True(files.Remaining > TimeSpan.Zero); Assert.False(revoked);
+            Assert.True(files.CleanupRemaining <= originalCleanup);
+        }
+        Assert.False(life.HasExplicitUnknown);
+    }
+
+    [Theory(Timeout = 15000)]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task Existing_files_or_native_phase_restricts_a_pending_parent_without_rebasing(bool filesEarlier)
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var gate = new object(); var current = true; var revoked = false;
+        var handoff = new ParentRenewalHandoff(gate, life);
+        void Revoke(Exception error) { lock (gate) { current = false; revoked = true; handoff.Revoke(error); } }
+        var admission = new ParentEffectAdmission(gate, _ => current && !revoked, Revoke, handoff);
+        var files = new InstalledToolFiles(life, TimeSpan.FromSeconds(filesEarlier ? 2 : 20), new InstalledToolHostScope.Credits(), admission, "owned");
+        var nativeStarted = System.Diagnostics.Stopwatch.GetTimestamp();
+        var nativeWork = TimeSpan.FromSeconds(filesEarlier ? 8 : 1);
+        ParentRenewalHandoff.Pending pending;
+        lock (gate) { pending = handoff.Begin("owned", handoff.Elapsed + TimeSpan.FromSeconds(10)); current = false; }
+        var waiting = Task.Run(() => files.CheckWork(nativeStarted, nativeWork), TestContext.Current.CancellationToken);
+        await ParentEffectAdmissionTests.WaitForWaiters(pending, 1, waiting);
+        await Assert.ThrowsAnyAsync<TimeoutException>(() => waiting.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        Assert.True(revoked); Assert.False(pending.Installed); Assert.False(life.HasExplicitUnknown);
+        Assert.True(handoff.Elapsed < pending.SafeDeadline); Assert.Equal(0, admission.EnteredCount);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Actual_Windows_capture_retires_by_its_existing_native_deadline_while_parent_renewal_never_settles()
+    {
+        if (!OperatingSystem.IsWindows()) Assert.Skip("Actual Windows capture and same original native disposition; no live service lease is claimed.");
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+        var gate = new object(); var current = true; var revoked = false;
+        var handoff = new ParentRenewalHandoff(gate, life);
+        void Revoke(Exception failure) { lock (gate) { current = false; revoked = true; handoff.Revoke(failure); } }
+        var admission = new ParentEffectAdmission(gate, run => run == "owned" && current && !revoked && ParentCoordinationHost.OriginalCanAdmitEffects(life), Revoke, handoff);
+        var files = new InstalledToolFiles(life, TimeSpan.FromSeconds(30), new InstalledToolHostScope.Credits(), admission, "owned");
+        var root = Path.Combine(Path.GetTempPath(), "forge-native-deadline-renewal-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+        var entered = Path.Combine(root, "entered"); var release = Path.Combine(root, "release");
+        static string Quote(string path) => "'" + path.Replace("'", "''", StringComparison.Ordinal) + "'";
+        var script = "[IO.File]::WriteAllText(" + Quote(entered) + ", 'entered'); $bound=[Diagnostics.Stopwatch]::StartNew(); while(-not [IO.File]::Exists(" + Quote(release) + ") -and $bound.Elapsed.TotalSeconds -lt 20){Start-Sleep -Milliseconds 10}; exit 0";
+        var shell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
+        var executor = new InstalledToolGateProvider.ActualExecutor(files, new Dictionary<string, string>(), shell, admission, "owned");
+        var actual = executor.ExecuteAsync(new(shell, ["-NoProfile", "-NonInteractive", "-Command", script], root), TimeSpan.FromSeconds(8), life.Token);
+        ParentRenewalHandoff.Pending? pending = null;
+        try
+        {
+            var began = System.Diagnostics.Stopwatch.GetTimestamp();
+            while (!File.Exists(entered) && !actual.IsCompleted && System.Diagnostics.Stopwatch.GetElapsedTime(began) < TimeSpan.FromSeconds(5))
+                await Task.Delay(10, TestContext.Current.CancellationToken);
+            Assert.True(File.Exists(entered));
+            lock (gate) { pending = handoff.Begin("owned", handoff.Elapsed + TimeSpan.FromSeconds(15)); current = false; }
+            await ParentEffectAdmissionTests.WaitForWaiters(pending, 1, actual);
+            await Assert.ThrowsAnyAsync<Exception>(() => actual.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
+        }
+        finally
+        {
+            if (!actual.IsCompleted)
+            {
+                Revoke(new OperationCanceledException("Fixture failure stops the same retained native owner."));
+                File.WriteAllText(release, "stop");
+                try { await actual.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken); } catch (Exception) { }
+            }
+        }
+        var capture = Assert.Single(executor.Calls).Capture;
+        Assert.True(capture.Command.TimedOut); Assert.True(revoked); Assert.NotNull(pending); Assert.False(pending.Installed);
+        Assert.True(handoff.Elapsed < pending.SafeDeadline);
+        Assert.True(capture.Command.OwnedProcessQuiescent);
+        Assert.True(capture.RootExitObserved && capture.StandardOutputDrainCompleted && capture.StandardErrorDrainCompleted);
+        var startup = Assert.IsType<CommandStartupObservation>(capture.Command.LifecycleDiagnostics!.Startup);
+        Assert.True(startup.OriginalElapsedSeconds < startup.OriginalTotalSeconds);
+        Assert.False(File.Exists(release)); Assert.False(life.HasExplicitUnknown); Assert.True(admission.AllKnownSettled);
+        var extraBirths = 0;
+        Assert.ThrowsAny<Exception>(() => admission.EnterSynchronous("owned", () => ++extraBirths));
+        Assert.Equal(0, extraBirths);
+    }
+
     sealed class CancelAtDisposition(ToolLifetime life, CancellationTokenSource cancellation) : IOwnedDuplexBudget, IOwnedFailureCleanup, IOwnedBudgetUnknownRetention
     {
         readonly OwnedWorkPhaseBudget phase = new(life);

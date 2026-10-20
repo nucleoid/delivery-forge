@@ -396,7 +396,7 @@ public sealed class InstalledToolGateProvider
         }
         // Successful ordinary preflight child close remains WORK. Only the exact fixed read-only
         // Git audit may be born after finalization, inside the SAME shrinking cleanup allowance.
-        private sealed class NestedBudget(InstalledToolFiles original, bool cleanupAudit) : IOwnedDuplexBudget, IOwnedFailureCleanup, IOwnedBudgetUnknownRetention
+        private sealed class NestedBudget(InstalledToolFiles original, bool cleanupAudit) : IOwnedDuplexBudget, IOwnedFailureCleanup, IOwnedBudgetUnknownRetention, IOwnedRestrictedWorkCheck
         {
             public void BeginFailureCleanup() => original.BeginFailureCleanup();
             public void PreserveUnknown() => original.PreserveUnknown();
@@ -405,6 +405,11 @@ public sealed class InstalledToolGateProvider
             public TimeSpan WorkLimit => original.WorkLimit;
             public CancellationToken Token => cleanupAudit ? CancellationToken.None : original.Token;
             public void CheckWork() { if (cleanupAudit) _ = original.CleanupRemaining; else original.CheckWork(); }
+            public void CheckWork(long localStarted, TimeSpan localWork)
+            {
+                if (cleanupAudit) _ = original.CleanupRemaining;
+                else original.CheckWork(localStarted, localWork);
+            }
             public TimeSpan CleanupRemaining => cleanupAudit ? original.CleanupRemaining : original.NativeDispositionRemaining;
         }
         internal byte[] OriginalOutput(CommandResult command) => _actual.TryGetValue(command, out var proof)

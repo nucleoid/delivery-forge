@@ -4,7 +4,7 @@ namespace DeliveryForge.Tool;
 
 // Internal implementation used by the real parent, with its SAME revocation lock and private current-authority check.
 internal sealed class ParentEffectAdmission(object originalGate, Func<string, bool> current, Action<Exception> revoke,
-    ParentRenewalHandoff? renewal = null) : ICoordinatedSynchronousEffectAdmission
+    ParentRenewalHandoff? renewal = null) : ICoordinatedSynchronousEffectAdmission, ICoordinatedBoundedCurrentness
 {
     sealed class OriginalInvocation { internal bool Entered, Returned, Synchronous; internal Task? Task; internal Task? Observation; internal Exception? Failure; }
     readonly List<OriginalInvocation> originals = [];
@@ -24,13 +24,25 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
             revoke(row.Failure);
         }
     }
-    public void CheckCurrent(string runId)
+    public void CheckCurrent(string runId) => CheckCurrentCore(runId, null, TimeSpan.Zero);
+    public void CheckCurrent(string runId, long existingStarted, TimeSpan existingWorkLimit) => CheckCurrentCore(runId, existingStarted, existingWorkLimit);
+    void CheckRestriction(long? existingStarted, TimeSpan existingWorkLimit)
+    {
+        if (existingStarted is not { } start) return;
+        try { _ = ParentRenewalHandoff.RemainingRestriction(start, existingWorkLimit); }
+        catch (Exception error) { lock (originalGate) revoke(error); throw; }
+    }
+    void CheckCurrentCore(string runId, long? existingStarted, TimeSpan existingWorkLimit)
     {
         while (true)
         {
+            CheckRestriction(existingStarted, existingWorkLimit);
             ParentRenewalHandoff.Pending? pending;
-            lock (originalGate) { pending = PendingOrCurrent(runId); if (pending is null) return; }
-            WaitForRenewal(pending);
+            lock (originalGate) pending = PendingOrCurrent(runId);
+            CheckRestriction(existingStarted, existingWorkLimit);
+            if (pending is null) return;
+            WaitForRenewal(pending, existingStarted, existingWorkLimit);
+            CheckRestriction(existingStarted, existingWorkLimit);
         }
     }
     ParentRenewalHandoff.Pending? PendingOrCurrent(string runId)
@@ -47,9 +59,9 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
         var denied = new CoordinationUncertainException("No current original parent effect authority.");
         revoke(denied); throw denied;
     }
-    void WaitForRenewal(ParentRenewalHandoff.Pending pending)
+    void WaitForRenewal(ParentRenewalHandoff.Pending pending, long? existingStarted = null, TimeSpan existingWorkLimit = default)
     {
-        try { renewal!.Wait(pending); }
+        try { renewal!.Wait(pending, existingStarted, existingWorkLimit); }
         catch (Exception error) { lock (originalGate) revoke(error); throw; }
     }
     public T EnterSynchronous<T>(string runId, Func<T> invoke)

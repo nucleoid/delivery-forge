@@ -77,11 +77,22 @@ internal sealed class ParentRenewalHandoff(object originalGate, ToolLifetime ori
         }
     }
 
-    internal void Wait(Pending actual)
+    internal static TimeSpan RemainingRestriction(long existingStarted, TimeSpan existingWorkLimit)
+    {
+        if (existingStarted <= 0 || existingStarted > Stopwatch.GetTimestamp() ||
+            existingWorkLimit <= TimeSpan.Zero || existingWorkLimit > TimeSpan.FromSeconds(1200))
+            throw new ArgumentOutOfRangeException(nameof(existingWorkLimit), "Finite existing work restriction required.");
+        var remaining = existingWorkLimit - Stopwatch.GetElapsedTime(existingStarted);
+        if (remaining <= TimeSpan.Zero) throw new TimeoutException("Existing subordinate WORK endpoint expired during parent currentness check.");
+        return remaining;
+    }
+
+    internal void Wait(Pending actual, long? existingStarted = null, TimeSpan existingWorkLimit = default)
     {
         // A reentrant caller must refuse rather than strand the renewal installer.
         if (Monitor.IsEntered(originalGate)) throw new CoordinationUncertainException("Cannot wait for renewal while holding original admission.");
         CheckOriginal();
+        if (existingStarted is { } beforeStart) _ = RemainingRestriction(beforeStart, existingWorkLimit);
         while (true)
         {
             var count = Volatile.Read(ref actual.WaitingCount);
@@ -97,10 +108,16 @@ internal sealed class ParentRenewalHandoff(object originalGate, ToolLifetime ori
                 var grantRemaining = actual.SafeDeadline - Elapsed;
                 if (grantRemaining <= TimeSpan.Zero) throw new TimeoutException("Previous original safe grant expired during renewal.");
                 var limit = remaining < grantRemaining ? remaining : grantRemaining;
+                if (existingStarted is { } start)
+                {
+                    var restricted = RemainingRestriction(start, existingWorkLimit);
+                    if (restricted < limit) limit = restricted;
+                }
                 actual.Settlement.Task.WaitAsync(limit, original.Token).GetAwaiter().GetResult();
             }
             else actual.Settlement.Task.GetAwaiter().GetResult();
             CheckOriginal();
+            if (existingStarted is { } afterStart) _ = RemainingRestriction(afterStart, existingWorkLimit);
             lock (originalGate)
             {
                 if (revoked is not null || !actual.Installed)

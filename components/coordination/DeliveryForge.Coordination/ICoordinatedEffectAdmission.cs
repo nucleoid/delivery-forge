@@ -18,3 +18,11 @@ public interface ICoordinatedSynchronousEffectAdmission : ICoordinatedEffectAdmi
     T EnterSynchronous<T>(string runId, Func<T> invoke);
     void CheckCurrent(string runId);
 }
+
+/// <summary>Optional restriction on waiting for currentness. The concrete owner supplies
+/// its existing monotonic start and work limit. These values only restrict waiting;
+/// no saved timing DATA can establish dispatch authority or extend an original.</summary>
+public interface ICoordinatedBoundedCurrentness
+{
+    void CheckCurrent(string runId, long existingStarted, TimeSpan existingWorkLimit);
+}

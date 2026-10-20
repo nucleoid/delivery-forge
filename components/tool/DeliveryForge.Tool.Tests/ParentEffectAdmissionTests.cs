@@ -46,6 +46,82 @@ public sealed class ParentEffectAdmissionTests
         Assert.False(actual.IsCompleted);
     }
 
+    [Fact]
+    public void Bounded_nested_fast_check_keeps_atomic_birth_and_actual_task_identity()
+    {
+        using var fixture = new RenewalFixture(TestContext.Current.CancellationToken);
+        var began = System.Diagnostics.Stopwatch.GetTimestamp();
+        var actual = Task.FromResult(7);
+        var returned = fixture.Admission.EnterAsync("owned", () =>
+        {
+            Assert.True(Monitor.IsEntered(fixture.Gate));
+            fixture.Admission.CheckCurrent("owned", began, TimeSpan.FromSeconds(5));
+            return actual;
+        });
+        Assert.Same(actual, returned); Assert.False(fixture.Revoked);
+    }
+
+    [Fact(Timeout = 15000)]
+    public async Task Consecutive_pending_checks_keep_the_same_subordinate_endpoint()
+    {
+        using var fixture = new RenewalFixture(TestContext.Current.CancellationToken);
+        var began = System.Diagnostics.Stopwatch.GetTimestamp();
+        var first = fixture.Begin();
+        var waiting = Task.Run(() => fixture.Admission.CheckCurrent("owned", began, TimeSpan.FromSeconds(4)), TestContext.Current.CancellationToken);
+        await WaitForWaiters(first, 1, waiting);
+        await Task.Delay(2300, TestContext.Current.CancellationToken);
+        ParentRenewalHandoff.Pending second;
+        lock (fixture.Gate) { fixture.Install(first); second = fixture.Begin(); }
+        await WaitForWaiters(second, 1, waiting);
+        await Assert.ThrowsAnyAsync<TimeoutException>(() => waiting.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+        Assert.True(fixture.Revoked); Assert.False(second.Installed); Assert.Equal(0, fixture.Admission.EnteredCount);
+        Assert.True(System.Diagnostics.Stopwatch.GetElapsedTime(began) < TimeSpan.FromSeconds(5));
+    }
+
+    [Fact(Timeout = 15000)]
+    public void Bounded_fast_currentness_rechecks_expiry_after_current_predicate_returns()
+    {
+        var gate = new object(); var revoked = false; var called = false;
+        var began = System.Diagnostics.Stopwatch.GetTimestamp();
+        var actual = new ParentEffectAdmission(gate, _ =>
+        {
+            called = true;
+            while (System.Diagnostics.Stopwatch.GetElapsedTime(began) < TimeSpan.FromMilliseconds(200)) Thread.Sleep(1);
+            return true;
+        }, _ => revoked = true);
+        Assert.Throws<TimeoutException>(() => actual.CheckCurrent("owned", began, TimeSpan.FromMilliseconds(100)));
+        Assert.True(called); Assert.True(revoked); Assert.Equal(0, actual.EnteredCount);
+    }
+
+    [Fact(Timeout = 15000)]
+    public async Task Already_completed_settlement_cannot_refund_expired_subordinate_work()
+    {
+        using var fixture = new RenewalFixture(TestContext.Current.CancellationToken);
+        var pending = fixture.Begin(); fixture.Install(pending);
+        var began = System.Diagnostics.Stopwatch.GetTimestamp();
+        await Task.Delay(150, TestContext.Current.CancellationToken);
+        Assert.True(pending.Settlement.Task.IsCompletedSuccessfully);
+        Assert.Throws<TimeoutException>(() => fixture.Handoff.Wait(pending, began, TimeSpan.FromMilliseconds(100)));
+        Assert.Throws<TimeoutException>(() => fixture.Admission.CheckCurrent("owned", began, TimeSpan.FromMilliseconds(100)));
+        Assert.True(fixture.Revoked); Assert.Equal(0, fixture.Admission.EnteredCount);
+    }
+
+    [Theory]
+    [InlineData("future")]
+    [InlineData("zero")]
+    [InlineData("unbounded")]
+    public void Invalid_work_restriction_revokes_without_creating_authority(string invalid)
+    {
+        using var fixture = new RenewalFixture(TestContext.Current.CancellationToken);
+        var began = System.Diagnostics.Stopwatch.GetTimestamp();
+        var work = TimeSpan.FromSeconds(5);
+        if (invalid == "future") began += System.Diagnostics.Stopwatch.Frequency * 60;
+        else if (invalid == "zero") work = TimeSpan.Zero;
+        else work = TimeSpan.MaxValue;
+        Assert.Throws<ArgumentOutOfRangeException>(() => fixture.Admission.CheckCurrent("owned", began, work));
+        Assert.True(fixture.Revoked); Assert.Equal(0, fixture.Admission.EnteredCount);
+    }
+
     [Theory(Timeout = 15000)]
     [InlineData("check")]
     [InlineData("synchronous")]

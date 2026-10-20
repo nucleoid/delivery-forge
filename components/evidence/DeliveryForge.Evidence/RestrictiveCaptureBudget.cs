@@ -17,7 +17,12 @@ internal sealed class RestrictiveCaptureBudget(long localStarted, TimeSpan local
         {
             if (!BoundedCaptureStream.Within(localStarted, localWork)) return false;
             if (enclosing is null) return true;
-            try { enclosing.CheckWork(); return true; }
+            try
+            {
+                if (enclosing is IOwnedRestrictedWorkCheck restricted) restricted.CheckWork(localStarted, localWork);
+                else enclosing.CheckWork();
+                return BoundedCaptureStream.Within(localStarted, localWork);
+            }
             catch (Exception failure) { retention.Add(failure); return false; }
         }
     }

@@ -14,7 +14,7 @@ public sealed record ParentCoordinationConfiguration(Uri Endpoint, string Projec
     string PrivateKeyPath, string CheckpointRoot, AdmissionFile DeploymentEvidence);
 
 // One original parent, one selected plan/run, one finite local writer lifetime. No takeover/scheduler claim.
-public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmission, IOwnedRunQuiescenceSource, IMonotonicClock, IAsyncDisposable
+public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmission, ICoordinatedBoundedCurrentness, IOwnedRunQuiescenceSource, IMonotonicClock, IAsyncDisposable
 {
     readonly object gate = new();
     readonly ParentCoordinationConfiguration selected;
@@ -206,6 +206,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
         finally { if (original.HasExplicitUnknown) effects.RetainUncertain(runId, "Original retained an unknown resource during synchronous work."); }
     });
     public void CheckCurrent(string runId) => effects.CheckCurrent(runId);
+    public void CheckCurrent(string runId, long existingStarted, TimeSpan existingWorkLimit) => effects.CheckCurrent(runId, existingStarted, existingWorkLimit);
 
     async Task RenewLoop()
     {

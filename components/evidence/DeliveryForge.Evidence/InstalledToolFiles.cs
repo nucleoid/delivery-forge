@@ -7,7 +7,7 @@ namespace DeliveryForge.Evidence;
 
 // Cooperative whole-invocation deadline and cumulative byte admission. These checks do not
 // claim hard interruption of filesystem/crypto/runtime work or hostile-filesystem atomicity.
-internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken token = default) : IOwnedDuplexBudget, IOwnedFailureCleanup, IOwnedBudgetUnknownRetention
+internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken token = default) : IOwnedDuplexBudget, IOwnedFailureCleanup, IOwnedBudgetUnknownRetention, IOwnedRestrictedWorkCheck
 {
     private readonly long _started = Stopwatch.GetTimestamp();
     private readonly IOwnedDuplexBudget? _parent;
@@ -81,8 +81,28 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     public CancellationToken Token => token;
     public void CheckWork()
     {
-        _admission?.CheckCurrent(_runId!);
         lock (_timing) CheckWorkCore();
+        CheckAdmission(WorkLimit);
+        lock (_timing) CheckWorkCore();
+    }
+    public void CheckWork(long localStarted, TimeSpan localWork)
+    {
+        lock (_timing) CheckWorkCore();
+        // Translate the actual native owner's existing deadline onto the files'
+        // SAME origin. Never replace either original start with the check time.
+        if (localStarted < _started || localStarted > Stopwatch.GetTimestamp() || localWork <= TimeSpan.Zero || localWork > TimeSpan.FromSeconds(1200))
+            throw new ArgumentOutOfRangeException(nameof(localWork));
+        var nativeDeadline = TimeSpan.FromTicks(checked(Stopwatch.GetElapsedTime(_started, localStarted).Ticks + localWork.Ticks));
+        CheckAdmission(Minimum(WorkLimit, nativeDeadline));
+        lock (_timing) CheckWorkCore();
+        if (Stopwatch.GetElapsedTime(localStarted) >= localWork)
+            throw new TimeoutException("Actual native WORK endpoint expired during parent currentness check.");
+    }
+    void CheckAdmission(TimeSpan existingWorkLimit)
+    {
+        if (_admission is DeliveryForge.Coordination.ICoordinatedBoundedCurrentness bounded)
+            bounded.CheckCurrent(_runId!, _started, existingWorkLimit);
+        else _admission?.CheckCurrent(_runId!);
     }
     private void CheckWorkCore()
     {
@@ -112,7 +132,7 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     // notification is sent. Parent WORK/whole and prior cleanup still bound MIN.
     internal void FinishSettledWorkCapture(BoundedCaptureTimingObservation timing)
     {
-        _admission?.CheckCurrent(_runId!);
+        CheckAdmission(WorkLimit);
         lock (_timing) { if (_cleanup is null) CheckWorkCore(); }
         RecordSettledWorkCapture(timing, Stopwatch.GetTimestamp());
         _ = CleanupRemaining;
@@ -176,7 +196,20 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     {
         // Never acquire the parent monitor while holding this timing lock: native
         // process admission uses the opposite order when it checks its budget.
-        _admission?.CheckCurrent(_runId!);
+        TimeSpan currentPhaseLimit;
+        lock (_timing)
+        {
+            if (_cleanup is null) { CheckWorkCore(); currentPhaseLimit = WorkLimit; }
+            else
+            {
+                // Sample elapsed BEFORE reading the already-latched remainder:
+                // translating it back can only shorten the existing endpoint.
+                var before = Stopwatch.GetElapsedTime(_started);
+                var remaining = CleanupRemaining;
+                currentPhaseLimit = Minimum(WholeLimit, TimeSpan.FromTicks(checked(before.Ticks + remaining.Ticks)));
+            }
+        }
+        CheckAdmission(currentPhaseLimit);
         lock (_timing) { if (_cleanup is null) CheckWorkCore(); else _ = CleanupRemaining; }
     }
     internal bool IsClosing { get { lock (_timing) return _cleanup is not null; } }
