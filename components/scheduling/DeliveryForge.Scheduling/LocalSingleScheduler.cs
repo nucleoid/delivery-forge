@@ -292,7 +292,7 @@ public sealed partial class LocalSingleScheduler
             {
                 CleanupLimitation = "Reservation failed: " + DescribeFailure(exception);
                 Interlocked.Exchange(ref _stopped, 1);
-                if (_nativeQuiescenceKnown) Release(); else _uncertain = true;
+                if (_nativeQuiescenceKnown && !_uncertain && !_store.HasUnsettledOriginalFiles && actualOriginalUnknown?.Invoke() != true) Release(); else _uncertain = true;
                 throw;
             }
         }
@@ -313,12 +313,14 @@ public sealed partial class LocalSingleScheduler
             await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
             EnsureControls();
             _worktrees.ValidateDestination(_worker.ParentCheckout, _worker.Worktree);
+            provisioningEntered = true;
             _nativeQuiescenceKnown = false;
             await _worktrees.PrepareAsync(_worker.ParentCheckout, _worker.Worktree, _worker.BaseCommit, deadline.Token).ConfigureAwait(false);
             _nativeQuiescenceKnown = true;
             await CheckFreshBaseAsync(deadline.Token).ConfigureAwait(false);
             EnsureControls();
             _nativeQuiescenceKnown = false;
+            preparationEntered = true;
             var prepared = await _execution.PrepareWorkerAsync(_worker, deadline.Token).ConfigureAwait(false);
             _prepared = true;
             _nativeQuiescenceKnown = true;

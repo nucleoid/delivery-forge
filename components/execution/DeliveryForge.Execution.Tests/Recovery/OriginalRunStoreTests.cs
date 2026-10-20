@@ -29,6 +29,18 @@ public sealed class OriginalRunStoreTests
         Assert.True(original.CleanupChecks > 0);
     }
     [Fact]
+    public async Task Read_postrefusal_closes_exact_open_handle_with_same_original_cleanup()
+    {
+        using var directory = new TemporaryDirectory(); var original = new Original(); var parent = new Parent();
+        var store = new RunStore(directory.Path).WithOriginalAdmission(original, parent, "owned");
+        var record = await store.AppendAsync("owned", "prepared", new { value = 1 }, TestContext.Current.CancellationToken);
+        parent.AfterValue = value => { if (value is byte[]) parent.Revoked = true; };
+        await Assert.ThrowsAsync<IOException>(() => store.RecoverAsync("owned", TestContext.Current.CancellationToken));
+        using var exclusive = new FileStream(record.Path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        Assert.True(original.CleanupChecks > 0); Assert.False(store.HasUnsettledOriginalFiles);
+        Assert.True(File.Exists(record.Path));
+    }
+    [Fact]
     public async Task Existing_original_cleanup_view_records_stop_without_restoring_forward_authority()
     {
         using var directory = new TemporaryDirectory(); var original = new Original(); var parent = new Parent();
@@ -54,9 +66,9 @@ public sealed class OriginalRunStoreTests
     }
     sealed class Parent : ICoordinatedSynchronousEffectAdmission
     {
-        internal bool Revoked; internal Action? After;
+        internal bool Revoked; internal Action? After; internal Action<object?>? AfterValue;
         public void CheckCurrent(string runId) { if (Revoked) throw new IOException("Actual parent revoked."); }
-        public T EnterSynchronous<T>(string runId, Func<T> invoke) { CheckCurrent(runId); var value = invoke(); After?.Invoke(); CheckCurrent(runId); return value; }
+        public T EnterSynchronous<T>(string runId, Func<T> invoke) { CheckCurrent(runId); var value = invoke(); After?.Invoke(); AfterValue?.Invoke(value); CheckCurrent(runId); return value; }
         public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke) { CheckCurrent(runId); return invoke(); }
         public void RetainUncertain(string runId, string reason) => throw new IOException(reason);
     }

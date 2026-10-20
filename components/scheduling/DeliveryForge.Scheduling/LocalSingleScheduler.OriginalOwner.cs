@@ -10,12 +10,32 @@ public sealed partial class LocalSingleScheduler
     ICoordinatedSynchronousEffectAdmission? parent;
     Func<Task?>? actualPipeline;
     Func<bool>? actualSettled;
+    Func<bool>? actualOriginalUnknown;
+    bool provisioningEntered, preparationEntered;
     internal bool HasRetainedReservation => _laneHeld || _ticket is not null || _resources is not null;
-    internal void BindOriginal(IOwnedDuplexBudget owner, ICoordinatedSynchronousEffectAdmission admission, Func<Task?> pipeline, Func<bool> settled)
+    internal void BindOriginal(IOwnedDuplexBudget owner, ICoordinatedSynchronousEffectAdmission admission, Func<Task?> pipeline, Func<bool> settled, Func<bool> originalUnknown)
     {
+        ArgumentNullException.ThrowIfNull(pipeline); ArgumentNullException.ThrowIfNull(settled); ArgumentNullException.ThrowIfNull(originalUnknown);
         if (original is not null || _laneHeld || _ticket is not null || _timeBudget is not null) throw new SchedulingException("Original scheduling binds once before reservation.");
         owner.CheckWork(); admission.CheckCurrent(_worker.RunId);
-        original = owner; parent = admission; actualPipeline = pipeline; actualSettled = settled;
+        original = owner; parent = admission; actualPipeline = pipeline; actualSettled = settled; actualOriginalUnknown = originalUnknown;
+    }
+    internal bool CanReleaseUnprovisioned => original is not null && _laneHeld && _ticket is not null && !_prepared && !provisioningEntered && !preparationEntered && _nativeQuiescenceKnown && !_uncertain && !_store.HasUnsettledOriginalFiles && actualOriginalUnknown?.Invoke() == false;
+    internal async Task ReleaseUnprovisionedObservedAsync(LocalDispatchReservation ticket, Func<bool> actualNoWorkerStart)
+    {
+        if (original is null) throw new SchedulingException("No retained original unstarted owner.");
+        using var deadline = new CancellationTokenSource(original.CleanupRemaining);
+        await _serial.WaitAsync(deadline.Token).ConfigureAwait(false);
+        try
+        {
+            _ = original.CleanupRemaining;
+            if (!ReferenceEquals(ticket, _ticket) || !CanReleaseUnprovisioned || actualPipeline?.Invoke() is not { IsCompleted: true } || !actualNoWorkerStart() || _execution.HasPendingControlOperations(_worker.RunId))
+                throw new SchedulingException("Unprovisioned release requires exact settled original no-start/no-provision evidence.");
+            // No writer/preparation/provisioning was entered, so there is no
+            // worker to stop or dispose. Retain all original refusal evidence.
+            _ = original.CleanupRemaining; MarkObservedClosed(); Release();
+        }
+        finally { _serial.Release(); }
     }
     void CheckOriginal() { original?.CheckWork(); parent?.CheckCurrent(_worker.RunId); }
     TimeSpan OriginalRemaining() { CheckOriginal(); return original!.WorkLimit - Stopwatch.GetElapsedTime(original.OriginalStarted); }

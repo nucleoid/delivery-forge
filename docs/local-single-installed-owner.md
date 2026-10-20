@@ -32,6 +32,10 @@ the reservation without sending Stop after LocalComplete. Known stopped runs
 instead use their same original cleanup allowance and actual stopped record;
 uncertain tasks, processes, writer disposition or finalization retain capacity.
 Saved checkpoints cannot invoke these private same-process release paths.
+If the actual base check refuses before provisioning or preparation was entered,
+the exact settled no-start pipeline can release its ticket under that same
+original cleanup allowance. Unknown provisioning, store-handle uncertainty and
+uncertain reservation persistence retain capacity and failure evidence.
 
 `SchedulingCertified` and `RecoveryCertified` remain false. The source and narrow
 fixture controls are not installed behavioral acceptance or cold recovery proof.

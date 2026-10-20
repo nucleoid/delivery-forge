@@ -18,7 +18,7 @@ public sealed partial class LocalSingleTests
         var worktrees = new WorktreeManager(); await using var processes = new ProcessControl(); using var execution = new ExecutionCoordinator(store, worktrees, processes, new FixtureControl());
         var scheduler = LocalSingleScheduler.Create(plan, worker, Demand, Budget(), store, execution, worktrees, repository.Reader);
         var original = new SchedulingOriginal(); var pendingPipeline = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
-        scheduler.BindOriginal(original, new SchedulingParent(), () => pendingPipeline.Task, () => true);
+        scheduler.BindOriginal(original, new SchedulingParent(), () => pendingPipeline.Task, () => true, () => false);
         var ticket = await scheduler.ReserveAsync(Cancellation);
         try
         {
@@ -47,13 +47,45 @@ public sealed partial class LocalSingleTests
     }
 
     [Fact]
+    public async Task Fresh_base_refusal_before_provisioning_releases_only_exact_settled_unstarted_ticket_under_original_cleanup()
+    {
+        using var repository = new PlanningRepository(); await repository.InitializeAsync(); var plan = await repository.FreezeAsync();
+        var worker = Worker(repository, plan, "unprovisioned-original"); var store = new RunStore(Path.Combine(repository.Root, "results"));
+        var worktrees = new WorktreeManager(); await using var processes = new ProcessControl(); using var execution = new ExecutionCoordinator(store, worktrees, processes);
+        var scheduler = LocalSingleScheduler.Create(plan, worker, Demand, Budget(), store, execution, worktrees, repository.Reader);
+        var original = new SchedulingOriginal(); var pipeline = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        scheduler.BindOriginal(original, new SchedulingParent(), () => pipeline.Task, () => false, () => false);
+        var ticket = await scheduler.ReserveAsync(Cancellation);
+        try
+        {
+            await File.AppendAllTextAsync(Path.Combine(repository.Checkout, "README.md"), "actual source drift", Cancellation);
+            await Assert.ThrowsAsync<SchedulingException>(() => scheduler.ProvisionAndPrepareAsync(ticket, Cancellation));
+            Assert.True(scheduler.CanReleaseUnprovisioned); Assert.False(Directory.Exists(worker.Worktree));
+            await Assert.ThrowsAsync<SchedulingException>(() => scheduler.ReleaseUnprovisionedObservedAsync(ticket, () => true));
+            Assert.True(scheduler.HasRetainedReservation);
+            pipeline.SetResult(false); original.Refuse = true; // WORK stays closed; cleanup does not reopen it.
+            await Assert.ThrowsAsync<SchedulingException>(() => scheduler.ReleaseUnprovisionedObservedAsync(new LocalDispatchReservation(ticket.RunId), () => true));
+            await Assert.ThrowsAsync<SchedulingException>(() => scheduler.ReleaseUnprovisionedObservedAsync(ticket, () => false));
+            Assert.True(scheduler.HasRetainedReservation);
+            await scheduler.ReleaseUnprovisionedObservedAsync(ticket, () => true);
+            Assert.False(scheduler.HasRetainedReservation);
+            Assert.Empty((await store.RecoverAsync(worker.RunId, Cancellation)).Records);
+            Assert.Equal("reserved", (await store.RecoverAsync(worker.RunId + "-scheduler", Cancellation)).Latest!.Payload.GetProperty("phase").GetString());
+        }
+        finally
+        {
+            pipeline.TrySetResult(false);
+            if (scheduler.CanReleaseUnprovisioned) await scheduler.ReleaseUnprovisionedObservedAsync(ticket, () => true);
+        }
+    }
+    [Fact]
     public async Task Original_work_refusal_precedes_reservation_store_or_provisioning()
     {
         using var repository = new PlanningRepository(); await repository.InitializeAsync(); var plan = await repository.FreezeAsync();
         var worker = Worker(repository, plan, "expired-original"); var storeRoot = Path.Combine(repository.Root, "absent-store"); var store = new RunStore(storeRoot);
         var worktrees = new WorktreeManager(); await using var processes = new ProcessControl(); using var execution = new ExecutionCoordinator(store, worktrees, processes);
         var scheduler = LocalSingleScheduler.Create(plan, worker, Demand, Budget(), store, execution, worktrees, repository.Reader); var original = new SchedulingOriginal();
-        scheduler.BindOriginal(original, new SchedulingParent(), () => Task.CompletedTask, () => true); original.Refuse = true;
+        scheduler.BindOriginal(original, new SchedulingParent(), () => Task.CompletedTask, () => true, () => false); original.Refuse = true;
         await Assert.ThrowsAsync<TimeoutException>(() => scheduler.ReserveAsync(Cancellation));
         Assert.False(scheduler.HasRetainedReservation); Assert.False(Directory.Exists(storeRoot)); Assert.False(Directory.Exists(worker.Worktree));
     }

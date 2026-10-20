@@ -124,10 +124,16 @@ public sealed class WorktreeManager
         if (_effectAdmission is not DeliveryForge.Coordination.ICoordinatedSynchronousEffectAdmission parent || runId != _effectRunId)
             throw new WorktreeBoundaryException("Writer birth requires the same synchronous original parent.");
         _originalBudget!.CheckWork(); parent.CheckCurrent(runId);
-        var lease = parent.EnterSynchronous(runId, () => AcquireWriterCore(worktree, runId, writerToken));
-        try { _originalBudget.CheckWork(); parent.CheckCurrent(runId); return lease; }
+        WriterLease? lease = null;
+        try
+        {
+            parent.EnterSynchronous(runId, () => AcquireWriterCore(worktree, runId, writerToken, born => lease = born));
+            _originalBudget.CheckWork(); parent.CheckCurrent(runId);
+            return lease ?? throw new WorktreeBoundaryException("Actual writer birth returned no lease.");
+        }
         catch (Exception primary)
         {
+            if (lease is null) throw;
             try { _ = _originalBudget.CleanupRemaining; lease.Dispose(); _ = _originalBudget.CleanupRemaining; }
             catch (Exception close)
             {
@@ -139,17 +145,19 @@ public sealed class WorktreeManager
             throw;
         }
     }
-    WriterLease AcquireWriterCore(string worktree, string runId, string writerToken)
+    WriterLease AcquireWriterCore(string worktree, string runId, string writerToken, Action<WriterLease>? captureBirth = null)
     {
         var path = WriterLockPath(worktree);
         try
         {
             var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+            var lease = new WriterLease(path, stream, runId, writerToken);
+            captureBirth?.Invoke(lease);
             using var writer = new StreamWriter(stream, leaveOpen: true);
             writer.Write($"{runId}\n{writerToken}\n");
             writer.Flush();
             stream.Flush(true);
-            return new WriterLease(path, stream, runId, writerToken);
+            return lease;
         }
         catch (IOException exception)
         {

@@ -362,12 +362,15 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
     }
     async Task FinishStoppedSchedulingAsync(HostBridgeFrame frame)
     {
-        if (frame.Scheduler is not { HasRetainedReservation: true } scheduler || frame.Reservation is not { } ticket || !frame.OwnerStopped || !ObservePipelineSettled(frame.RunId)) return;
+        if (frame.Scheduler is not { HasRetainedReservation: true } scheduler || frame.Reservation is not { } ticket || !ObservePipelineSettled(frame.RunId)) return;
+        bool NoWorkerStart() => frame.Accepted is null && frame.Request is null && !frame.Lifetime.HasExplicitUnknown && !adapter.ActualCalls.Any(call => call.RunId == frame.RunId && call.Kind == "Start") && ObservePipelineSettled(frame.RunId);
+        var unprovisioned = !frame.OwnerStopped && scheduler.CanReleaseUnprovisioned && NoWorkerStart();
+        if (!frame.OwnerStopped && !unprovisioned) return;
         try
         {
             bool enter;
             lock (frame.ReconciliationGate) { enter = !frame.SchedulingCleanupEntered; frame.SchedulingCleanupEntered = true; }
-            if (enter) frame.SchedulingCleanup = scheduler.ReleaseStoppedObservedAsync(ticket,
+            if (enter) frame.SchedulingCleanup = unprovisioned ? scheduler.ReleaseUnprovisionedObservedAsync(ticket, NoWorkerStart) : scheduler.ReleaseStoppedObservedAsync(ticket,
                 () => frame.OwnerStopped && ObservePipelineSettled(frame.RunId),
                 () => coordinator.ReleaseStoppedWriterAsync(frame.RunId, () => frame.OwnerStopped && ObservePipelineSettled(frame.RunId)));
             var actual = frame.SchedulingCleanup ?? throw new IOException("Original scheduler cleanup invocation has not returned its task.");
@@ -385,7 +388,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
             {
                 var scheduler = localSingleFactory(schedulingPlan ?? throw new ToolUsageException("Actual frozen scheduling plan required."), plan, coordination ?? throw new ToolUsageException("Actual acquired parent required."));
                 frame.Scheduler = scheduler;
-                scheduler.BindOriginal(frame.Lifetime, coordination, () => frame.Worker.Actual, () => ObservePipelineSettled(plan.RunId) && NativeCompletedAndQuiet(frame));
+                scheduler.BindOriginal(frame.Lifetime, coordination, () => frame.Worker.Actual, () => ObservePipelineSettled(plan.RunId) && NativeCompletedAndQuiet(frame), () => frame.Lifetime.HasExplicitUnknown);
                 frame.Reservation = await frame.Enter(() => scheduler.ReserveAsync(frame.Lifetime.Token)).ConfigureAwait(false);
                 request = await frame.Enter(() => scheduler.ProvisionAndPrepareAsync(frame.Reservation, frame.Lifetime.Token)).ConfigureAwait(false);
             }

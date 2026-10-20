@@ -7,9 +7,12 @@ namespace DeliveryForge.Execution;
 public sealed partial class RunStore
 {
     static readonly List<FileStream> UnsettledFiles = [];
+    bool unsettledOriginalFile;
+    public bool HasUnsettledOriginalFiles => Volatile.Read(ref unsettledOriginalFile);
     void RetainFile(FileStream stream)
     {
         lock (UnsettledFiles) UnsettledFiles.Add(stream);
+        Volatile.Write(ref unsettledOriginalFile, true);
         if (original is IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown();
     }
     IOwnedDuplexBudget? original;
@@ -47,15 +50,34 @@ public sealed partial class RunStore
         token.ThrowIfCancellationRequested();
         // Synchronous bounded reads are enrolled separately from later writes.
         // No parent gate is held across an asynchronous method's prefix.
-        return Task.FromResult(Effect(() =>
+        FileStream? stream = null; byte[]? bytes = null; Exception? primary = null, close = null;
+        try
         {
-            RejectReparseAncestors(path); RejectReparseFile(path);
-            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            if (stream.Length > 16 * 1024 * 1024) throw new RunStoreCorruptionException("Store input exceeds finite extent.");
-            var bytes = new byte[checked((int)stream.Length)]; var offset = 0;
-            while (offset < bytes.Length) { CheckOriginal(); token.ThrowIfCancellationRequested(); var count = stream.Read(bytes, offset, Math.Min(65536, bytes.Length - offset)); if (count == 0) throw new EndOfStreamException(); offset += count; }
-            if (stream.ReadByte() != -1) throw new RunStoreCorruptionException("Store input grew during read.");
-            return bytes;
-        }));
+            bytes = Effect(() =>
+            {
+                RejectReparseAncestors(path); RejectReparseFile(path);
+                stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+                if (stream.Length > 16 * 1024 * 1024) throw new RunStoreCorruptionException("Store input exceeds finite extent.");
+                var read = new byte[checked((int)stream.Length)]; var offset = 0;
+                while (offset < read.Length) { CheckOriginal(); token.ThrowIfCancellationRequested(); var count = stream.Read(read, offset, Math.Min(65536, read.Length - offset)); if (count == 0) throw new EndOfStreamException(); offset += count; }
+                if (stream.ReadByte() != -1) throw new RunStoreCorruptionException("Store input grew during read.");
+                return read;
+            });
+        }
+        catch (Exception error) { primary = error; }
+        if (stream is not null)
+        {
+            try
+            {
+                if (primary is not null) _ = original.CleanupRemaining; else CheckOriginal();
+                stream.Dispose();
+                if (primary is not null) _ = original.CleanupRemaining; else CheckOriginal();
+            }
+            catch (Exception error) { close = error; RetainFile(stream); }
+        }
+        if (primary is not null && close is not null) throw new AggregateException("Original store read and first disposition failed.", primary, close);
+        if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+        if (close is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(close).Throw();
+        return Task.FromResult(bytes ?? throw new IOException("Original store read returned no bytes."));
     }
 }
