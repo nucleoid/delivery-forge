@@ -3,7 +3,8 @@ using DeliveryForge.Coordination;
 namespace DeliveryForge.Tool;
 
 // Internal implementation used by the real parent, with its SAME revocation lock and private current-authority check.
-internal sealed class ParentEffectAdmission(object originalGate, Func<string, bool> current, Action<Exception> revoke) : ICoordinatedSynchronousEffectAdmission
+internal sealed class ParentEffectAdmission(object originalGate, Func<string, bool> current, Action<Exception> revoke,
+    ParentRenewalHandoff? renewal = null) : ICoordinatedSynchronousEffectAdmission
 {
     sealed class OriginalInvocation { internal bool Entered, Returned, Synchronous; internal Task? Task; internal Task? Observation; internal Exception? Failure; }
     readonly List<OriginalInvocation> originals = [];
@@ -25,34 +26,59 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
     }
     public void CheckCurrent(string runId)
     {
-        lock (originalGate)
+        while (true)
         {
-            ObserveReturnedFailures();
-            if (retainedUncertain || returnedFailure || !current(runId))
-            {
-                var denied = new CoordinationUncertainException("No current original parent effect authority.");
-                revoke(denied); throw denied;
-            }
+            ParentRenewalHandoff.Pending? pending;
+            lock (originalGate) { pending = PendingOrCurrent(runId); if (pending is null) return; }
+            WaitForRenewal(pending);
         }
+    }
+    ParentRenewalHandoff.Pending? PendingOrCurrent(string runId)
+    {
+        ObserveReturnedFailures();
+        if (!retainedUncertain && !returnedFailure)
+        {
+            ParentRenewalHandoff.Pending? pending;
+            try { pending = renewal?.Snapshot(runId); }
+            catch (Exception error) { revoke(error); throw; }
+            if (pending is not null) return pending;
+            if (current(runId)) return null;
+        }
+        var denied = new CoordinationUncertainException("No current original parent effect authority.");
+        revoke(denied); throw denied;
+    }
+    void WaitForRenewal(ParentRenewalHandoff.Pending pending)
+    {
+        try { renewal!.Wait(pending); }
+        catch (Exception error) { lock (originalGate) revoke(error); throw; }
     }
     public T EnterSynchronous<T>(string runId, Func<T> invoke)
     {
         ArgumentNullException.ThrowIfNull(invoke);
         var completion = new TaskCompletionSource<T>();
-        lock (originalGate)
+        while (true)
         {
-            CheckCurrent(runId);
-            if (originals.Count >= 1024)
+            ParentRenewalHandoff.Pending? pending;
+            lock (originalGate)
             {
-                var exhausted = new IOException("Finite original parent effect ledger exhausted.");
-                revoke(exhausted); throw exhausted;
+                pending = PendingOrCurrent(runId);
+                if (pending is null)
+                {
+                    if (originals.Count >= 1024)
+                    {
+                        var exhausted = new IOException("Finite original parent effect ledger exhausted.");
+                        revoke(exhausted); throw exhausted;
+                    }
+                    // The actual completion exists before leaving admission. Renewal and
+                    // revocation can proceed while I/O runs; quiescence sees this pending Task.
+                    var row = new OriginalInvocation { Entered = true, Returned = true, Synchronous = true, Task = completion.Task };
+                    originals.Add(row);
+                    row.Observation = completion.Task.ContinueWith(_ => { lock (originalGate) ObserveReturnedFailures(); },
+                        CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                    break;
+                }
             }
-            // The actual completion exists before leaving admission. Renewal and
-            // revocation can proceed while I/O runs; quiescence sees this pending Task.
-            var row = new OriginalInvocation { Entered = true, Returned = true, Synchronous = true, Task = completion.Task };
-            originals.Add(row);
-            row.Observation = completion.Task.ContinueWith(_ => { lock (originalGate) ObserveReturnedFailures(); },
-                CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            WaitForRenewal(pending);
         }
         T result;
         try { CheckCurrent(runId); result = invoke(); }
@@ -64,26 +90,30 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
     public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke)
     {
         ArgumentNullException.ThrowIfNull(invoke);
-        lock (originalGate)
+        while (true)
         {
-            ObserveReturnedFailures();
-            if (retainedUncertain || returnedFailure || !current(runId))
+            ParentRenewalHandoff.Pending? pending;
+            lock (originalGate)
             {
-                var denied = new CoordinationUncertainException("No current original parent effect authority."); revoke(denied); throw denied;
+                pending = PendingOrCurrent(runId);
+                if (pending is null)
+                {
+                    if (originals.Count >= 1024)
+                    {
+                        var exhausted = new IOException("Finite original parent effect ledger exhausted."); revoke(exhausted); throw exhausted;
+                    }
+                    var row = new OriginalInvocation { Entered = true }; originals.Add(row);
+                    try
+                    {
+                        var actual = invoke(); row.Task = actual; row.Returned = true;
+                        if (actual is null) throw new IOException("Actual original effect returned no task.");
+                        row.Observation = actual.ContinueWith(_ => { lock (originalGate) ObserveReturnedFailures(); }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                        return actual;
+                    }
+                    catch (Exception error) { row.Failure = error; retainedUncertain = true; revoke(error); throw; }
+                }
             }
-            if (originals.Count >= 1024)
-            {
-                var exhausted = new IOException("Finite original parent effect ledger exhausted."); revoke(exhausted); throw exhausted;
-            }
-            var row = new OriginalInvocation { Entered = true }; originals.Add(row);
-            try
-            {
-                var actual = invoke(); row.Task = actual; row.Returned = true;
-                if (actual is null) throw new IOException("Actual original effect returned no task.");
-                row.Observation = actual.ContinueWith(_ => { lock (originalGate) ObserveReturnedFailures(); }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-                return actual;
-            }
-            catch (Exception error) { row.Failure = error; retainedUncertain = true; revoke(error); throw; }
+            WaitForRenewal(pending);
         }
     }
 }

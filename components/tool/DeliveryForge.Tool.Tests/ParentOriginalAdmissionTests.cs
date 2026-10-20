@@ -120,6 +120,56 @@ public sealed class ParentOriginalAdmissionTests
     }
 
     [Fact(Timeout = 30000)]
+    public async Task Actual_Windows_capture_survives_pending_then_successful_parent_renewal_handoff()
+    {
+        if (!OperatingSystem.IsWindows()) Assert.Skip("Actual Windows capture; no live coordination service or production lease is claimed.");
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+        var gate = new object(); var current = true; var revoked = false;
+        var handoff = new ParentRenewalHandoff(gate, life);
+        void Revoke(Exception error) { lock (gate) { current = false; revoked = true; handoff.Revoke(error); } }
+        var admission = new ParentEffectAdmission(gate, run => run == "owned" && current && !revoked && ParentCoordinationHost.OriginalCanAdmitEffects(life), Revoke, handoff);
+        var files = new InstalledToolFiles(life, TimeSpan.FromSeconds(30), new InstalledToolHostScope.Credits(), admission, "owned");
+        var shell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
+        var root = Path.Combine(Path.GetTempPath(), "forge-capture-renewal-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+        var entered = Path.Combine(root, "entered"); var release = Path.Combine(root, "release"); var finished = Path.Combine(root, "finished");
+        static string Quote(string path) => "'" + path.Replace("'", "''", StringComparison.Ordinal) + "'";
+        var script = "[IO.File]::WriteAllText(" + Quote(entered) + ", 'entered'); $bound=[Diagnostics.Stopwatch]::StartNew(); while(-not [IO.File]::Exists(" + Quote(release) + ") -and $bound.Elapsed.TotalSeconds -lt 15){Start-Sleep -Milliseconds 10}; if(-not [IO.File]::Exists(" + Quote(release) + ")){exit 9}; [IO.File]::WriteAllText(" + Quote(finished) + ", 'finished'); Write-Output 'finished'; exit 0";
+        var executor = new InstalledToolGateProvider.ActualExecutor(files, new Dictionary<string, string>(), shell, admission, "owned");
+        var actual = executor.ExecuteAsync(new(shell, ["-NoProfile", "-NonInteractive", "-Command", script], root), TimeSpan.FromSeconds(20), life.Token);
+        Task<int>? next = null;
+        try
+        {
+            var began = System.Diagnostics.Stopwatch.GetTimestamp();
+            while (!File.Exists(entered) && !actual.IsCompleted && System.Diagnostics.Stopwatch.GetElapsedTime(began) < TimeSpan.FromSeconds(8))
+                await Task.Delay(10, TestContext.Current.CancellationToken);
+            Assert.True(File.Exists(entered));
+            ParentRenewalHandoff.Pending pending;
+            lock (gate) { pending = handoff.Begin("owned", handoff.Elapsed + TimeSpan.FromSeconds(10)); current = false; }
+            await ParentEffectAdmissionTests.WaitForWaiters(pending, 1, actual); // Genuine active capture reached its next budget check.
+            var calls = 0; var before = admission.EnteredCount;
+            next = Task.Run(() => admission.EnterSynchronous("owned", () => { Interlocked.Increment(ref calls); return 7; }), TestContext.Current.CancellationToken);
+            await ParentEffectAdmissionTests.WaitForWaiters(pending, 2, next);
+            Assert.Equal(0, calls); Assert.Equal(before, admission.EnteredCount); Assert.False(revoked); Assert.False(File.Exists(finished));
+            handoff.Install(pending, () => current = true);
+            Assert.Equal(7, await next.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+            File.WriteAllText(release, "release");
+            var result = await actual.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+            Assert.Equal(0, result.ExitCode); Assert.False(revoked); Assert.True(File.Exists(finished));
+        }
+        finally
+        {
+            File.WriteAllText(release, "release");
+            if (!actual.IsCompleted || next is { IsCompleted: false }) Revoke(new OperationCanceledException("Fixture original stopping after assertion failure."));
+            try { await actual.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken); } catch (Exception) { }
+            if (next is not null) { try { await next.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken); } catch (Exception) { } }
+        }
+        var capture = Assert.Single(executor.Calls).Capture;
+        Assert.True(capture.Command.OwnedProcessQuiescent);
+        Assert.True(capture.RootExitObserved && capture.StandardOutputDrainCompleted && capture.StandardErrorDrainCompleted);
+        Assert.False(life.HasExplicitUnknown); Assert.True(admission.AllKnownSettled);
+    }
+
+    [Fact(Timeout = 30000)]
     public async Task Actual_native_capture_revocation_stops_and_closes_the_original_without_false_unknown()
     {
         if (!OperatingSystem.IsWindows()) Assert.Skip("Actual Windows original scope; Linux scoped ownership remains separate.");

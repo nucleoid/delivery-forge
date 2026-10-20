@@ -23,6 +23,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
     readonly FileCoordinationCheckpointStore checkpoints;
     readonly CancellationTokenSource renewalStop;
     readonly ParentEffectAdmission effects;
+    readonly ParentRenewalHandoff renewalHandoff;
     readonly List<Task> coordinationTasks = [];
     readonly CancellationTokenRegistration cancelled;
     ContinuumCoordinationAdapter? reducer;
@@ -54,7 +55,8 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
         ContinuumMcpTransport actualTransport, FileCoordinationCheckpointStore actualStore)
     {
         selected = settings; original = life; transport = actualTransport; checkpoints = actualStore;
-        effects = new(gate, runId => OriginalCanAdmitEffects(original) && opened && !closed && !revoked && parentRunId == runId && authority is not null && reducer is not null && reducer.MayDispatch(authority), Revoke);
+        renewalHandoff = new(gate, original);
+        effects = new(gate, runId => OriginalCanAdmitEffects(original) && opened && !closed && !revoked && parentRunId == runId && authority is not null && reducer is not null && reducer.MayDispatch(authority), Revoke, renewalHandoff);
         renewalStop = CancellationTokenSource.CreateLinkedTokenSource(life.Token);
         cancelled = life.Token.Register(() => Revoke(new OperationCanceledException("Original parent cancellation revoked admission.")));
     }
@@ -213,17 +215,25 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
             for (var iteration = 0; iteration < 20; iteration++)
             {
                 await Task.Delay(TimeSpan.FromSeconds(60), renewalStop.Token).ConfigureAwait(false);
-                original.Check(); DispatchAuthority actual;
-                lock (gate) { if (closed || revoked || authority is null) return; actual = authority; }
-                lock (gate) fixtureRenewalInputs = fixtureObservedLeases.ToArray();
-                var task = reducer!.RenewAllAsync(actual, renewalStop.Token); lock (gate) { coordinationTasks.Add(task); fixtureRenewalTask = task; }
-                var result = await task.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
+                original.Check(); DispatchAuthority actual; ParentRenewalHandoff.Pending pending;
                 lock (gate)
                 {
-                    releaseContinuation = result.ReleaseContinuation;
-                    if (result.Authority is null || closed || revoked) throw new CoordinationUncertainException("Actual renewal did not return new current authority.");
-                    authority = result.Authority; fixtureObservedLeases = result.Snapshot.Leases.ToArray();
+                    if (closed || revoked || authority is null) return;
+                    actual = authority;
+                    fixtureRenewalInputs = fixtureObservedLeases.ToArray();
+                    if (fixtureRenewalInputs.Count == 0) throw new CoordinationUncertainException("Original grants unavailable before renewal.");
+                    // Close births before the reducer synchronously withdraws the old authority.
+                    pending = renewalHandoff.Begin(parentRunId!, fixtureRenewalInputs.Min(lease => lease.SafeDeadline));
                 }
+                var task = reducer!.RenewAllAsync(actual, renewalStop.Token); lock (gate) { coordinationTasks.Add(task); fixtureRenewalTask = task; }
+                var result = await task.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
+                // Cleanup evidence remains reachable even when a late handoff is refused.
+                lock (gate) releaseContinuation = result.ReleaseContinuation;
+                renewalHandoff.Install(pending, () =>
+                {
+                    if (result.Authority is null || closed || revoked || original.HasExplicitUnknown) throw new CoordinationUncertainException("Actual renewal did not return new current authority.");
+                    authority = result.Authority; fixtureObservedLeases = result.Snapshot.Leases.ToArray();
+                });
             }
             throw new TimeoutException("Finite original renewal iterations exhausted.");
         }
@@ -236,6 +246,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
         lock (gate)
         {
             failure ??= error; revoked = true;
+            renewalHandoff.Revoke(error);
             // Admission closes before any stop task can run. Never discard an entered uncertain original.
             if (opened && !closed && bridge is not null && owner is not null && lossStop is null)
                 lossStop = StopOwnedAfterRevocation(bridge, parentRunId!);
@@ -255,6 +266,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
             if (owner is null || owner != requested || bridge is null) throw new CoordinationUncertainException("No original parent owner for quiescence.");
             // Quiescence closes admission permanently for this single lifecycle, before the sample escapes the gate.
             revoked = true;
+            renewalHandoff.Revoke(new CoordinationUncertainException("Original parent entered quiescence."));
             // Only this coordination observation is excluded; actual effects remain.
             var quiet = !original.HasExplicitUnknown && effects.AllKnownSettled &&
                 bridge.ObserveCoordinationWorkSettled(parentRunId!);
@@ -268,7 +280,9 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
         lock (gate)
         {
             if (disposeEntered) { if (!disposed || dispositionFailure is not null) throw new CoordinationUncertainException("Original parent disposition remains nonpass; no repeat."); return; }
-            disposeEntered = true; closed = true; renewalStop.Cancel();
+            disposeEntered = true; closed = true;
+            renewalHandoff.Revoke(new CoordinationUncertainException("Original parent disposition closed admission."));
+            renewalStop.Cancel();
         }
         try
         {
