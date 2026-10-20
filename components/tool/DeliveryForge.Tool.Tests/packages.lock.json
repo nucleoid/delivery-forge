@@ -191,6 +191,14 @@
           "DeliveryForge.Evidence": "[1.0.0, )"
         }
       },
+      "deliveryforge.scheduling": {
+        "type": "Project",
+        "dependencies": {
+          "DeliveryForge.Coordination": "[1.0.0, )",
+          "DeliveryForge.Execution": "[1.0.0, )",
+          "DeliveryForge.Planning": "[1.0.0, )"
+        }
+      },
       "deliveryforge.tool": {
         "type": "Project",
         "dependencies": {
@@ -199,7 +207,8 @@
           "DeliveryForge.Evidence": "[1.0.0, )",
           "DeliveryForge.Execution": "[1.0.0, )",
           "DeliveryForge.Planning": "[1.0.0, )",
-          "DeliveryForge.Publication": "[1.0.0, )"
+          "DeliveryForge.Publication": "[1.0.0, )",
+          "DeliveryForge.Scheduling": "[1.0.0, )"
         }
       }
     }
