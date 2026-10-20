@@ -12,7 +12,7 @@ public sealed record PlanIntent(PlanningRequest Request, IReadOnlyList<string> E
     IReadOnlyList<DependencyNode> Dependencies, IReadOnlyList<PlanGate> Gates, RolloutPlan Rollout, IReadOnlyList<PlanUnknown> Unknowns, string Revision);
 public interface IIssueContentPort { Task<PlanIntent> ReadPublicIssueAsync(string issue, TimeSpan remaining, CancellationToken cancellationToken); }
 public sealed record RunSelection(string RunId, string StoreRoot, string Repository, string RepositoryRoot, string StoredCeiling, string PlanIdentity);
-public sealed class ToolApplication(OwnerHostBridge? host = null, IIssueContentPort? issues = null, ParentPublicationBinding? publication = null, IWorkerAssignmentPort? assignments = null, ProcessCommandExecutor? actualExecutor = null, ToolLifetime? actualOriginal = null, AdmissionFile? actualConfigurationPin = null)
+public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssueContentPort? issues = null, ParentPublicationBinding? publication = null, IWorkerAssignmentPort? assignments = null, ProcessCommandExecutor? actualExecutor = null, ToolLifetime? actualOriginal = null, AdmissionFile? actualConfigurationPin = null)
 {
     readonly List<ToolCallObservation> externalCalls = [];
     readonly object retainedConfigurationGate = new(); TrustedConfiguration? retainedQualityConfiguration; string? retainedQualityConfigurationPath;
@@ -42,7 +42,8 @@ public sealed class ToolApplication(OwnerHostBridge? host = null, IIssueContentP
         using var locallyOwnedLifetime = actualOriginal is null ? life : null;
         life.Check();
         var config = TrustedConfiguration.LoadSelected(configPath, life, actualConfigurationPin);
-        if ((config.InstalledQuality is not null || config.InstalledReview is not null || config.LocalRealGolden is not null) && actualOriginal is not null && actualConfigurationPin is not null)
+        if (config.HistoricalQuality is not null && command.Mode != ToolMode.QualityBaseline) throw new ToolUsageException("Historical quality selection requires the explicit quality-baseline mode.");
+        if ((config.InstalledQuality is not null || config.InstalledReview is not null || config.LocalRealGolden is not null || config.HistoricalQuality is not null) && actualOriginal is not null && actualConfigurationPin is not null)
         {
             // Reload verifies the exact current admitted bytes; retain the same
             // actual selected configuration object rather than adopt saved DATA.
@@ -74,6 +75,7 @@ public sealed class ToolApplication(OwnerHostBridge? host = null, IIssueContentP
         {
             ToolMode.Plan => await PlanAsync(command, config, life).ConfigureAwait(false),
             ToolMode.Implement => await ImplementAsync(command, config, life).ConfigureAwait(false),
+            ToolMode.QualityBaseline => await HistoricalQualityAsync(command, config, life).ConfigureAwait(false),
             ToolMode.Resume => await RunAsync(command, config, life).ConfigureAwait(false),
             ToolMode.Pr or ToolMode.Merge => await RunAsync(command, config, life).ConfigureAwait(false),
             _ => throw new ToolUsageException("An explicit mode is required.")

@@ -268,7 +268,7 @@ public sealed class HostBridgeFrame
     }
     public bool CloseWhenSettled() { lock (operationGate) { if (Unknown) { Lifetime.RetainBridgeUnknown(this); return false; } Lifetime.ReleaseSettledBridge(this); if (OwnsOriginal) Lifetime.Dispose(); return true; } }
 }
-public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostAdapter adapter, bool requireCoordination = false)
+public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostAdapter adapter, bool requireCoordination = false)
 {
     ParentCoordinationHost? coordination;
     InstalledQualityHost? installedQuality;
@@ -313,6 +313,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
         installedQuality?.Bind(plan, assignment, config, original);
         installedReview?.Bind(plan, assignment, config, original);
         localRealGolden?.Bind(plan, assignment, config, original);
+        historicalQuality?.Bind(plan, assignment, config, original);
     }
     internal bool ObserveCoordinationWorkSettled(string runId)
         => frames.TryGetValue(runId, out var frame) && !frame.SchedulingCompletion.Unknown && frame.Scheduler?.HasRetainedReservation != true && ObservePipelineSettled(runId);
@@ -323,7 +324,7 @@ public sealed class OwnerHostBridge(ExecutionCoordinator coordinator, NamedHostA
         // CurrentAsync/EnterAsync admission. Every actual containing phase and
         // child/control remains an obligation; only this observation route is
         // excluded. In particular an unreturned phase invocation is not quiet.
-        if (actual.Worker.Unknown || actual.Quality.Unknown || actual.Review.Unknown || actual.IndependentReview.Unknown || actual.LocalReal.Unknown || actual.ResumeControls.Any(control => control.Unknown) || actual.InvocationUnknown || actual.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(runId) || !adapter.ObserveBoundNativeQuiescence(runId) || !coordinator.ObserveOriginalProcessesSettled(runId)) return false;
+        if (actual.Worker.Unknown || actual.Quality.Unknown || actual.Review.Unknown || actual.IndependentReview.Unknown || actual.LocalReal.Unknown || historicalQuality?.Unknown == true || actual.ResumeControls.Any(control => control.Unknown) || actual.InvocationUnknown || actual.EnteredTasks.Any(task => !task.IsCompleted) || adapter.HasUnknownCalls(runId) || !adapter.ObserveBoundNativeQuiescence(runId) || !coordinator.ObserveOriginalProcessesSettled(runId)) return false;
         return actual.OwnerCompleted || actual.OwnerStopped || actual.Accepted is null && !adapter.ActualCalls.Any(call => call.RunId == runId && call.Kind == "Start");
     }
     readonly ConcurrentDictionary<string, HostBridgeFrame> frames = new(StringComparer.Ordinal);

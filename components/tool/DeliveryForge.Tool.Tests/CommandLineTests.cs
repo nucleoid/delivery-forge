@@ -10,7 +10,8 @@ public sealed class CommandLineTests
     [InlineData("merge", "--run-dir", "/run", null, null)]
     [InlineData("resume", "--run-dir", "/run", "--ceiling", "implement")]
     [InlineData("capabilities", "--profile", "local", null, null)]
-    public void Exact_six_modes_are_parsed(string a, string b, string c, string? d, string? e)
+    [InlineData("quality-baseline", "--plan", "/plan", "--config", "/config")]
+    public void Exact_modes_are_parsed(string a, string b, string c, string? d, string? e)
     {
         var command = CommandLine.Parse(new[] { a, b, c, d, e }.Where(x => x is not null).Select(x => x!).ToArray()); Assert.NotNull(command.Mode);
     }
@@ -30,6 +31,9 @@ public sealed class CommandLineTests
     [InlineData("--help --version")]
     [InlineData("implement --plan /one --plan /two")]
     [InlineData("plan --repo=/repo --intent-file /intent")]
+    [InlineData("quality-baseline")]
+    [InlineData("quality-baseline --plan /plan --run-dir /saved")]
+    [InlineData("quality-baseline --plan /plan --ceiling implement")]
     public void Invalid_authority_or_ambiguous_grammar_refuses_before_effect(string input) => Assert.Throws<ToolUsageException>(() => CommandLine.Parse(input.Split(' ', StringSplitOptions.RemoveEmptyEntries)));
     [Fact] public void Help_is_generated_from_same_option_table() { var help = CommandLine.Help(); foreach (var row in CommandLine.Definitions) Assert.Contains("--" + row.Name, help); Assert.DoesNotContain("--authorize", help); }
     [Fact] public async Task Capabilities_reports_unavailable_without_config_or_host_probe() { var r = await new ToolApplication().ExecuteAsync(CommandLine.Parse(["capabilities"]), TestContext.Current.CancellationToken); Assert.Equal("INCOMPLETE", r.Outcome); Assert.False(r.RuntimeCertified); }

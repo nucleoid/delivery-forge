@@ -53,6 +53,7 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         }
         if (config.LocalRealGolden is not null && config.LocalSingle is null) throw new ToolUsageException("Local-real requires an independently approved finite LocalSingle policy; no direct execution fallback.");
         if (config.InstalledQuality is not null) bridge.BindInstalledQuality(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing quality requires the actual pinned root configuration."), actualOriginal, worktrees, selectedLinuxScope));
+        if (config.HistoricalQuality is not null) bridge.BindHistoricalQuality(new(config, actualConfigurationPin ?? throw new ToolUsageException("Historical gates require the actual pinned root configuration."), actualOriginal, selectedLinuxScope));
         if (config.InstalledReview is not null) bridge.BindInstalledReview(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing review requires the actual pinned root configuration."), actualOriginal, executor, selectedLinuxScope));
         if (config.LocalRealGolden is { } golden)
         {

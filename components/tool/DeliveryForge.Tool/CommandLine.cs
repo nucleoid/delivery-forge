@@ -1,6 +1,6 @@
 namespace DeliveryForge.Tool;
 
-public enum ToolMode { Plan, Implement, Pr, Merge, Resume, Capabilities }
+public enum ToolMode { Plan, Implement, Pr, Merge, Resume, Capabilities, QualityBaseline }
 public sealed class ToolUsageException(string message) : Exception(message);
 public sealed record ToolCommand(ToolMode? Mode, IReadOnlyDictionary<string, string?> Options)
 {
@@ -10,11 +10,11 @@ public sealed record ToolCommand(ToolMode? Mode, IReadOnlyDictionary<string, str
 public sealed record OptionDefinition(string Name, bool TakesValue, string[] Modes);
 public static class CommandLine
 {
-    private static readonly string[] ModeNames = ["plan", "implement", "pr", "merge", "resume", "capabilities"];
+    private static readonly string[] ModeNames = ["plan", "implement", "pr", "merge", "resume", "capabilities", "quality-baseline"];
     private static readonly OptionDefinition[] Table = [
         new("help",false,ModeNames),new("version",false,ModeNames),new("json",false,ModeNames),new("dry-run",false,ModeNames),new("config",true,ModeNames),
         new("repo",true,["plan","implement"]),new("issue",true,["plan"]),new("intent-file",true,["plan"]),new("plan-out",true,["plan"]),
-        new("plan",true,["implement"]),new("run-dir",true,["implement","pr","merge","resume"]),new("result-dir",true,["implement"]),
+        new("plan",true,["implement","quality-baseline"]),new("run-dir",true,["implement","pr","merge","resume"]),new("result-dir",true,["implement"]),
         new("replay-out",true,["plan","implement","pr","merge","resume"]),new("ceiling",true,["resume"]),new("profile",true,["capabilities"]),
         new("title-file",true,["pr"]),new("body-file",true,["pr"])
     ];
@@ -56,16 +56,17 @@ public static class CommandLine
         switch (mode)
         {
             case ToolMode.Plan: if (!Has("repo") || Has("issue") == Has("intent-file")) throw new ToolUsageException("plan requires --repo and exactly one --issue/--intent-file."); break;
-            case ToolMode.Implement: if (!Has("plan")) throw new ToolUsageException("implement requires --plan."); break;
+            case ToolMode.Implement: case ToolMode.QualityBaseline: if (!Has("plan")) throw new ToolUsageException("This mode requires --plan."); break;
             case ToolMode.Pr: case ToolMode.Merge: case ToolMode.Resume: if (!Has("run-dir")) throw new ToolUsageException("This mode requires --run-dir."); break;
         }
         if (Has("profile") && values["profile"] is not ("local" or "production")) throw new ToolUsageException("Profile must be local or production.");
         if (Has("ceiling") && values["ceiling"] is not ("plan" or "implement" or "pr" or "merge")) throw new ToolUsageException("Invalid ceiling.");
         return new(mode, values);
     }
-    public static string Help() => "delivery-forge <plan|implement|pr|merge|resume|capabilities> [options]\n" +
+    public static string Help() => "delivery-forge <plan|implement|pr|merge|resume|capabilities|quality-baseline> [options]\n" +
         "plan --repo ROOT (--issue OWNER/REPO#N | --intent-file FILE) [--plan-out FILE]\n" +
         "implement --plan RICH_BUNDLE [--repo EXACT_ROOT] [--run-dir DIR] [--result-dir DIR]\n" +
+        "quality-baseline --plan RICH_BUNDLE --config TRUSTED_CONFIG (real gates only; candidate remains unapproved)\n" +
         "pr|merge|resume --run-dir DIR; resume [--ceiling plan|implement|pr|merge]\n" +
         "capabilities [--profile local|production]\n" +
         string.Join("\n", Table.Select(x => "--" + x.Name + (x.TakesValue ? " VALUE" : "") + " (" + string.Join(",", x.Modes) + ")")) + "\nNo implicit publication, replay execution, release or deploy. Unsupported live profiles remain INCOMPLETE.\n";

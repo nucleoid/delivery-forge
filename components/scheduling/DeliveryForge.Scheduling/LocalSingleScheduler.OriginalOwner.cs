@@ -21,6 +21,21 @@ public sealed partial class LocalSingleScheduler
         original = owner; parent = admission; actualPipeline = pipeline; actualSettled = settled; actualOriginalUnknown = originalUnknown;
     }
     internal bool CanReleaseUnprovisioned => original is not null && _laneHeld && _ticket is not null && !_prepared && !provisioningEntered && !preparationEntered && _nativeQuiescenceKnown && !_uncertain && !_store.HasUnsettledOriginalFiles && actualOriginalUnknown?.Invoke() == false;
+    internal async Task ReleaseCompletedUnprovisionedObservedAsync(LocalDispatchReservation ticket, Func<bool> actualNoWorkerStart, CancellationToken token)
+    {
+        await WaitSerialAsync(token).ConfigureAwait(false);
+        try
+        {
+            CheckOriginal();
+            if (!ReferenceEquals(ticket, _ticket) || !CanReleaseUnprovisioned || actualPipeline?.Invoke() is not { IsCompletedSuccessfully: true } ||
+                actualSettled?.Invoke() != true || !actualNoWorkerStart() || _execution.HasPendingControlOperations(_worker.RunId))
+                throw new SchedulingException("Only this settled original gate-only pipeline can release its unused reservation.");
+            // No writer, preparation or native worker exists to stop. The same
+            // original WORK endpoint remains in force for parent finalization.
+            CheckOriginal(); MarkObservedClosed(); Release();
+        }
+        finally { _serial.Release(); }
+    }
     internal async Task ReleaseUnprovisionedObservedAsync(LocalDispatchReservation ticket, Func<bool> actualNoWorkerStart)
     {
         if (original is null) throw new SchedulingException("No retained original unstarted owner.");

@@ -92,10 +92,11 @@ public sealed partial class LocalSingleTests
     sealed class SchedulingOriginal : IOwnedDuplexBudget
     {
         internal bool Refuse;
+        internal int CleanupReads;
         public long OriginalStarted { get; } = Stopwatch.GetTimestamp();
         public TimeSpan WholeLimit => TimeSpan.FromSeconds(1200);
         public TimeSpan WorkLimit => TimeSpan.FromSeconds(1100);
-        public TimeSpan CleanupRemaining => TimeSpan.FromSeconds(60);
+        public TimeSpan CleanupRemaining { get { CleanupReads++; return TimeSpan.FromSeconds(60); } }
         public CancellationToken Token => CancellationToken.None;
         public void CheckWork() { if (Refuse) throw new TimeoutException("Fixture original refused WORK."); }
     }
