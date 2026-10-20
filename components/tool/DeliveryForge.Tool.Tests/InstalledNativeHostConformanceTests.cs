@@ -20,7 +20,7 @@ public sealed class InstalledNativeHostConformanceTests
         static readonly List<Frame> Unknown = [];
         internal readonly ToolLifetime Original = new(TimeSpan.FromSeconds(600), TestContext.Current.CancellationToken);
         internal readonly List<Task> ActualCalls = []; internal Fixture Selected = null!; internal IHostToolSessionPort Port = null!; internal WorktreeManager Git = null!; internal ProcessCommandExecutor Executor = null!; internal WriterLease? Lease; internal AgentRequest Request = null!;
-        internal DuplexRetirement? Retirement; internal bool LeaseCloseEntered, LeaseClosed, DispositionEntered; internal Exception? Failure, Post;
+        internal DuplexRetirement? Retirement; internal bool LeaseCloseEntered, LeaseClosed, DispositionEntered, AcceptanceAssertionsReturned; internal Exception? Failure, Post; internal NativeFailureSnapshotWriter? FailureSnapshot;
         internal OwnedDuplexProcess? Native => Port switch { DeliveryForge.Tool.Codex.CodexAppServerPort p => p.OriginalProcess, DeliveryForge.Tool.Claude.ClaudeStreamPort p => p.OriginalProcess, DeliveryForge.Tool.Pi.PiRpcPort p => p.OriginalProcess, _ => null };
         internal async Task<T> Call<T>(Func<Task<T>> invoke) { Original.Check(); var actual = invoke(); ActualCalls.Add(actual); try { var result = await actual.WaitAsync(Original.Remaining, TestContext.Current.CancellationToken); Original.Check(); return result; } catch (Exception error) { Failure ??= error; throw; } }
         internal static Frame Prepare(string adapter, bool stop)
@@ -66,17 +66,47 @@ public sealed class InstalledNativeHostConformanceTests
             Assert.Throws<AgentCapabilityIncompleteException>(() => WorkerEnvelope.ValidateAccepted(Request, accepted)); return accepted;
         }
         internal static AgentRunBinding Binding(AgentAcceptedReceipt a) => new(a.AdapterId, a.AdapterVersion, a.RunId, a.RequestIdentity, a.RuntimeRunIdentity, a.RuntimeTaskIdentity);
+        internal void CaptureFailureAfterNativeSettlement()
+        {
+            _ = Original.CleanupRemaining;
+            var native = Native ?? throw new IOException("No retained actual native owner for failure snapshot.");
+            if (Retirement is not { KnownClosed: true, RootExited: true, ActiveProcesses: 0, DispositionReturned: true } || native.HasUnknownIo) throw new IOException("No failure snapshot before actual same-original native settlement.");
+            var stderr = native.StandardError; _ = Original.CleanupRemaining;
+            if (stderr.Length > 1048576) throw new IOException("Original stderr profile exceeded.");
+            // Retain raw bytes only in the original private owner. Arbitrary
+            // stderr, account responses and prompts cannot be made safe by a
+            // regex redaction claim. Export exact hash/extent and fixed signals.
+            var text = Encoding.UTF8.GetString(stderr); var signals = new List<string>();
+            foreach (var signal in new[] { "not initialized", "already initialized", "failed to initialize sqlite", "error loading", "permission denied", "connection refused", "timed out", "unauthorized", "authentication", "invalid request", "error" })
+                if (text.Contains(signal, StringComparison.OrdinalIgnoreCase)) signals.Add(signal);
+            var io = native.ActualIo; var first = io.Take(128).Select(x => new { x.Kind, x.Entered, x.InvocationReturned, TaskStatus = x.ActualTask?.Status, PrimaryType = x.Primary?.GetType().FullName, PostType = x.Post?.GetType().FullName, x.Unknown }).ToArray();
+            var value = new
+            {
+                Kind = "ActualNativeHostFailureSnapshot-v1", Selected.Adapter, Selected.CaseKind,
+                OriginalStarted = Original.OriginalStarted, Frequency = System.Diagnostics.Stopwatch.Frequency, ElapsedTicks = System.Diagnostics.Stopwatch.GetTimestamp() - Original.OriginalStarted,
+                PrimaryType = Failure?.GetType().FullName, PostType = Post?.GetType().FullName,
+                Startup = Port is DeliveryForge.Tool.Codex.CodexAppServerPort codex ? codex.SnapshotStartupDiagnostics() : null,
+                StandardError = new { Bytes = stderr.Length, Sha256 = BoundedFiles.Sha(stderr), Signals = signals, TextExported = false },
+                Native = new { Retirement.KnownClosed, Retirement.RootExited, Retirement.ActiveProcesses, Retirement.OutputEof, Retirement.ErrorEof, Retirement.InputCloseReturned, Retirement.DispositionReturned, Retirement.ExitCode, FailureCount = Retirement.Failures.Count },
+                ActualIoCount = io.Count, ActualIo = first, IoMetadataBoundExceeded = io.Count > first.Length,
+                FrameTasks = ActualCalls.Take(128).Select(t => t.Status).ToArray(), FrameTaskCount = ActualCalls.Count,
+                Accepted = false, RuntimeCertified = false, RawAccountOrPromptExported = false
+            };
+            _ = Original.CleanupRemaining; var bytes = JsonSerializer.SerializeToUtf8Bytes(value, BoundedFiles.Json); _ = Original.CleanupRemaining;
+            FailureSnapshot = new(Original); FailureSnapshot.Write(Path.Combine(Selected.ResultDirectory, "native-host-failure.json"), bytes); _ = Original.CleanupRemaining;
+        }
         public async ValueTask DisposeAsync()
         {
             if (DispositionEntered) throw new IOException("Original native conformance disposition already entered; no retry."); DispositionEntered = true;
             try
             {
                 if (Native is not null) { var actual = Native.RetireAsync(Retirement is null); ActualCalls.Add(actual); Retirement = await actual.WaitAsync(Original.CleanupRemaining); }
+                if (!AcceptanceAssertionsReturned && Native is not null) CaptureFailureAfterNativeSettlement();
                 if (Retirement is { KnownClosed: false } || ActualCalls.Any(t => !t.IsCompleted)) throw new IOException("Actual native conformance remains UNKNOWN; original graph retained, no passing cleanup.");
                 if (Lease is not null) { _ = Original.CleanupRemaining; LeaseCloseEntered = true; Lease.Dispose(); LeaseClosed = true; _ = Original.CleanupRemaining; }
                 Original.Dispose(); lock (Unknown) Unknown.Remove(this);
             }
-            catch (Exception error) { Post = error; throw; } // original frame remains strongly retained, no retry/recursive cleanup.
+            catch (Exception error) { Post = error; if (Failure is not null && !ReferenceEquals(Failure, error)) throw new AggregateException("Actual native primary and same-original failure disposition.", Failure, error); throw; } // original frame remains strongly retained, no retry/recursive cleanup.
         }
     }
     [Theory(Timeout = 700000)]
@@ -93,6 +123,7 @@ public sealed class InstalledNativeHostConformanceTests
         Assert.NotEmpty(completion.ArtifactPaths); foreach (var artifact in completion.ArtifactPaths) { var bytes = BoundedFiles.Read(artifact, frame.Original); Assert.DoesNotContain(frame.Request.WriterToken, Encoding.UTF8.GetString(bytes), StringComparison.Ordinal); }
         // Actual native/protocol/Git observations only. This probe never writes
         // RootActualInstalledHostConformanceAcceptance or publishes authority.
+        frame.AcceptanceAssertionsReturned = true;
     }
     [Theory(Timeout = 700000)]
     [InlineData("codex.cli")]
@@ -107,5 +138,6 @@ public sealed class InstalledNativeHostConformanceTests
         var retired = native.RetireAsync(true); frame.Retirement = await retired.WaitAsync(frame.Original.CleanupRemaining, TestContext.Current.CancellationToken); Assert.True(frame.Retirement.KnownClosed); Assert.True(frame.Retirement.RootExited); Assert.Equal(0u, frame.Retirement.ActiveProcesses); Assert.True(frame.Retirement.DispositionReturned); _ = frame.Original.CleanupRemaining;
         // A stop attempt is not a successful worker commit. Native kill/actual
         // protocol-control outcomes remain separately recorded by the port.
+        frame.AcceptanceAssertionsReturned = true;
     }
 }
