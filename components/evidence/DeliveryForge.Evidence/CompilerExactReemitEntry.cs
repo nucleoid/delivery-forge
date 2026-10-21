@@ -60,7 +60,9 @@ internal static class CompilerExactReemitEntry
                 .WithAssemblyIdentityComparer(DesktopAssemblyIdentityComparer.Default);
             var name = parsed.CompilationName ?? Path.GetFileNameWithoutExtension(parsed.OutputFileName);
             var compilation = CSharpCompilation.Create(name, trees, metadata, options);
-            var emit = parsed.EmitOptions.WithPdbFilePath(parsed.GetPdbFilePath(parsed.OutputFileName))
+            var mappedPdbPath = resolver.NormalizePath(parsed.GetPdbFilePath(parsed.OutputFileName), baseFilePath: null)
+                ?? throw Unsupported("The exact compiler PDB path is unsupported.");
+            var emit = parsed.EmitOptions.WithPdbFilePath(mappedPdbPath)
                 .WithOutputNameOverride(parsed.OutputFileName);
             using var pe = new BoundedOutput(check);
             using var pdb = new BoundedOutput(check);

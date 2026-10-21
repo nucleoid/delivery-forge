@@ -19,7 +19,7 @@ internal static class CompilerExactReemit
     // the producer/consumer recipe decoder BEFORE calling this comparison slice.
     internal sealed record Request(string BaseDirectory, string[] ScalarArguments,
         Input[] Sources, Reference[] References, string[] EmbeddedSourcePaths);
-    internal sealed record Comparison(bool Equal, string Reason);
+    internal sealed record Comparison(bool Equal, string Reason, byte[] EmittedPe, byte[] EmittedPdb);
     private const int MaximumArtifactBytes = 128 * 1024 * 1024;
     private const int MaximumRows = 10000;
     // Exact already-selected SDK 10.0.401 compiler pair, not a caller-supplied hash.
@@ -83,7 +83,7 @@ internal static class CompilerExactReemit
             }
             var details = $" Actual PE: {Identity(actualPe)}; emitted PE: {Identity(emitted[0])}; actual PDB: {Identity(actualPdb)}; emitted PDB: {Identity(emitted[1])}.";
             return new(equal, (equal ? "Complete PE and portable PDB byte equality only; authored body-origin remains unproven."
-                : "Exact target-compiler PE/PDB bytes differ; general source origin remains unsupported.") + details);
+                : "Exact target-compiler PE/PDB bytes differ; general source origin remains unsupported.") + details, emitted[0], emitted[1]);
         }
         finally { island.Unload(); } // Unload requests collection; no immediate-unload claim.
     }

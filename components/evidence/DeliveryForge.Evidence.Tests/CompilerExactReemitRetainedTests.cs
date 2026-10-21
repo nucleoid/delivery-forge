@@ -75,6 +75,13 @@ public sealed class CompilerExactReemitRetainedTests
                 sources, references, embedded);
             var result = CompilerExactReemit.Compare(request, Read(value.GetProperty("compilerCommon")),
                 Read(value.GetProperty("compilerCSharp")), Read(value.GetProperty("assembly")), Read(value.GetProperty("pdb")), files);
+            if (!result.Equal)
+            {
+                files.Check();
+                TestContext.Current.AddAttachment("reemitted-DeliveryForge.Execution.dll", result.EmittedPe, "application/octet-stream");
+                TestContext.Current.AddAttachment("reemitted-DeliveryForge.Execution.pdb", result.EmittedPdb, "application/octet-stream");
+                files.Check();
+            }
             Assert.True(result.Equal, result.Reason);
             Assert.Contains("body-origin remains unproven", result.Reason, StringComparison.Ordinal);
             // This is a read-only local compilation of retained bytes and exact
