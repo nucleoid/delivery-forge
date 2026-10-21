@@ -41,8 +41,12 @@ public sealed class ClaudeStreamStateTests
     {
         var state = Admitted(); var row = new Dictionary<string, object?>
         {
-            ["type"] = "user", ["session_id"] = Session, ["uuid"] = PromptId,
-            ["parent_tool_use_id"] = null, ["message"] = new { role = "user", content = Prompt }, ["origin"] = new { kind = "human" },
+            ["type"] = "user",
+            ["session_id"] = Session,
+            ["uuid"] = PromptId,
+            ["parent_tool_use_id"] = null,
+            ["message"] = new { role = "user", content = Prompt },
+            ["origin"] = new { kind = "human" },
         };
         row.Remove(missing); Assert.Throws<IOException>(() => Observe(state, row));
         Assert.False(state.Acknowledged); Assert.False(state.Settled);
@@ -54,8 +58,13 @@ public sealed class ClaudeStreamStateTests
     {
         var state = Started(); Idle(state); var row = new Dictionary<string, object?>
         {
-            ["type"] = "result", ["session_id"] = Session, ["subtype"] = "success", ["terminal_reason"] = "completed",
-            ["uuid"] = "result-test-id", ["is_error"] = false, ["origin"] = new { kind = "human" },
+            ["type"] = "result",
+            ["session_id"] = Session,
+            ["subtype"] = "success",
+            ["terminal_reason"] = "completed",
+            ["uuid"] = "result-test-id",
+            ["is_error"] = false,
+            ["origin"] = new { kind = "human" },
         };
         row.Remove(missing); Assert.Throws<IOException>(() => Observe(state, row));
         Assert.False(state.Settled); Assert.Throws<IOException>(state.RequireSuccess);

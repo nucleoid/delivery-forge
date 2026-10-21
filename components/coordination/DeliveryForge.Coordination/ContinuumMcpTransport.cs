@@ -258,7 +258,8 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
             if (_renewalObservationReservations >= 512) throw new CoordinationUnavailableException("Finite actual renewal observation bound.");
             _renewalObservationReservations++; observation = _actualRenewals.Count;
             _actualRenewals.Add(new(request.RequestId, request.Lease.Resource.Scope, request.Lease.Resource.ResourceKey,
-                request.Lease.LeaseId, request.Lease.Owner.RunId, request.Lease.FencingToken, TransportOutcome.Uncertain) { InvocationState = "Pending" });
+                request.Lease.LeaseId, request.Lease.Owner.RunId, request.Lease.FencingToken, TransportOutcome.Uncertain)
+            { InvocationState = "Pending" });
         }
         try
         {

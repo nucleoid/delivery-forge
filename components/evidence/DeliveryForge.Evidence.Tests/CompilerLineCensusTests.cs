@@ -66,7 +66,7 @@ public sealed class CompilerLineCensusTests
     {
         using var fixture = new Fixture();
         var inventory = fixture.Inventory(document: fixture.Document with
-            { LogicalPath = "Other.cs", RepositoryPath = "other/Other.cs", PhysicalPath = null });
+        { LogicalPath = "Other.cs", RepositoryPath = "other/Other.cs", PhysicalPath = null });
         Assert.False(inventory.Complete); Assert.Empty(inventory.Points);
         Assert.Contains("not completely", inventory.Reason, StringComparison.Ordinal);
     }
@@ -249,24 +249,46 @@ public sealed class CompilerLineCensusTests
             // bytes remain untouched; direct metadata inspection reaches that boundary.
             if (fault == "checksum")
                 return ReadChecksumNegative();
-            var data = new Dictionary<string, byte[]>(StringComparer.Ordinal) { ["source"] = rawSource, ["pe"] = Pe,
-                ["pdb"] = fault == "malformed-pdb" ? [0xff] : Pdb };
+            var data = new Dictionary<string, byte[]>(StringComparer.Ordinal)
+            {
+                ["source"] = rawSource,
+                ["pe"] = Pe,
+                ["pdb"] = fault == "malformed-pdb" ? [0xff] : Pdb
+            };
             var contexts = new JsonArray(); var builds = new JsonArray(); var executions = new JsonArray(); var artifacts = new JsonArray();
             foreach (var context in secondContext ? new[] { "c", "c2" } : new[] { "c" })
             {
-                contexts.Add(JsonSerializer.SerializeToNode(new { id = context, project = ProjectRole + "/DeliveryForge.Evidence.CensusFixture.csproj",
+                contexts.Add(JsonSerializer.SerializeToNode(new
+                {
+                    id = context,
+                    project = ProjectRole + "/DeliveryForge.Evidence.CensusFixture.csproj",
                     inputs = new[] { new { role = "source", logicalPath = "Subject.cs", repositoryPath = ProjectRole + "/Subject.cs", locator = "source",
-                        length = Source.Length, sha256 = InstalledToolFiles.Identity(Source)[7..], generated = false, encoding = "utf-8" } } }));
+                        length = Source.Length, sha256 = InstalledToolFiles.Identity(Source)[7..], generated = false, encoding = "utf-8" } }
+                }));
                 var build = context + "b";
-                builds.Add(JsonSerializer.SerializeToNode(new { id = build, contextId = context, moduleIdentity = Build.ModuleIdentity,
-                    mvid = fault == "mvid" ? Guid.Empty.ToString("D") : Build.Mvid, debugIdentity = fault == "debug" ? new string('0', 64) : Build.DebugIdentity,
-                    assemblySha256 = fault == "assembly-hash" ? new string('0', 64) : InstalledToolFiles.Identity(Pe)[7..], pdbSha256 = InstalledToolFiles.Identity(data["pdb"])[7..] }));
+                builds.Add(JsonSerializer.SerializeToNode(new
+                {
+                    id = build,
+                    contextId = context,
+                    moduleIdentity = Build.ModuleIdentity,
+                    mvid = fault == "mvid" ? Guid.Empty.ToString("D") : Build.Mvid,
+                    debugIdentity = fault == "debug" ? new string('0', 64) : Build.DebugIdentity,
+                    assemblySha256 = fault == "assembly-hash" ? new string('0', 64) : InstalledToolFiles.Identity(Pe)[7..],
+                    pdbSha256 = InstalledToolFiles.Identity(data["pdb"])[7..]
+                }));
                 foreach (var role in new[] { "assembly", "pdb" })
                 {
                     var locator = role == "assembly" ? "pe" : "pdb";
-                    var row = JsonSerializer.SerializeToNode(new { id = context + role, kind = role, locator,
-                        contextId = fault == "context" && role == "pdb" ? "foreign" : context, buildId = build,
-                        length = data[locator].Length, sha256 = InstalledToolFiles.Identity(data[locator])[7..] })!;
+                    var row = JsonSerializer.SerializeToNode(new
+                    {
+                        id = context + role,
+                        kind = role,
+                        locator,
+                        contextId = fault == "context" && role == "pdb" ? "foreign" : context,
+                        buildId = build,
+                        length = data[locator].Length,
+                        sha256 = InstalledToolFiles.Identity(data[locator])[7..]
+                    })!;
                     artifacts.Add(row);
                     if (fault == "duplicate" && role == "pdb") artifacts.Add(row.DeepClone());
                 }
@@ -283,9 +305,19 @@ public sealed class CompilerLineCensusTests
                     new XElement("Classes", new XElement("Class", new XElement("Methods", omitFile ? null : points))))));
                 var locatorCoverage = context + "coverage";
                 data.Add(locatorCoverage, Encoding.UTF8.GetBytes(xml.ToString(SaveOptions.DisableFormatting)));
-                if (!omitReport) artifacts.Add(JsonSerializer.SerializeToNode(new { id = locatorCoverage, kind = "coverage", locator = locatorCoverage,
-                    contextId = context, buildId = build, executionId = execution, format = "opencover", coordinateKind = "line",
-                    length = data[locatorCoverage].Length, sha256 = InstalledToolFiles.Identity(data[locatorCoverage])[7..] }));
+                if (!omitReport) artifacts.Add(JsonSerializer.SerializeToNode(new
+                {
+                    id = locatorCoverage,
+                    kind = "coverage",
+                    locator = locatorCoverage,
+                    contextId = context,
+                    buildId = build,
+                    executionId = execution,
+                    format = "opencover",
+                    coordinateKind = "line",
+                    length = data[locatorCoverage].Length,
+                    sha256 = InstalledToolFiles.Identity(data[locatorCoverage])[7..]
+                }));
             }
             var node = new JsonObject { ["contexts"] = contexts, ["builds"] = builds, ["executions"] = executions, ["artifacts"] = artifacts };
             using var manifest = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(node));
