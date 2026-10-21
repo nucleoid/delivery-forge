@@ -1,5 +1,6 @@
 using System.Formats.Tar;
 using System.Text;
+using DeliveryForge.Contracts.State;
 using DeliveryForge.Execution.Host;
 using DeliveryForge.Review;
 
