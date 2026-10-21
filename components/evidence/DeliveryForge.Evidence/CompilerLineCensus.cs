@@ -19,7 +19,12 @@ internal static class CompilerLineCensus
     internal sealed record Build(string ModuleIdentity, string Mvid, string DebugIdentity);
     internal sealed record Point(int MethodToken, string LogicalPath, int StartLine, int StartColumn,
         int EndLine, int EndColumn);
-    internal sealed record Inventory(bool Complete, string Reason, IReadOnlyList<Point> Points, IReadOnlyList<string> Limitations);
+    internal sealed record Line(string LogicalPath, int Number);
+    internal sealed record Inventory(bool Complete, string Reason, IReadOnlyList<Point> Points, IReadOnlyList<string> Limitations)
+    {
+        internal IReadOnlyList<Line> ProviderLines { get; init; } = [];
+        internal IReadOnlyList<Line> PolicyLines { get; init; } = [];
+    }
 
     internal static Inventory Inspect(byte[] assembly, byte[] pdb, Build expected,
         IReadOnlyList<Document> documents, InstalledToolFiles files)
@@ -84,7 +89,6 @@ internal static class CompilerLineCensus
             }
             var mapped = new Dictionary<DocumentHandle, Document>();
             var names = new HashSet<string>(StringComparer.Ordinal);
-            var extents = new Dictionary<string, int[]>(StringComparer.Ordinal);
             var sha256 = new Guid("8829d00f-11b8-4213-878b-770e8597ac16");
             foreach (var handle in reader.Documents)
             {
@@ -109,9 +113,10 @@ internal static class CompilerLineCensus
                 var source = candidates[0];
                 if (source.Sha256 != hash) throw Refuse("Compiler document checksum differs from the captured source bytes.");
                 mapped.Add(handle, source);
-                if (!extents.ContainsKey(source.LogicalPath)) extents.Add(source.LogicalPath, LineExtents(source.Text, files));
             }
             var points = new List<Point>(); var totalPoints = 0;
+            var projection = new CompilerLineProjection(documents, files);
+            if (projection.Reason is { } projectionReason) Unsupported(projectionReason);
             var implicitConstructors = new CompilerImplicitConstructor(documents, files);
             if (HidesAuthoredCode(metadata, metadata.CustomAttributes, files))
                 Unsupported("Debugger-hiding metadata is unsupported by the complete compiler-line profile.");
@@ -149,8 +154,7 @@ internal static class CompilerLineCensus
                         var captured = new Point(MetadataTokens.GetToken(methodHandle), source.LogicalPath,
                             point.StartLine, point.StartColumn, point.EndLine, point.EndColumn);
                         points.Add(captured);
-                        if (!SupportedSingleLine(captured, extents[source.LogicalPath]))
-                            Unsupported("Multiline, remapped or out-of-extent compiler spans are unsupported; executable interior lines are not guessed.");
+                        if (!projection.Add(captured)) Unsupported(projection.Reason!);
                     }
                     // RVA=0 declares no executable method body (abstract/import/runtime).
                     // An opaque IL body cannot be presumed compiler-generated or exempt.
@@ -160,7 +164,8 @@ internal static class CompilerLineCensus
                 }
             }
             files.Check();
-            return new(complete, reason, points.AsReadOnly(), Array.AsReadOnly(limitations.Order(StringComparer.Ordinal).ToArray()));
+            return new(complete, reason, points.AsReadOnly(), Array.AsReadOnly(limitations.Order(StringComparer.Ordinal).ToArray()))
+            { ProviderLines = projection.ProviderLines, PolicyLines = projection.PolicyLines };
         }
         catch (BadImageFormatException error) { throw Refuse("Malformed managed PE/portable PDB compiler evidence.", error); }
     }
@@ -195,41 +200,6 @@ internal static class CompilerLineCensus
             start = end + 1;
         }
         return false;
-    }
-
-    internal static bool SupportedSingleLine(Point point, int[] lineLengths)
-    {
-        if (point.StartLine <= 0 || point.StartLine > lineLengths.Length || point.StartColumn <= 0 ||
-            point.StartColumn > lineLengths[point.StartLine - 1] + 1 || point.EndColumn <= 0) return false;
-        // Exclusive endpoint on the next physical line at column1 contains no
-        // character on that next line. No executable interior/comment is invented.
-        if (point.EndLine == point.StartLine + 1 && point.EndColumn == 1)
-            return point.StartColumn <= lineLengths[point.StartLine - 1];
-        return point.EndLine == point.StartLine && point.EndColumn > point.StartColumn &&
-            point.EndColumn <= lineLengths[point.StartLine - 1] + 1;
-    }
-
-    private static int[] LineExtents(string text, InstalledToolFiles files)
-    {
-        var result = new List<int>();
-        var length = text.Length;
-        if (length > 0 && text[length - 1] == '\u001a') length--;
-        var start = length > 0 && text[0] == '\ufeff' ? 1 : 0;
-        for (var index = start; index < length; index++)
-        {
-            if ((index & 4095) == 0) files.Check();
-            if (text[index] is not ('\r' or '\n' or '\u0085' or '\u2028' or '\u2029')) continue;
-            if (result.Count >= MaximumRows) throw Refuse("Compiler source extent exceeds the existing point ceiling.");
-            result.Add(index - start);
-            if (text[index] == '\r' && index + 1 < length && text[index + 1] == '\n') index++;
-            start = index + 1;
-        }
-        if (start < length)
-        {
-            if (result.Count >= MaximumRows) throw Refuse("Compiler source extent exceeds the existing point ceiling.");
-            result.Add(length - start);
-        }
-        return result.ToArray();
     }
 
     private static bool HidesAuthoredCode(MetadataReader reader, CustomAttributeHandleCollection attributes, InstalledToolFiles files)

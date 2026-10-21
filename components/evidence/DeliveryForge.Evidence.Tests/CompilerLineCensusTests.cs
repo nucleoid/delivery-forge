@@ -262,18 +262,6 @@ public sealed class CompilerLineCensusTests
     [DebuggerHidden]
     private static int DebuggerHiddenBody(int value) => value + 1;
 
-    [Theory]
-    [InlineData(1, 1, 1, 4, true)]
-    [InlineData(1, 1, 2, 1, true)]
-    [InlineData(1, 4, 2, 1, false)]
-    [InlineData(1, 1, 2, 2, false)]
-    [InlineData(1, 1, 3, 1, false)]
-    [InlineData(0, 1, 1, 4, false)]
-    [InlineData(1, 5, 1, 6, false)]
-    [InlineData(1, 2, 1, 2, false)]
-    public void Only_supported_physical_single_line_spans_can_enter_the_census(int start, int column, int end, int endColumn, bool supported)
-        => Assert.Equal(supported, CompilerLineCensus.SupportedSingleLine(new(0x06000001, "Subject.cs", start, column, end, endColumn), [3, 5]));
-
     [Fact]
     public void Actual_original_cancellation_is_not_wrapped_as_a_metadata_problem()
     {

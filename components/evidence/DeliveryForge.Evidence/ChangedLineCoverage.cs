@@ -76,6 +76,14 @@ internal static partial class ChangedLineCoverage
         var artifacts = Array(manifest, "artifacts").ToArray();
         if (artifacts.Length > 1_000_000) throw Refuse("Complete artifact membership exceeds the existing point ceiling.");
         var required = new Dictionary<string, HashSet<string>>(comparer);
+        var providerLines = new Dictionary<string, HashSet<string>>(comparer);
+        var completeContexts = new HashSet<string>(StringComparer.Ordinal);
+        var membershipSteps = 0;
+        void MembershipStep()
+        {
+            files.Check();
+            if (++membershipSteps > 1_000_000) throw Refuse("Complete compiler line/context membership exceeds the existing finite profile.");
+        }
         var censusComplete = requireCompilerCensus;
         string? censusReason = null;
         if (requireCompilerCensus)
@@ -105,12 +113,22 @@ internal static partial class ChangedLineCoverage
                     context.Value.Values.Select(source => new CompilerLineCensus.Document(source.LogicalPath, source.RepositoryPath,
                         source.PhysicalPath, source.Sha256, source.Text, source.Generated)).ToArray(), files);
                 if (!inventory.Complete) { censusComplete = false; censusReason ??= inventory.Reason; }
-                foreach (var point in inventory.Points)
+                else completeContexts.Add(context.Key);
+                foreach (var row in inventory.ProviderLines)
                 {
-                    files.Check();
-                    var source = context.Value[point.LogicalPath];
-                    if (source.Generated || source.RepositoryPath is not { } path || !changes.TryGetValue(path, out var changed) || !changed.Contains(point.StartLine)) continue;
-                    var key = path + ":" + point.StartLine.ToString(CultureInfo.InvariantCulture);
+                    MembershipStep();
+                    var source = context.Value[row.LogicalPath];
+                    if (source.Generated || source.RepositoryPath is not { } path || !changes.TryGetValue(path, out var changed) || !changed.Contains(row.Number)) continue;
+                    var key = path + ":" + row.Number.ToString(CultureInfo.InvariantCulture);
+                    if (!providerLines.TryGetValue(key, out var membership)) providerLines.Add(key, membership = new(StringComparer.Ordinal));
+                    membership.Add(context.Key);
+                }
+                foreach (var row in inventory.PolicyLines)
+                {
+                    MembershipStep();
+                    var source = context.Value[row.LogicalPath];
+                    if (source.Generated || source.RepositoryPath is not { } path || !changes.TryGetValue(path, out var changed) || !changed.Contains(row.Number)) continue;
+                    var key = path + ":" + row.Number.ToString(CultureInfo.InvariantCulture);
                     if (!required.TryGetValue(key, out var membership)) required.Add(key, membership = new(StringComparer.Ordinal));
                     membership.Add(context.Key);
                 }
@@ -203,8 +221,18 @@ internal static partial class ChangedLineCoverage
                         !int.TryParse(point.Attribute("vc")?.Value, NumberStyles.None, CultureInfo.InvariantCulture, out var visits) || visits < 0)
                         throw Refuse("Malformed actual line counter.");
                     if (source.RepositoryPath is null || !changes.TryGetValue(source.RepositoryPath, out var added) || !added.Contains(line)) continue;
-                    if (!executable.TryGetValue(source.RepositoryPath + ":" + line.ToString(CultureInfo.InvariantCulture), out var perContext))
-                        executable.Add(source.RepositoryPath + ":" + line.ToString(CultureInfo.InvariantCulture), perContext = new(StringComparer.Ordinal));
+                    var key = source.RepositoryPath + ":" + line.ToString(CultureInfo.InvariantCulture);
+                    if (requireCompilerCensus && completeContexts.Contains(contextId))
+                    {
+                        if (!providerLines.TryGetValue(key, out var providers) || !providers.Contains(contextId))
+                            throw Refuse("A reported changed line is outside the independently captured compiler provider inventory.");
+                        // The exact provider envelope may contain comment/blank
+                        // or exclusive-endpoint lines. Validated H-minus-E rows
+                        // never create denominator membership or measured hits.
+                        if (!required.TryGetValue(key, out var members) || !members.Contains(contextId)) continue;
+                    }
+                    if (!executable.TryGetValue(key, out var perContext))
+                        executable.Add(key, perContext = new(StringComparer.Ordinal));
                     // Repeated executions OR their line hits within the SAME context. Separate
                     // contexts are conjoined below; one target cannot conceal another's miss.
                     perContext[contextId] = perContext.GetValueOrDefault(contextId) || visits > 0;
@@ -240,8 +268,8 @@ internal static partial class ChangedLineCoverage
         {
             foreach (var row in executable)
                 foreach (var context in row.Value.Keys)
-                    if (censusComplete && (!required.TryGetValue(row.Key, out var membership) || !membership.Contains(context)))
-                        throw Refuse("A reported changed line is outside the independently captured compiler-line inventory.");
+                    if (completeContexts.Contains(context) && (!providerLines.TryGetValue(row.Key, out var membership) || !membership.Contains(context)))
+                        throw Refuse("A reported changed line is outside the independently captured compiler provider inventory.");
             foreach (var row in required)
             {
                 files.Check();
@@ -261,7 +289,7 @@ internal static partial class ChangedLineCoverage
                 InstalledToolFiles.Identity(diff), missing.Count, censusComplete);
         return new(count, hit, percent, count == 0 ? GateOutcome.Incomplete : percent >= 80m ? GateOutcome.Pass : GateOutcome.Fail,
             count == 0 ? "No measurable changed executable lines; no exemption or N/A is inferred." :
-                requireCompilerCensus ? "Actual changed LINE coverage with a complete, single-line compiler/PDB inventory and measurements in every required context." :
+                requireCompilerCensus ? "Actual changed LINE coverage with complete compiler/PDB provider spans, a half-open source-token policy inventory, and measurements in every required context." :
                 "Observed reported-line ratio only; no complete compiler census is claimed.", InstalledToolFiles.Identity(diff), 0, censusComplete);
     }
 
