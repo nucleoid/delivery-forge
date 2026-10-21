@@ -173,6 +173,9 @@
           "Microsoft.CodeAnalysis.CSharp": "[5.0.0, )"
         }
       },
+      "deliveryforge.evidence.asyncfixture": {
+        "type": "Project"
+      },
       "Microsoft.CodeAnalysis.CSharp": {
         "type": "CentralTransitive",
         "requested": "[5.0.0, )",
