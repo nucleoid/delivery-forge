@@ -18,10 +18,12 @@ internal static class CompilerSourceOrigins
     private const long MaximumBytes = 128 * 1024 * 1024;
     private sealed record Point(int Method, string Path, int StartLine, int StartColumn, int EndLine, int EndColumn);
     private sealed record Candidate(int Method, int ContainedPoints, int AllMethodPoints, bool CompletePointSetContained);
-    private sealed record ConstructorRole(string? DeclarationId, string Display, bool Implicit, bool DelegatesToThis);
+    private sealed record ConstructorRole(string? DeclarationId, string Display, bool Implicit, bool DelegatesToThis,
+        CompilerNamedMethodBindings.Binding NamedMethodBinding);
     private sealed record Region(string Kind, string Path, int StartLine, int StartColumn, int EndLine, int EndColumn,
         string? DeclarationId, string SemanticDisplay, string ContainingType, bool? Static, bool IsAsync,
-        bool EmptyBlock, string Obligation, IReadOnlyList<ConstructorRole> ConstructorGroup, IReadOnlyList<Candidate> Candidates);
+        bool EmptyBlock, string Obligation, CompilerNamedMethodBindings.Binding NamedMethodBinding,
+        IReadOnlyList<ConstructorRole> ConstructorGroup, IReadOnlyList<Candidate> Candidates);
 
     internal static byte[] Capture(CSharpCompilation compilation, byte[] assembly, byte[] pdb,
         Action check, CancellationToken token)
@@ -31,6 +33,8 @@ internal static class CompilerSourceOrigins
         void Step()
         {
             check(); token.ThrowIfCancellationRequested();
+            if (!System.Runtime.CompilerServices.RuntimeHelpers.TryEnsureSufficientExecutionStack())
+                throw new IOException("Semantic origin recursion exceeds the available execution stack.");
             if (++steps > MaximumSteps) throw new IOException("Semantic origin inventory exceeds the existing finite work profile.");
         }
         // Charge before retaining rows or allocating their arrays. Eight bytes per
@@ -58,6 +62,7 @@ internal static class CompilerSourceOrigins
         var reader = symbols.GetMetadataReader();
         if (metadata.MethodDefinitions.Count > MaximumRows || reader.Documents.Count > MaximumRows)
             throw new IOException("Semantic origin inventory exceeds the bounded method/document profile.");
+        var namedBindings = CompilerNamedMethodBindings.Capture(compilation, metadata, reader, Step, Admit);
         var points = new List<Point>();
         var documentPaths = new Dictionary<DocumentHandle, string>();
         var noVisibleIlBodies = new List<int>();
@@ -149,14 +154,21 @@ internal static class CompilerSourceOrigins
                                 { Initializer.ThisOrBaseKeyword.RawKind: (int)SyntaxKind.ThisKeyword }) delegates = true;
                         }
                         constructors.Add(new(constructor.GetDocumentationCommentId() is { } constructorId ? Text(constructorId) : null,
-                            Text(constructor.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)), constructor.IsImplicitlyDeclared, delegates));
+                            Text(constructor.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)), constructor.IsImplicitlyDeclared, delegates,
+                            NamedBinding(constructor)));
                     }
                 regions.Add(new(kind, path, sl, sc, el, ec,
                     owner?.GetDocumentationCommentId() is { } id ? Text(id) : null,
                     Text(owner?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
                     Text((owner?.ContainingType ?? owner as INamedTypeSymbol)?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
                     owner?.IsStatic, (owner as IMethodSymbol)?.IsAsync ?? false,
-                    span is BlockSyntax { Statements.Count: 0 }, obligation, constructors, candidates));
+                    span is BlockSyntax { Statements.Count: 0 }, obligation, NamedBinding(owner as IMethodSymbol), constructors, candidates));
+            }
+            CompilerNamedMethodBindings.Binding NamedBinding(IMethodSymbol? method)
+            {
+                var binding = namedBindings.For(method);
+                Admit(256L + 32L * binding.PdbStateMachineCarriers.Count, binding.Disposition);
+                return binding;
             }
             void Attributes(ISymbol? symbol)
             {
@@ -264,7 +276,7 @@ internal static class CompilerSourceOrigins
             sourceCount = sourceRows.Count, methodCount = metadata.MethodDefinitions.Count,
             visiblePointCount = points.Count, noVisibleIlBodyCount = noVisibleIlBodies.Count,
             noVisibleIlBodies, sources = sourceRows, authoredHiding = hiding, regions,
-            unresolved = "Metadata signatures, full semantic ownership and constructor groups are not joined. Candidate spans never authorize an exemption."
+            unresolved = "Named bindings are unique exact CLI signatures or explicit unresolved results. Nested semantic ownership and constructor execution obligations remain unresolved. Candidate spans and named bindings never authorize an exemption."
         });
         if (bytes.Length > MaximumBytes) throw new IOException("Semantic runtime inventory exceeds the existing artifact bound.");
         Step(); return bytes;
