@@ -50,10 +50,28 @@ public sealed class ProductionReviewFiniteAdmissionTests
                 {"Fixture":false,"Advisory":false,"AllowedFamilies":[{"Author":"gpt","Reviewer":"claude"}],"AllowedScopes":["source"],"AllowExactReuse":false,"Budget":{"MaximumRounds":2,"MaximumDuration":"00:00:30","MaximumTokens":4096,"MaximumCost":1.0},"ExemptionApprovers":[]}
                 """;
             await File.WriteAllTextAsync(Path.Combine(repository, "review.json"), policy, TestContext.Current.CancellationToken);
+            // One existing commit adds many ACTUAL distinct loose object bytes;
+            // the former ~10 admitted effects/object exhausts the real1024 cap.
+            for (var index = 0; index < 256; index++)
+                await File.WriteAllTextAsync(Path.Combine(repository, $"inventory-{index}.txt"), $"distinct-owned-object-{index}\n", TestContext.Current.CancellationToken);
             for (var index = 0; index < 12; index++)
             {
+                // Retain these genuine historical Git objects. The
+                // current source is separately extended below to507 tracked
+                // entries, exercising BOTH exact object and source groups.
+                if (index == 1)
+                    for (var file = 0; file < 256; file++) File.Delete(Path.Combine(repository, $"inventory-{file}.txt"));
+                if (index == 2)
+                {
+                    for (var file = 0; file < 504; file++)
+                        await File.WriteAllTextAsync(Path.Combine(repository, $"census-{file}.txt"),
+                            file == 1 ? "$Format:%H$\n" : $"complete-source-{file}\n", TestContext.Current.CancellationToken);
+                    await File.WriteAllTextAsync(Path.Combine(repository, ".gitattributes"),
+                        "census-0.txt export-ignore\ncensus-1.txt export-subst\n", TestContext.Current.CancellationToken);
+                }
                 await File.WriteAllTextAsync(Path.Combine(repository, "subject.txt"), $"history-{index}\n", TestContext.Current.CancellationToken);
-                await Git(repository, "add", "--", "review.json", "subject.txt");
+                if (index is 0 or 1 or 2) await Git(repository, "add", "--", ".");
+                else await Git(repository, "add", "--", "review.json", "subject.txt");
                 await Git(repository, "-c", "user.name=SourceBuilder", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", $"history-{index}");
             }
             var baseCommit = await Git(repository, "rev-parse", "HEAD");
@@ -69,7 +87,10 @@ public sealed class ProductionReviewFiniteAdmissionTests
             var commonGit = await Git(worker, "rev-parse", "--path-format=absolute", "--git-common-dir");
             Assert.True(File.Exists(Path.Combine(worker, ".git"))); Assert.NotEqual(workerGit, commonGit);
             var objectFiles = Directory.EnumerateFiles(Path.Combine(commonGit, "objects"), "*", SearchOption.AllDirectories).Count();
-            Assert.True(objectFiles >= 30);
+            Assert.True(objectFiles >= 507);
+            Assert.Equal(507, Directory.EnumerateFiles(worker).Count(path => Path.GetFileName(path) != ".git"));
+            Assert.Equal("complete-source-0\n", await File.ReadAllTextAsync(Path.Combine(worker, "census-0.txt"), TestContext.Current.CancellationToken));
+            Assert.Equal("$Format:%H$\n", await File.ReadAllTextAsync(Path.Combine(worker, "census-1.txt"), TestContext.Current.CancellationToken));
             DirectoryInfo? source = new(Environment.CurrentDirectory);
             while (source is not null && !File.Exists(Path.Combine(source.FullName, "DeliveryForge.slnx"))) source = source.Parent;
             Assert.NotNull(source);
@@ -91,6 +112,10 @@ public sealed class ProductionReviewFiniteAdmissionTests
             Assert.True(current); Assert.False(owner.Uncertain); Assert.False(original.HasExplicitUnknown);
             Assert.InRange(parent.EnteredCount, 1, 1023); Assert.True(parent.AllKnownSettled);
             TestContext.Current.TestOutputHelper!.WriteLine($"Actual linked object files={objectFiles}; finite parent effects={parent.EnteredCount}/1024.");
+            var controlledView = bootstrap.ObjectView.ControlledGitDirectory;
+            bootstrap.DisposeDuringWork(); bootstrap.DisposeDuringWork(); bootstrap.Dispose();
+            original.Check(); Assert.False(Directory.Exists(controlledView));
+            Assert.True(parent.AllKnownSettled); Assert.False(original.HasExplicitUnknown);
             passed = true;
         }
         finally

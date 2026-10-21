@@ -54,6 +54,42 @@ public sealed class OriginalWriterDispositionTests
     }
 
     [Fact]
+    public void Failed_original_preparation_closes_once_but_preserves_complete_durable_writer_bytes()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-failed-preparation-writer-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root); // Retain this small real failure namespace.
+        var original = new Original(); var parent = new Parent();
+        var manager = new WorktreeManager(Environment.ProcessPath!, new ProcessCommandExecutor(), original)
+            .WithParentAdmission(parent, "owned");
+        var path = Path.Combine(root, "writer-evidence"); var bytes = new byte[] { 1, 2, 3, 4 };
+        var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+        stream.Write(bytes); stream.Flush(true); var lease = new WriterLease(path, stream, "owned", "token");
+        manager.RetireFailedPreparationWriter(lease);
+        Assert.True(lease.FirstCloseReturned);
+        Assert.Equal(bytes, File.ReadAllBytes(path));
+        using var exclusive = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        Assert.False(original.Unknown); Assert.Equal(0, parent.UnknownObservations);
+        TestContext.Current.TestOutputHelper!.WriteLine("Failed preparation retained complete durable writer bytes after one known first close.");
+    }
+
+    [Fact]
+    public void Known_failed_preparation_first_close_with_expired_post_keeps_bytes_without_false_unknown()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-known-preparation-close-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root); // Preserve the actual refused-post evidence.
+        var original = new Original(); var parent = new Parent();
+        var manager = new WorktreeManager(Environment.ProcessPath!, new ProcessCommandExecutor(), original)
+            .WithParentAdmission(parent, "owned");
+        var path = Path.Combine(root, "writer-evidence"); var bytes = new byte[] { 4, 3, 2, 1 };
+        var stream = new ReturnThenExpireStream(path, () => original.CleanupExpired = true);
+        stream.Write(bytes); stream.Flush(true); var lease = new WriterLease(path, stream, "owned", "token");
+        Assert.Throws<TimeoutException>(() => manager.RetireFailedPreparationWriter(lease));
+        Assert.True(lease.FirstCloseReturned); Assert.Equal(1, stream.CloseAttempts);
+        Assert.Equal(bytes, File.ReadAllBytes(path));
+        Assert.False(original.Unknown); Assert.Equal(0, parent.UnknownObservations);
+    }
+
+    [Fact]
     public async Task Existing_expired_flow_endpoint_is_timeout_before_any_action()
     {
         using var directory = new TemporaryDirectory();
@@ -68,12 +104,12 @@ public sealed class OriginalWriterDispositionTests
 
     sealed class Original : IOwnedDuplexBudget, IOwnedBudgetUnknownRetention
     {
-        internal bool Unknown;
+        internal bool Unknown, CleanupExpired;
         internal TimeSpan Limit = TimeSpan.FromSeconds(1100);
         public long OriginalStarted { get; } = Stopwatch.GetTimestamp();
         public TimeSpan WholeLimit => TimeSpan.FromSeconds(1200);
         public TimeSpan WorkLimit => Limit;
-        public TimeSpan CleanupRemaining => TimeSpan.FromSeconds(60);
+        public TimeSpan CleanupRemaining => CleanupExpired ? throw new TimeoutException("Existing original cleanup endpoint expired after actual first close.") : TimeSpan.FromSeconds(60);
         public CancellationToken Token => CancellationToken.None;
         public void CheckWork() { }
         public void PreserveUnknown() => Unknown = true;
@@ -85,6 +121,15 @@ public sealed class OriginalWriterDispositionTests
         public T EnterSynchronous<T>(string runId, Func<T> invoke) => invoke();
         public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke) => invoke();
         public void RetainUncertain(string runId, string reason) => UnknownObservations++;
+    }
+    sealed class ReturnThenExpireStream(string path, Action afterClose) : FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None)
+    {
+        internal int CloseAttempts;
+        protected override void Dispose(bool disposing)
+        {
+            CloseAttempts++; base.Dispose(disposing);
+            if (disposing) afterClose();
+        }
     }
     sealed class FaultAfterCloseStream(string path) : FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None)
     {

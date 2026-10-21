@@ -206,9 +206,9 @@ public sealed partial class LocalSingleScheduler
     // Cleanup-only cold entry: never returns a reservation or resumes terminal work.
     public async Task<bool> ReconcileColdTerminalAsync(CancellationToken cancellationToken = default)
     {
+        if (RefuseGenericOriginalControl("cold terminal cleanup")) return false;
         Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _stopped, 1);
-        if (RefuseGenericOriginalControl("cold terminal cleanup")) return false;
         await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         var cleanupLaneHeld = false;
         try
@@ -275,9 +275,9 @@ public sealed partial class LocalSingleScheduler
 
     public async Task<bool> ReconcileCleanupAsync(CancellationToken cancellationToken = default)
     {
+        if (RefuseGenericOriginalControl("generic cleanup")) return false;
         Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _stopped, 1);
-        if (RefuseGenericOriginalControl("generic cleanup")) return false;
         await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -412,9 +412,9 @@ public sealed partial class LocalSingleScheduler
 
     public async Task PauseAsync(CancellationToken cancellationToken = default)
     {
+        if (RefuseGenericOriginalControl("native pause")) throw new SchedulingException(CleanupLimitation);
         Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _paused, 1);
-        if (RefuseGenericOriginalControl("native pause")) throw new SchedulingException(CleanupLimitation);
         await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {
@@ -432,9 +432,9 @@ public sealed partial class LocalSingleScheduler
 
     public async Task<bool> StopAsync(CancellationToken cancellationToken = default)
     {
+        if (RefuseGenericOriginalControl("generic stop")) return false;
         Interlocked.Increment(ref _controlGeneration);
         Interlocked.Exchange(ref _stopped, 1);
-        if (RefuseGenericOriginalControl("generic stop")) return false;
         await WaitSerialAsync(cancellationToken).ConfigureAwait(false);
         try
         {

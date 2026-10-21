@@ -40,6 +40,10 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
     Task<RenewalResult>? fixtureRenewalTask;
     IReadOnlyList<LeaseEvidence> fixtureRenewalInputs = Array.Empty<LeaseEvidence>();
     Task? renewal, lossStop, transportClose, checkpointClose;
+    Task<ReleaseResult>? releaseTask, cleanupReleaseTask;
+    bool releaseEntered, releaseReturned, cleanupReleaseEntered, cleanupReleaseReturned;
+    bool registrationCloseEntered, registrationClosed, renewalStopCloseEntered, renewalStopClosed;
+    bool transportCloseEntered, transportCloseReturned, checkpointCloseEntered, checkpointCloseReturned;
     bool bound, acquiring, opened, closed, revoked, disposeEntered, disposed;
     Exception? failure, dispositionFailure;
     public string DomainId { get; } = Guid.NewGuid().ToString("D");
@@ -227,9 +231,11 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
                     pending = renewalHandoff.Begin(parentRunId!, fixtureRenewalInputs.Min(lease => lease.SafeDeadline));
                 }
                 var task = reducer!.RenewAllAsync(actual, renewalStop.Token); lock (gate) { coordinationTasks.Add(task); fixtureRenewalTask = task; }
-                var result = await task.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
-                // Cleanup evidence remains reachable even when a late handoff is refused.
+                var result = await task.WaitAsync(original.Remaining).ConfigureAwait(false);
+                // Retain the exact returned cleanup continuation BEFORE the
+                // WORK postcheck; no late dispatch authority is installed.
                 lock (gate) releaseContinuation = result.ReleaseContinuation;
+                original.Check();
                 renewalHandoff.Install(pending, () =>
                 {
                     if (result.Authority is null || closed || revoked || original.HasExplicitUnknown) throw new CoordinationUncertainException("Actual renewal did not return new current authority.");
@@ -259,6 +265,25 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
         catch (Exception error) { lock (gate) failure ??= error; original.RetainUnknown(); }
     }
 
+    // Observation only: a completed worker's evidence refusal may already have
+    // entered this parent's own stop. Cleanup must await that SAME retained Task
+    // before attempting its exact writer disposition. No new stop is born here.
+    internal async Task<bool> ObserveExistingLossStopAsync(string runId, ToolLifetime sameOriginal)
+    {
+        Task? actual;
+        lock (gate)
+        {
+            if (!ReferenceEquals(sameOriginal, original) || parentRunId != runId)
+                throw new CoordinationUncertainException("Same original parent stop observation required.");
+            actual = lossStop;
+        }
+        _ = original.CleanupRemaining;
+        if (actual is not null) await actual.WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
+        _ = original.CleanupRemaining;
+        if (original.HasExplicitUnknown) throw new CoordinationUncertainException("Actual original stop retained uncertainty.");
+        return true;
+    }
+
     public Task<QuiescenceEvidence> ObserveAsync(LeaseOwner requested, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -276,89 +301,146 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
         }
     }
 
-    internal async Task RetireSettledBatchNodeAsync(string runId)
+    internal bool DispositionKnownClosed { get { lock (gate) return disposed; } }
+    internal static async Task WaitActualDispositionTaskAsync(Task actual, ToolLifetime original, bool cleanup)
     {
-        // This successful forward transition is deliberately separate from
-        // failure/final cleanup: CleanupRemaining permanently closes WORK.
-        while (true)
+        // The caller retains the actual creator task before this wait. A wait
+        // timeout is not cancellation, a replacement close, or resource proof.
+        await actual.WaitAsync(cleanup ? original.CleanupRemaining : original.Remaining).ConfigureAwait(false);
+        if (cleanup) _ = original.CleanupRemaining; else original.Check();
+    }
+    void CloseDispositionAdmission()
+    {
+        lock (gate)
         {
-            effects.CheckCurrent(runId);
-            lock (gate)
+            disposeEntered = true; closed = true;
+            renewalHandoff.Revoke(new CoordinationUncertainException("Original parent disposition closed admission."));
+            renewalStop.Cancel();
+        }
+    }
+    async Task CompleteDispositionAsync(bool cleanup)
+    {
+        if (disposed) { if (cleanup) _ = original.CleanupRemaining; else original.Check(); return; }
+        if (renewal is not null) await WaitActualDispositionTaskAsync(renewal, original, cleanup).ConfigureAwait(false);
+        if (lossStop is not null) await WaitActualDispositionTaskAsync(lossStop, original, cleanup).ConfigureAwait(false);
+        lock (gate)
+        {
+            if (original.HasExplicitUnknown || !effects.AllKnownSettled || coordinationTasks.Any(task =>
+                !ReferenceEquals(task, releaseTask) && !ReferenceEquals(task, cleanupReleaseTask) && !task.IsCompletedSuccessfully))
+                throw new CoordinationUncertainException("Original effect/coordination task remains unsettled or failed; owners retained.");
+        }
+        if (!releaseEntered)
+        {
+            releaseEntered = true;
+            // Never use WORK cancellation to abandon an already-created release.
+            // All physical waits remain clipped to this SAME original endpoint.
+            if (releaseContinuation is not null) releaseTask = reducer!.ContinueReleaseAsync(releaseContinuation, CancellationToken.None);
+            else if (authority is not null) releaseTask = reducer!.ReleaseAllAsync(authority, CancellationToken.None);
+            releaseReturned = true;
+            if (releaseTask is not null) lock (gate) coordinationTasks.Add(releaseTask);
+        }
+        if (!releaseReturned) throw new CoordinationUncertainException("Original release invocation did not return its actual Task; no retry.");
+        if (releaseTask is not null)
+        {
+            await WaitActualDispositionTaskAsync(releaseTask, original, cleanup).ConfigureAwait(false);
+            var result = releaseTask.Result; releaseContinuation = result.Continuation;
+            if (result.Snapshot.Phase != CoordinationLifecyclePhase.Closed || result.Continuation is not null)
             {
-                original.Check();
-                if (renewalHandoff.Snapshot(runId) is not null) continue;
-                if (parentRunId != runId || disposeEntered || closed || revoked || failure is not null || lossStop is not null ||
-                    original.HasExplicitUnknown || reducer is null || authority is null || !reducer.MayDispatch(authority) ||
-                    bridge is null || !bridge.ObserveCoordinationWorkSettled(runId) || !effects.AllKnownSettled)
-                    throw new CoordinationUncertainException("Only this known-settled current original can release a completed batch node.");
-                disposeEntered = true; closed = true;
-                renewalHandoff.Revoke(new CoordinationUncertainException("Completed batch node permanently closed admission."));
-                renewalStop.Cancel();
-                break;
+                // Exactly one cleanup continuation is permitted, and only the
+                // opaque continuation actually returned by the SAME reducer.
+                if (!cleanup || result.Continuation is null)
+                    throw new CoordinationUncertainException("Original forward release did not close; cleanup continuation required.");
+                if (!cleanupReleaseEntered)
+                {
+                    cleanupReleaseEntered = true;
+                    cleanupReleaseTask = reducer!.ContinueReleaseAsync(result.Continuation, CancellationToken.None);
+                    cleanupReleaseReturned = true;
+                    lock (gate) coordinationTasks.Add(cleanupReleaseTask);
+                }
+                if (!cleanupReleaseReturned || cleanupReleaseTask is null)
+                    throw new CoordinationUncertainException("Original cleanup continuation did not return its actual Task; no retry.");
+                await WaitActualDispositionTaskAsync(cleanupReleaseTask, original, true).ConfigureAwait(false);
+                result = cleanupReleaseTask.Result; releaseContinuation = result.Continuation;
+                if (result.Snapshot.Phase != CoordinationLifecyclePhase.Closed || result.Continuation is not null)
+                    throw new CoordinationUncertainException("Actual original lease cleanup remains incomplete; owners retained.");
             }
         }
+        if (original.HasExplicitUnknown) throw new CoordinationUncertainException("Original uncertainty forbids dependent transport disposition.");
+        // First-close tasks stay rooted across WORK-to-cleanup transfer. Never
+        // call either creator again after timeout, exception or unknown return.
+        if (!transportCloseEntered) { transportCloseEntered = true; transportClose ??= transport.DisposeAsync().AsTask(); transportCloseReturned = true; }
+        if (!transportCloseReturned || transportClose is null) throw new CoordinationUncertainException("Original transport close did not return its actual Task; no retry.");
+        await WaitActualDispositionTaskAsync(transportClose, original, cleanup).ConfigureAwait(false);
+        if (!checkpointCloseEntered) { checkpointCloseEntered = true; checkpointClose ??= checkpoints.DisposeAsync().AsTask(); checkpointCloseReturned = true; }
+        if (!checkpointCloseReturned || checkpointClose is null) throw new CoordinationUncertainException("Original checkpoint close did not return its actual Task; no retry.");
+        await WaitActualDispositionTaskAsync(checkpointClose, original, cleanup).ConfigureAwait(false);
+        if (!registrationCloseEntered) { registrationCloseEntered = true; cancelled.Dispose(); registrationClosed = true; }
+        if (!registrationClosed) throw new CoordinationUncertainException("Original cancellation registration close remains unknown; no retry.");
+        if (!renewalStopCloseEntered) { renewalStopCloseEntered = true; renewalStop.Dispose(); renewalStopClosed = true; }
+        if (!renewalStopClosed) throw new CoordinationUncertainException("Original renewal cancellation close remains unknown; no retry.");
+        lock (gate) disposed = true;
+        lock (Originals) Originals.Remove(this);
+        lock (Creations) if (creation is not null) Creations.Remove(creation);
+        if (cleanup) _ = original.CleanupRemaining; else original.Check();
+    }
+    internal async Task RetireSettledBatchNodeAsync(string runId)
+    {
         try
         {
-            if (renewal is not null) await renewal.WaitAsync(original.Remaining).ConfigureAwait(false);
-            original.Check();
-            lock (gate)
-                if (coordinationTasks.Any(task => !task.IsCompletedSuccessfully) || !effects.AllKnownSettled || original.HasExplicitUnknown)
-                    throw new CoordinationUncertainException("Completed node still has an unsettled original operation.");
-            var releasing = reducer!.ReleaseAllAsync(authority!, original.Token); lock (gate) coordinationTasks.Add(releasing);
-            var result = await releasing.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
-            if (result.Continuation is not null || result.Snapshot.Phase != CoordinationLifecyclePhase.Closed)
-                throw new CoordinationUncertainException("Completed node resource release did not close its actual lifecycle.");
-            transportClose = transport.DisposeAsync().AsTask(); await transportClose.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
-            checkpointClose = checkpoints.DisposeAsync().AsTask(); await checkpointClose.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
-            cancelled.Dispose(); renewalStop.Dispose(); disposed = true;
-            lock (Originals) Originals.Remove(this);
-            lock (Creations) if (creation is not null) Creations.Remove(creation);
+            // Successful between-node disposition keeps WORK available. Final
+            // nodes instead use the containing root's normal cleanup path.
+            while (true)
+            {
+                effects.CheckCurrent(runId);
+                lock (gate)
+                {
+                    original.Check();
+                    if (renewalHandoff.Snapshot(runId) is not null) continue;
+                    if (parentRunId != runId || disposeEntered || closed || revoked || failure is not null || lossStop is not null ||
+                        original.HasExplicitUnknown || reducer is null || authority is null || !reducer.MayDispatch(authority) ||
+                        bridge is null || !bridge.ObserveCoordinationWorkSettled(runId) || !effects.AllKnownSettled)
+                        throw new CoordinationUncertainException("Only this known-settled current original can release a completed batch node.");
+                    CloseDispositionAdmission();
+                    break;
+                }
+            }
+            await CompleteDispositionAsync(false).ConfigureAwait(false);
         }
-        catch (Exception error) { dispositionFailure = error; original.RetainUnknown(); throw; }
+        catch (Exception primary)
+        {
+            dispositionFailure ??= primary;
+            try
+            {
+                original.BeginFailureCleanup();
+                if (!disposeEntered) CloseDispositionAdmission();
+                await CompleteDispositionAsync(true).ConfigureAwait(false);
+            }
+            catch (Exception cleanup)
+            {
+                original.RetainUnknown();
+                throw new AggregateException("Completed node WORK retirement and SAME original cleanup failure.", primary, cleanup);
+            }
+            // Known physical cleanup does not erase the failed WORK transition
+            // or permit another node. The primary still fails the whole run.
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+            throw;
+        }
     }
 
     public async ValueTask DisposeAsync()
     {
         lock (gate)
         {
-            if (disposeEntered) { if (!disposed || dispositionFailure is not null) throw new CoordinationUncertainException("Original parent disposition remains nonpass; no repeat."); return; }
-            disposeEntered = true; closed = true;
-            renewalHandoff.Revoke(new CoordinationUncertainException("Original parent disposition closed admission."));
-            renewalStop.Cancel();
-        }
-        try
-        {
-            if (renewal is not null) await renewal.WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
-            if (lossStop is not null) await lossStop.WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
-            lock (gate)
+            if (disposeEntered)
             {
-                if (original.HasExplicitUnknown || coordinationTasks.Any(task => !task.IsCompletedSuccessfully) || !effects.AllKnownSettled)
-                    throw new CoordinationUncertainException("Original effect/coordination task remains unsettled or failed; owners retained.");
+                if (!disposed) throw new CoordinationUncertainException(dispositionFailure is null ? "Original parent disposition is still active; no repeat." : "Original parent disposition remains nonpass; no repeat.");
+                return; // Observe known closure; never reclose an actual owner.
             }
-            Task<ReleaseResult>? releasing = null;
-            if (releaseContinuation is not null) releasing = reducer!.ContinueReleaseAsync(releaseContinuation, CancellationToken.None);
-            else if (authority is not null) releasing = reducer!.ReleaseAllAsync(authority, CancellationToken.None);
-            if (releasing is not null)
-            {
-                lock (gate) coordinationTasks.Add(releasing);
-                var result = await releasing.WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
-                if (result.Continuation is not null || result.Snapshot.Phase != CoordinationLifecyclePhase.Closed)
-                    throw new CoordinationUncertainException("Actual original lease cleanup remains incomplete; owners retained.");
-            }
-            _ = original.CleanupRemaining;
-            transportClose = transport.DisposeAsync().AsTask();
-            await transportClose.WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
-            _ = original.CleanupRemaining;
-            checkpointClose = checkpoints.DisposeAsync().AsTask();
-            await checkpointClose.WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
-            _ = original.CleanupRemaining;
-            cancelled.Dispose(); renewalStop.Dispose(); disposed = true;
-            lock (Originals) Originals.Remove(this);
-            lock (Creations) if (creation is not null) Creations.Remove(creation);
+            CloseDispositionAdmission();
         }
-        catch (Exception error) { dispositionFailure = error; original.RetainUnknown(); throw; }
+        try { await CompleteDispositionAsync(true).ConfigureAwait(false); }
+        catch (Exception error) { dispositionFailure ??= error; original.RetainUnknown(); throw; }
     }
-
     sealed class PinnedOperatorEvidence(AdmissionFile exact, ToolLifetime life) : IContinuumDeploymentEvidenceSource
     {
         public Task<ContinuumDeploymentEvidence> ObserveAsync(CancellationToken cancellationToken = default)

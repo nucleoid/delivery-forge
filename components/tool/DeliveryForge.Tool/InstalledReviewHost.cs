@@ -103,6 +103,9 @@ internal sealed class InstalledReviewHost : IDisposable
             throw new WorkerEnvelopeException("Same original immutable source preparation and completed author required.");
         if (actualAuthorFamily != "gpt") return ToolResult.Incomplete("ACTUAL_AUTHOR_FAMILY_REQUIRED", "The completed native author did not expose unambiguous opposite-family provenance.");
         if (independentReviewer is not null) throw new ToolUsageException("Actual independent reviewer cannot replay.");
+        // Refuse this unsupported native route before creating a private CWD.
+        // RunAsync keeps the same guard as defense at its own boundary.
+        if (ClaudeIndependentReviewer.UnsupportedPlatform() is { } platformRefusal) return platformRefusal;
         sourceOwner.Check();
         async Task<(PatchIdentity Patch, byte[] FrozenPlan)> PrepareEvidence(CancellationToken token)
         {
@@ -126,6 +129,12 @@ internal sealed class InstalledReviewHost : IDisposable
             var planAndEvidence = JsonSerializer.SerializeToUtf8Bytes(new { FrozenPlan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), QualityEvidence = qualityEvidence, MissingQualityEvidence = actualQualityResults.Count == 0 }, BoundedFiles.Json);
             token.ThrowIfCancellationRequested(); sourceOwner.Check(); return (patch, planAndEvidence);
         }
+        var userSettings = parent.EnterSynchronous(assignment.RunId, () =>
+        {
+            sourceOwner.Check(); original.Check();
+            return ClaudeReviewerUserSettings.CaptureActual(original,
+                assignment.ParentCheckout, assignment.Worktree, assignment.ResultDirectory, selection.ArtifactRoot);
+        });
         var reviewerDirectory = parent.EnterSynchronous(assignment.RunId, () =>
         {
             sourceOwner.Check(); original.Check();
@@ -134,7 +143,7 @@ internal sealed class InstalledReviewHost : IDisposable
             return ClaudeReviewerWorkingDirectory.Create(original, assignment.RunId, selection.ArtifactRoot,
                 assignment.ParentCheckout, assignment.Worktree, assignment.ResultDirectory);
         });
-        independentReviewer = new(selection.IndependentReviewer, original, executor, parent, assignment.RunId, reviewerDirectory, bootstrap,
+        independentReviewer = new(selection.IndependentReviewer, original, executor, parent, assignment.RunId, reviewerDirectory, userSettings, bootstrap,
             () => ReferenceEquals(frame.Completion, completion) && frame.OwnerCompleted && !frame.OwnerStopped && frame.Primary is null && frame.Post is null && actualNativeCompletedAndQuiet(),
             () => parent.EnterSynchronous(assignment.RunId, () => { sourceOwner.Check(); _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536); return true; }), linuxScope);
         return await parent.EnterAsync(assignment.RunId, () => independentReviewer.RunAsync(actualAuthorFamily,
@@ -307,6 +316,14 @@ internal sealed class InstalledReviewHost : IDisposable
             new { run.RunId, SourcePreparation = path, ReviewerAccepted = false, PublicationAuthority = false });
     }
 
+    internal void DisposeDuringWork()
+    {
+        if (disposed) return;
+        original.Check();
+        if (Unknown) { original.RetainUnknown(); throw new IOException("Actual review object view remains uncertain; retain its owner."); }
+        bootstrap?.DisposeDuringWork(); disposed = true;
+        original.Check();
+    }
     public void Dispose()
     {
         if (disposed) return;

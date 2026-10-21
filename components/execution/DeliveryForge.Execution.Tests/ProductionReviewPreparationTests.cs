@@ -124,6 +124,20 @@ public sealed class ProductionReviewPreparationTests : IDisposable
         // The injected first-close failure is sticky; the production owner never retries.
     }
 
+    [Fact]
+    public void Unreturned_close_notifies_parent_even_when_original_unknown_observation_throws()
+    {
+        var owner = Owner(); original.ThrowOnUnknown = true;
+        var resource = new FaultAfterCloseStream(Path.Combine(root, "first-close-and-observation-failure"));
+        Exception? primary = new IOException("Retained forward refusal."); var retainedPrimary = primary;
+        var close = Assert.IsType<AggregateException>(owner.CloseResource(resource, ref primary));
+        Assert.Equal(3, close.Flatten().InnerExceptions.Count);
+        Assert.Contains(close.Flatten().InnerExceptions, failure => failure.Message == "Original unknown observation failed after marking.");
+        Assert.Equal(1, parent.UnknownObservations); Assert.Equal(1, resource.CloseAttempts);
+        Assert.Same(retainedPrimary, primary); Assert.True(original.Unknown); Assert.True(owner.Uncertain);
+        Assert.False(owner.MayCleanOwnedFiles);
+    }
+
     public static bool WindowsCreationOwnedProfile => OperatingSystem.IsWindows();
 
     [Fact(Timeout = 120_000, SkipUnless = nameof(WindowsCreationOwnedProfile), Skip = "Linux production source acceptance requires its selected creation-owned scope profile.")]
@@ -212,7 +226,7 @@ public sealed class ProductionReviewPreparationTests : IDisposable
         // No reviewer capability, execution, acceptance receipt or publication is issued.
     }
 
-    public void Dispose() => Directory.Delete(root, recursive: true);
+    public void Dispose() { if (!original.Unknown) Directory.Delete(root, recursive: true); }
     sealed class RefusingParent : ICoordinatedSynchronousEffectAdmission
     {
         internal int Entries;
@@ -238,14 +252,14 @@ public sealed class ProductionReviewPreparationTests : IDisposable
     }
     sealed class Original : IOwnedDuplexBudget, IOwnedBudgetUnknownRetention
     {
-        internal bool Unknown; internal int CleanupChecks;
+        internal bool Unknown; internal bool ThrowOnUnknown; internal int CleanupChecks;
         public long OriginalStarted { get; } = Stopwatch.GetTimestamp();
         public TimeSpan WholeLimit => TimeSpan.FromSeconds(1200);
         public TimeSpan WorkLimit => TimeSpan.FromSeconds(1100);
         public TimeSpan CleanupRemaining { get { CleanupChecks++; return TimeSpan.FromSeconds(60); } }
         public CancellationToken Token => CancellationToken.None;
         public void CheckWork() { if (Stopwatch.GetElapsedTime(OriginalStarted) >= WorkLimit) throw new TimeoutException(); }
-        public void PreserveUnknown() => Unknown = true;
+        public void PreserveUnknown() { Unknown = true; if (ThrowOnUnknown) throw new IOException("Original unknown observation failed after marking."); }
     }
     sealed class FaultAfterCloseStream(string path) : FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None)
     {

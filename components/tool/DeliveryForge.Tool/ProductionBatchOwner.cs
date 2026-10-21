@@ -44,6 +44,7 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             config.InstalledReview is not null || config.LocalRealGolden is not null)
             throw new ToolUsageException("Batch container requires bounded nodes and explicit aggregate policy, separate from leaf owner selections.");
         _ = BoundedFiles.Plain(selection.StoreRoot, true);
+        if (selection.ControlPath is { } controlPath) ProductionBatchControlInput.ValidatePath(selection.StoreRoot, controlPath);
         var validation = ResourceBudget.Measure(selection.Policy.Caps, selection.Policy); // DATA validation, not measured capacity.
         var plans = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
         var configs = new HashSet<string>(plans.Comparer);
@@ -85,7 +86,11 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
         if (command.Mode != ToolMode.Implement || command.Has("run-dir") || command.Has("result-dir") || command.Has("replay-out"))
             throw new ToolUsageException("Production batch uses implement and its explicitly pinned node destinations; ambiguous per-run overrides are refused.");
         if (command.Get("repo") is string guard && !Same(guard, containing.RepositoryRoot)) throw new ToolUsageException("Batch repository guard differs.");
-        if (!command.Has("dry-run")) StandaloneOwnerComposition.RequireFreshExecutionStore(selected.StoreRoot, original);
+        if (!command.Has("dry-run"))
+        {
+            StandaloneOwnerComposition.RequireFreshExecutionStore(selected.StoreRoot, original);
+            if (selected.ControlPath is { } controlPath) ProductionBatchControlInput.RequireInitiallyAbsent(controlPath, original);
+        }
         var anchor = selected.Nodes.SingleOrDefault(node => Same(node.Plan.Path, command.Get("plan")!))
             ?? throw new ToolUsageException("--plan must select one exact pinned batch anchor; it cannot select or replace batch members.");
         var measured = resources.MeasureScheduling(original);
@@ -120,6 +125,7 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
         var ids = nodes.Select(node => node.Selection.NodeId).ToHashSet(StringComparer.Ordinal);
         if (ids.Count != nodes.Count || nodes.Select(node => node.Plan.WorkItem).Distinct(StringComparer.Ordinal).Count() != nodes.Count)
             throw new ToolUsageException("Batch work items and pinned DAG root identities must be unique.");
+        foreach (var node in nodes) RefuseInternalPrerequisites(node.Prerequisites, ids);
         var queue = new ProductionBatchQueue(nodes.Select(node => new ProductionQueueNode(node.Selection.NodeId,
             Footprint(node), node.Selection.Demand, node.Selection.RiskClass,
             node.Prerequisites.Keys.Where(ids.Contains).ToArray())).ToArray(), selected.Fairness);
@@ -129,22 +135,36 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
         var marker = Path.Combine(selected.StoreRoot, "batch-selection.json");
         var store = new RunStore(selected.StoreRoot); var runId = "batch-" + Guid.NewGuid().ToString("N");
         var selectionIdentity = SelectionIdentity(selected);
+        var operatorInput = selected.ControlPath is { } inputPath
+            ? new ProductionBatchControlInput(inputPath, runId, selectionIdentity, original, control) : null;
         var planIdentities = nodes.ToDictionary(node => node.Selection.NodeId, node => node.Plan.Identity, StringComparer.Ordinal);
         BoundedFiles.WriteNew(marker, JsonSerializer.SerializeToUtf8Bytes(new BatchMarker("ProductionBatchSelectionData-v1", runId, containingPin.Sha256, selectionIdentity), BoundedFiles.Json), original);
         await Persist().ConfigureAwait(false);
-        while (!control.Paused && !control.Stopped && queue.SelectCandidate(budget) is { } candidate)
+        if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
+        var candidate = control.Paused || control.Stopped ? null : queue.SelectCandidate(budget);
+        while (!control.Paused && !control.Stopped && candidate is not null)
         {
+            if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
+            if (control.Paused || control.Stopped) break;
             original.Check(); _ = InstalledHostAdmission.ReadExact(containingPin, original, 65536);
             var node = nodes.Single(item => item.Selection.NodeId == candidate.Id);
             if (!await IsIntegratedAsync(node).ConfigureAwait(false))
             {
                 queue.RecordData(candidate.Id, "ReplanRequired");
-                await Persist().ConfigureAwait(false); continue;
+                await Persist().ConfigureAwait(false);
+                if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
+                candidate = control.Paused || control.Stopped ? null : queue.SelectCandidate(budget);
+                continue;
             }
             if (control.Paused || control.Stopped) break;
             await Persist().ConfigureAwait(false); // Durable selected intent before any owner/lease/worker creation.
+            if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
             if (control.Paused || control.Stopped) break;
             var admission = InstalledHostAdmission.ReadRootAccepted(node.Root.InstalledHostAdmission, node.Configuration, original);
+            // Acknowledged input fences owner/coordination construction itself,
+            // not merely the later native adapter start.
+            if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
+            if (control.Paused || control.Stopped) break;
             var actualOwner = new StandaloneOwnerComposition(node.Configuration, node.Root.StoreRoot, node.Root.WorkerPaths, original, admission.Host, admission.Profile,
                 node.Scope, node.Selection.Configuration, resources, budget, node.Selection.NodeId);
             lock (stateGate) { active = actualOwner; actualOwners.Add(actualOwner); }
@@ -160,17 +180,25 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             // Outcomes come from the exact actual owner frame, never from the
             // caller or a serialized ToolResult claiming successful work.
             var completion = await Observe(actualOwner.ActualBridge.ReadActualBatchCompletionAsync(original)).ConfigureAwait(false);
-            var retiring = actualOwner.RetireSettledBatchNodeAsync(completion); Retain(retiring);
-            try { await retiring.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check(); }
-            finally { if (!retiring.IsCompleted) original.RetainUnknown(); }
-            lock (stateGate) { retired.Add(actualOwner); active = null; }
             completedHeads.Add(candidate.Id, completion.HeadCommit);
             queue.RecordData(candidate.Id, completion.Phase);
             await Persist().ConfigureAwait(false);
+            // Read and persist controls before the queue is advanced. Selection
+            // mutates DATA exactly once; the cached choice is used next turn.
+            if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
+            var following = control.Paused || control.Stopped ? null : queue.SelectCandidate(budget);
+            // The final/pause/stopped owner goes to normal root cleanup. Never
+            // enter cleanup and then request further WORK from this batch.
+            if (following is null) break;
+            var retiring = actualOwner.RetireSettledBatchNodeAsync(completion); Retain(retiring);
+            try { await retiring.ConfigureAwait(false); }
+            finally { if (!retiring.IsCompleted) original.RetainUnknown(); }
+            lock (stateGate) { retired.Add(actualOwner); active = null; }
+            candidate = following;
         }
         var snapshot = queue.Snapshot();
         return snapshot.Values.All(phase => phase == "Pass")
-            ? new("COMPLETE", "COORDINATED_BATCH_LOCAL_COMPLETE", "Actual coordinated node pipelines and forward resource disposition completed; installed profile certification remains separate.", new { RunId = runId, Nodes = snapshot, SchedulingCertified = false })
+            ? new("COMPLETE", "COORDINATED_BATCH_LOCAL_COMPLETE", "Actual coordinated node pipelines completed; installed profile certification remains separate.", new { RunId = runId, Nodes = snapshot, SchedulingCertified = false })
             : ToolResult.Incomplete("COORDINATED_BATCH_BLOCKED", "Pending integration, nonpassing prerequisite, capacity, pause or stop prevents further node dispatch.", new { RunId = runId, Nodes = snapshot, control.Paused, control.Stopped });
 
         async Task Persist()
@@ -184,6 +212,11 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
     }
     static async Task<bool> InitializeNode(StandaloneOwnerComposition owner) { await owner.InitializeCoordinationAsync().ConfigureAwait(false); return true; }
     static TimeSpan Min(TimeSpan left, TimeSpan right) => left < right ? left : right;
+    internal static void RefuseInternalPrerequisites(IReadOnlyDictionary<string, string> prerequisites, IReadOnlySet<string> selectedNodeIds)
+    {
+        if (prerequisites.Keys.Any(selectedNodeIds.Contains))
+            throw new ToolUsageException("This batch profile accepts only independent selected roots and already-integrated external commit prerequisites; internal edges require integration and a newly frozen plan.");
+    }
     internal static IReadOnlyDictionary<string, string> ReadFrozenPrerequisites(FrozenPlan plan, string nodeId) => LocalSingleScheduler.ReadCoordinatedPrerequisites(plan, nodeId);
     internal static void ValidateLeaf(TrustedConfiguration parent, ProductionBatchSelection batch, ProductionBatchNodeSelection selection, TrustedConfiguration leaf, ToolLifetime original)
     {
@@ -252,6 +285,8 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
         }
         if (node.Configuration.InstalledReview is { } review) yield return review.GitImage.Path;
     }
+    // Restrictive latch only; actual retained owners still own physical cleanup.
+    internal void StopNewDispatch() => control.Stop();
     internal void Pause() => control.Pause();
     internal async Task<ToolResult> StopAsync()
     {

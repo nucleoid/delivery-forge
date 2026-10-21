@@ -59,4 +59,38 @@ public sealed partial class LocalSingleTests
         Assert.Equal(0, original.CleanupReads); Assert.False(scheduler.HasRetainedReservation);
         Assert.Contains("actual containing host", scheduler.CleanupLimitation, StringComparison.Ordinal);
     }
+    [Theory]
+    [InlineData("stop")]
+    [InlineData("cleanup")]
+    [InlineData("cold-terminal")]
+    [InlineData("pause")]
+    public async Task Refused_bound_generic_control_does_not_latch_or_prevent_actual_owner_reservation(string control)
+    {
+        using var repository = new PlanningRepository(); await repository.InitializeAsync(); var plan = await repository.FreezeAsync();
+        var worker = Worker(repository, plan, "refused-control-" + control);
+        var storeRoot = Path.Combine(repository.Root, "control-store"); var store = new RunStore(storeRoot);
+        var worktrees = new WorktreeManager(); await using var processes = new ProcessControl();
+        using var execution = new ExecutionCoordinator(store, worktrees, processes);
+        var scheduler = LocalSingleScheduler.Create(plan, worker, Demand, Budget(), store, execution, worktrees, repository.Reader);
+        var original = new SchedulingOriginal();
+        scheduler.BindOriginal(original, new SchedulingParent(), () => Task.CompletedTask, () => true, () => false);
+        if (control == "pause") await Assert.ThrowsAsync<SchedulingException>(() => scheduler.PauseAsync(Cancellation));
+        else Assert.False(await (control switch
+        {
+            "stop" => scheduler.StopAsync(Cancellation),
+            "cleanup" => scheduler.ReconcileCleanupAsync(Cancellation),
+            _ => scheduler.ReconcileColdTerminalAsync(Cancellation)
+        }));
+        Assert.Equal(0, original.CleanupReads); Assert.False(scheduler.HasRetainedReservation);
+        Assert.False(Directory.Exists(worker.Worktree));
+        var ticket = await scheduler.ReserveAsync(Cancellation);
+        try { Assert.True(scheduler.HasRetainedReservation); original.CheckWork(); }
+        finally
+        {
+            // Same fixture owner, exact unused ticket, completed bound pipeline;
+            // no native worker/provisioning or production issuer is claimed.
+            await scheduler.ReleaseCompletedUnprovisionedObservedAsync(ticket, () => true, Cancellation);
+        }
+        Assert.False(scheduler.HasRetainedReservation); Assert.Equal(0, original.CleanupReads);
+    }
 }

@@ -101,6 +101,32 @@ public sealed class ExecutionCoordinator : IDisposable
         });
         original.CheckWork(); parent.CheckCurrent(runId);
     }
+    // Cleanup-only for this actual completed worker after its separate evidence
+    // capture failed. Saved history alone cannot supply the original binding,
+    // exact live writer or the caller's current native-settlement observation.
+    internal Task ReleaseCompletedWriterAfterFailureAsync(string runId, AgentCompletionReceipt actualCompletion, Func<bool> actualClosed) =>
+        RunExclusiveAsync(runId, async () =>
+        {
+            if (original is null || originalRun != runId)
+                throw new WorkerEnvelopeException("Same original completed cleanup owner required.");
+            _ = original.CleanupRemaining;
+            if (!actualClosed() || !ObserveOriginalProcessesSettled(runId)) throw new WorkerEnvelopeException("Actual completed worker is not known closed.");
+            var recovered = await _store.RecoverAsync(runId, CancellationToken.None).ConfigureAwait(false);
+            var record = recovered.Records.LastOrDefault(row => row.Kind == "worker-completed")
+                ?? throw new WorkerEnvelopeException("Actual original completed record absent.");
+            if (!System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(_store.ReadPayload<AgentCompletionReceipt>(record)).AsSpan().SequenceEqual(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(actualCompletion)))
+                throw new WorkerEnvelopeException("Completed cleanup receipt differs from this original.");
+            EnsureWriterOwnership(GetPrepared(recovered).Request);
+            _ = original.CleanupRemaining;
+            if (!actualClosed() || !ObserveOriginalProcessesSettled(runId) || !_writers.TryGetValue(runId, out var writer) ||
+                writer.ObserveCurrentNamespaceIdentity().Outcome != WriterNamespaceIdentityOutcome.Match)
+                throw new WorkerEnvelopeException("Actual completed writer/closure changed before first disposition.");
+            DisposeOriginalWriter(runId, writer);
+            if (!((ICollection<KeyValuePair<string, WriterLease>>)_writers).Remove(new(runId, writer)))
+                throw new WorkerEnvelopeException("Actual completed cleanup writer identity changed.");
+            _ = original.CleanupRemaining; return true;
+        }, CancellationToken.None, cleanup: true);
+
     internal Task ReleaseStoppedWriterAsync(string runId, Func<bool> actualStopped) =>
         RunExclusiveAsync(runId, async () =>
         {
@@ -182,9 +208,10 @@ public sealed class ExecutionCoordinator : IDisposable
                 throw new WorktreeBoundaryException("A writer is already registered for this run in this coordinator.");
             return (request, record);
         }
-        catch
+        catch (Exception primary)
         {
-            writer.Abandon();
+            try { _worktrees.RetireFailedPreparationWriter(writer); }
+            catch (Exception close) { throw new AggregateException("Worker preparation and original writer first disposition failed.", primary, close); }
             throw;
         }
     }

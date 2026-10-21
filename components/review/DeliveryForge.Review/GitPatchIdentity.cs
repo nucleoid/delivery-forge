@@ -10,9 +10,15 @@ namespace DeliveryForge.Review;
 internal delegate Task<GitProcessResult> OwnedReviewGit(string gitDirectory, IReadOnlyList<string> arguments,
     CancellationToken token, byte[]? input = null, IReadOnlyDictionary<string, string>? environment = null);
 
+internal sealed record OwnedSourceTreeEntry(string Mode, string ObjectId);
+internal delegate Task<byte[]> OwnedReviewSourceSnapshot(string headCommit, string headTree,
+    IReadOnlyDictionary<string, OwnedSourceTreeEntry> tree, CancellationToken token);
+
 public sealed class ControlledGitEvidenceContext : IDisposable
 {
     private readonly Action? _dispose;
+    private readonly Action? _disposeOwnedWork;
+    private int _workDisposition;
     private readonly HashSet<string> retainedScratch = new(StringComparer.Ordinal);
     public IReadOnlyList<string> RetainedScratchPaths { get { lock (retainedScratch) return retainedScratch.ToArray(); } }
     internal void RegisterScratch(params string[] paths)
@@ -46,7 +52,9 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         Action? checkOwnedWork = null,
         Action<string>? deleteOwnedScratch = null,
         Func<Func<object?>, object?>? ownedSynchronous = null,
-        Func<string, int, CancellationToken, Task<byte[]>>? readOwnedFile = null)
+        Func<string, int, CancellationToken, Task<byte[]>>? readOwnedFile = null,
+        OwnedReviewSourceSnapshot? ownedSourceSnapshot = null,
+        Action? disposeOwnedWork = null)
     {
         SourceRoot = Path.GetFullPath(sourceRoot);
         WorkerGitDirectory = Path.GetFullPath(workerGitDirectory);
@@ -61,6 +69,7 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         WorkerIndexHash = workerIndexHash.ToArray();
         QuiescenceAuthority = quiescenceAuthority;
         _dispose = dispose;
+        _disposeOwnedWork = disposeOwnedWork;
         BeforeFinalRecheck = beforeFinalRecheck;
         OwnedGit = ownedGit;
         MayCleanOwnedFiles = mayCleanOwnedFiles;
@@ -68,6 +77,7 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         DeleteOwnedScratch = deleteOwnedScratch;
         OwnedSynchronous = ownedSynchronous;
         ReadOwnedFile = readOwnedFile;
+        OwnedSourceSnapshot = ownedSourceSnapshot;
     }
 
     public string SourceRoot { get; }
@@ -89,6 +99,7 @@ public sealed class ControlledGitEvidenceContext : IDisposable
     internal Action<string>? DeleteOwnedScratch { get; }
     internal Func<Func<object?>, object?>? OwnedSynchronous { get; }
     internal Func<string, int, CancellationToken, Task<byte[]>>? ReadOwnedFile { get; }
+    internal OwnedReviewSourceSnapshot? OwnedSourceSnapshot { get; }
     internal T EnterOwnedSynchronous<T>(Func<T> invoke)
     {
         if (OwnedSynchronous is null) throw new ReviewPreflightException("Original source file admission is absent.");
@@ -99,7 +110,17 @@ public sealed class ControlledGitEvidenceContext : IDisposable
     {
         // A failed reconstruction/retirement retains the actual controlled view
         // and exact scratch paths. Do not erase evidence through a using-finally.
-        if (RetainedScratchPaths.Count == 0) _dispose?.Invoke();
+        if (Volatile.Read(ref _workDisposition) == 0 && RetainedScratchPaths.Count == 0) _dispose?.Invoke();
+    }
+    internal void DisposeDuringWork()
+    {
+        if (Volatile.Read(ref _workDisposition) == 2) return;
+        if (RetainedScratchPaths.Count != 0 || _disposeOwnedWork is null)
+            throw new ReviewPreflightException("Original WORK view retirement is unavailable; exact view and scratch retained.");
+        if (Interlocked.CompareExchange(ref _workDisposition, 1, 0) != 0)
+            throw new ReviewPreflightException("Original WORK view first retirement did not return; exact view retained.");
+        _disposeOwnedWork();
+        Volatile.Write(ref _workDisposition, 2);
     }
 }
 
@@ -252,7 +273,20 @@ public static partial class GitPatchIdentity
             context,
             ["ls-tree", "-r", "-z", "--full-tree", headCommit],
             cancellationToken);
-        var tracked = ParseTree(listing.StandardOutput);
+        var tracked = ParseTree(listing.StandardOutput, context.SourceRealm == ReviewAuthorityRealm.Production);
+        if (context.SourceRealm == ReviewAuthorityRealm.Production)
+        {
+            if (tracked.Count > 4096 || context.OwnedSourceSnapshot is null)
+                throw new ReviewPreflightException("Production source snapshot requires its finite original owner.");
+            if (tracked.Values.Any(entry => entry.Type != "blob"))
+                throw new ReviewPreflightException("Submodule working-state evidence is unsupported.");
+            // Only the private original owner compares complete native archive
+            // bytes with one bounded actual source census. Public DATA cannot
+            // supply a snapshot digest or skip native HEAD/index verification.
+            return await context.OwnedSourceSnapshot(headCommit, headTree,
+                tracked.ToDictionary(pair => pair.Key, pair => new OwnedSourceTreeEntry(pair.Value.Mode, pair.Value.ObjectId), StringComparer.Ordinal),
+                cancellationToken).ConfigureAwait(false);
+        }
         using var fingerprint = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var file in EnumerateSourceEntries(context, cancellationToken))
@@ -375,7 +409,7 @@ public static partial class GitPatchIdentity
         }
     }
 
-    private static Dictionary<string, TreeEntry> ParseTree(byte[] bytes)
+    private static Dictionary<string, TreeEntry> ParseTree(byte[] bytes, bool strictUtf8 = false)
     {
         var result = new Dictionary<string, TreeEntry>(StringComparer.Ordinal);
         var offset = 0;
@@ -383,7 +417,7 @@ public static partial class GitPatchIdentity
         {
             var end = Array.IndexOf(bytes, (byte)0, offset);
             if (end < 0) throw new ReviewPreflightException("Controlled Git tree listing is malformed.");
-            var record = Encoding.UTF8.GetString(bytes, offset, end - offset);
+            var record = (strictUtf8 ? new UTF8Encoding(false, true) : Encoding.UTF8).GetString(bytes, offset, end - offset);
             var tab = record.IndexOf('\t');
             var metadata = record[..tab].Split(' ');
             result.Add(record[(tab + 1)..], new TreeEntry(metadata[0], metadata[1], metadata[2]));

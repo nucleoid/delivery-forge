@@ -20,12 +20,10 @@ internal sealed class ClaudeReviewerWorkingDirectory
         foreach (var source in new[] { parentCheckout, workerRoot, resultRoot })
             BoundedFiles.Separate(source, artifactRoot);
         var artifact = BoundedFiles.Plain(artifactRoot, true);
-        var parent = System.IO.Path.GetDirectoryName(artifact.TrimEnd(System.IO.Path.DirectorySeparatorChar))
-            ?? throw new IOException("Private review artifact parent required.");
-        BoundedFiles.Plain(parent, true);
+        // The configured artifact root owns this durable neutral namespace.
         var nonce = Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(16));
-        var path = System.IO.Path.Combine(parent, ".forge-reviewer-" + nonce);
-        foreach (var source in new[] { parentCheckout, workerRoot, resultRoot, artifactRoot }) BoundedFiles.Separate(source, path);
+        var path = System.IO.Path.Combine(artifact, ".forge-reviewer-" + nonce);
+        foreach (var source in new[] { parentCheckout, workerRoot, resultRoot }) BoundedFiles.Separate(source, path);
         BoundedFiles.Plain(path, true); original.Check();
         if (Directory.Exists(path) || File.Exists(path)) throw new IOException("Fresh owner reviewer namespace required; no adoption.");
         Directory.CreateDirectory(path); original.Check(); BoundedFiles.Plain(path, true);

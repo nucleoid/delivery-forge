@@ -19,6 +19,7 @@ public sealed record IndependentClaudeReviewSelection(AdmissionFile Image, strin
 // before using the existing issuer barriers.
 internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection selection, ToolLifetime original,
     ProcessCommandExecutor executor, ParentCoordinationHost parent, string runId, ClaudeReviewerWorkingDirectory actualWorkingDirectory,
+    ClaudeReviewerUserSettings actualUserSettings,
     ProductionReviewBootstrap bootstrap, Func<bool> sameCompletedWorker, Action verifyProtectedConfiguration, LinuxScopeSelection? linuxScope)
 {
     // Created only after the existing private issuer accepted the exact genuine
@@ -114,7 +115,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
     }
     void VerifyImage() => parent.EnterSynchronous(runId, () =>
     {
-        Current(); var token = phaseCancellation?.Token ?? original.Token;
+        Current(); actualUserSettings.CheckActual(); var token = phaseCancellation?.Token ?? original.Token;
         if (OperatingSystem.IsWindows())
         {
             heldImage ??= BoundedFiles.RetainVerifiedNativeImage(selection.Image, original, token);
@@ -124,12 +125,27 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         Current(); return true;
     });
     void Save(string path, byte[] bytes) => parent.EnterSynchronous(runId, () => { Current(); BoundedFiles.WriteNew(path, bytes, original); Current(); return true; });
+    internal static void PrecheckObservationInputs(DeliveryForge.Coordination.ICoordinatedSynchronousEffectAdmission actualParent,
+        string runId, ClaudeReviewerWorkingDirectory workingDirectory, TimeSpan remaining) => actualParent.EnterSynchronous(runId, () =>
+    {
+        if (remaining <= TimeSpan.Zero) throw new TimeoutException("Original bounded independent review allowance expired before observation admission.");
+        workingDirectory.Check(); return true;
+    });
+    internal static ToolResult? UnsupportedPlatform() => OperatingSystem.IsLinux()
+        ? ToolResult.Incomplete("INDEPENDENT_REVIEW_IMAGE_IDENTITY_UNSUPPORTED", "Linux independent review requires an immutable exact-image execution primitive; no native reviewer observation or review was dispatched.")
+        : null;
+    internal static ToolResult BudgetIncomplete(string runId, BudgetDecision decision) =>
+        ToolResult.Incomplete("INDEPENDENT_REVIEW_BUDGET", decision.Reason, new { runId, decision.Findings });
     async Task<BoundedCommandCaptureResult> Observe(string[] arguments)
     {
         Current(); VerifyImage(); var row = new Observation(); BoundedCommandCaptureResult capture;
         lock (tasks) { if (stopping) throw new OperationCanceledException(); observations.Add(row); }
         try
         {
+            // Deterministic no-birth refusals happen before asynchronous effect
+            // enrollment. Keep the same checks inside the atomic birth delegate:
+            // a racing refusal there remains conservatively uncertain.
+            PrecheckObservationInputs(parent, runId, actualWorkingDirectory, Remaining(phaseStarted));
             capture = await parent.EnterAsync(runId, () =>
             {
                 var left = Remaining(phaseStarted); if (left > TimeSpan.FromSeconds(30)) left = TimeSpan.FromSeconds(30);
@@ -226,8 +242,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         // Creation-owned Linux scope proves process ownership, not immutable
         // hash-to-launch image identity. No observation/paid review may reach
         // production acceptance until that exact-image launch primitive exists.
-        if (OperatingSystem.IsLinux())
-            return ToolResult.Incomplete("INDEPENDENT_REVIEW_IMAGE_IDENTITY_UNSUPPORTED", "Linux independent review requires an immutable exact-image execution primitive; no native reviewer observation or review was dispatched.");
+        if (UnsupportedPlatform() is { } platformRefusal) return platformRefusal;
         ClaudeIndependentReviewData.RequireSubscriptionEnvironment(Environment.GetEnvironmentVariable);
         var ledger = ReviewBudgetLedger.FromTrustedPolicy(bootstrap.Policy);
         if (!ledger.TryReserve(new(bootstrap.Policy.Budget.MaximumDuration, bootstrap.Policy.Budget.MaximumTokens, bootstrap.Policy.Budget.MaximumCost), out var reservation, out var decision))
@@ -248,6 +263,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             if (new UTF8Encoding(false, true).GetString(version.StandardOutputBytes).Trim() != selection.Version) throw new IOException("Actual reviewer version differs from its selected image profile.");
             var auth = await Observe(["auth", "status"]).ConfigureAwait(false);
             ClaudeIndependentReviewData.RequireSubscription(auth.StandardOutputBytes);
+            actualUserSettings.RequireObservedConfigurationDirectory(auth.StandardOutputBytes);
             // Store a digest and bounded route fields, never account details or credentials.
             var authHash = Hash(auth.StandardOutputBytes); var observedAt = DateTimeOffset.UtcNow;
             var rawPatch = await GitPatchIdentity.ExportVerifiedPatchAsync(bootstrap.ObjectView, patch, phaseStop.Token).ConfigureAwait(false);
@@ -306,8 +322,12 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             _ = await GitPatchIdentity.ExportVerifiedPatchAsync(bootstrap.ObjectView, patch, phaseStop.Token).ConfigureAwait(false);
             parent.EnterSynchronous(runId, () => { Current(); actualWorkingDirectory.Check(); return true; });
             Current(); VerifyImage(); verifyProtectedConfiguration(); Current();
+            // This is the original complete review-phase clock: preparation,
+            // observations, native review, retirement and same-source postproof.
+            // Native retirement does not grant a shorter accounting interval.
+            ledger.RecordFindings(report.Findings);
             var budget = ledger.Settle(reservation!, new(Stopwatch.GetElapsedTime(started), usage.Tokens, usage.Cost));
-            if (budget.IsExhausted) return ToolResult.Incomplete("INDEPENDENT_REVIEW_BUDGET", budget.Reason);
+            if (budget.IsExhausted) return BudgetIncomplete(runId, budget);
             var rawHash = Hash(native);
             var proof = Hash(JsonSerializer.SerializeToUtf8Bytes(new { requestId, Model = model, RouteHash = authHash, selection.Image, selection.Version, Native = rawHash }));
             if (DateTimeOffset.UtcNow > validUntil) return ToolResult.Incomplete("INDEPENDENT_REVIEW_PROOF_EXPIRED", "Actual reviewer proof expired inside its original frozen allowance.");

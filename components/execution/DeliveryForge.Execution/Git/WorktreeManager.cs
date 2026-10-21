@@ -172,6 +172,33 @@ public sealed partial class WorktreeManager
             throw;
         }
     }
+    // A failed preparation cannot erase the original durable writer evidence.
+    // Only legacy managers retain their pre-existing Abandon/delete behavior.
+    internal void RetireFailedPreparationWriter(WriterLease writer)
+    {
+        if (_originalBudget is null) { writer.Abandon(); return; }
+        try
+        {
+            _ = _originalBudget.CleanupRemaining;
+            writer.Dispose();
+            _ = _originalBudget.CleanupRemaining;
+        }
+        catch (Exception close)
+        {
+            // A known first-close return followed by endpoint expiry is an
+            // accounting failure, not an unreturned actual handle disposition.
+            if (writer.FirstCloseReturned) throw;
+            lock (RetainedWriterBirths) RetainedWriterBirths.Add(writer);
+            var failures = new List<Exception> { close };
+            try { if (_originalBudget is IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown(); }
+            catch (Exception observation) { failures.Add(observation); }
+            try { _effectAdmission?.RetainUncertain(writer.RunId, "Failed preparation writer first disposition did not return."); }
+            catch (Exception observation) { failures.Add(observation); }
+            if (failures.Count > 1) throw new AggregateException("Failed preparation writer disposition/uncertainty observations retained.", failures);
+            throw;
+        }
+    }
+
     WriterLease AcquireWriterCore(string worktree, string runId, string writerToken, Action<WriterLease>? captureBirth = null)
     {
         var binding = _originalBudget is null ? null : RequireOriginalBinding(worktree);
@@ -378,6 +405,10 @@ public sealed partial class WorktreeManager
         start.Environment["GIT_TERMINAL_PROMPT"] = "0";
         if (binding is not null)
         {
+            // Bound initial/cleanup observations must not refresh the retained
+            // index as an optional side effect. Required writes still use Git's
+            // ordinary mandatory locks; this grants no mutation authority.
+            start.ArgumentList.Add("--no-optional-locks");
             start.ArgumentList.Add("--git-dir=" + binding.GitDirectory);
             start.ArgumentList.Add("--work-tree=" + binding.Worktree);
             start.Environment["GIT_COMMON_DIR"] = binding.CommonDirectory;

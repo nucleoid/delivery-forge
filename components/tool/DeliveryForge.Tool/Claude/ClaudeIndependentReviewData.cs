@@ -17,7 +17,7 @@ internal static class ClaudeIndependentReviewData
         return ["--safe-mode", "--setting-sources", "user", .. arguments];
     }
     internal static string[] IsolatedReviewArguments(decimal maximumCost) =>
-        ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--no-session-persistence", "--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob", "--permission-mode", "dontAsk", "--max-budget-usd", maximumCost.ToString(CultureInfo.InvariantCulture)];
+        ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd", maximumCost.ToString(CultureInfo.InvariantCulture)];
 
     internal static readonly string[] ProviderOverrides = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_SIMPLE"];
     internal static void RequireSubscriptionEnvironment(Func<string, string?> read)

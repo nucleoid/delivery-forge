@@ -222,6 +222,14 @@ public sealed class ProductionBatchTests
         var dependencies = ProductionBatchOwner.ReadFrozenPrerequisites(frozen, "selected-root");
         Assert.Equal(context.Commit, Assert.Single(dependencies).Value); Assert.True(dependencies.ContainsKey("required"));
         Assert.Empty(ProductionBatchOwner.ReadFrozenPrerequisites(frozen, "unrelated"));
+        // The actual frozen prerequisite is already integrated, but selecting it
+        // as another batch root cannot promise future integration/replanning.
+        Assert.Throws<ToolUsageException>(() => ProductionBatchOwner.RefuseInternalPrerequisites(dependencies,
+            new HashSet<string>(["selected-root", "required"], StringComparer.Ordinal)));
+        ProductionBatchOwner.RefuseInternalPrerequisites(dependencies,
+            new HashSet<string>(["selected-root", "unrelated"], StringComparer.Ordinal));
+        ProductionBatchOwner.RefuseInternalPrerequisites(ProductionBatchOwner.ReadFrozenPrerequisites(frozen, "unrelated"),
+            new HashSet<string>(["selected-root", "unrelated"], StringComparer.Ordinal));
         Assert.Throws<SchedulingException>(() => ProductionBatchOwner.ReadFrozenPrerequisites(frozen, "absent"));
         var actualSource = new GitRepositoryContextReader(git, executor, original); var fixtureParent = new ReaderParentFixture();
         var admitted = actualSource.WithParentAdmission(fixtureParent, "batch-reader-binding-fixture");

@@ -98,7 +98,14 @@ public sealed partial class LocalSingleScheduler
         catch { if (terminalEntered) _uncertain = true; throw; }
         finally { _serial.Release(); }
     }
-    internal async Task ReleaseStoppedObservedAsync(LocalDispatchReservation ticket, Func<bool> actualStopped, Func<Task> releaseActualWriter)
+    internal Task ReleaseStoppedObservedAsync(LocalDispatchReservation ticket, Func<bool> actualStopped, Func<Task> releaseActualWriter) =>
+        ReleaseTerminalObservedAsync(ticket, actualStopped, releaseActualWriter);
+    // The actual completed worker has already settled. This callback must also
+    // join the retained failed evidence Task; no terminal DATA or new owner is
+    // enough. This path closes WORK and cannot dispatch another node.
+    internal Task ReleaseCompletedFailureObservedAsync(LocalDispatchReservation ticket, Func<bool> actualCompletedFailure, Func<Task> releaseActualWriter) =>
+        ReleaseTerminalObservedAsync(ticket, actualCompletedFailure, releaseActualWriter);
+    async Task ReleaseTerminalObservedAsync(LocalDispatchReservation ticket, Func<bool> actualStopped, Func<Task> releaseActualWriter)
     {
         if (original is null) throw new SchedulingException("No retained original cleanup owner.");
         using var deadline = new CancellationTokenSource(original.CleanupRemaining);

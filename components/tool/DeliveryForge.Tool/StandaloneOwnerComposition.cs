@@ -12,7 +12,8 @@ public sealed record StandaloneHostSelection(string Executable, long Bytes, stri
 public sealed class StandaloneOwnerComposition : IAsyncDisposable
 {
     static readonly List<StandaloneOwnerComposition> Unknown = [];
-    readonly ToolLifetime original; readonly ProcessControl processes; readonly ExecutionCoordinator coordinator; readonly OwnerHostBridge bridge; readonly TrustedConfiguration configuration; ParentCoordinationHost? coordination; Task? coordinationCreation, batchProcessClose; bool coordinationEntered, disposeEntered;
+    readonly ToolLifetime original; readonly ProcessControl processes; readonly ExecutionCoordinator coordinator; readonly OwnerHostBridge bridge; readonly TrustedConfiguration configuration; ParentCoordinationHost? coordination; Task? coordinationCreation, batchProcessClose, parentBatchRetirement, parentCleanup;
+    bool coordinationEntered, disposeEntered, disposed, reviewCloseEntered, reviewClosed, coordinatorCloseEntered, coordinatorClosed, processCloseEntered, processCloseReturned;
     public ToolApplication Application { get; }
     public OwnerHostBridge ActualBridge => bridge;
     public StandaloneOwnerComposition(TrustedConfiguration config, string actualStoreRoot, LocalWorkerPaths workerPaths, ToolLifetime actualOriginal, StandaloneHostSelection selectedHost, AgentAdapterProfile actualConformedProfile, LinuxScopeSelection? selectedLinuxScope = null, AdmissionFile? actualConfigurationPin = null, StandaloneResources? actualResources = null)
@@ -90,6 +91,45 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         try { coordination = await actual.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check(); bridge.BindCoordination(coordination); }
         catch { if (!actual.IsCompleted) original.RetainUnknown(); throw; }
     }
+    void CloseReviewOnce(bool cleanup)
+    {
+        if (!reviewCloseEntered) { reviewCloseEntered = true; bridge.DisposeInstalledReviewWhenSettled(cleanup); reviewClosed = true; }
+        if (!reviewClosed) throw new IOException("Original review disposition did not return; no retry.");
+    }
+    void CloseCoordinatorOnce()
+    {
+        if (!coordinatorCloseEntered) { coordinatorCloseEntered = true; coordinator.Dispose(); coordinatorClosed = true; }
+        if (!coordinatorClosed) throw new IOException("Original coordinator disposition did not return; no retry.");
+    }
+    async Task CloseProcessesAsync(bool cleanup)
+    {
+        if (!processCloseEntered) { processCloseEntered = true; batchProcessClose ??= processes.DisposeAsync().AsTask(); processCloseReturned = true; }
+        if (!processCloseReturned || batchProcessClose is null) throw new IOException("Original process-controller close did not return its actual Task; no retry.");
+        await ParentCoordinationHost.WaitActualDispositionTaskAsync(batchProcessClose, original, cleanup).ConfigureAwait(false);
+    }
+    async Task CompleteCleanupAsync()
+    {
+        _ = original.CleanupRemaining;
+        if (coordinationCreation is not null && !coordinationCreation.IsCompleted || bridge.RetainedFrames.Any(frame => frame.Unknown) || original.HasExplicitUnknown)
+            throw new IOException("Original composition retains unfinished or unknown work; owners retained.");
+        CloseReviewOnce(true);
+        if (coordination is not null && !coordination.DispositionKnownClosed)
+        {
+            // If no forward disposition entered, this is its first normal
+            // cleanup. A known-closed parent is observed without another close.
+            parentCleanup ??= coordination.DisposeAsync().AsTask();
+            await ParentCoordinationHost.WaitActualDispositionTaskAsync(parentCleanup, original, true).ConfigureAwait(false);
+        }
+        if (original.HasRetainedUnknown) throw new IOException("Original coordination retained uncertainty; dependent native owners retained.");
+        CloseCoordinatorOnce();
+        await CloseProcessesAsync(true).ConfigureAwait(false);
+        disposed = true;
+        _ = original.CleanupRemaining;
+    }
+    void RetainFailedDisposition()
+    {
+        original.RetainUnknown(); lock (Unknown) if (!Unknown.Contains(this)) Unknown.Add(this);
+    }
     internal async Task RetireSettledBatchNodeAsync(OwnerHostBridge.BatchNodeCompletion completion)
     {
         original.Check(); bridge.RequireActualBatchCompletion(completion, original);
@@ -98,30 +138,40 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         disposeEntered = true;
         try
         {
-            bridge.DisposeInstalledReviewWhenSettled(); original.Check();
-            await coordination.RetireSettledBatchNodeAsync(completion.RunId).WaitAsync(original.Remaining).ConfigureAwait(false);
+            CloseReviewOnce(false); original.Check();
+            parentBatchRetirement = coordination.RetireSettledBatchNodeAsync(completion.RunId);
+            // This concrete parent enforces WORK and SAME cleanup internally.
+            // An outer WORK-only wait must not preempt its cleanup/quiescence.
+            await parentBatchRetirement.ConfigureAwait(false);
             bridge.RequireActualBatchCompletion(completion, original);
-            coordinator.Dispose(); original.Check();
-            batchProcessClose = processes.DisposeAsync().AsTask();
-            await batchProcessClose.WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
+            CloseCoordinatorOnce(); original.Check();
+            await CloseProcessesAsync(false).ConfigureAwait(false); original.Check();
+            disposed = true;
         }
-        catch { original.RetainUnknown(); lock (Unknown) Unknown.Add(this); throw; }
+        catch (Exception primary)
+        {
+            try { original.BeginFailureCleanup(); await CompleteCleanupAsync().ConfigureAwait(false); }
+            catch (Exception cleanup)
+            {
+                RetainFailedDisposition();
+                throw new AggregateException("Completed node WORK retirement and SAME composition cleanup failure.", primary, cleanup);
+            }
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+            throw;
+        }
     }
     public async ValueTask DisposeAsync()
     {
-        if (disposeEntered) throw new IOException("Original composition disposition already entered; no retry."); disposeEntered = true;
-        if (coordinationCreation is not null && !coordinationCreation.IsCompleted || bridge.RetainedFrames.Any(frame => frame.Unknown)) { original.RetainUnknown(); lock (Unknown) Unknown.Add(this); return; }
-        Exception? primary = null, post = null;
-        try
+        if (disposeEntered)
         {
-            _ = original.CleanupRemaining;
-            bridge.DisposeInstalledReviewWhenSettled();
-            if (coordination is not null) await coordination.DisposeAsync().AsTask().WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
-            if (original.HasRetainedUnknown) throw new IOException("Original coordination retained uncertainty; dependent native owners retained.");
-            coordinator.Dispose(); await processes.DisposeAsync().AsTask().WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
+            if (!disposed) throw new IOException("Original composition disposition remains nonpass; no retry.");
+            return; // Known closure is observed, never replayed.
         }
-        catch (Exception error) { primary = error; original.RetainUnknown(); lock (Unknown) Unknown.Add(this); }
-        try { _ = original.CleanupRemaining; } catch (Exception error) { post = error; original.RetainUnknown(); lock (Unknown) if (!Unknown.Contains(this)) Unknown.Add(this); }
+        disposeEntered = true;
+        Exception? primary = null, post = null;
+        try { await CompleteCleanupAsync().ConfigureAwait(false); }
+        catch (Exception error) { primary = error; RetainFailedDisposition(); }
+        try { _ = original.CleanupRemaining; } catch (Exception error) { post = error; RetainFailedDisposition(); }
         if (primary is not null && post is not null) throw new AggregateException("Actual standalone first disposition and independent SAME original post.", primary, post);
         if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
     }

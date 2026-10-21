@@ -301,10 +301,10 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
     {
         lock (registration) { if (installedReview is not null || frames.Count != 0) throw new ToolUsageException("Installed review binds the idle actual bridge once."); installedReview = actual; }
     }
-    internal void DisposeInstalledReviewWhenSettled()
+    internal void DisposeInstalledReviewWhenSettled(bool cleanup = true)
     {
         if (frames.Values.Any(frame => frame.Unknown)) throw new IOException("Actual worker/review frames are not settled; retain the review object view.");
-        installedReview?.Dispose();
+        if (cleanup) installedReview?.Dispose(); else installedReview?.DisposeDuringWork();
     }
     internal void BindInstalledQuality(InstalledQualityHost actual)
     {
@@ -507,11 +507,49 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
             var actualResult = await frame.Worker.ObserveAsync(original).ConfigureAwait(false);
             if (frame.Scheduler is { } scheduler && frame.Reservation is { } reservation && frame.Primary is null && frame.Post is null && NativeCompletedAndQuiet(frame))
             {
+                Exception? evidenceFailure = null;
                 if (batchControl is not null)
                 {
                     frame.BatchEvidenceCapture.Start(original, () => CaptureActualBatchEvidenceAsync(frame, original));
-                    _ = await frame.BatchEvidenceCapture.ObserveAsync(original).ConfigureAwait(false);
-                    batchEvidenceTask = frame.BatchEvidenceCapture.Actual;
+                    try
+                    {
+                        _ = await frame.BatchEvidenceCapture.ObserveAsync(original).ConfigureAwait(false);
+                        batchEvidenceTask = frame.BatchEvidenceCapture.Actual;
+                    }
+                    catch (Exception error)
+                    {
+                        // A completed DATA capture failure cannot issue evidence,
+                        // but does not itself make the actual native child live.
+                        // Pending calls, an expired endpoint or native uncertainty
+                        // still retain every original owner and reservation.
+                        if (!SettledBatchEvidenceFailure(frame)) throw;
+                        // A known synchronous refusal may already have entered
+                        // this parent's own loss-stop. Observe that exact Task;
+                        // never issue a second stop or race its writer handling.
+                        if (coordination is null) throw;
+                        _ = await frame.EnterCleanup(_ => coordination.ObserveExistingLossStopAsync(plan.RunId, original)).ConfigureAwait(false);
+                        if (!SettledBatchEvidenceFailure(frame) || !ObservePipelineSettled(plan.RunId) ||
+                            !CompletedNativeOwnedResourcesClosed(frame)) throw;
+                        evidenceFailure = error;
+                    }
+                }
+                if (evidenceFailure is not null)
+                {
+                    // A failure closes forward WORK. Only the actual completed
+                    // worker's retained writer and reservation may retire here.
+                    // No failed capture becomes accepted evidence or a batch Pass.
+                    lock (frame.ReconciliationGate)
+                    {
+                        if (frame.SchedulingCleanupEntered) throw new IOException("Original scheduling cleanup already entered.", evidenceFailure);
+                        frame.SchedulingCleanupEntered = true;
+                        frame.SchedulingCleanup = scheduler.ReleaseCompletedFailureObservedAsync(reservation,
+                            () => SettledBatchEvidenceFailure(frame) && ObservePipelineSettled(plan.RunId) && CompletedNativeOwnedResourcesClosed(frame),
+                            () => coordinator.ReleaseCompletedWriterAfterFailureAsync(plan.RunId, frame.Completion!,
+                                () => SettledBatchEvidenceFailure(frame) && ObservePipelineSettled(plan.RunId) && CompletedNativeOwnedResourcesClosed(frame)));
+                    }
+                    try { await frame.SchedulingCleanup.WaitAsync(original.CleanupRemaining).ConfigureAwait(false); _ = original.CleanupRemaining; }
+                    catch (Exception cleanup) { throw new AggregateException("Original batch evidence failure and same-original cleanup.", evidenceFailure, cleanup); }
+                    System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(evidenceFailure).Throw();
                 }
                 frame.SchedulingCompletion.Start(original, async () =>
                 {
@@ -625,8 +663,13 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
         catch (Exception error) { frame.Primary ??= error; return ToolResult.Incomplete("HOST_OPERATION_RETAINED", "Actual host/owner operation failed or remains unknown; no retry or invented quiescence.", new { frame.RunId, frame.Unknown, Type = error.GetType().FullName, OwnerCompleted = frame.OwnerCompleted }); }
         finally { frame.LeaveRoute(); frame.CloseWhenSettled(); }
     }
-    bool NativeCompletedAndQuiet(HostBridgeFrame frame) => frame.OwnerCompleted && !frame.OwnerStopped &&
-        frame.Primary is null && frame.Post is null && frame.Completion is not null &&
+    internal static bool SettledBatchEvidenceFailure(HostBridgeFrame frame) =>
+        frame.BatchEvidenceCapture.Actual is { IsCompleted: true, IsCompletedSuccessfully: false } &&
+        frame.BatchEvidenceCapture.Primary is not null &&
+        !frame.BatchEvidenceCapture.Unknown && !frame.Lifetime.HasExplicitUnknown;
+    bool NativeCompletedAndQuiet(HostBridgeFrame frame) => !frame.OwnerStopped && frame.Primary is null && frame.Post is null && CompletedNativeOwnedResourcesClosed(frame);
+    bool CompletedNativeOwnedResourcesClosed(HostBridgeFrame frame) => frame.OwnerCompleted &&
+        frame.Completion is not null &&
         adapter.Realm != HostObservationRealm.ContractFixture && !adapter.HasUnknownCalls(frame.RunId) &&
         adapter.ObserveBoundNativeQuiescence(frame.RunId) && coordinator.ObserveOriginalProcessesSettled(frame.RunId);
     public async Task<ToolResult> StopRetainedAsync(string runId)

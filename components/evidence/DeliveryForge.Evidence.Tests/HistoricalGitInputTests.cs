@@ -4,6 +4,7 @@ namespace DeliveryForge.Evidence.Tests;
 
 // Real ordinary-file boundary controls only. These minimal metadata fixtures
 // are not accepted Git repositories, native executions or baseline approvals.
+[Collection("Installed tool profile process environment")]
 public sealed class HistoricalGitInputTests
 {
     sealed class Input
@@ -43,6 +44,50 @@ public sealed class HistoricalGitInputTests
         Assert.False(data.RootElement.GetProperty("WriterAuthority").GetBoolean());
         Assert.False(data.RootElement.GetProperty("BaselineAuthority").GetBoolean());
         binding.Require(input.Root, input.Expected);
+    }
+
+    [Theory]
+    [InlineData("GIT_EXTERNAL_DIFF")]
+    [InlineData("GIT_ASKPASS")]
+    [InlineData("GIT_SSH_COMMAND")]
+    [InlineData("git_trace")]
+    [InlineData("GIT_CONFIG_KEY_0")]
+    [InlineData("GIT_FUTURE_HELPER")]
+    public void Actual_inherited_and_invocation_Git_variables_cannot_escape_complete_environment(string key)
+    {
+        var previous = Environment.GetEnvironmentVariable(key);
+        try
+        {
+            Environment.SetEnvironmentVariable(key, "inert-no-command-is-executed");
+            var input = new Input(); var binding = new HistoricalGitInput(Files(), input.Root, input.Expected);
+            var configured = binding.Configure(new("selected-absolute-git", ["status"], input.Root,
+                new Dictionary<string, string> { [key] = "profile-override-also-refused", ["FORGE_TEST_NON_GIT"] = "retained" }));
+            Assert.True(configured.EnvironmentIsComplete);
+            Assert.DoesNotContain(configured.Environment!.Keys, name => string.Equals(name, key, StringComparison.OrdinalIgnoreCase));
+            Assert.Equal("retained", configured.Environment["FORGE_TEST_NON_GIT"]);
+            foreach (var required in new[] { "PATH", "SystemRoot", "HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS",
+                "DOTNET_PROCESSOR_COUNT", "DOTNET_GCHeapHardLimit", "DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER", "MSBUILDDISABLENODEREUSE" })
+                if (Environment.GetEnvironmentVariable(required) is { } value) Assert.Equal(value, configured.Environment[required]);
+            var start = new System.Diagnostics.ProcessStartInfo();
+            CommandEnvironment.Complete(start, configured);
+            Assert.DoesNotContain(start.Environment.Keys, name => string.Equals(name, key, StringComparison.OrdinalIgnoreCase));
+            Assert.Equal(Path.GetFullPath(input.Git), start.Environment["GIT_DIR"]);
+            Assert.Equal("inert-no-command-is-executed", Environment.GetEnvironmentVariable(key));
+        }
+        finally { Environment.SetEnvironmentVariable(key, previous); }
+    }
+
+    [Fact]
+    public void Complete_input_does_not_reintroduce_ambient_values_and_invalid_extent_refuses_before_native_use()
+    {
+        var input = new Input(); var binding = new HistoricalGitInput(Files(), input.Root, input.Expected);
+        var configured = binding.Configure(new("selected-absolute-git", ["status"], input.Root,
+            new Dictionary<string, string> { ["FORGE_ONLY_SELECTED"] = "retained" }) { EnvironmentIsComplete = true });
+        Assert.True(configured.EnvironmentIsComplete);
+        Assert.Equal("retained", configured.Environment!["FORGE_ONLY_SELECTED"]);
+        Assert.DoesNotContain("PATH", configured.Environment.Keys);
+        Assert.Throws<ArgumentException>(() => binding.Configure(new("selected-absolute-git", ["status"], input.Root,
+            new Dictionary<string, string> { ["FORGE_OVERSIZED"] = new('x', 32769) }) { EnvironmentIsComplete = true }));
     }
 
     [Theory]

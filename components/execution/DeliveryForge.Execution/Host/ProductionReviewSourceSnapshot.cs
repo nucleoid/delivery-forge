@@ -1,0 +1,188 @@
+using System.Formats.Tar;
+using System.Security.Cryptography;
+using System.Text;
+using DeliveryForge.Review;
+
+namespace DeliveryForge.Execution.Host;
+
+public sealed partial class ProductionReviewSourceOwner
+{
+    // info/attributes has highest precedence, including default tree attributes
+    // used by archive. Disable export and checkout transformations: expected
+    // bytes must be raw controlled object bytes, never substituted/exported text.
+    internal const string ArchiveAttributeText = "* -export-ignore -export-subst -text -ident -filter -working-tree-encoding\n";
+    internal sealed record ArchiveSourceFile(string Mode, byte[] Bytes);
+
+    internal async Task<byte[]> VerifySourceSnapshotAsync(string headCommit, string headTree,
+        IReadOnlyDictionary<string, OwnedSourceTreeEntry> tree, CancellationToken token)
+    {
+        Check(); token.ThrowIfCancellationRequested();
+        if (headCommit != HeadCommit || !ObjectId(headTree) || controlled is null || tree.Count > 4096)
+            throw new ReviewPreflightException("Source snapshot differs from this original's selected controlled view.");
+        var attributesPath = Path.Combine(controlled, "info", "attributes");
+        var required = Encoding.UTF8.GetBytes(ArchiveAttributeText);
+        async Task RequireAttributes()
+        {
+            var current = await ReadFileAsync(attributesPath, 1024, token).ConfigureAwait(false);
+            if (!current.AsSpan().SequenceEqual(required)) throw new ReviewPreflightException("Controlled archive attributes changed.");
+        }
+        await RequireAttributes().ConfigureAwait(false);
+        var actualTree = await GitAsync(controlled, ["rev-parse", "--verify", headCommit + "^{tree}"], token).ConfigureAwait(false);
+        if (new UTF8Encoding(false, true).GetString(actualTree.StandardOutput).Trim() != headTree)
+            throw new ReviewPreflightException("Controlled source tree differs from this snapshot request.");
+        // Existing bounded native capture; no stdin transport, extraction,
+        // per-file process, caller digest or newly issued execution authority.
+        var archive = await GitAsync(controlled,
+            ["-c", "core.autocrlf=false", "-c", "core.eol=lf", "archive", "--format=tar", headCommit], token).ConfigureAwait(false);
+        await RequireAttributes().ConfigureAwait(false);
+        try
+        {
+            return EnterSynchronous(() =>
+            {
+                var expected = ParseSourceArchive(archive.StandardOutput, tree, headCommit, MaximumBytes, () => { Check(); token.ThrowIfCancellationRequested(); });
+                using var fingerprint = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                var seen = new HashSet<string>(StringComparer.Ordinal); var entries = 0; long readBytes = 0;
+                void Current() { Check(); token.ThrowIfCancellationRequested(); }
+                byte[] ReadSource(string path)
+                {
+                    FileStream? file = null; byte[]? bytes = null; Exception? primary = null;
+                    try
+                    {
+                        Current(); Plain(path); file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read); Current();
+                        var length = file.Length;
+                        if (length > MaximumBytes || length > MaximumBytes - readBytes)
+                            throw new ReviewPreflightException("Owned source snapshot exceeds its complete byte bound.");
+                        bytes = new byte[checked((int)length)]; var offset = 0;
+                        while (offset < bytes.Length)
+                        {
+                            Current(); var count = file.Read(bytes, offset, Math.Min(65536, bytes.Length - offset)); Current();
+                            if (count == 0) throw new ReviewPreflightException("Owned source ended before its captured extent.");
+                            offset += count;
+                        }
+                        Current(); var eof = file.ReadByte(); Current();
+                        if (eof != -1 || file.Length != length) throw new ReviewPreflightException("Owned source extent changed while read.");
+                        readBytes += length;
+                    }
+                    catch (Exception failure) { primary = failure; }
+                    var close = file is null ? null : CloseResource(file, ref primary);
+                    ThrowFailures(primary, close); return bytes ?? throw new IOException("Owned source read returned no bytes.");
+                }
+                void Visit(string directory, int depth)
+                {
+                    Current(); Plain(directory);
+                    if (depth > 64) throw new ReviewPreflightException("Owned source traversal exceeds64 directory levels.");
+                    IEnumerator<string>? iterator = null; Exception? primary = null;
+                    try
+                    {
+                        Current(); iterator = Directory.EnumerateFileSystemEntries(directory).GetEnumerator(); Current();
+                        while (true)
+                        {
+                            Current(); var next = iterator.MoveNext(); Current(); if (!next) break;
+                            var path = iterator.Current;
+                            if (path == Path.Combine(SourceRoot, ".git")) continue;
+                            if (++entries > 4096) throw new ReviewPreflightException("Owned source traversal exceeds4096 entries.");
+                            Current(); var attributes = File.GetAttributes(path); Current();
+                            if (!attributes.HasFlag(FileAttributes.ReparsePoint) && attributes.HasFlag(FileAttributes.Directory))
+                            { Visit(path, depth + 1); continue; }
+                            var relative = Path.GetRelativePath(SourceRoot, path).Replace('\\', '/');
+                            if (!expected.TryGetValue(relative, out var entry) || !seen.Add(relative))
+                                throw new ReviewPreflightException("Source membership differs from the complete controlled archive.");
+                            Current(); var target = new FileInfo(path).LinkTarget; Current();
+                            byte[] bytes; string mode;
+                            if (!string.IsNullOrEmpty(target)) { bytes = Encoding.UTF8.GetBytes(target); readBytes += bytes.Length; mode = "120000"; }
+                            else
+                            {
+                                bytes = ReadSource(path);
+                                Current(); mode = OperatingSystem.IsWindows() ? entry.Mode :
+                                    File.GetUnixFileMode(path).HasFlag(UnixFileMode.UserExecute) ? "100755" : "100644"; Current();
+                            }
+                            if (readBytes > MaximumBytes || mode != entry.Mode || !bytes.AsSpan().SequenceEqual(entry.Bytes))
+                                throw new ReviewPreflightException("Source mode or complete bytes differ from the controlled archive.");
+                            fingerprint.AppendData(Encoding.UTF8.GetBytes(relative)); fingerprint.AppendData([0]);
+                            fingerprint.AppendData(Encoding.ASCII.GetBytes(mode)); fingerprint.AppendData([0]);
+                            fingerprint.AppendData(SHA256.HashData(bytes)); Current();
+                        }
+                    }
+                    catch (Exception failure) { primary = failure; }
+                    var close = iterator is null ? null : CloseResource(iterator, ref primary); ThrowFailures(primary, close);
+                }
+                Visit(SourceRoot, 0); Current();
+                if (seen.Count != expected.Count) throw new ReviewPreflightException("Tracked source entries are missing from the assigned root.");
+                return fingerprint.GetHashAndReset();
+            });
+        }
+        catch (Exception failure)
+        {
+            // Bounded actual native bytes remain on the retained failed Task;
+            // they are DATA, never a substitute for this original owner.
+            failure.Data["OwnedReviewSourceArchive"] = archive;
+            throw;
+        }
+    }
+
+    // Bounded native archive DATA parser. This issues no provenance; only the
+    // actual owner above may join its result to a live controlled source census.
+    internal static Dictionary<string, ArchiveSourceFile> ParseSourceArchive(byte[] archive,
+        IReadOnlyDictionary<string, OwnedSourceTreeEntry> tree, string head, int maximum, Action check)
+    {
+        if (maximum is < 1 or > 16777216 || archive.Length > maximum || archive.Length % 512 != 0 || tree.Count > 4096)
+            throw new ReviewPreflightException("Complete source archive exceeds its finite profile.");
+        var result = new Dictionary<string, ArchiveSourceFile>(StringComparer.Ordinal);
+        var names = new HashSet<string>(StringComparer.Ordinal); var count = 0; long bytes = 0; var globalSeen = false;
+        using var stream = new MemoryStream(archive, false); using var reader = new TarReader(stream, leaveOpen: true);
+        while (true)
+        {
+            check(); var entry = reader.GetNextEntry(copyData: false); check(); if (entry is null) break;
+            if (entry is PaxGlobalExtendedAttributesTarEntry global)
+            {
+                if (globalSeen || global.GlobalExtendedAttributes.Count != 1 || !global.GlobalExtendedAttributes.TryGetValue("comment", out var commit) || commit != head)
+                    throw new ReviewPreflightException("Unknown or foreign Git archive global attributes.");
+                globalSeen = true; continue;
+            }
+            if (entry.Format is not (TarEntryFormat.Ustar or TarEntryFormat.Pax))
+                throw new ReviewPreflightException("Only bounded standard Git Ustar/Pax source archives are supported.");
+            if (++count > 4096) throw new ReviewPreflightException("Source archive entry census exceeds4096.");
+            var directory = entry.EntryType == TarEntryType.Directory;
+            var name = directory && entry.Name.EndsWith('/') ? entry.Name[..^1] : entry.Name;
+            if (name.Length is < 1 or > 4096 || name.Contains('\\') || name.Contains('\0') || name.Contains('\uFFFD') || name.StartsWith('/') ||
+                name.Split('/').Any(part => part is "" or "." or "..") || name.Split('/').Any(part => part.Equals(".git", StringComparison.OrdinalIgnoreCase)) || !names.Add(name))
+                throw new ReviewPreflightException("Source archive has duplicate or noncanonical paths.");
+            if (entry is PaxTarEntry pax && pax.ExtendedAttributes.Any(pair => pair.Key switch
+                { "path" => pair.Value != entry.Name, "linkpath" => entry.EntryType != TarEntryType.SymbolicLink || pair.Value != entry.LinkName,
+                  "mtime" => pair.Value.Length > 32 || !decimal.TryParse(pair.Value, System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint, System.Globalization.CultureInfo.InvariantCulture, out _), _ => true }))
+                throw new ReviewPreflightException("Unknown or mismatched Git archive attributes.");
+            if (directory)
+            {
+                if (entry.Length != 0 || !tree.Keys.Any(path => path.StartsWith(name + "/", StringComparison.Ordinal)))
+                    throw new ReviewPreflightException("Foreign source archive directory.");
+                continue;
+            }
+            if (!tree.TryGetValue(name, out var expected) || expected.Mode is not ("100644" or "100755" or "120000"))
+                throw new ReviewPreflightException("Source archive membership differs from the controlled tree.");
+            byte[] data; string mode;
+            if (entry.EntryType == TarEntryType.SymbolicLink)
+            {
+                if (entry.Length != 0 || entry.LinkName.Length > 4096 || entry.LinkName.Contains('\uFFFD')) throw new ReviewPreflightException("Source archive symbolic link extent is unsupported.");
+                data = Encoding.UTF8.GetBytes(entry.LinkName); mode = "120000";
+            }
+            else if (entry.EntryType is TarEntryType.RegularFile or TarEntryType.V7RegularFile)
+            {
+                mode = entry.Mode.HasFlag(UnixFileMode.UserExecute) ? "100755" : "100644";
+                if (entry.Length < 0 || entry.Length > maximum - bytes) throw new ReviewPreflightException("Source archive file extent exceeds its bound.");
+                data = new byte[checked((int)entry.Length)]; var offset = 0;
+                while (offset < data.Length)
+                {
+                    check(); var read = entry.DataStream?.Read(data, offset, Math.Min(65536, data.Length - offset)) ?? 0; check();
+                    if (read == 0) throw new ReviewPreflightException("Source archive file ended early."); offset += read;
+                }
+            }
+            else throw new ReviewPreflightException("Hardlinks and unknown source archive entry types are unsupported.");
+            bytes += data.Length;
+            if (bytes > maximum || mode != expected.Mode) throw new ReviewPreflightException("Source archive mode or bytes exceed the selected profile.");
+            result.Add(name, new(mode, data)); check();
+        }
+        while (stream.Position < stream.Length) { check(); if (stream.ReadByte() != 0) throw new ReviewPreflightException("Unexpected trailing source archive data."); }
+        if (!globalSeen || result.Count != tree.Count) throw new ReviewPreflightException("Incomplete source archive membership or Git commit provenance.");
+        return result;
+    }
+}

@@ -63,6 +63,7 @@ public sealed class BatchEvidenceHandoffBoundaryTests
         var pending = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
         frame.BatchEvidenceCapture.Start(original, () => pending.Task);
         Assert.True(frame.Unknown);
+        Assert.False(OwnerHostBridge.SettledBatchEvidenceFailure(frame));
         Assert.False(frame.CloseWhenSettled());
         Assert.Same(pending.Task, frame.BatchEvidenceCapture.Actual);
         pending.SetResult(true);
@@ -88,6 +89,7 @@ public sealed class BatchEvidenceHandoffBoundaryTests
         Assert.Same(failure, await Assert.ThrowsAsync<IOException>(() => frame.BatchEvidenceCapture.ObserveAsync(original)));
         Assert.Same(actual, frame.BatchEvidenceCapture.Actual);
         Assert.Same(failure, frame.BatchEvidenceCapture.Primary);
+        Assert.True(OwnerHostBridge.SettledBatchEvidenceFailure(frame));
         var bridge = new OwnerHostBridge(coordinator, new CodexHostAdapter(new UncalledPort()));
         Assert.Throws<IOException>(() => bridge.RequireCapturedBatchEvidence(frame, original));
         Assert.True(frame.CloseWhenSettled());

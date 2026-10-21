@@ -1,6 +1,8 @@
 using System.Text;
 using DeliveryForge.Coordination;
 using DeliveryForge.Evidence;
+using DeliveryForge.Execution;
+using DeliveryForge.Execution.Host;
 using DeliveryForge.Execution.Git;
 
 namespace DeliveryForge.Tool.Tests;
@@ -108,6 +110,82 @@ public sealed class ProvisionedGitBindingTests
         Assert.True(fixture.Parent.Inner.AllKnownSettled);
     }
 
+    [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Bound_readonly_status_does_not_refresh_actual_index_bytes(bool cleanup)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        using var writer = fixture.Manager.AcquireWriter(fixture.Worker, "owned", "readonly-index");
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        var before = File.ReadAllBytes(binding.IndexPath);
+        var subject = Path.Combine(fixture.Worker, "subject.txt");
+        var content = File.ReadAllBytes(subject);
+        var changedTimestamp = File.GetLastWriteTimeUtc(subject).AddMinutes(-5);
+        // Change only the worktree stat cache input. An ordinary optional index
+        // refresh can now rewrite bytes even though the tracked content is clean.
+        File.SetLastWriteTimeUtc(subject, changedTimestamp);
+        Assert.Equal(changedTimestamp, File.GetLastWriteTimeUtc(subject));
+        Assert.Equal(content, File.ReadAllBytes(subject));
+        var births = fixture.InitialManager.ActualOwnedGitInvocations;
+        var observed = cleanup
+            ? await fixture.InitialManager.ObserveOwnedCleanupAsync(fixture.Worker, TestContext.Current.CancellationToken)
+            : await fixture.InitialManager.ObserveAsync(fixture.Worker, TestContext.Current.CancellationToken);
+        Assert.True(observed.IsClean);
+        Assert.True(fixture.InitialManager.ActualOwnedGitInvocations > births);
+        Assert.Equal(before, File.ReadAllBytes(binding.IndexPath));
+        Assert.Equal(content, File.ReadAllBytes(subject));
+        Assert.Equal(changedTimestamp, File.GetLastWriteTimeUtc(subject));
+        Assert.Equal(WriterNamespaceIdentityOutcome.Match, writer.ObserveCurrentNamespaceIdentity().Outcome);
+        Assert.False(fixture.Original.HasExplicitUnknown);
+    }
+
+    [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Completed_writer_failure_cleanup_uses_exact_live_owner_after_forward_revocation(bool redirect)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var store = new RunStore(Path.Combine(fixture.Root, "completed-store"));
+        await using var processes = new ProcessControl();
+        using var coordinator = new ExecutionCoordinator(store, fixture.Manager, processes);
+        coordinator.BindCoordinationAdmission(fixture.Parent);
+        coordinator.BindOriginalScheduling(fixture.Original, fixture.Parent, "owned", fixture.Manager);
+        var completion = await fixture.CompleteContractFixtureAsync(coordinator);
+        var binding = coordinator.RequireOriginalWorktreeBinding("owned", fixture.Original);
+        var writer = Assert.IsType<WriterLease>(fixture.Parent.ActualWriter);
+        var lockPath = writer.DiagnosticLockPath;
+        var bytes = Encoding.UTF8.GetBytes(writer.RunId + "\n" + writer.WriterToken + "\n");
+        // The real Git/record/writer path is exercised with fixture envelope DATA;
+        // no native worker, quality/review or production acceptance is issued.
+        fixture.Parent.Current = false;
+        _ = fixture.Original.CleanupRemaining;
+        if (redirect)
+        {
+            var path = Path.Combine(binding.GitDirectory, "commondir");
+            using (var metadata = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read))
+            {
+                metadata.SetLength(0); metadata.Write(Encoding.UTF8.GetBytes(fixture.Foreign + "\n"));
+            }
+            await Assert.ThrowsAsync<WorktreeBoundaryException>(() =>
+                coordinator.ReleaseCompletedWriterAfterFailureAsync("owned", completion, () => true));
+            Assert.False(writer.FirstCloseReturned);
+            Assert.Equal(WriterNamespaceIdentityOutcome.Match, writer.ObserveCurrentNamespaceIdentity().Outcome);
+            // Known fixture-owner Dispose later closes this actual held handle;
+            // never restore/repair the foreign metadata or claim successful release.
+        }
+        else
+        {
+            await coordinator.ReleaseCompletedWriterAfterFailureAsync("owned", completion, () => true);
+            Assert.True(writer.FirstCloseReturned);
+            Assert.Equal(bytes, File.ReadAllBytes(lockPath));
+            using var exclusive = new FileStream(lockPath, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        }
+        Assert.False(fixture.Original.HasExplicitUnknown);
+        Assert.DoesNotContain((await new RunStore(store.RootPath).RecoverAsync("owned", TestContext.Current.CancellationToken)).Records,
+            row => row.Kind == "stopped");
+    }
+
     sealed class PostBirthParent : ICoordinatedSynchronousEffectAdmission
     {
         internal readonly ParentEffectAdmission Inner;
@@ -125,6 +203,7 @@ public sealed class ProvisionedGitBindingTests
         public T EnterSynchronous<T>(string runId, Func<T> invoke)
         {
             var value = Inner.EnterSynchronous(runId, invoke);
+            if (value is WriterLease born) ActualWriter = born;
             if (RefuseWriterReturn && value is WriterLease writer)
             {
                 ActualWriter = writer;
@@ -167,7 +246,8 @@ public sealed class ProvisionedGitBindingTests
             }
             catch { value.Dispose(); throw; }
         }
-        async Task<string> Git(params string[] arguments)
+        async Task<string> Git(params string[] arguments) => await GitAt(Repository, arguments);
+        async Task<string> GitAt(string directory, params string[] arguments)
         {
             var environment = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
                 .Where(row => !((string)row.Key).StartsWith("GIT_", StringComparison.OrdinalIgnoreCase))
@@ -175,12 +255,33 @@ public sealed class ProvisionedGitBindingTests
             environment["GIT_CONFIG_NOSYSTEM"] = "1"; environment["GIT_CONFIG_GLOBAL"] = "NUL";
             environment["GIT_CONFIG_SYSTEM"] = "NUL"; environment["GIT_TERMINAL_PROMPT"] = "0";
             var capture = await Parent.EnterAsync("owned", () => Executor.ExecuteBoundedCaptureAsync(new(GitImage,
-                ["-c", "core.hooksPath=NUL", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", .. arguments], Repository, environment)
+                ["-c", "core.hooksPath=NUL", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", .. arguments], directory, environment)
             { EnvironmentIsComplete = true }, TimeSpan.FromSeconds(15), 1048576, Original.Token, new OwnedWorkPhaseBudget(Original)));
             Assert.Equal(0, capture.Command.ExitCode); Assert.True(capture.Command.OwnedProcessQuiescent);
             Assert.True(capture.RootExitObserved); Assert.True(capture.StandardOutputDrainCompleted); Assert.True(capture.StandardErrorDrainCompleted);
             Assert.True(capture.Command.LifecycleDiagnostics?.OwnedTree is { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 });
             return Encoding.UTF8.GetString(capture.StandardOutputBytes).Trim();
+        }
+        internal async Task<AgentCompletionReceipt> CompleteContractFixtureAsync(ExecutionCoordinator coordinator)
+        {
+            var head = await Git("rev-parse", "HEAD");
+            var plan = new FrozenWorkerPlan("owned", "sha256:" + new string('a', 64), head, "fixture/repository", Repository,
+                Worker, Path.Combine(Root, "fixture-result"), "actual-completed-writer", ["subject.txt"], [],
+                "fixture.cleanup", "fixture-v1", [AgentCapability.Launch, AgentCapability.CompletionEvidence]);
+            var (request, _) = await coordinator.PrepareWorkerAsync(plan, TestContext.Current.CancellationToken);
+            var capabilities = request.RequiredCapabilities.Select(capability => new AgentCapabilityEvidence(capability,
+                AgentCapabilityStatus.Supported, "contract fixture DATA only", "fixture:completed-writer-cleanup")).ToArray();
+            var accepted = new AgentAcceptedReceipt(request.SchemaVersion, request.RunId, request.RequestIdentity, request.PlanIdentity,
+                request.BaseCommit, request.Worktree, request.AdapterId, request.AdapterVersion, "fixture-run", "fixture-task", DateTimeOffset.UtcNow, capabilities);
+            await coordinator.AcceptAsync(accepted, TestContext.Current.CancellationToken);
+            File.WriteAllText(Path.Combine(Worker, "subject.txt"), "actual committed cleanup fixture\n");
+            await GitAt(Worker, "add", "--", "subject.txt");
+            await GitAt(Worker, "-c", "user.name=CleanupFixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "completed");
+            var observed = await Manager.ObserveAsync(Worker, TestContext.Current.CancellationToken);
+            var completion = new AgentCompletionReceipt(request.SchemaVersion, request.RunId, request.RequestIdentity, request.AdapterId, request.AdapterVersion,
+                accepted.RuntimeRunIdentity, accepted.RuntimeTaskIdentity, "success", request.Worktree, observed.HeadCommit, observed.TreeId, DateTimeOffset.UtcNow, [], []);
+            await coordinator.CompleteAsync(completion, TestContext.Current.CancellationToken);
+            return completion;
         }
         public void Dispose()
         {

@@ -1,3 +1,5 @@
+using System.Collections;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
@@ -94,7 +96,25 @@ internal sealed class HistoricalGitInput
     {
         Require(actual.WorkingDirectory, expected);
         var nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
-        var closed = new Dictionary<string, string>(actual.Environment ?? new Dictionary<string, string>(), StringComparer.Ordinal);
+        // Complete the ACTUAL inherited environment, retaining non-Git OS,
+        // resource, loader and Linux user-bus values. A partial profile map is
+        // not a complete environment. The fixed Git role set replaces ALL
+        // inherited/profile Git variables, including future trace/helper keys.
+        IDictionary inherited = actual.EnvironmentIsComplete ? new Dictionary<string, string>() : Environment.GetEnvironmentVariables();
+        if (inherited.Count > 512 || actual.Environment?.Count > 512)
+            throw new EvidenceWriteException("Historical Git environment exceeds the existing finite complete profile.");
+        var closed = new Dictionary<string, string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        foreach (DictionaryEntry row in inherited)
+        {
+            files.Check();
+            if (!((string)row.Key).StartsWith("GIT_", StringComparison.OrdinalIgnoreCase))
+                closed[(string)row.Key] = (string)row.Value!;
+        }
+        foreach (var row in actual.Environment ?? new Dictionary<string, string>())
+        {
+            files.Check();
+            if (!row.Key.StartsWith("GIT_", StringComparison.OrdinalIgnoreCase)) closed[row.Key] = row.Value;
+        }
         foreach (var pair in new Dictionary<string, string>
         {
             ["GIT_DIR"] = GitDirectory,
@@ -126,13 +146,18 @@ internal sealed class HistoricalGitInput
         }
         // No effective filter/include/transform key exists in the validated
         // local configuration; global/system/parameter sources are closed.
-        return actual with
+        var configured = actual with
         {
             Arguments = ["--no-pager", "-c", "core.hooksPath=" + nullDevice, "-c", "core.fsmonitor=false",
                 "-c", "core.untrackedCache=false", "-c", "core.attributesFile=" + nullDevice,
                 "-c", "diff.external=", "--no-optional-locks", .. actual.Arguments],
-            Environment = closed
+            Environment = closed,
+            EnvironmentIsComplete = true
         };
+        // Existing owner validation, before native admission. No subprocess is
+        // started; finite keys/values/cumulative limits remain unchanged.
+        CommandEnvironment.Complete(new ProcessStartInfo(), configured);
+        files.Check(); return configured;
     }
 
     // Same deliberately finite canonical-clone configuration profile as plan

@@ -19,3 +19,28 @@ When a protected baseline registry is selected, configure mutation before the Cr
 Baseline compatibility requires the exact profile, tool source, executable/package version and package bytes, configuration, scope and project. Profile identities include installation paths and payload hashes. An approval therefore applies to that OS and installation profile; moving the tool or switching OS requires a separately reviewed compatible baseline approval. Compatibility is checked before running the callable gate. The parent rechecks the exact approval bytes and UTC validity before consuming the comparison.
 
 Public contract CI excludes `Category=LiveContinuumAcceptance` because hosted runners lack the independently admitted private UAT profiles. This exclusion is not a passed live gate. Before release, run every row of `ParentNativeContinuumLiveTests` with the genuine current profiles and retain exact-head output: protected-registry issuance; Git admission after yield; file admission after yield for both read and persistence; normal completion releasing four leases; completed-owner external loss preserving four successors; and active-native external loss stopping the same original and preserving successors. These seven rows do not replace real installed worker, independent reviewer, quality, recovery or Windows/Linux golden acceptance. Missing profiles or owner-approved artifacts block that acceptance.
+
+## Current standalone compatibility boundaries
+
+Non-dry-run standalone `implement` requires the explicit approved `LocalSingle`
+selection. That owner provisions the new worktree and retains its actual Git
+binding. Precreated worker paths and durable markers cannot be adopted. The
+executable refuses a missing provisioning policy before constructing a host or
+coordination owner. Historical-quality mode does not dispatch a worker and keeps
+its separate route.
+
+Every newly constructed standalone execution composition requires a fresh empty
+or absent execution store. This includes non-dry-run `pr`, `merge` and
+`quality-baseline`; saved journals cannot construct a live owner. Use `pr` or
+`merge` with `--dry-run` for the existing immutable-history diagnostics. Existing
+in-flight ownership stays retained for its original owner; use a new selected
+store for a new run. This restriction does not grant publication or recovery
+authority, and raw old stores remain unchanged.
+
+When installed quality is configured, an incomplete or failed protected-quality
+comparison prevents independent reviewer dispatch in single-run and batch
+routes. The configured reviewer runs only after actual same-frame protected
+completion, or through the existing quality-absent route. A successful tool
+result label is insufficient. This avoids spending review allowance on a chain
+whose protected prerequisites are incomplete; it does not certify the runtime
+reviewer or its independence.

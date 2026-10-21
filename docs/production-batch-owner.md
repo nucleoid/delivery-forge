@@ -35,7 +35,13 @@ queue checkpoint cannot establish any of these actual capabilities.
 
 Required semantic prerequisites use frozen `commit:<full Git object ID>`
 conditions. The actual branch must contain those commits. An open PR, successful
-worker or same-tree change does not establish integration. Base or candidate
+worker or same-tree change does not establish integration. This initial product
+profile refuses prerequisites whose IDs name another selected batch root, even
+when the queue kernel could order those roots. Select independent roots with
+already-integrated external commit prerequisites instead. The batch cannot
+merge an earlier worker head or rewrite a dependent's frozen plan. Such a chain
+requires independently authorized integration followed by a newly reconciled
+plan/configuration and a fresh batch invocation. Base or candidate
 drift leaves a node `ReplanRequired`; a new frozen plan/configuration revision
 is needed. Unrelated DAG nodes are not silently made prerequisites.
 
@@ -61,8 +67,28 @@ must be separate. Existing files, source history and failed evidence are kept.
 `implement --dry-run` imports and checks selected plans without creating a host,
 lease, worker or journal. `resume --dry-run --run-dir STORE --config CONTAINER`
 reconstructs bounded immutable queue data and always reports `MayDispatch:false`.
-Fresh-process native-owner adoption remains unavailable. Queue pause/stop
-fences new native node birth; unsupported native pause/resume is not invented.
+Fresh-process native-owner adoption remains unavailable.
+
+An optional `ProductionBatch.ControlPath` selects one plain direct child file of
+the fresh batch StoreRoot, excluding reserved `batch-selection.json` and `runs`.
+It must be absent at startup. After reading the actual owner-created marker, an
+operator may publish one complete UTF8 JSON record (maximum1024bytes):
+`{"Kind":"ProductionBatchControl-v1","BatchRunId":"<actual marker RunId>","SelectionIdentity":"<actual marker identity>","Action":"pause"}`.
+`stop` is the only other Action. Unknown/duplicate/foreign/malformed input is
+refused; no record grants dispatch, policy changes, resume or ownership.
+
+The owner reads this input at serial node boundaries: before selecting a node,
+after persisting selected intent, and immediately before constructing its actual
+composition/coordination owner. It persists only actually observed sticky flags.
+Pause/stop prevents subsequent owner creation after acknowledgement; deleting or
+replacing a record never clears a latch and stop cannot be lowered to pause.
+A command arriving after a boundary is acknowledged at the next boundary; this
+is not instantaneous interruption of an active/prepared worker. There is no
+background reader, polling timer, stdin protocol or fresh clock. Dry-run and
+history inspection do not interpret commands. A failing root latches Stop before
+cleanup; the same actual owner still owns native disposition, and completed
+workers do not receive an invented Stop. Queue pause/stop also fences new native
+node birth; unsupported native pause/resume is not invented.
 If pause races a node already being prepared, the birth fence prevents native
 start and conservatively halts the batch with the prepared original retained
 for containing-owner cleanup. That race does not create a resumable batch.

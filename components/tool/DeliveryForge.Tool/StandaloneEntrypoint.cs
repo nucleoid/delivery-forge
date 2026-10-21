@@ -72,6 +72,14 @@ internal sealed class StandaloneEntrypoint
                     batch = new(config, configPin, original, resources ?? throw new IOException("Actual aggregate resources unavailable.")); actualReferences.Add(batch);
                     var actual = batch.RunAsync(command); actualReferences.Add(actual);
                     try { result = await actual.WaitAsync(original.Remaining).ConfigureAwait(false); }
+                    catch (Exception workFailure)
+                    {
+                        // Close admission before observing this SAME actual
+                        // batch task during the original cleanup allowance.
+                        batch.StopNewDispatch();
+                        await SettleBatchTaskAfterWorkFailureAsync(actual, original, workFailure).ConfigureAwait(false);
+                        throw;
+                    }
                     finally { if (!actual.IsCompleted) original.RetainUnknown(); }
                     original.Check();
                 }
@@ -80,7 +88,12 @@ internal sealed class StandaloneEntrypoint
                 {
                     var root = ReadPinned<StandaloneRootSelection>(config.StandaloneRoot, 65536); SeparateSelection(config, configPath, root); original.Check();
                     var inspection = command.Mode == ToolMode.Plan || command.Has("dry-run") || command.Mode == ToolMode.Capabilities;
-                    if (!inspection) StandaloneOwnerComposition.RequireFreshExecutionStore(root.StoreRoot, original);
+                    if (!inspection)
+                    {
+                        StandaloneOwnerComposition.RequireFreshExecutionStore(root.StoreRoot, original);
+                        if (command.Mode == ToolMode.Implement && config.LocalSingle is null)
+                            throw new ToolUsageException("Standalone implementation requires the explicit finite LocalSingle provisioning policy. Precreated worker paths cannot be adopted; no host or coordination owner was created.");
+                    }
                     LinuxScopeSelection? scope = null;
                     if (OperatingSystem.IsLinux()) scope = ReadPinned<LinuxScopeSelection>(root.LinuxScopeProfile ?? throw new ToolUsageException("Exact Linux owner profile required before Git or host birth."), 65536);
                     ProcessCommandExecutor executor = OperatingSystem.IsLinux() ? new(scope!, original) : new();
@@ -98,7 +111,7 @@ internal sealed class StandaloneEntrypoint
             }
             exit = result?.ExitCode ?? 1;
         }
-        catch (Exception error) { primary = error; Program.RetainFailure(error); try { original.BeginFailureCleanup(); } catch (Exception endpoint) { secondary.Add(endpoint); original.RetainUnknown(); } }
+        catch (Exception error) { batch?.StopNewDispatch(); primary = error; Program.RetainFailure(error); try { original.BeginFailureCleanup(); } catch (Exception endpoint) { secondary.Add(endpoint); original.RetainUnknown(); } }
         // Unknown native/task frames are never disposed, restored or converted
         // into a normal exit. The same actual caller is passively retained for
         // its containing owner to reconcile; this is a failed, over-budget state.
@@ -117,6 +130,24 @@ internal sealed class StandaloneEntrypoint
         catch (Exception error) { secondary.Add(error); original.RetainUnknown(); }
         if (original.HasRetainedUnknown || deliveryEntered && !deliveryReturned) return await HoldUnknown().ConfigureAwait(false);
         original.Dispose(); lock (Retained) Retained.Remove(this); return primary is null ? exit : 1;
+    }
+    internal static async Task SettleBatchTaskAfterWorkFailureAsync(Task actual, ToolLifetime original, Exception primary)
+    {
+        try
+        {
+            original.BeginFailureCleanup();
+            await actual.WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
+            _ = original.CleanupRemaining;
+        }
+        catch (Exception cleanup)
+        {
+            if (!actual.IsCompleted) original.RetainUnknown();
+            if (!ReferenceEquals(primary, cleanup))
+                throw new AggregateException("Batch WORK wait and SAME original task cleanup observation failed.", primary, cleanup);
+        }
+        // A late success or known physical cleanup never erases the failed
+        // WORK wait or turns an over-budget batch into COMPLETE.
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
     }
     async Task<int> HoldUnknown() { original.RetainUnknown(); attention.EmitOnce(); return await unknownHold.Task.ConfigureAwait(false); }
     static string Encode(object actual)

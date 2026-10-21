@@ -20,7 +20,7 @@ public sealed class ClaudeReviewerIsolationTests
         Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.IsolatedObservationArguments(["auth", "login"]));
         Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.IsolatedObservationArguments(["settings", "set", "model", "other"]));
         var main = ClaudeIndependentReviewData.IsolatedReviewArguments(1.25m);
-        Assert.Equal(new[] { "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--no-session-persistence", "--strict-mcp-config", "--tools", "Read,Grep,Glob", "--allowedTools", "Read,Grep,Glob", "--permission-mode", "dontAsk", "--max-budget-usd", "1.25" }, main);
+        Assert.Equal(new[] { "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd", "1.25" }, main);
         Assert.DoesNotContain("--model", main); Assert.DoesNotContain("--settings", main);
     }
     [Fact]
@@ -34,7 +34,8 @@ public sealed class ClaudeReviewerIsolationTests
         foreach (var source in new[] { parent, worker, result, artifacts }) Directory.CreateDirectory(source);
         File.WriteAllText(Path.Combine(worker, "CLAUDE.md"), "Hostile source instruction is outside the neutral directory.");
         var actual = ClaudeReviewerWorkingDirectory.Create(original, "run-cwd-control", artifacts, parent, worker, result);
-        foreach (var source in new[] { parent, worker, result, artifacts }) BoundedFiles.Separate(source, actual.Path);
+        foreach (var source in new[] { parent, worker, result }) BoundedFiles.Separate(source, actual.Path);
+        Assert.Equal(Path.GetFullPath(artifacts), Path.GetDirectoryName(actual.Path));
         actual.Check(); Assert.False(File.Exists(Path.Combine(actual.Path, "CLAUDE.md")));
         var marker = Path.Combine(actual.Path, ".forge-reviewer-owner"); Assert.True(File.Exists(marker));
         File.AppendAllText(marker, "changed");
@@ -51,5 +52,30 @@ public sealed class ClaudeReviewerIsolationTests
         Assert.Throws<ToolUsageException>(() => ClaudeReviewerWorkingDirectory.Create(original, "run-cwd-control", artifacts,
             Path.Combine(root, "parent"), worker, Path.Combine(root, "result")));
         Assert.False(Directory.Exists(artifacts)); original.Check();
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Deterministic_observation_precheck_refusal_does_not_enter_async_parent_effect(bool expired)
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var root = Path.Combine(Path.GetTempPath(), "forge-reviewer-preadmission-" + Guid.NewGuid().ToString("N"));
+        var artifacts = Path.Combine(root, "artifacts");
+        var cwd = ClaudeReviewerWorkingDirectory.Create(original, "run-preadmission", artifacts,
+            Path.Combine(root, "parent"), Path.Combine(root, "worker"), Path.Combine(root, "result"));
+        if (!expired) File.AppendAllText(Path.Combine(cwd.Path, ".forge-reviewer-owner"), "drift");
+        var revoked = false; var calls = 0;
+        var parent = new ParentEffectAdmission(new object(), run => run == "owned", _ => revoked = true);
+        void Attempt()
+        {
+            ClaudeIndependentReviewer.PrecheckObservationInputs(parent, "owned", cwd, expired ? TimeSpan.Zero : original.Remaining);
+            _ = parent.EnterAsync("owned", () => { calls++; return Task.FromResult(1); });
+        }
+        if (expired) Assert.Throws<TimeoutException>(Attempt);
+        else Assert.Throws<IOException>(Attempt);
+        Assert.Equal(0, calls); Assert.Equal(1, parent.EnteredCount);
+        // A returned synchronous validation failure revokes new work under the
+        // existing policy, but it is known settled rather than async UNKNOWN.
+        Assert.True(parent.AllKnownSettled); Assert.True(revoked); Assert.False(original.HasExplicitUnknown);
     }
 }
