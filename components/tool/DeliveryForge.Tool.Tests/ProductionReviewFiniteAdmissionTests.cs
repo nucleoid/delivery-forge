@@ -44,10 +44,16 @@ public sealed class ProductionReviewFiniteAdmissionTests
             File.WriteAllBytes(Path.Combine(root, $"git-{call:D3}-stderr.bin"), capture.StandardErrorBytes);
             var observation = System.Text.Json.JsonSerializer.Serialize(new
             {
-                Arguments = args, Directory = directory, capture.Command,
-                capture.RootExitObserved, capture.StandardOutputDrainCompleted, capture.StandardErrorDrainCompleted,
-                capture.CaptureBoundExceeded, capture.Timing,
-                OutputBytes = capture.StandardOutputBytes.Length, ErrorBytes = capture.StandardErrorBytes.Length
+                Arguments = args,
+                Directory = directory,
+                capture.Command,
+                capture.RootExitObserved,
+                capture.StandardOutputDrainCompleted,
+                capture.StandardErrorDrainCompleted,
+                capture.CaptureBoundExceeded,
+                capture.Timing,
+                OutputBytes = capture.StandardOutputBytes.Length,
+                ErrorBytes = capture.StandardErrorBytes.Length
             });
             File.WriteAllText(Path.Combine(root, $"git-{call:D3}-capture.json"), observation);
             if (capture.Command.ExitCode != 0 || !capture.Command.OwnedProcessQuiescent)

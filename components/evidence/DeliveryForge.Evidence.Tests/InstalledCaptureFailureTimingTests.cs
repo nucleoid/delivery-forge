@@ -43,11 +43,19 @@ public sealed class InstalledCaptureFailureTimingTests
         File.WriteAllBytes(Path.Combine(root, "actual-stderr.bin"), actual.Capture.StandardErrorBytes);
         var timing = JsonSerializer.Serialize(new
         {
-            actual.Result.ExitCode, actual.Result.TimedOut, actual.Result.Cancelled,
-            actual.Result.OwnedProcessQuiescent, actual.Result.LifecycleDiagnostics,
-            actual.Capture.RootExitObserved, actual.Capture.StandardOutputDrainCompleted, actual.Capture.StandardErrorDrainCompleted,
-            OutputBytes = actual.Capture.StandardOutputBytes.Length, ErrorBytes = actual.Capture.StandardErrorBytes.Length,
-            Child = actual.Capture.Timing, Files = files.TimingData, Failure = failure?.ToString()
+            actual.Result.ExitCode,
+            actual.Result.TimedOut,
+            actual.Result.Cancelled,
+            actual.Result.OwnedProcessQuiescent,
+            actual.Result.LifecycleDiagnostics,
+            actual.Capture.RootExitObserved,
+            actual.Capture.StandardOutputDrainCompleted,
+            actual.Capture.StandardErrorDrainCompleted,
+            OutputBytes = actual.Capture.StandardOutputBytes.Length,
+            ErrorBytes = actual.Capture.StandardErrorBytes.Length,
+            Child = actual.Capture.Timing,
+            Files = files.TimingData,
+            Failure = failure?.ToString()
         });
         File.WriteAllText(Path.Combine(root, "timing.json"), timing);
         TestContext.Current.TestOutputHelper!.WriteLine("Retained actual invalid-byte observation: " + root + " " + timing);
