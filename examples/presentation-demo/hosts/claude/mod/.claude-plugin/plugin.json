@@ -1,0 +1,7 @@
+{
+  "name": "forge-cockpit-demo",
+  "version": "0.1.0",
+  "description": "Synthetic read-only Delivery Forge native cockpit",
+  "author": { "name": "Delivery Forge" },
+  "types": "./types/index.d.ts"
+}
