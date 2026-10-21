@@ -4,12 +4,7 @@ import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const root = path.dirname(fileURLToPath(import.meta.url));
-const oxlint = path.join(
-  root,
-  "node_modules",
-  ".bin",
-  process.platform === "win32" ? "oxlint.cmd" : "oxlint",
-);
+const oxlint = path.join(root, "node_modules", "oxlint", "bin", "oxlint");
 
 type Diagnostic = { code?: string; severity?: string };
 type Report = { diagnostics: Diagnostic[]; number_of_files: number; number_of_rules: number };
@@ -65,14 +60,19 @@ function run(fixture:
   | "violation-no-space-from"
   | "suppression-multiline-jsx-backtick"
   | "violation-multiline-jsx-backtick"
+  | "suppression-multiline-jsx-expression-backtick"
+  | "violation-multiline-jsx-expression-backtick"
+  | "suppression-same-line-jsx-expression-quote"
+  | "violation-same-line-jsx-expression-quote"
   | "suppression-blanket-specific-enable"
   | "suppression-prefixed-alias"): {
   status: number | null;
   report: Report;
 } {
   const result = spawnSync(
-    oxlint,
+    process.execPath,
     [
+      oxlint,
       "--config",
       path.join(root, "oxlint.config.ts"),
       "--format",
@@ -86,7 +86,11 @@ function run(fixture:
         fixture === "suppression-jsx-expression-container" ||
         fixture === "violation-jsx-expression-container" ||
         fixture === "suppression-multiline-jsx-backtick" ||
-        fixture === "violation-multiline-jsx-backtick"
+        fixture === "violation-multiline-jsx-backtick" ||
+        fixture === "suppression-multiline-jsx-expression-backtick" ||
+        fixture === "violation-multiline-jsx-expression-backtick" ||
+        fixture === "suppression-same-line-jsx-expression-quote" ||
+        fixture === "violation-same-line-jsx-expression-quote"
           ? "tsx"
           : "ts"
       }`),
@@ -180,6 +184,8 @@ for (const [suppressedName, violationName] of [
   ["suppression-prefix-update-regex", "violation-prefix-update-regex"],
   ["suppression-no-space-from", "violation-no-space-from"],
   ["suppression-multiline-jsx-backtick", "violation-multiline-jsx-backtick"],
+  ["suppression-multiline-jsx-expression-backtick", "violation-multiline-jsx-expression-backtick"],
+  ["suppression-same-line-jsx-expression-quote", "violation-same-line-jsx-expression-quote"],
 ] as const) {
   const violationControl = run(violationName);
   assert.equal(violationControl.status, 1);

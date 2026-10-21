@@ -796,7 +796,7 @@ public sealed class SchemaValidationTests
             _ => ("delivery-forge.dotnet", "1.0.0", "dotnet", "10.0.401", "trx-v1")
         };
         var runtimeClosure = gateId == "anti-slop"
-            ? "sha256:74eb6bfe76e45e488e4ca336bc15818b093db2672050c2fccb5f036a259e76a0"
+            ? "sha256:c2906d585a171f1e52857131f3c4d67424aafea262371768599166fb0de5c186"
             : "sha256:" + new string('b', 64);
         gate["command"] = CommandEnvelope(tool, toolVersion, format, runtimeClosure);
         gate["authorityBinding"] = new JsonObject

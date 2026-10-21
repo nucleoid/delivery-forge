@@ -639,18 +639,29 @@ internal static class JavaScriptSuppressionScanner
         var previous = index - 1;
         while (previous >= 0 && IsWhitespace(content[previous]))
             previous--;
-        if (previous >= 0 && content[previous] == (byte)'}')
+        while (previous >= 0)
         {
-            for (var next = index + 1; next < content.Length; next++)
-            {
-                if (content[next] == (byte)'<')
-                    return true;
-                if (content[next] is (byte)'\r' or (byte)'\n' or (byte)';')
-                    return false;
-            }
-        }
-        while (previous >= 0 && content[previous] is not (byte)'>' and not (byte)'{' and not (byte)'}')
+            while (previous >= 0 &&
+                   content[previous] is not (byte)'>' and not (byte)'{' and not (byte)'}')
+                previous--;
+            if (previous < 0 || content[previous] != (byte)'}')
+                break;
+
+            var depth = 1;
             previous--;
+            while (previous >= 0 && depth > 0)
+            {
+                if (content[previous] == (byte)'}')
+                    depth++;
+                else if (content[previous] == (byte)'{')
+                    depth--;
+                previous--;
+            }
+            if (depth != 0)
+                return false;
+            while (previous >= 0 && IsWhitespace(content[previous]))
+                previous--;
+        }
         if (previous < 0 || content[previous] != (byte)'>')
             return false;
         for (var next = index + 1; next < content.Length; next++)

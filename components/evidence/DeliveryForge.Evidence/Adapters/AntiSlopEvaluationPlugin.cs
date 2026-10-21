@@ -13,11 +13,11 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
     private const string ReviewedLockSha256 = "556259ea811200192cd7dc75016408cf76a4718a813245cb9f3b820d74ed8567";
     private const string ReviewedConfigSha256 = "5226e689d45cb10f4a25df0e31f52092f52b958fdd179862a0312815df9c8e10";
     private const string ReviewedEffectConfigSha256 = "d4e372437c08bfc5d4db784bb78ae78b2e3950442379b526cede50b5f3c8e907";
-    private const string ReviewedBatchRunnerSha256 = "36c0882a2dffcb207393649ad1e013b0f81a76fced84d702e3fd0b3b32c3aa39";
+    private const string ReviewedBatchRunnerSha256 = "7fb599c9b2e31b81a5287e25527b0d9113cfaae93fcba90184241ed51c08bedd";
     public const string ReviewedLinuxX64GnuRuntimeClosureSha256 =
-        "sha256:74eb6bfe76e45e488e4ca336bc15818b093db2672050c2fccb5f036a259e76a0";
+        "sha256:c2906d585a171f1e52857131f3c4d67424aafea262371768599166fb0de5c186";
     public const string ReviewedLinuxX64GnuEffectRuntimeClosureSha256 =
-        "sha256:6cc88c912de3f61f066b807eda906546aa5d4786af1c7e3c6a8a20a9e7269bc4";
+        "sha256:90c09e42ef48daf1412b0b475ef72df731de3b0e0b8e25281187640e6c0aabe8";
     internal const int MaximumDirectArgumentBytes = 24_000;
     private static readonly HashSet<string> SupportedExtensions = new(
         [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"],
@@ -165,6 +165,14 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             return NormalizedEvidence.Incomplete(
                 "Anti-slop requires the exact pinned Oxlint 1.78.0 JSON capability.");
         var inputs = DeterministicEvaluationPluginRegistry.NormalizeInputs(request.Plugin?.Inputs ?? []);
+        try
+        {
+            AntiSlopManifestPolicy.ValidateInputs(inputs);
+        }
+        catch (EvaluationPluginException exception)
+        {
+            return NormalizedEvidence.Incomplete(exception.Message);
+        }
         var unsupported = inputs.Where(input => !IsSupportedInput(input)).ToArray();
         if (unsupported.Length > 0)
             return NormalizedEvidence.Incomplete(
@@ -524,10 +532,14 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             var expectedRunner = Path.GetFullPath(Path.Combine(root, "run-oxlint-batches.mjs"));
             if (!string.Equals(Path.GetFullPath(invocation.Arguments[0]), expectedRunner, PathComparison))
                 throw new InvalidOperationException("The anti-slop batch runner is not the code-owned launcher.");
-            var manifestBytes = await cache.ReadFileAsync(invocation.Arguments[6], cancellationToken)
+            var manifestLength = new FileInfo(invocation.Arguments[6]).Length;
+            if (manifestLength > AntiSlopManifestPolicy.MaximumManifestBytes)
+                throw new InvalidOperationException(
+                    $"Anti-slop input manifest exceeds the {AntiSlopManifestPolicy.MaximumManifestBytes}-byte ceiling.");
+            var manifestBytes = await cache.ReadFileAsync(
+                    invocation.Arguments[6], cancellationToken, AntiSlopManifestPolicy.MaximumManifestBytes)
                 .ConfigureAwait(false);
-            var manifestInputs = JsonSerializer.Deserialize<string[]>(manifestBytes) ??
-                throw new InvalidOperationException("The anti-slop input manifest is malformed.");
+            var manifestInputs = AntiSlopManifestPolicy.ParseSnapshotManifest(manifestBytes);
             var normalizedManifestInputs = DeterministicEvaluationPluginRegistry.NormalizeInputs(manifestInputs);
             if (!expectedInputs.SequenceEqual(normalizedManifestInputs, StringComparer.Ordinal))
                 throw new InvalidOperationException(
@@ -761,17 +773,28 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         private readonly Dictionary<string, IReadOnlyList<string>> _directoryLists = new(PathComparer);
         private long _cachedBytes;
 
-        internal async ValueTask<byte[]> ReadFileAsync(string path, CancellationToken cancellationToken)
+        internal async ValueTask<byte[]> ReadFileAsync(
+            string path,
+            CancellationToken cancellationToken,
+            long? maximumFileBytes = null)
         {
             path = Path.GetFullPath(path);
             cancellationToken.ThrowIfCancellationRequested();
             if (_files.TryGetValue(path, out var cached))
+            {
+                if (maximumFileBytes is not null && cached.LongLength > maximumFileBytes.Value)
+                    throw new InvalidOperationException(
+                        $"Anti-slop closure file exceeds the {maximumFileBytes.Value}-byte ceiling: {path}");
                 return cached;
+            }
             if (!File.Exists(path))
                 throw new InvalidOperationException($"Required anti-slop closure file is unavailable: {path}");
             await using var stream = new FileStream(
                 path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
+            if (maximumFileBytes is not null && stream.Length > maximumFileBytes.Value)
+                throw new InvalidOperationException(
+                    $"Anti-slop closure file exceeds the {maximumFileBytes.Value}-byte ceiling: {path}");
             if (stream.Length > int.MaxValue || stream.Length > MaximumCachedClosureBytes - _cachedBytes)
                 throw new InvalidOperationException(
                     $"Anti-slop closure exceeds the {MaximumCachedClosureBytes}-byte snapshot memory ceiling: {path}");

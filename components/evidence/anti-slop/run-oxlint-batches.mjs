@@ -11,19 +11,22 @@ const fail = (reason) => {
 };
 
 const args = process.argv.slice(2);
+const maximumManifestBytes = 8 * 1024 * 1024;
+const maximumInputCount = 100_000;
+const maximumInputPathBytes = 4_096;
 if (args.length !== 6 || args[0] !== "--oxlint" || args[2] !== "--config" || args[4] !== "--inputs")
   fail("invalid canonical batch-runner arguments");
 
 let inputs;
 try {
-  if (statSync(args[5]).size > 8 * 1024 * 1024)
+  if (statSync(args[5]).size > maximumManifestBytes)
     fail("input manifest exceeds the 8 MiB ceiling");
   inputs = JSON.parse(readFileSync(args[5], "utf8"));
 } catch (error) {
   fail(`input manifest unavailable: ${error.message}`);
 }
-if (!Array.isArray(inputs) || inputs.length > 100_000 ||
-    inputs.some((value) => typeof value !== "string" || Buffer.byteLength(value) > 4096))
+if (!Array.isArray(inputs) || inputs.length > maximumInputCount ||
+    inputs.some((value) => typeof value !== "string" || Buffer.byteLength(value) > maximumInputPathBytes))
   fail("input manifest must be a JSON string array");
 
 const prefix = ["--config", args[3], "--format", "json", "--no-ignore", "--disable-nested-config"];

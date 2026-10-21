@@ -24,6 +24,56 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
+    public async Task Anti_slop_manifest_publication_is_atomic_concurrent_and_recovers_truncation()
+    {
+        using var repository = new TempDirectory();
+        using var output = new TempDirectory();
+        var original = TestEvidence.GateRequest(output.Path);
+        var inputs = Enumerable.Range(0, 20)
+            .Select(index => $"src/{index:D2}-{new string('x', 1_500)}.ts")
+            .ToArray();
+
+        GateRequest Create() => AntiSlopRequestFactory.Create(
+            "anti-slop", original.Policy, original.Capability, original.ExpectedRepository,
+            original.Invocation.WorkingDirectory, repository.Path, System.IO.Path.Combine(repository.Path, "node"),
+            inputs, "frozen-javascript-family", TimeSpan.FromSeconds(30), output.Path);
+
+        var requests = await Task.WhenAll(Enumerable.Range(0, 12).Select(_ => Task.Run(Create)));
+        var manifest = requests[0].Invocation.Arguments[6];
+        Assert.All(requests, request => Assert.Equal(manifest, request.Invocation.Arguments[6]));
+        var expected = await File.ReadAllBytesAsync(manifest, TestContext.Current.CancellationToken);
+
+        await File.WriteAllTextAsync(manifest, "[", TestContext.Current.CancellationToken);
+        var recovered = Create();
+
+        Assert.Equal(manifest, recovered.Invocation.Arguments[6]);
+        Assert.Equal(expected, await File.ReadAllBytesAsync(manifest, TestContext.Current.CancellationToken));
+        Assert.Empty(Directory.EnumerateFiles(System.IO.Path.GetDirectoryName(manifest)!, "*.tmp"));
+    }
+
+    [Fact]
+    public void Anti_slop_factory_enforces_all_manifest_bounds_before_publication()
+    {
+        using var repository = new TempDirectory();
+        using var output = new TempDirectory();
+        var original = TestEvidence.GateRequest(output.Path);
+
+        void Create(IReadOnlyList<string> inputs) => AntiSlopRequestFactory.Create(
+            "anti-slop", original.Policy, original.Capability, original.ExpectedRepository,
+            original.Invocation.WorkingDirectory, repository.Path, System.IO.Path.Combine(repository.Path, "node"),
+            inputs, "frozen-javascript-family", TimeSpan.FromSeconds(30), output.Path);
+
+        Assert.Contains("100000", Assert.Throws<EvaluationPluginException>(() =>
+            Create(Enumerable.Range(0, 100_001).Select(index => $"src/{index}.ts").ToArray())).Message);
+        Assert.Contains("4096", Assert.Throws<EvaluationPluginException>(() =>
+            Create([new string('x', 4_094) + ".ts"])).Message);
+        Assert.Contains("8388608", Assert.Throws<EvaluationPluginException>(() =>
+            Create(Enumerable.Range(0, 2_100)
+                .Select(index => $"src/{index:D4}-{new string('x', 3_990)}.ts")
+                .ToArray())).Message);
+    }
+
+    [Fact]
     public void Reviewed_installed_anti_slop_runtime_closure_is_exact()
     {
         if (!OperatingSystem.IsLinux() ||
@@ -505,6 +555,84 @@ public sealed class DeterministicEvaluationPluginTests
         var plugin = AntiSlopEvaluationPlugin.CreateBundledForFixture(root, nodePath);
 
         Assert.Null(plugin.ValidateBeforeExecution(request));
+    }
+
+    [Theory]
+    [InlineData("bytes", "manifest")]
+    [InlineData("count", "manifest")]
+    [InlineData("path", "path")]
+    public async Task Hand_built_anti_slop_manifest_bound_failures_persist_incomplete_without_execution(
+        string invalidBound,
+        string expectedReason)
+    {
+        using var temp = new TempDirectory();
+        using var output = new TempDirectory();
+        var (config, nodePath, entryPoint) = CreateFixtureAntiSlopClosure(temp.Path);
+        var root = System.IO.Path.GetDirectoryName(config)!;
+        var manifest = System.IO.Path.Combine(temp.Path, "inputs.json");
+        switch (invalidBound)
+        {
+            case "bytes":
+                await using (var stream = new FileStream(manifest, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                    stream.SetLength(8L * 1024 * 1024 + 1);
+                break;
+            case "count":
+                await File.WriteAllBytesAsync(
+                    manifest,
+                    System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
+                        Enumerable.Repeat("src/app.ts", 100_001)),
+                    TestContext.Current.CancellationToken);
+                break;
+            case "path":
+                await File.WriteAllBytesAsync(
+                    manifest,
+                    System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(
+                        new[] { new string('x', 4_094) + ".ts" }),
+                    TestContext.Current.CancellationToken);
+                break;
+        }
+        var invocation = new CommandInvocation(
+            nodePath,
+            [System.IO.Path.Combine(root, "run-oxlint-batches.mjs"), "--oxlint", entryPoint,
+                "--config", config, "--inputs", manifest],
+            temp.Path,
+            new Dictionary<string, string>(StringComparer.Ordinal),
+            InheritEnvironment: false);
+        var original = TestEvidence.GateRequest(output.Path);
+        var executableIdentity = $"sha256:{Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(nodePath)))}";
+        var request = original with
+        {
+            Capability = ToolCapability.FromDetection(
+                "oxlint", "1.78.0", "oxlint-json-v1", false, [], nodePath,
+                executableIdentity, ["lint"], invocation.WorkingDirectory),
+            Adapter = EvidenceAdapterKind.External,
+            ConfigurationIdentity = "unavailable",
+            Invocation = invocation,
+            Plugin = new EvaluationPluginSelection("dmmulroy.anti-slop", true, ["src/app.ts"])
+        };
+        var fixturePlugin = AntiSlopEvaluationPlugin.CreateBundledForFixture(root, nodePath);
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new ScopedSequenceRepositoryIdentityReader(
+                new RepositoryEvaluationScope(["src/app.ts"], new HashSet<string>(StringComparer.Ordinal)),
+                TestEvidence.Repository(), TestEvidence.Repository()),
+            invocation.WorkingDirectory,
+            TestEvidence.Commit('a'),
+            plugins: new DeterministicEvaluationPluginRegistry([fixturePlugin]),
+            authorityRegistry: new TrustedGatePluginRegistry(
+            [
+                new("test", fixturePlugin.Id, fixturePlugin.Version, fixturePlugin.ExpectedTool,
+                    "1.78.0", "oxlint-json-v1")
+            ]),
+            hostOwnedClaimRoot: null);
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains(expectedReason, result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(result.Execution.ExitCode);
+        Assert.True(File.Exists(result.ReceiptPath));
     }
 
     [Fact]
