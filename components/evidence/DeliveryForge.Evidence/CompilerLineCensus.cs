@@ -112,6 +112,7 @@ internal static class CompilerLineCensus
                 if (!extents.ContainsKey(source.LogicalPath)) extents.Add(source.LogicalPath, LineExtents(source.Text, files));
             }
             var points = new List<Point>(); var totalPoints = 0;
+            var implicitConstructors = new CompilerImplicitConstructor(documents, files);
             if (HidesAuthoredCode(metadata, metadata.CustomAttributes, files))
                 Unsupported("Debugger-hiding metadata is unsupported by the complete compiler-line profile.");
             foreach (var typeHandle in metadata.TypeDefinitions)
@@ -153,7 +154,8 @@ internal static class CompilerLineCensus
                     }
                     // RVA=0 declares no executable method body (abstract/import/runtime).
                     // An opaque IL body cannot be presumed compiler-generated or exempt.
-                    if (method.RelativeVirtualAddress != 0 && visible == 0)
+                    if (method.RelativeVirtualAddress != 0 && visible == 0 &&
+                        !implicitConstructors.Proves(methodHandle, metadata, pe))
                         Unsupported("An executable compiler body has no usable nonhidden source points; authored completeness is unproven.");
                 }
             }

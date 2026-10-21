@@ -4,6 +4,7 @@
     <RootNamespace>DeliveryForge.Evidence</RootNamespace>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" />
     <ProjectReference Include="../../contracts/DeliveryForge.Contracts/DeliveryForge.Contracts.csproj" />
     <ProjectReference Include="../../coordination/DeliveryForge.Coordination/DeliveryForge.Coordination.csproj" />
     <EmbeddedResource Include="Vendor/Crap4CSharp/result-schema-v1.json" LogicalName="DeliveryForge.Evidence.Crap4CSharp.result-schema-v1.json" />

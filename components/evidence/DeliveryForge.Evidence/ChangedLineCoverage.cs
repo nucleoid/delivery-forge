@@ -39,7 +39,7 @@ internal static partial class ChangedLineCoverage
             foreach (var input in Array(context, "inputs"))
             {
                 files.Check();
-                if (Text(input, "role") != "source") continue;
+                if (Text(input, "role") is not ("source" or "compiler-source")) continue;
                 var logical = Text(input, "logicalPath"); InstalledToolProfile.Relative(logical);
                 var locator = Text(input, "locator");
                 InstalledToolProfile.Relative(locator);
