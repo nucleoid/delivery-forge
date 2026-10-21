@@ -148,8 +148,12 @@ public sealed partial class ProductionReviewSourceOwner
                 name.Split('/').Any(part => part is "" or "." or "..") || name.Split('/').Any(part => part.Equals(".git", StringComparison.OrdinalIgnoreCase)) || !names.Add(name))
                 throw new ReviewPreflightException("Source archive has duplicate or noncanonical paths.");
             if (entry is PaxTarEntry pax && pax.ExtendedAttributes.Any(pair => pair.Key switch
-                { "path" => pair.Value != entry.Name, "linkpath" => entry.EntryType != TarEntryType.SymbolicLink || pair.Value != entry.LinkName,
-                  "mtime" => pair.Value.Length > 32 || !decimal.TryParse(pair.Value, System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint, System.Globalization.CultureInfo.InvariantCulture, out _), _ => true }))
+                {
+                    "path" => pair.Value != entry.Name,
+                    "linkpath" => entry.EntryType != TarEntryType.SymbolicLink || pair.Value != entry.LinkName,
+                    "mtime" => pair.Value.Length > 32 || !decimal.TryParse(pair.Value, System.Globalization.NumberStyles.AllowLeadingSign | System.Globalization.NumberStyles.AllowDecimalPoint, System.Globalization.CultureInfo.InvariantCulture, out _),
+                    _ => true
+                }))
                 throw new ReviewPreflightException("Unknown or mismatched Git archive attributes.");
             if (directory)
             {

@@ -82,12 +82,14 @@ public sealed class HistoricalGitInputTests
     {
         var input = new Input(); var binding = new HistoricalGitInput(Files(), input.Root, input.Expected);
         var configured = binding.Configure(new("selected-absolute-git", ["status"], input.Root,
-            new Dictionary<string, string> { ["FORGE_ONLY_SELECTED"] = "retained" }) { EnvironmentIsComplete = true });
+            new Dictionary<string, string> { ["FORGE_ONLY_SELECTED"] = "retained" })
+        { EnvironmentIsComplete = true });
         Assert.True(configured.EnvironmentIsComplete);
         Assert.Equal("retained", configured.Environment!["FORGE_ONLY_SELECTED"]);
         Assert.DoesNotContain("PATH", configured.Environment.Keys);
         Assert.Throws<ArgumentException>(() => binding.Configure(new("selected-absolute-git", ["status"], input.Root,
-            new Dictionary<string, string> { ["FORGE_OVERSIZED"] = new('x', 32769) }) { EnvironmentIsComplete = true }));
+            new Dictionary<string, string> { ["FORGE_OVERSIZED"] = new('x', 32769) })
+        { EnvironmentIsComplete = true }));
     }
 
     [Theory]

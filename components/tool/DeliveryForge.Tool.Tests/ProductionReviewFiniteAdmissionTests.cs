@@ -46,6 +46,7 @@ public sealed class ProductionReviewFiniteAdmissionTests
         try
         {
             await Git(repository, "init", "-q", "-b", "main");
+            await Git(repository, "config", "core.autocrlf", "false");
             const string policy = """
                 {"Fixture":false,"Advisory":false,"AllowedFamilies":[{"Author":"gpt","Reviewer":"claude"}],"AllowedScopes":["source"],"AllowExactReuse":false,"Budget":{"MaximumRounds":2,"MaximumDuration":"00:00:30","MaximumTokens":4096,"MaximumCost":1.0},"ExemptionApprovers":[]}
                 """;
