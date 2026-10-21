@@ -235,9 +235,14 @@ public sealed class CompilerOfficialRecipeTests
             }).ToArray();
             var legacy = CompilerLineCensus.Inspect(emitted.EmittedPe, emitted.EmittedPdb, expected, documents, files);
             Assert.False(legacy.Complete); // Essential: the fixture must use fallback.
-            Assert.Equal(new[] { 4, 7, 8, 9, 10, 11, 12 }, legacy.ProviderLines.Where(line => line.LogicalPath == "Flag.cs")
+            // The real record copy constructor also has a visible point over
+            // the declaration's Flag token. Keep it in both inventories and
+            // require its measurement alongside the accessor and method body.
+            var recordPoint = Assert.Single(legacy.Points, point => point.LogicalPath == "Flag.cs" && point.StartLine == 2);
+            Assert.Equal((22, 2, 26), (recordPoint.StartColumn, recordPoint.EndLine, recordPoint.EndColumn));
+            Assert.Equal(new[] { 2, 4, 7, 8, 9, 10, 11, 12 }, legacy.ProviderLines.Where(line => line.LogicalPath == "Flag.cs")
                 .Select(line => line.Number).Distinct().Order().ToArray());
-            Assert.Equal(new[] { 4, 7, 8, 11, 12 }, legacy.PolicyLines.Where(line => line.LogicalPath == "Flag.cs")
+            Assert.Equal(new[] { 2, 4, 7, 8, 11, 12 }, legacy.PolicyLines.Where(line => line.LogicalPath == "Flag.cs")
                 .Select(line => line.Number).Distinct().Order().ToArray());
 
             // Clone retained DATA solely as a compact closed-shape fixture template.
@@ -321,7 +326,7 @@ public sealed class CompilerOfficialRecipeTests
             Descriptor(recipeArtifact, JsonSerializer.SerializeToUtf8Bytes(recipe), "fixture/recipe.json", true);
             var coverageArtifact = Assert.Single(manifest["artifacts"]!.AsArray(), row => row!["kind"]!.GetValue<string>() == "coverage" &&
                 row["contextId"]!.GetValue<string>() == contextId && row["buildId"]!.GetValue<string>() == buildId)!.AsObject();
-            var points = new[] { 4, 7, 8, 9, 10, 11, 12 }.Select(line => new XElement("SequencePoint",
+            var points = new[] { 2, 4, 7, 8, 9, 10, 11, 12 }.Select(line => new XElement("SequencePoint",
                 new XAttribute("sl", line), new XAttribute("vc", 1), new XAttribute("fileid", "1")));
             var coverageMethod = new XElement("Method", new XElement("FileRef", new XAttribute("uid", "1")),
                 new XElement("SequencePoints", points));
@@ -349,8 +354,8 @@ public sealed class CompilerOfficialRecipeTests
             {
                 var reduction = ChangedLineCoverage.ReadCompilerBound(diff, parsed.RootElement, fixtureRoot, ReadFixture, files);
                 Assert.True(reduction.CompilerCensusComplete, reduction.Reason);
-                Assert.Equal(GateOutcome.Pass, reduction.Outcome); Assert.Equal(5, reduction.ChangedExecutableLines);
-                Assert.Equal(5, reduction.CoveredChangedLines); Assert.Equal(100m, reduction.Percent);
+                Assert.Equal(GateOutcome.Pass, reduction.Outcome); Assert.Equal(6, reduction.ChangedExecutableLines);
+                Assert.Equal(6, reduction.CoveredChangedLines); Assert.Equal(100m, reduction.Percent);
                 Assert.Equal(0, reduction.UnmeasuredChangedLines);
                 Assert.True(compilerReads.SetEquals(compilerLocators));
             }
