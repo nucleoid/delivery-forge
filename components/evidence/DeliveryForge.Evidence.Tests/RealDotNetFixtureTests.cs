@@ -10,6 +10,7 @@ public sealed class RealDotNetFixtureTests
     public async Task Earlier_red_commit_then_clean_green_head_produces_real_test_counts()
     {
         using var temp = new TempDirectory();
+        using var greenOwner = new TempDirectory();
         using var evidence = new TempDirectory();
         var fixture = System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "RealDotNet");
         CopyTree(fixture, temp.Path);
@@ -35,19 +36,7 @@ public sealed class RealDotNetFixtureTests
         var redHead = await GitAsync(executor, temp.Path, ["rev-parse", "HEAD"]);
 
         var dotnet = ResolveExecutable("DELIVERY_FORGE_DOTNET_HOST", "dotnet");
-        var detection = await new ToolCapabilityDetector(executor).DetectAsync(
-            new CapabilityProbe(
-                "dotnet", ExecutableSource.TrustedExplicit, dotnet, temp.Path, null,
-                ["--version"], ["--help"], "10.0.401", "trx-v1", false),
-            TestContext.Current.CancellationToken);
-        var capability = detection.Capability;
-        Assert.True(capability.Supported,
-            $"Dotnet capability: executable={dotnet}; observed={capability.Version}; " +
-            $"version exit={detection.VersionResult?.ExitCode}; " +
-            $"version output={detection.VersionResult?.StandardOutput} {detection.VersionResult?.StandardError}; " +
-            $"help exit={detection.HelpResult?.ExitCode}; " +
-            $"help output={detection.HelpResult?.StandardOutput} {detection.HelpResult?.StandardError}");
-        Assert.Equal("10.0.401", capability.Version);
+        var capability = await DetectDotNetAsync(executor, dotnet, temp.Path);
         var project = System.IO.Path.Combine(temp.Path, "Subject.Tests", "Subject.Tests.csproj");
         var redTrx = System.IO.Path.Combine(temp.Path, "red.trx");
         var protectedBase = redHead.StandardOutput.Trim();
@@ -79,11 +68,38 @@ public sealed class RealDotNetFixtureTests
         var greenHead = await GitAsync(executor, temp.Path, ["rev-parse", "HEAD"]);
         Assert.NotEqual(redHead.StandardOutput.Trim(), greenHead.StandardOutput.Trim());
 
+        // Model a platform-specific SDK residue that is not part of either committed tree.
+        // GREEN must be evaluated from committed source, never from the RED build worktree.
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(temp.Path, "red-worktree-residue.tmp"),
+            "red-only",
+            TestContext.Current.CancellationToken);
+
         DeleteBuildOutputs(temp.Path);
-        var greenTrx = System.IO.Path.Combine(temp.Path, "green.trx");
-        var assembly = System.IO.Path.Combine(temp.Path, "Subject", "bin", "Release", "net10.0", "Subject.dll");
+        var contaminatedStatus = await GitAsync(
+            executor, temp.Path, ["status", "--porcelain=v1", "--untracked-files=all"]);
+        Assert.Contains("red-worktree-residue.tmp", contaminatedStatus.StandardOutput, StringComparison.Ordinal);
+
+        var greenRepository = System.IO.Path.Combine(greenOwner.Path, "repository");
+        await GitAsync(
+            executor,
+            greenOwner.Path,
+            ["clone", "--no-local", "--no-hardlinks", "--", temp.Path, greenRepository]);
+        var clonedHead = await GitAsync(executor, greenRepository, ["rev-parse", "HEAD"]);
+        Assert.Equal(greenHead.StandardOutput.Trim(), clonedHead.StandardOutput.Trim());
+        var cleanStatus = await GitAsync(
+            executor, greenRepository, ["status", "--porcelain=v1", "--untracked-files=all"]);
+        Assert.True(string.IsNullOrEmpty(cleanStatus.StandardOutput),
+            $"Fresh GREEN clone is not clean:{Environment.NewLine}{cleanStatus.StandardOutput}");
+
+        capability = await DetectDotNetAsync(executor, dotnet, greenRepository);
+        project = System.IO.Path.Combine(greenRepository, "Subject.Tests", "Subject.Tests.csproj");
+        var greenTrx = System.IO.Path.Combine(greenRepository, "green.trx");
+        var assembly = System.IO.Path.Combine(
+            greenRepository, "Subject", "bin", "Release", "net10.0", "Subject.dll");
         Assert.False(File.Exists(assembly));
-        var greenResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "green-gate",
+        var greenResult = await RunGateAsync(
+            executor, capability, greenRepository, evidence.Path, protectedBase, "green-gate",
             ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={greenTrx}"]);
         ArchiveFixtureEvidence(evidence.Path, greenResult);
         Assert.True(greenResult.Execution.ExitCode == 0,
@@ -100,8 +116,9 @@ public sealed class RealDotNetFixtureTests
         Assert.Contains("evidence.trx", greenResult.ArtifactHashes.Keys);
         Assert.StartsWith("sha256:", greenResult.ArtifactHashes["evidence.trx"]);
 
-        var warmTrx = System.IO.Path.Combine(temp.Path, "warm.trx");
-        var warmResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "warm-gate",
+        var warmTrx = System.IO.Path.Combine(greenRepository, "warm.trx");
+        var warmResult = await RunGateAsync(
+            executor, capability, greenRepository, evidence.Path, protectedBase, "warm-gate",
             ["test", project, "--configuration", "Release", "--no-restore", "--no-build",
                 "--logger", $"trx;LogFileName={warmTrx}"]);
         ArchiveFixtureEvidence(evidence.Path, warmResult);
@@ -175,6 +192,27 @@ public sealed class RealDotNetFixtureTests
         var result = await RunAsync(executor, "git", directory, arguments);
         Assert.Equal(0, result.ExitCode);
         return result;
+    }
+
+    private static async Task<ToolCapability> DetectDotNetAsync(
+        ProcessCommandExecutor executor,
+        string dotnet,
+        string repository)
+    {
+        var detection = await new ToolCapabilityDetector(executor).DetectAsync(
+            new CapabilityProbe(
+                "dotnet", ExecutableSource.TrustedExplicit, dotnet, repository, null,
+                ["--version"], ["--help"], "10.0.401", "trx-v1", false),
+            TestContext.Current.CancellationToken);
+        var capability = detection.Capability;
+        Assert.True(capability.Supported,
+            $"Dotnet capability: executable={dotnet}; observed={capability.Version}; " +
+            $"version exit={detection.VersionResult?.ExitCode}; " +
+            $"version output={detection.VersionResult?.StandardOutput} {detection.VersionResult?.StandardError}; " +
+            $"help exit={detection.HelpResult?.ExitCode}; " +
+            $"help output={detection.HelpResult?.StandardOutput} {detection.HelpResult?.StandardError}");
+        Assert.Equal("10.0.401", capability.Version);
+        return capability;
     }
 
     private static string FindRepositoryFile(string name)
