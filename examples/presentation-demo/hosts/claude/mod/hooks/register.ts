@@ -1,10 +1,10 @@
 import { atom, read, update } from 'claude-code'
-import { snapshotsFromCatalog } from '../../../../src/fixtures.mjs'
-import { cockpitView, COCKPIT_VIEWS, linesForView } from '../../../../src/cockpit-view-model.mjs'
+import { GENERATED_FIXTURES } from '../generated/fixtures.ts'
 
 const PANE = 'forge-cockpit-demo'
 const PREF = 'forge-cockpit-demo-preferences-v1'
-const states = snapshotsFromCatalog()
+const COCKPIT_VIEWS = ['overview', 'evidence', 'usage', 'activity']
+const states = GENERATED_FIXTURES
 const view = atom({ plugin: 'forge-cockpit-demo', key: 'view' }, 'overview')
 const scenario = atom({ plugin: 'forge-cockpit-demo', key: 'scenario' }, 'failed-gate')
 const selected = atom({ plugin: 'forge-cockpit-demo', key: 'selected' }, 0)
@@ -55,7 +55,7 @@ export function register(on: any) {
     if (e.requestId !== PANE) return next(e)
     const { Box, Text, Button, Select } = $.ui.resolve(e)
     const currentView = await read($, view), currentScenario = await read($, scenario), currentSelected = await read($, selected), showDetail = await read($, detail), message = await read($, notice)
-    const state = findState(currentScenario), vm = cockpitView(state.snapshot, { selected: currentSelected, history: states.slice(0, states.indexOf(state) + 1) })
+    const state = findState(currentScenario), safeSelected = Math.max(0, Math.min(state.evidence.length - 1, currentSelected)), vm = { ...state, selected: safeSelected, detail: state.details[safeSelected] || ['No evidence selected.'] }
     const width = Number(e?.props?.bodyColumns) || 72
     const redraw = () => $.ui.invalidate('ui.render')
     const chooseView = (name: string, label: string, hotkey: string) => Button({ key: `view-${name}`, label, hotkey, plain: true, dimColor: currentView !== name, onPress: async () => { await setView($, name); redraw() } })
@@ -66,7 +66,7 @@ export function register(on: any) {
     } else if (currentView === 'evidence') {
       const options = vm.evidence.map((row: any) => ({ value: row.id, label: row.text }))
       body = options.length ? [Select({ key: 'evidence-select', options, onSelect: async (value: string) => { const index = vm.evidence.findIndex((x: any) => x.id === value); await update($, selected, () => Math.max(0, index)); await update($, detail, () => true); redraw() } })] : [Text({ children: ['No evidence receipts in this fixture.'] })]
-    } else body = linesForView(state.snapshot, currentView, { selected: currentSelected, history: states.slice(0, states.indexOf(state) + 1) }).map((value: string, i: number) => Text({ key: `${currentView}-${i}`, children: [value] }))
+    } else body = (state[currentView] || state.overview).map((value: string, i: number) => Text({ key: `${currentView}-${i}`, children: [value] }))
     const tabs = width < 32
       ? Select({ key: 'view-select', options: COCKPIT_VIEWS.map((name) => ({ value: name, label: name[0].toUpperCase() + name.slice(1) })), onSelect: async (name: string) => { await setView($, name); redraw() } })
       : Box({ flexDirection: 'row', columnGap: width >= 72 ? 3 : 1, children: [chooseView('overview', 'Overview', '1'), chooseView('evidence', 'Evidence', '2'), chooseView('usage', 'Usage', '3'), chooseView('activity', 'Activity', '4')] })
