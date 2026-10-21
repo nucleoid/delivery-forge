@@ -53,6 +53,7 @@ public sealed class RealDotNetFixtureTests
         var redResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "red-gate",
             ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={redTrx}"]);
         ArchiveFixtureEvidence(evidence.Path, redResult);
+        Assert.NotNull(redResult.Execution.ExitCode);
         Assert.NotEqual(0, redResult.Execution.ExitCode);
         Assert.True(redResult.Outcome == GateOutcome.Fail,
             $"RED gate: {redResult.Outcome}; reason: {redResult.Reason}; " +
@@ -78,7 +79,12 @@ public sealed class RealDotNetFixtureTests
         var greenResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "green-gate",
             ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={greenTrx}"]);
         ArchiveFixtureEvidence(evidence.Path, greenResult);
-        Assert.Equal(0, greenResult.Execution.ExitCode);
+        Assert.True(greenResult.Execution.ExitCode == 0,
+            $"GREEN process did not complete successfully: exit={greenResult.Execution.ExitCode}; " +
+            $"timeout={greenResult.Execution.TimedOut}; cancelled={greenResult.Execution.Cancelled}; " +
+            $"quiescent={greenResult.Execution.OwnedProcessQuiescent}; reason={greenResult.Reason}; " +
+            $"native={greenResult.Execution.LifecycleDiagnostics?.NativeFailure}\n" +
+            greenResult.Execution.StandardOutput + "\n" + greenResult.Execution.StandardError);
         Assert.True(File.Exists(assembly));
         Assert.Equal((1, 1, 1, 0), ReadCounts(greenTrx));
         Assert.Equal(GateOutcome.Pass, greenResult.Outcome);
@@ -92,6 +98,7 @@ public sealed class RealDotNetFixtureTests
             ["test", project, "--configuration", "Release", "--no-restore", "--no-build",
                 "--logger", $"trx;LogFileName={warmTrx}"]);
         ArchiveFixtureEvidence(evidence.Path, warmResult);
+        Assert.NotNull(warmResult.Execution.ExitCode);
         Assert.Equal(0, warmResult.Execution.ExitCode);
         Assert.Equal((1, 1, 1, 0), ReadCounts(warmTrx));
         Assert.Equal(GateOutcome.Incomplete, warmResult.Outcome);
@@ -115,11 +122,23 @@ public sealed class RealDotNetFixtureTests
             sourceRepositoryRoot: repository,
             requiredGatePluginBindings:
             [new RequiredGatePluginBinding("test", "delivery-forge.dotnet", "1.0.0", "dotnet")]);
-        return await new GateRunner(executor, reader, repository, protectedBase).RunAsync(
+        var boundedArguments = arguments.Concat(
+            ["--disable-build-servers", "-m:1", "-p:UseSharedCompilation=false", "-p:BuildInParallel=false", "/nodeReuse:false"])
+            .ToArray();
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1",
+            ["MSBUILDDISABLENODEREUSE"] = "1",
+            ["UseSharedCompilation"] = "false"
+        };
+        return await new GateRunner(
+            executor, reader, repository, protectedBase,
+            plugins: null, authorityRegistry: null,
+            hostOwnedClaimRoot: System.IO.Path.Combine(outputRoot, ".claims", outputName)).RunAsync(
             new GateRequest(
                 "test", policy, capability, EvidenceAdapterKind.DotNet,
                 TestEvidence.Identity('6'), identity,
-                new CommandInvocation(capability.ExecutablePath!, arguments, repository),
+                new CommandInvocation(capability.ExecutablePath!, boundedArguments, repository, environment),
                 "fixture", TimeSpan.FromSeconds(90), System.IO.Path.Combine(outputRoot, outputName)),
             TestContext.Current.CancellationToken);
     }

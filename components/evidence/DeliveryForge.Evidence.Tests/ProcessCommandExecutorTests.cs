@@ -206,7 +206,7 @@ public sealed class ProcessCommandExecutorTests
     public async Task Partial_tree_kill_failure_flows_through_real_executor_to_gate_incomplete()
     {
         using var temp = new TempDirectory();
-        var request = LongRunningRequest(temp.Path);
+        var request = LongRunningRequest(temp.Path) with { Timeout = TimeSpan.FromSeconds(2) };
         Process? killedProcess = null;
         Process? observedProcess = null;
         var executor = new ProcessCommandExecutor(
@@ -232,7 +232,10 @@ public sealed class ProcessCommandExecutorTests
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
-        Assert.True(result.Execution.TimedOut);
+        Assert.True(result.Execution.TimedOut,
+            $"Expected the real command to reach timeout cleanup: outcome={result.Outcome}; " +
+            $"reason={result.Reason}; exit={result.Execution.ExitCode}; " +
+            $"cancelled={result.Execution.Cancelled}; native={result.Execution.LifecycleDiagnostics?.NativeFailure}");
         Assert.False(result.Execution.Cancelled);
         Assert.Same(killedProcess, observedProcess);
         Assert.False(result.Execution.OwnedProcessQuiescent);
@@ -320,7 +323,7 @@ public sealed class ProcessCommandExecutorTests
     {
         var request = TestEvidence.GateRequest(output);
         var (fileName, arguments) = OperatingSystem.IsWindows()
-            ? (Environment.GetEnvironmentVariable("ComSpec")!, new[] { "/d", "/s", "/c", "for /L %i in (1,1,2147483647) do @rem" })
+            ? (Environment.GetEnvironmentVariable("ComSpec")!, new[] { "/d", "/s", "/c", "ping -n 30 127.0.0.1 >NUL" })
             : ("/bin/sh", new[] { "-c", "exec sleep 30" });
         var executableIdentity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(fileName)))}";
         var capability = ToolCapability.FromDetection(

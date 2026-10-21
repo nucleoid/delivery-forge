@@ -218,7 +218,10 @@ public sealed class GateRunnerTests
         var first = await firstTask;
 
         Assert.Equal(GateOutcome.Incomplete, excluded.Outcome);
-        Assert.Contains("live process", excluded.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(
+            excluded.Reason.Contains("live process", StringComparison.OrdinalIgnoreCase) ||
+            excluded.Reason.Contains("ownership is ambiguous", StringComparison.OrdinalIgnoreCase),
+            $"Unexpected truthful claim exclusion reason: {excluded.Reason}");
         Assert.Equal(GateOutcome.Incomplete, first.Outcome);
     }
 

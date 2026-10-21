@@ -184,6 +184,7 @@ public sealed class GitRepositoryIdentityReaderTests
         var objectId = (await Git(temp.Path, "rev-parse", "HEAD:app.ts")).Trim();
         var objectPath = System.IO.Path.Combine(temp.Path, ".git", "objects", objectId[..2], objectId[2..]);
         Assert.True(File.Exists(objectPath));
+        File.SetAttributes(objectPath, File.GetAttributes(objectPath) & ~FileAttributes.ReadOnly);
         File.Delete(objectPath);
 
         var error = await Assert.ThrowsAsync<EvidenceRepositoryException>(() =>
