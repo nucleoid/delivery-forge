@@ -38,7 +38,7 @@ public sealed record GateReceiptContract(
 public sealed record GateAuthorityBindingContract(
     string GateId, string PolicyIdentity, string HeadCommit,
     string PluginId, string PluginVersion, string Tool, string ToolVersion,
-    string ToolIdentity, string ConfigurationIdentity, string InputSetIdentity,
+    string ToolIdentity, string ConfigurationIdentity, string RuntimeClosureIdentity, string InputSetIdentity,
     bool Enabled, string Status, bool ProductionCapable, string Authority);
 
 public sealed record AuthoritativeGateReceiptContract(

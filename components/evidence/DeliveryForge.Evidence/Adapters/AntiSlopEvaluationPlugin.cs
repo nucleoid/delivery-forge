@@ -13,6 +13,10 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
     private const string ReviewedConfigSha256 = "5226e689d45cb10f4a25df0e31f52092f52b958fdd179862a0312815df9c8e10";
     private const string ReviewedEffectConfigSha256 = "d4e372437c08bfc5d4db784bb78ae78b2e3950442379b526cede50b5f3c8e907";
     private const string ReviewedBatchRunnerSha256 = "cc9853de43920adb20a9ec459f77ed072606c41b5ddf37d378db4abb98c74d01";
+    public const string ReviewedLinuxX64GnuRuntimeClosureSha256 =
+        "sha256:f3c39acbe45af98d4ea005347660992ac47a75fb6511a9ba6c2563792a3be267";
+    public const string ReviewedLinuxX64GnuEffectRuntimeClosureSha256 =
+        "sha256:232567ab4655c415110837439dc85ef9d408ea86afedbac682aea0568d9a4fce";
     internal const int MaximumDirectArgumentBytes = 24_000;
     private static readonly HashSet<string> SupportedExtensions = new(
         [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"],
@@ -175,7 +179,8 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
                 return NormalizedEvidence.Incomplete(
                     "Anti-slop invocation does not use the code-owned registered bundle and Node runtime.");
             if (_enforceReviewedPins)
-                ValidateReviewedPins(_trustedBundleRoot, request.Plugin?.EnableEffectRules == true);
+                ValidateReviewedPins(_trustedBundleRoot, _trustedNodePath,
+                    request.Plugin?.EnableEffectRules == true);
         }
         catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException or
                                            IOException or UnauthorizedAccessException or InvalidOperationException or JsonException)
@@ -223,6 +228,12 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
                 $"Anti-slop configuration or runtime closure became unavailable: {exception.Message}");
         }
     }
+
+    public string GetRuntimeClosureIdentity(GateRequest request) =>
+        !_enforceReviewedPins || _trustedBundleRoot is null || _trustedNodePath is null
+            ? request.ConfigurationIdentity
+            : ComputeRuntimeClosureIdentity(
+                _trustedBundleRoot, _trustedNodePath, request.Plugin?.EnableEffectRules == true);
 
     public NormalizedEvidence Normalize(
         GateRequest request,
@@ -358,7 +369,7 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             string.Equals(binding.PluginVersion, Version, StringComparison.Ordinal) &&
             string.Equals(binding.Tool, ExpectedTool, StringComparison.Ordinal));
 
-    private static void ValidateReviewedPins(string root, bool effectRulesEnabled)
+    private static void ValidateReviewedPins(string root, string nodePath, bool effectRulesEnabled)
     {
         var expected = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -380,6 +391,42 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             Path.Combine(root, "node_modules", "oxlint", "package.json")));
         if (package.RootElement.GetProperty("version").GetString() != OxlintVersion)
             throw new InvalidOperationException("Installed Oxlint package version differs from the reviewed runtime pin.");
+        if (!OperatingSystem.IsLinux() || System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture !=
+            System.Runtime.InteropServices.Architecture.X64 ||
+            !Directory.Exists(Path.Combine(root, "node_modules", "@oxlint", "binding-linux-x64-gnu")))
+            throw new InvalidOperationException(
+                "The complete reviewed anti-slop runtime closure is not pinned for this platform binding.");
+        var actualClosure = ComputeRuntimeClosureIdentity(root, nodePath, effectRulesEnabled);
+        var expectedClosure = effectRulesEnabled
+            ? ReviewedLinuxX64GnuEffectRuntimeClosureSha256
+            : ReviewedLinuxX64GnuRuntimeClosureSha256;
+        if (!string.Equals(actualClosure, expectedClosure, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                $"The complete anti-slop executable runtime closure differs from the reviewed pin: {actualClosure}.");
+    }
+
+    internal static string ComputeRuntimeClosureIdentity(string root, string nodePath, bool effectRulesEnabled)
+    {
+        root = Path.GetFullPath(root);
+        nodePath = Path.GetFullPath(nodePath);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        AppendClosureFile(hash, root, Path.Combine(root, "package.json"));
+        AppendClosureFile(hash, root, Path.Combine(root, "package-lock.json"));
+        AppendClosureFile(hash, root, Path.Combine(root, "oxlint.config.ts"));
+        AppendClosureFile(hash, root, Path.Combine(root, "run-oxlint-batches.mjs"));
+        if (effectRulesEnabled)
+            AppendClosureFile(hash, root, Path.Combine(root, "oxlint.effect.config.ts"));
+        AppendClosureDirectory(hash, root, Path.Combine(root, "vendor", "anti-slop"));
+        AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "@oxlint", "plugins"));
+        AppendClosureDirectory(hash, root, Path.Combine(root, "node_modules", "oxlint"));
+        var bindings = Directory.EnumerateDirectories(
+                Path.Combine(root, "node_modules", "@oxlint"), "binding-*", SearchOption.TopDirectoryOnly)
+            .Order(StringComparer.Ordinal).ToArray();
+        if (bindings.Length != 1)
+            throw new InvalidOperationException("Exactly one reviewed Oxlint platform binding must be installed.");
+        AppendClosureDirectory(hash, root, bindings[0]);
+        AppendClosureFile(hash, Path.GetDirectoryName(nodePath)!, nodePath, "runtime/node-bytes");
+        return $"sha256:{Convert.ToHexStringLower(hash.GetHashAndReset())}";
     }
 
     internal static string ComputeConfigurationIdentity(

@@ -28,65 +28,47 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
-    public void V2_flag_requires_host_owned_store_before_any_gate_can_run()
+    public void Runner_has_no_v2_signing_or_boolean_authority_surface()
     {
-        using var temp = new TempDirectory();
-
-        var error = Assert.Throws<ArgumentException>(() => new GateRunner(
-            new QueueCommandExecutor(),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
-            TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'),
-            emitAuthoritativeV2: true));
-
-        Assert.Contains("host-owned", error.Message, StringComparison.OrdinalIgnoreCase);
+        var parameters = typeof(GateRunner).GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            .SelectMany(constructor => constructor.GetParameters())
+            .ToArray();
+        Assert.DoesNotContain(parameters, parameter => parameter.ParameterType == typeof(HostOwnedReceiptStore));
+        Assert.DoesNotContain(parameters, parameter => parameter.ParameterType == typeof(bool));
     }
 
     [Fact]
-    public async Task Authoritative_host_composition_emits_v2_and_reopens_durable_provenance()
+    public void Authoritative_host_stays_disabled_without_a_real_privileged_boundary()
     {
         using var temp = new TempDirectory();
         var request = TestEvidence.GateRequest(temp.Path) with
         {
             Plugin = new EvaluationPluginSelection("delivery-forge.dotnet", Enabled: false)
         };
-        var receiptRoot = System.IO.Path.Combine(temp.Path, "host-receipts");
-        var host = new AuthoritativeEvaluationHost(
+        var error = Assert.Throws<NotSupportedException>(() => new AuthoritativeEvaluationHost(
             new QueueCommandExecutor(),
             new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
             request.Invocation.WorkingDirectory,
-            TestEvidence.Commit('a'),
-            receiptRoot,
-            new byte[32],
-            new(true, true, "fixture-host", "gate process uses a distinct fixture principal"));
+            TestEvidence.Commit('a')));
 
-        var result = await host.RunAsync(request, TestContext.Current.CancellationToken);
-        var receipt = ContractValidator.ParseAndValidate(await File.ReadAllBytesAsync(
-            result.ReceiptPath, TestContext.Current.CancellationToken));
-        var reopened = new HostOwnedReceiptStore(receiptRoot, new byte[32]);
-
-        Assert.Equal("2.0.0", receipt.SchemaVersion);
-        Assert.True(host.ReceiptProvenance.Contains(receipt.Identity));
-        Assert.True(reopened.Provenance.Contains(receipt.Identity));
-        Assert.Equal(receipt.Identity, host.ReadReceipt(receipt.Identity).Identity);
+        Assert.Contains("separate-principal", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public void Authoritative_host_rejects_same_principal_or_unverified_isolation()
+    public void Authoritative_host_has_no_boolean_attestation_surface()
     {
         using var temp = new TempDirectory();
         var request = TestEvidence.GateRequest(temp.Path);
 
-        var error = Assert.Throws<ArgumentException>(() => new AuthoritativeEvaluationHost(
+        var error = Assert.Throws<NotSupportedException>(() => new AuthoritativeEvaluationHost(
             new QueueCommandExecutor(),
             new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
             request.Invocation.WorkingDirectory,
-            TestEvidence.Commit('a'),
-            System.IO.Path.Combine(temp.Path, "host-receipts"),
-            new byte[32],
-            new(Verified: true, SeparateSecurityPrincipal: false,
-                Issuer: "fixture-host", Evidence: "same uid")));
+            TestEvidence.Commit('a')));
 
-        Assert.Contains("separate security principal", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain(typeof(AuthoritativeEvaluationHost).Assembly.GetTypes(),
+            type => type.Name.Contains("Attestation", StringComparison.Ordinal));
+        Assert.Contains("disabled", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -150,8 +132,7 @@ public sealed class GateRunnerTests
         var runner = new GateRunner(
             new StubCommandExecutor(TestEvidence.CommandResult()),
             new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
-            TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'),
-            emitAuthoritativeV2: false);
+            TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
 
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
@@ -222,10 +203,12 @@ public sealed class GateRunnerTests
         var firstRunner = new GateRunner(blocking,
             new SequenceRepositoryIdentityReader(identity, identity),
             firstRequest.Invocation.WorkingDirectory, TestEvidence.Commit('a'),
+            plugins: null, authorityRegistry: null,
             hostOwnedClaimRoot: claimRoot);
         var secondRunner = new GateRunner(new StubCommandExecutor(TestEvidence.CommandResult()),
             new SequenceRepositoryIdentityReader(identity, identity),
             firstRequest.Invocation.WorkingDirectory, TestEvidence.Commit('a'),
+            plugins: null, authorityRegistry: null,
             hostOwnedClaimRoot: claimRoot);
 
         var firstTask = firstRunner.RunAsync(firstRequest, TestContext.Current.CancellationToken);
@@ -292,7 +275,7 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
-    public async Task Ambiguous_oversized_claim_persists_incomplete_without_takeover()
+    public async Task Oversized_unlocked_claim_is_recovered_without_weakening_live_exclusion()
     {
         using var temp = new TempDirectory();
         var request = TestEvidence.GateRequest(temp.Path);
@@ -307,9 +290,33 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
-        Assert.Contains("ambiguous", result.Reason, StringComparison.OrdinalIgnoreCase);
-        Assert.Equal(GateClaimLease.MaximumClaimBytes + 1, new FileInfo(claimPath).Length);
+        Assert.Contains("Recovered a stale gate claim", result.Reason, StringComparison.OrdinalIgnoreCase);
+        var interrupted = Assert.Single(Directory.GetFiles(temp.Path, "test.claim.interrupted-*"));
+        Assert.Equal(GateClaimLease.MaximumClaimBytes + 1, new FileInfo(interrupted).Length);
         Assert.True(File.Exists(result.ReceiptPath));
+    }
+
+    [Fact]
+    public async Task Abandoned_unpublished_claim_is_boundedly_scavenged_without_touching_fresh_pending_claim()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path);
+        var claimPath = System.IO.Path.Combine(temp.Path, request.GateId + ".claim");
+        var abandoned = claimPath + ".pending-abandoned";
+        var fresh = claimPath + ".pending-fresh";
+        await File.WriteAllTextAsync(abandoned, "partial", TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(fresh, "concurrent", TestContext.Current.CancellationToken);
+        File.SetLastWriteTimeUtc(abandoned, DateTime.UtcNow.AddHours(-1));
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory, TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.False(File.Exists(abandoned));
+        Assert.True(File.Exists(fresh));
     }
 
     [Fact]

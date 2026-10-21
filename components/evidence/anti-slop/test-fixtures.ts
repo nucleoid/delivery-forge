@@ -27,7 +27,10 @@ function run(fixture:
   | "suppression-keyword-properties"
   | "suppression-jsx-guess"
   | "suppression-bare"
-  | "suppression-unknown"): {
+  | "suppression-unknown"
+  | "suppression-jsx-slash"
+  | "suppression-blanket-specific-enable"
+  | "suppression-prefixed-alias"): {
   status: number | null;
   report: Report;
 } {
@@ -40,7 +43,7 @@ function run(fixture:
       "json",
       "--no-ignore",
       "--disable-nested-config",
-      path.join(root, "fixtures", `${fixture}.ts`),
+      path.join(root, "fixtures", `${fixture}.${fixture === "suppression-jsx-slash" ? "tsx" : "ts"}`),
     ],
     {
       cwd: root,
@@ -90,6 +93,9 @@ for (const bypass of [
   "suppression-multiline-block",
   "suppression-keyword-properties",
   "suppression-jsx-guess",
+  "suppression-jsx-slash",
+  "suppression-blanket-specific-enable",
+  "suppression-prefixed-alias",
 ] as const) {
   const result = run(bypass);
   assert.equal(result.status, 0, `${bypass}: pinned Oxlint must demonstrate the suppression attack`);
@@ -104,4 +110,4 @@ for (const name of ["suppression-bare", "suppression-unknown"] as const) {
   assert.deepEqual(result.report.diagnostics, []);
 }
 
-console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, eight suppression attacks reproduced");
+console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, eleven suppression attacks reproduced");

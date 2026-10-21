@@ -30,13 +30,14 @@ public sealed record EvaluationPluginReceiptMetadata(
     bool Enabled,
     EvaluationPluginStatus Status,
     string ConfigurationIdentity,
+    string RuntimeClosureIdentity,
     IReadOnlyList<string> Inputs,
     string InputSetIdentity,
     string? ToolOutcome)
 {
     internal static EvaluationPluginReceiptMetadata Unbound { get; } = new(
         "unbound", "unbound", false, EvaluationPluginStatus.Selected,
-        "unbound", [], DeterministicEvaluationPluginRegistry.ComputeInputSetIdentity([]), null);
+        "unbound", "unbound", [], DeterministicEvaluationPluginRegistry.ComputeInputSetIdentity([]), null);
 }
 
 public sealed record EvaluationPluginSnapshot(object? State)
@@ -62,6 +63,8 @@ public interface IDeterministicEvaluationPlugin
     NormalizedEvidence? ValidateAfterExecution(
         GateRequest request,
         EvaluationPluginSnapshot snapshot) => null;
+
+    string GetRuntimeClosureIdentity(GateRequest request) => request.ConfigurationIdentity;
 
     EvaluationPluginSnapshot CaptureBefore(GateRequest request);
 
@@ -189,6 +192,7 @@ public sealed class DeterministicEvaluationPluginRegistry
             request.Plugin?.Enabled ?? true,
             status,
             request.ConfigurationIdentity,
+            plugin.GetRuntimeClosureIdentity(request),
             inputs,
             ComputeInputSetIdentity(inputs),
             toolOutcome);

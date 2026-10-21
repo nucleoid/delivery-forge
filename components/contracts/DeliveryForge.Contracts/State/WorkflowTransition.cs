@@ -23,6 +23,36 @@ public sealed record TransitionEvidence(
     bool EnforceAuthoritativeGateReceipts = false,
     string? GateAuthorityRegistryIdentity = null);
 
+/// <summary>Immutable host-owned receipt policy; caller evidence cannot activate it.</summary>
+public sealed class GateReceiptConsumerPolicy
+{
+    private GateReceiptConsumerPolicy(bool enforce, TrustedGatePluginRegistry registry,
+        TrustedReceiptProvenance? provenance, string expectedRegistryIdentity)
+    {
+        Enforce = enforce;
+        Registry = registry;
+        Provenance = provenance;
+        ExpectedRegistryIdentity = expectedRegistryIdentity;
+    }
+
+    public static GateReceiptConsumerPolicy Disabled { get; } = new(
+        false, TrustedGatePluginRegistry.BuiltIns, null, TrustedGatePluginRegistry.BuiltIns.Identity);
+    public static GateReceiptConsumerPolicy CreateIsolatedFixture(
+        TrustedGatePluginRegistry registry, TrustedReceiptProvenance provenance) =>
+        new(true, registry ?? throw new ArgumentNullException(nameof(registry)),
+            provenance ?? throw new ArgumentNullException(nameof(provenance)), registry.Identity);
+    public bool Enforce { get; }
+    public TrustedGatePluginRegistry Registry { get; }
+    public TrustedReceiptProvenance? Provenance { get; }
+    public string ExpectedRegistryIdentity { get; }
+
+    internal static GateReceiptConsumerPolicy ForIsolatedTest(TransitionEvidence evidence) =>
+        new(evidence.EnforceAuthoritativeGateReceipts,
+            evidence.GateAuthorityRegistry ?? TrustedGatePluginRegistry.BuiltIns,
+            evidence.GateReceiptProvenance,
+            evidence.GateAuthorityRegistryIdentity ?? string.Empty);
+}
+
 public static class WorkflowTransition
 {
     private static readonly IReadOnlySet<(WorkflowState From, WorkflowState To)> LinearTransitions =
@@ -48,14 +78,16 @@ public static class WorkflowTransition
         new HashSet<WorkflowState> { WorkflowState.Merged, WorkflowState.Blocked, WorkflowState.Failed, WorkflowState.Stopped };
 
     public static void EnsureAllowed(WorkflowState from, WorkflowState to, TransitionEvidence evidence) =>
-        EnsureAllowedCore(from, to, evidence, ReviewAuthorityRealm.Production, receiver: null);
+        EnsureAllowedCore(from, to, evidence, ReviewAuthorityRealm.Production, receiver: null,
+            GateReceiptConsumerPolicy.Disabled);
 
     public static void EnsureAllowed(
         WorkflowState from,
         WorkflowState to,
         TransitionEvidence evidence,
         ReviewTransitionReceiver receiver) =>
-        EnsureAllowedCore(from, to, evidence, ReviewAuthorityRealm.Production, receiver);
+        EnsureAllowedCore(from, to, evidence, ReviewAuthorityRealm.Production, receiver,
+            GateReceiptConsumerPolicy.Disabled);
 
     internal static void EnsureAllowedForIsolatedTest(
         WorkflowState from,
@@ -71,7 +103,8 @@ public static class WorkflowTransition
                 evidence.ReviewContext,
                 evidence.HostReviewContext)
             : null;
-        EnsureAllowedCore(from, to, evidence, ReviewAuthorityRealm.Test, receiver);
+        EnsureAllowedCore(from, to, evidence, ReviewAuthorityRealm.Test, receiver,
+            GateReceiptConsumerPolicy.ForIsolatedTest(evidence));
     }
 
     internal static void EnsureAllowedForIsolatedTest(
@@ -79,14 +112,16 @@ public static class WorkflowTransition
         WorkflowState to,
         TransitionEvidence evidence,
         ReviewTransitionReceiver receiver) =>
-        EnsureAllowedCore(from, to, evidence, ReviewAuthorityRealm.Test, receiver);
+        EnsureAllowedCore(from, to, evidence, ReviewAuthorityRealm.Test, receiver,
+            GateReceiptConsumerPolicy.ForIsolatedTest(evidence));
 
     private static void EnsureAllowedCore(
         WorkflowState from,
         WorkflowState to,
         TransitionEvidence evidence,
         ReviewAuthorityRealm requiredReviewRealm,
-        ReviewTransitionReceiver? receiver)
+        ReviewTransitionReceiver? receiver,
+        GateReceiptConsumerPolicy gatePolicy)
     {
         ArgumentNullException.ThrowIfNull(evidence);
         if (!Enum.IsDefined(from) || !Enum.IsDefined(to) || !Enum.IsDefined(evidence.Ceiling))
@@ -108,7 +143,7 @@ public static class WorkflowTransition
 
         if (to == WorkflowState.IndependentReview)
         {
-            RequireRequiredGates(evidence);
+            RequireRequiredGates(evidence, gatePolicy);
         }
 
         if (to == WorkflowState.PrAuthorized)
@@ -127,7 +162,7 @@ public static class WorkflowTransition
         if (to == WorkflowState.CiComplete)
         {
             RequirePolicyCeiling(evidence, AuthorizationCeiling.Pr, "CI completion");
-            using var _ = RequirePolicyBoundGate(evidence.CiReceipt, "ci", evidence);
+            using var _ = RequirePolicyBoundGate(evidence.CiReceipt, "ci", evidence, gatePolicy);
         }
 
         if (to == WorkflowState.HostReviewComplete)
@@ -243,7 +278,7 @@ public static class WorkflowTransition
         }
     }
 
-    private static void RequireRequiredGates(TransitionEvidence evidence)
+    private static void RequireRequiredGates(TransitionEvidence evidence, GateReceiptConsumerPolicy gatePolicy)
     {
         var policy = RequirePolicy(evidence);
         using var policyDocument = JsonDocument.Parse(policy.CanonicalBytes);
@@ -252,7 +287,7 @@ public static class WorkflowTransition
         var supplied = new HashSet<string>(StringComparer.Ordinal);
         foreach (var gate in evidence.GateReceipts ?? [])
         {
-            using var gateDocument = RequirePolicyBoundGate(gate, expectedGateId: null, evidence);
+            using var gateDocument = RequirePolicyBoundGate(gate, expectedGateId: null, evidence, gatePolicy);
             supplied.Add(gateDocument.RootElement.GetProperty("gateId").GetString()!);
         }
 
@@ -262,7 +297,8 @@ public static class WorkflowTransition
         }
     }
 
-    private static JsonDocument RequirePolicyBoundGate(ValidatedContract? gate, string? expectedGateId, TransitionEvidence evidence)
+    private static JsonDocument RequirePolicyBoundGate(ValidatedContract? gate, string? expectedGateId,
+        TransitionEvidence evidence, GateReceiptConsumerPolicy gatePolicy)
     {
         RequireReceipt(gate, "gate-receipt", outcome: null, action: null, evidence);
         var policy = RequirePolicy(evidence);
@@ -280,24 +316,24 @@ public static class WorkflowTransition
             document.Dispose();
             throw new InvalidWorkflowTransitionException("Gate receipt does not match the required policy, gate identity, or allowed outcome.");
         }
-        if (evidence.EnforceAuthoritativeGateReceipts &&
-            !string.Equals(evidence.GateAuthorityRegistryIdentity,
-                (evidence.GateAuthorityRegistry ?? TrustedGatePluginRegistry.BuiltIns).Identity,
+        if (gatePolicy.Enforce &&
+            !string.Equals(gatePolicy.ExpectedRegistryIdentity,
+                gatePolicy.Registry.Identity,
                 StringComparison.Ordinal))
         {
             document.Dispose();
             throw new InvalidWorkflowTransitionException(
                 "Gate authority registry identity differs from the producer-owned registry.");
         }
-        if (evidence.EnforceAuthoritativeGateReceipts &&
+        if (gatePolicy.Enforce &&
             !GateReceiptAuthority.TryValidateAuthoritativeOutcome(
-                root, out var authorityFailure, evidence.GateAuthorityRegistry))
+                root, out var authorityFailure, gatePolicy.Registry))
         {
             document.Dispose();
             throw new InvalidWorkflowTransitionException(authorityFailure);
         }
-        if (evidence.EnforceAuthoritativeGateReceipts &&
-            evidence.GateReceiptProvenance?.Contains(gate.Identity) != true)
+        if (gatePolicy.Enforce &&
+            gatePolicy.Provenance?.Contains(gate.Identity) != true)
         {
             document.Dispose();
             throw new InvalidWorkflowTransitionException(

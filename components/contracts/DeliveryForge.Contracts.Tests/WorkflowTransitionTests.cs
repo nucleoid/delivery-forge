@@ -612,6 +612,7 @@ public sealed class WorkflowTransitionTests
                 ["toolVersion"] = toolVersion,
                 ["toolIdentity"] = "sha256:" + new string('a', 64),
                 ["configurationIdentity"] = "sha256:" + new string('b', 64),
+                ["runtimeClosureIdentity"] = "sha256:" + new string('b', 64),
                 ["inputSetIdentity"] = "sha256:" + new string('c', 64),
                 ["enabled"] = true,
                 ["status"] = notApplicable ? "NOT_APPLICABLE" : "EXECUTED",
@@ -627,7 +628,11 @@ public sealed class WorkflowTransitionTests
         ["capabilityFormat"] = format,
         ["executableIdentity"] = "sha256:" + new string('a', 64),
         ["configurationIdentity"] = "sha256:" + new string('b', 64),
-        ["plugin"] = new JsonObject { ["inputSetIdentity"] = "sha256:" + new string('c', 64) }
+        ["plugin"] = new JsonObject
+        {
+            ["runtimeClosureIdentity"] = "sha256:" + new string('b', 64),
+            ["inputSetIdentity"] = "sha256:" + new string('c', 64)
+        }
     }.ToJsonString();
 
     private static ValidatedContract ParseFixture(string file) => ContractValidator.ParseAndValidate(

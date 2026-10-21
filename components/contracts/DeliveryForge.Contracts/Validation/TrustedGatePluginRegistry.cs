@@ -9,7 +9,8 @@ public sealed record TrustedGatePluginBinding(
     string PluginVersion,
     string Tool,
     string? ExpectedToolVersion = null,
-    string? ExpectedFormatVersion = null);
+    string? ExpectedFormatVersion = null,
+    string? ExpectedRuntimeClosureIdentity = null);
 
 /// <summary>
 /// Code-owned gate/plugin authority. Hosts may construct an extended registry in trusted
@@ -44,7 +45,8 @@ public sealed class TrustedGatePluginRegistry
         new("crap", "delivery-forge.crap4csharp", "1.0.0", "crap4csharp", "0.1.0+1129c9d3280168b294f9fed1542f81ca716c6d53", "1.0"),
         new("crap4csharp", "delivery-forge.crap4csharp", "1.0.0", "crap4csharp", "0.1.0+1129c9d3280168b294f9fed1542f81ca716c6d53", "1.0"),
         new("mutation", "delivery-forge.mutate4csharp", "1.0.0", "mutate4csharp", "0.1.0-format-only", "2"),
-        new("anti-slop", "dmmulroy.anti-slop", "0.1.2+13909c9e07590f5a85d93c62712259fe14a883f7", "oxlint", "1.78.0", "oxlint-json-v1"),
+        new("anti-slop", "dmmulroy.anti-slop", "0.1.2+13909c9e07590f5a85d93c62712259fe14a883f7", "oxlint", "1.78.0", "oxlint-json-v1",
+            "sha256:f3c39acbe45af98d4ea005347660992ac47a75fb6511a9ba6c2563792a3be267"),
         new("ci", "delivery-forge.ci", "1.0.0", "ci", "github-actions-v1", "github-checks-v1")
     ]);
 
@@ -60,7 +62,8 @@ public sealed class TrustedGatePluginRegistry
         {
             var canonical = string.Join('\n', Bindings.Select(binding => string.Join('\0',
                 binding.GateId, binding.PluginId, binding.PluginVersion, binding.Tool,
-                binding.ExpectedToolVersion ?? string.Empty, binding.ExpectedFormatVersion ?? string.Empty))) + "\n";
+                binding.ExpectedToolVersion ?? string.Empty, binding.ExpectedFormatVersion ?? string.Empty,
+                binding.ExpectedRuntimeClosureIdentity ?? string.Empty))) + "\n";
             return "sha256:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(canonical)));
         }
     }

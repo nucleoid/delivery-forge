@@ -6,6 +6,17 @@ namespace DeliveryForge.Evidence.Tests;
 public sealed class DeterministicEvaluationPluginTests
 {
     [Fact]
+    public void Reviewed_installed_anti_slop_runtime_closure_is_exact()
+    {
+        var root = System.IO.Path.GetFullPath(System.IO.Path.Combine(
+            AppContext.BaseDirectory, "..", "..", "..", "..", "anti-slop"));
+        var baseIdentity = AntiSlopEvaluationPlugin.ComputeRuntimeClosureIdentity(root, "/usr/bin/node", false);
+        var effectIdentity = AntiSlopEvaluationPlugin.ComputeRuntimeClosureIdentity(root, "/usr/bin/node", true);
+        Assert.Equal(AntiSlopEvaluationPlugin.ReviewedLinuxX64GnuRuntimeClosureSha256, baseIdentity);
+        Assert.Equal(AntiSlopEvaluationPlugin.ReviewedLinuxX64GnuEffectRuntimeClosureSha256, effectIdentity);
+    }
+
+    [Fact]
     public void Builtins_are_registered_by_stable_identity_and_legacy_adapter()
     {
         var registry = DeterministicEvaluationPluginRegistry.CreateBuiltIns();
@@ -32,13 +43,12 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
-    public async Task Custom_registry_is_one_truth_for_runner_and_authority_binding()
+    public async Task Public_custom_registry_is_one_truth_for_runner_and_authority_binding()
     {
         using var temp = new TempDirectory();
-        var pluginRegistry = new DeterministicEvaluationPluginRegistry(
-            [new StubEvaluationPlugin("host.custom", "2.0.0", "custom-tool")]);
-        var authorityRegistry = new TrustedGatePluginRegistry(
-            [new TrustedGatePluginBinding("custom", "host.custom", "2.0.0", "custom-tool", "3.0.0", "custom-v1")]);
+        var custom = new StubEvaluationPlugin("host.custom", "2.0.0", "custom-tool");
+        var registry = new TrustedEvaluationPluginRegistry(
+            [new TrustedEvaluationPluginRegistration("custom", custom, "3.0.0", "custom-v1")]);
         var request = TestEvidence.GateRequest(temp.Path) with
         {
             GateId = "custom",
@@ -50,24 +60,21 @@ public sealed class DeterministicEvaluationPluginTests
             new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
             TestEvidence.WorkingDirectory(temp.Path),
             TestEvidence.Commit('a'),
-            pluginRegistry,
-            authorityRegistry: authorityRegistry);
+            registry);
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal("host.custom", result.Plugin.Id);
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
-        Assert.Throws<EvaluationPluginException>(() => new GateRunner(
-            new QueueCommandExecutor(),
-            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
-            TestEvidence.WorkingDirectory(temp.Path),
-            TestEvidence.Commit('a'),
-            pluginRegistry,
-            authorityRegistry: TrustedGatePluginRegistry.BuiltIns));
+        Assert.Throws<ArgumentException>(() => new TrustedEvaluationPluginRegistry(
+        [
+            new TrustedEvaluationPluginRegistration("custom", custom),
+            new TrustedEvaluationPluginRegistration("custom", custom)
+        ]));
     }
 
     [Fact]
-    public async Task Executed_not_applicable_uses_v2_authority_status_with_rationale()
+    public async Task Same_process_not_applicable_cannot_mint_v2_authority()
     {
         using var temp = new TempDirectory();
         var executable = System.IO.Path.Combine(temp.Path, "custom-tool");
@@ -75,14 +82,13 @@ public sealed class DeterministicEvaluationPluginTests
         var executableIdentity = $"sha256:{Convert.ToHexStringLower(
             System.Security.Cryptography.SHA256.HashData(await File.ReadAllBytesAsync(
                 executable, TestContext.Current.CancellationToken)))}";
-        var pluginRegistry = new DeterministicEvaluationPluginRegistry(
-            [new StubEvaluationPlugin(
-                "host.custom", "2.0.0", "custom-tool",
-                new NormalizedEvidence(
-                    GateOutcome.NotApplicable, "No applicable custom units.", false, true, [],
-                    "The frozen scope contains no custom units."))]);
-        var authorityRegistry = new TrustedGatePluginRegistry(
-            [new TrustedGatePluginBinding("custom", "host.custom", "2.0.0", "custom-tool", "3.0.0", "custom-v1")]);
+        var customPlugin = new StubEvaluationPlugin(
+            "host.custom", "2.0.0", "custom-tool",
+            new NormalizedEvidence(
+                GateOutcome.NotApplicable, "No applicable custom units.", false, true, [],
+                "The frozen scope contains no custom units."));
+        var pluginRegistry = new TrustedEvaluationPluginRegistry(
+            [new TrustedEvaluationPluginRegistration("custom", customPlugin, "3.0.0", "custom-v1")]);
         var original = TestEvidence.GateRequest(temp.Path);
         var request = original with
         {
@@ -104,21 +110,17 @@ public sealed class DeterministicEvaluationPluginTests
         var runner = new GateRunner(
             new StubCommandExecutor(TestEvidence.CommandResult()),
             new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
-            original.Invocation.WorkingDirectory, TestEvidence.Commit('a'), pluginRegistry,
-            emitAuthoritativeV2: true, authorityRegistry: authorityRegistry,
-            authoritativeReceiptStore: new HostOwnedReceiptStore(
-                System.IO.Path.Combine(temp.Path, "host-receipts"), new byte[32]),
-            hostOwnedClaimRoot: System.IO.Path.Combine(temp.Path, "host-claims"));
+            original.Invocation.WorkingDirectory, TestEvidence.Commit('a'), pluginRegistry);
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
         var receipt = ContractValidator.ParseAndValidate(await File.ReadAllBytesAsync(
             result.ReceiptPath, TestContext.Current.CancellationToken));
         using var document = System.Text.Json.JsonDocument.Parse(receipt.CanonicalBytes);
 
-        Assert.Equal(GateOutcome.NotApplicable, result.Outcome);
-        Assert.Equal(EvaluationPluginStatus.NotApplicable, result.Plugin.Status);
-        Assert.True(GateReceiptAuthority.TryValidateAuthoritativeOutcome(
-            document.RootElement, out var reason, authorityRegistry), reason);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Equal(EvaluationPluginStatus.Selected, result.Plugin.Status);
+        Assert.Contains("production gate", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.False(document.RootElement.TryGetProperty("authorityBinding", out _));
     }
 
     [Fact]
@@ -230,7 +232,7 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
-    public async Task Production_composition_runs_applicable_anti_slop_and_survives_restart()
+    public async Task Same_uid_anti_slop_execution_remains_incomplete_and_cannot_construct_authority()
     {
         using var repository = new TempDirectory();
         using var artifacts = new TempDirectory();
@@ -246,25 +248,12 @@ public sealed class DeterministicEvaluationPluginTests
         var commit = (await Git(repository.Path, "rev-parse", "HEAD")).Trim();
         var antiSlopRoot = System.IO.Path.GetFullPath(System.IO.Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..", "anti-slop"));
-        var config = System.IO.Path.Combine(antiSlopRoot, "oxlint.config.ts");
         var nodePath = "/usr/bin/node";
-        var entryPoint = System.IO.Path.Combine(antiSlopRoot, "node_modules", "oxlint", "bin", "oxlint");
-        var manifest = System.IO.Path.Combine(artifacts.Path, "inputs.json");
-        await File.WriteAllTextAsync(manifest, "[\"app.ts\"]", TestContext.Current.CancellationToken);
-        var invocation = new CommandInvocation(
-            nodePath,
-            [System.IO.Path.Combine(antiSlopRoot, "run-oxlint-batches.mjs"), "--oxlint", entryPoint,
-                "--config", config, "--inputs", manifest],
-            repository.Path,
-            new Dictionary<string, string>(StringComparer.Ordinal),
-            InheritEnvironment: false);
         var reader = new GitRepositoryIdentityReader(new ProcessCommandExecutor(), repository.Path, commit);
         var expected = await reader.ReadAsync(TestContext.Current.CancellationToken);
         var executableIdentity = $"sha256:{Convert.ToHexStringLower(
             System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(nodePath)))}";
-        var request = new GateRequest(
-            "anti-slop",
-            new ResolvedEvidencePolicy(
+        var policy = new ResolvedEvidencePolicy(
                 TestEvidence.Identity('1'), TestEvidence.Identity('2'), commit,
                 PolicyAuthorityKind.ProtectedGitBase, 0m, ["anti-slop"], authorityVerified: true,
                 sourceRepositoryRoot: repository.Path,
@@ -272,43 +261,30 @@ public sealed class DeterministicEvaluationPluginTests
                 [new RequiredGatePluginBinding(
                     "anti-slop", "dmmulroy.anti-slop",
                     $"0.1.2+{AntiSlopEvaluationPlugin.UpstreamCommit}", "oxlint")],
-                allowedNotApplicable: new HashSet<string>(["anti-slop"], StringComparer.Ordinal)),
-            ToolCapability.FromDetection(
+                allowedNotApplicable: new HashSet<string>(["anti-slop"], StringComparer.Ordinal));
+        var capability = ToolCapability.FromDetection(
                 "oxlint", AntiSlopEvaluationPlugin.OxlintVersion, "oxlint-json-v1", false, [],
-                nodePath, executableIdentity, ["lint"], repository.Path),
-            EvidenceAdapterKind.External,
-            AntiSlopEvaluationPlugin.ComputeConfigurationIdentity(invocation, effectRulesEnabled: false),
-            expected,
-            invocation,
-            "frozen-javascript-family",
-            TimeSpan.FromSeconds(30),
-            System.IO.Path.Combine(artifacts.Path, "gate-output"),
-            new EvaluationPluginSelection("dmmulroy.anti-slop", Enabled: true, Inputs: ["app.ts"]));
-        var host = new AuthoritativeEvaluationHost(
+                nodePath, executableIdentity, ["lint"], repository.Path);
+        var request = AntiSlopRequestFactory.Create(
+            "anti-slop", policy, capability, expected, repository.Path, antiSlopRoot, nodePath,
+            ["app.ts"], "frozen-javascript-family", TimeSpan.FromSeconds(30),
+            System.IO.Path.Combine(artifacts.Path, "gate-output"));
+        var selection = Assert.IsType<EvaluationPluginSelection>(request.Plugin);
+        Assert.Equal(["app.ts"], selection.Inputs);
+        Assert.Empty(Assert.IsAssignableFrom<IReadOnlyDictionary<string, string>>(request.Invocation.Environment));
+        Assert.False(request.Invocation.InheritEnvironment);
+        var result = await new GateRunner(
+                new ProcessCommandExecutor(), reader, repository.Path, commit,
+                DeterministicEvaluationPluginRegistry.CreateBuiltIns(antiSlopRoot, nodePath))
+            .RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.False(result.ProductionCapable);
+        Assert.Contains("production gate", result.Reason, StringComparison.OrdinalIgnoreCase);
+        var error = Assert.Throws<NotSupportedException>(() => new AuthoritativeEvaluationHost(
             new ProcessCommandExecutor(), reader, repository.Path, commit,
-            System.IO.Path.Combine(artifacts.Path, "host-receipts"),
-            new byte[32],
-            new(true, true, "fixture-host", "gate process uses a distinct fixture principal"),
-            DeterministicEvaluationPluginRegistry.CreateBuiltIns(
-                antiSlopRoot, nodePath));
-
-        var interrupted = await host.RunAsync(
-            request with
-            {
-                Plugin = request.Plugin! with { Enabled = false }
-            }, TestContext.Current.CancellationToken);
-        var bundle = await new AuthoritativeEvaluationComposition(host).RunRequiredAsync(
-            [request], TestContext.Current.CancellationToken);
-        var receipt = Assert.Single(bundle.Receipts);
-        using var document = System.Text.Json.JsonDocument.Parse(receipt.CanonicalBytes);
-
-        Assert.True(bundle.ReceiptProvenance.Contains(receipt.Identity));
-        Assert.Equal(GateOutcome.Incomplete, interrupted.Outcome);
-        var restartedStore = new HostOwnedReceiptStore(
-            System.IO.Path.Combine(artifacts.Path, "host-receipts"), new byte[32]);
-        Assert.True(restartedStore.Provenance.Contains(receipt.Identity));
-        Assert.True(GateReceiptAuthority.TryValidateAuthoritativeOutcome(
-            document.RootElement, out var reason), reason);
+            DeterministicEvaluationPluginRegistry.CreateBuiltIns(antiSlopRoot, nodePath)));
+        Assert.Contains("separate-principal", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -673,7 +649,7 @@ public sealed class DeterministicEvaluationPluginTests
         if (omitTrackedInput)
             Assert.Contains("protected-base scope", result.Reason, StringComparison.OrdinalIgnoreCase);
         else
-            Assert.Contains("runtime pin", result.Reason, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("production gate", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -721,9 +697,7 @@ public sealed class DeterministicEvaluationPluginTests
             new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
             TestEvidence.WorkingDirectory(temp.Path),
             TestEvidence.Commit('a'),
-            emitAuthoritativeV2: true,
-            authoritativeReceiptStore: new HostOwnedReceiptStore(
-                System.IO.Path.Combine(temp.Path, "host-receipts"), new byte[32]),
+            plugins: null, authorityRegistry: null,
             hostOwnedClaimRoot: System.IO.Path.Combine(temp.Path, "host-claims"));
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
@@ -738,9 +712,8 @@ public sealed class DeterministicEvaluationPluginTests
 
         var receiptBytes = await File.ReadAllBytesAsync(result.ReceiptPath, TestContext.Current.CancellationToken);
         var validatedReceipt = ContractValidator.ParseAndValidate(receiptBytes);
-        Assert.Equal("2.0.0", validatedReceipt.SchemaVersion);
-        Assert.NotNull(result.TrustedReceiptProvenance);
-        Assert.True(result.TrustedReceiptProvenance.Contains(validatedReceipt.Identity));
+        Assert.Equal("1.0.0", validatedReceipt.SchemaVersion);
+        Assert.Null(result.TrustedReceiptProvenance);
         using var receipt = System.Text.Json.JsonDocument.Parse(receiptBytes);
         using var command = System.Text.Json.JsonDocument.Parse(
             receipt.RootElement.GetProperty("command").GetString()!);
@@ -792,8 +765,9 @@ public sealed class DeterministicEvaluationPluginTests
                 TestEvidence.Repository(), TestEvidence.Repository()),
             invocation.WorkingDirectory,
             TestEvidence.Commit('a'),
-            fixtureRegistry,
-            authorityRegistry: fixtureAuthority);
+            plugins: fixtureRegistry,
+            authorityRegistry: fixtureAuthority,
+            hostOwnedClaimRoot: null);
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 

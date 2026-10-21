@@ -1,7 +1,7 @@
 {
   "schemaVersion": "2.0.0",
   "kind": "gate-receipt",
-  "identity": "sha256:90b77c189e94e0f9faf5627047e8cb9f1a9ac97a579f1176da4d350f8e1aa8ca",
+  "identity": "sha256:9ec21fd7673dddfad0a8abade17c596dd622a7bb87956080d649d011e7f1dd40",
   "gateId": "test",
   "policyIdentity": "sha256:5b20c1e7cb638ae6a87f49a56a91f3c49b7d35dab394e816d0554e009f6e33fe",
   "baseCommit": "6304c90f83df3cdb918dff03f6358dcf4a939d16",
@@ -28,6 +28,7 @@
     "toolVersion": "10.0.401",
     "toolIdentity": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "configurationIdentity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "runtimeClosureIdentity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "inputSetIdentity": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
     "enabled": true,
     "status": "EXECUTED",

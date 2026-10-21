@@ -46,7 +46,10 @@ public sealed class PublicationFixture
             Path.GetTempPath(), "delivery-forge-publication-receipts", Guid.NewGuid().ToString("N")), new byte[32]);
         foreach (var receipt in Gates.Append(Ci)) receiptStore.Append(receipt);
         GateReceiptProvenance = receiptStore.Provenance;
-        Authority = PublicationAuthorityHost.CreateIsolatedFixture(ReviewHost);
+        Authority = PublicationAuthorityHost.CreateIsolatedFixture(
+            ReviewHost,
+            GateReceiptConsumerPolicy.CreateIsolatedFixture(
+                TrustedGatePluginRegistry.BuiltIns, GateReceiptProvenance));
     }
 
     public static DateTimeOffset Time => DateTimeOffset.Parse("2026-10-11T00:00:01Z");
@@ -100,7 +103,7 @@ public sealed class PublicationFixture
             "gateId":"{{gateId}}", "policyIdentity":"{{Policy.Identity}}", "headCommit":"{{Commit('b')}}",
             "pluginId":"{{pluginId}}", "pluginVersion":"1.0.0", "tool":"{{tool}}",
             "toolVersion":"{{(tool == "dotnet" ? "10.0.401" : "github-actions-v1")}}", "toolIdentity":"{{Id('a')}}",
-            "configurationIdentity":"{{Id('b')}}", "inputSetIdentity":"{{Id('c')}}",
+            "configurationIdentity":"{{Id('b')}}", "runtimeClosureIdentity":"{{Id('b')}}", "inputSetIdentity":"{{Id('c')}}",
             "enabled":true, "status":"EXECUTED", "productionCapable":true, "authority":"production" } }
         """);
 
@@ -115,7 +118,11 @@ public sealed class PublicationFixture
             ["capabilityFormat"] = format,
             ["executableIdentity"] = Id('a'),
             ["configurationIdentity"] = Id('b'),
-            ["plugin"] = new JsonObject { ["inputSetIdentity"] = Id('c') }
+            ["plugin"] = new JsonObject
+            {
+                ["runtimeClosureIdentity"] = Id('b'),
+                ["inputSetIdentity"] = Id('c')
+            }
         }.ToJsonString())!.ToJsonString();
     }
 

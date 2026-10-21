@@ -12,6 +12,8 @@ internal sealed class GateClaimLease : IAsyncDisposable
 {
     internal const int MaximumClaimBytes = 4096;
     private const int ClaimVersion = 1;
+    private const int MaximumPendingClaimsInspected = 64;
+    private static readonly TimeSpan PendingClaimRecoveryAge = TimeSpan.FromMinutes(10);
     private readonly string path;
     private readonly string nonce;
     private FileStream? stream;
@@ -25,6 +27,7 @@ internal sealed class GateClaimLease : IAsyncDisposable
 
     internal static GateClaimAcquisition Acquire(string path, Action<string>? afterInspectionForTest = null)
     {
+        RecoverAbandonedPendingClaims(path);
         string? interruptedClaimPath = null;
         for (var attempt = 0; attempt < 8; attempt++)
         {
@@ -35,18 +38,28 @@ internal sealed class GateClaimLease : IAsyncDisposable
                 var bytes = JsonSerializer.SerializeToUtf8Bytes(claim);
                 if (bytes.Length > MaximumClaimBytes)
                     throw new EvidenceWriteException("Gate claim metadata exceeds its bounded representation.");
-                var created = new FileStream(
-                    path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read,
-                    MaximumClaimBytes, FileOptions.WriteThrough);
+                var temporary = path + ".pending-" + nonce;
                 try
                 {
-                    created.Write(bytes);
-                    created.Flush(flushToDisk: true);
+                    using (var pending = new FileStream(
+                               temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None,
+                               MaximumClaimBytes, FileOptions.WriteThrough))
+                    {
+                        pending.Write(bytes);
+                        pending.Flush(flushToDisk: true);
+                    }
+                    // Same-directory rename publishes only a complete durable claim and fails
+                    // atomically when another owner already holds the canonical name.
+                    File.Move(temporary, path);
+                    var created = new FileStream(
+                        path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read,
+                        MaximumClaimBytes, FileOptions.WriteThrough);
+                    if (!OperatingSystem.IsMacOS()) created.Lock(0, 1);
                     return new(new(path, nonce, created), null, interruptedClaimPath);
                 }
                 catch
                 {
-                    created.Dispose();
+                    try { File.Delete(temporary); } catch (IOException) { }
                     TryDeleteOwned(path, nonce);
                     throw;
                 }
@@ -98,6 +111,39 @@ internal sealed class GateClaimLease : IAsyncDisposable
         return new(null, "Gate claim changed concurrently and could not be acquired deterministically.", null);
     }
 
+    private static void RecoverAbandonedPendingClaims(string path)
+    {
+        var directory = Path.GetDirectoryName(path);
+        if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
+            return;
+
+        var cutoff = DateTime.UtcNow - PendingClaimRecoveryAge;
+        try
+        {
+            foreach (var pending in Directory.EnumerateFiles(
+                         directory, Path.GetFileName(path) + ".pending-*", SearchOption.TopDirectoryOnly)
+                     .Take(MaximumPendingClaimsInspected))
+            {
+                try
+                {
+                    var information = new FileInfo(pending);
+                    if (!information.Attributes.HasFlag(FileAttributes.ReparsePoint) &&
+                        information.LastWriteTimeUtc <= cutoff)
+                        File.Delete(pending);
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                    // A concurrent acquisition may still own a fresh pending file. Recovery is
+                    // best-effort and never weakens exclusion on the canonical claim name.
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            // Failure to scavenge an unpublished file cannot affect canonical claim ownership.
+        }
+    }
+
     internal static byte[] CreatePayloadForProcess(int processId)
     {
         var claim = ClaimForProcess(processId, Guid.NewGuid().ToString("N"));
@@ -106,6 +152,10 @@ internal sealed class GateClaimLease : IAsyncDisposable
 
     public ValueTask DisposeAsync()
     {
+        if (!OperatingSystem.IsMacOS())
+        {
+            try { stream?.Unlock(0, 1); } catch (IOException) { }
+        }
         stream?.Dispose();
         stream = null;
         TryDeleteOwned(path, nonce);
@@ -119,15 +169,16 @@ internal sealed class GateClaimLease : IAsyncDisposable
             var information = new FileInfo(path);
             if (!information.Exists)
                 return new(ClaimOwnerState.Stale, "claim disappeared", null);
-            if (information.Length <= 0 || information.Length > MaximumClaimBytes ||
-                information.Attributes.HasFlag(FileAttributes.ReparsePoint))
-                return new(ClaimOwnerState.Ambiguous, "claim is empty, oversized, or a reparse point", null);
+            if (information.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                return new(ClaimOwnerState.Ambiguous, "claim is a reparse point", null);
+            if (information.Length <= 0 || information.Length > MaximumClaimBytes)
+                return InspectMalformedLiveness(path, information, "claim is empty or oversized");
             var bytes = File.ReadAllBytes(path);
             var claim = JsonSerializer.Deserialize<ClaimDocument>(bytes);
             if (claim is null || claim.Version != ClaimVersion || claim.ProcessId <= 0 ||
                 string.IsNullOrWhiteSpace(claim.BootId) || string.IsNullOrWhiteSpace(claim.ProcessStartToken) ||
                 string.IsNullOrWhiteSpace(claim.Nonce))
-                return new(ClaimOwnerState.Ambiguous, "claim metadata is malformed", null);
+                return InspectMalformedLiveness(path, information, "claim metadata is malformed");
             var currentBoot = BootId();
             if (!string.Equals(currentBoot, claim.BootId, StringComparison.Ordinal))
                 return new(ClaimOwnerState.Stale, "claim belongs to an earlier boot", claim.Nonce);
@@ -143,6 +194,29 @@ internal sealed class GateClaimLease : IAsyncDisposable
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException or EvidenceWriteException)
         {
             return new(ClaimOwnerState.Ambiguous, exception.Message, null);
+        }
+    }
+
+    private static ClaimInspection InspectMalformedLiveness(string path, FileInfo information, string reason)
+    {
+        if (OperatingSystem.IsMacOS())
+            return new(ClaimOwnerState.Ambiguous,
+                $"{reason}; advisory-lock recovery is unavailable on macOS", null);
+        try
+        {
+            using var candidate = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.ReadWrite);
+            candidate.Lock(0, 1);
+            candidate.Unlock(0, 1);
+            var identity = $"malformed:{information.Length}:{information.LastWriteTimeUtc.Ticks}";
+            return new(ClaimOwnerState.Stale, $"{reason}; no live advisory-lock owner exists", identity);
+        }
+        catch (IOException)
+        {
+            return new(ClaimOwnerState.Live, $"{reason}; an advisory-lock owner is live", null);
+        }
+        catch (UnauthorizedAccessException exception)
+        {
+            return new(ClaimOwnerState.Ambiguous, $"{reason}; liveness cannot be checked: {exception.Message}", null);
         }
     }
 

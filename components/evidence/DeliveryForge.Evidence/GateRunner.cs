@@ -19,8 +19,6 @@ public sealed class GateRunner
     private readonly string _trustedWorkingDirectory;
     private readonly string _trustedProtectedBaseCommit;
     private readonly DeterministicEvaluationPluginRegistry _plugins;
-    private readonly bool _emitAuthoritativeV2;
-    private readonly HostOwnedReceiptStore? _authoritativeReceiptStore;
     private readonly string? _hostOwnedClaimRoot;
 
     public GateRunner(
@@ -28,11 +26,32 @@ public sealed class GateRunner
         IRepositoryIdentityReader repository,
         string trustedWorkingDirectory,
         string trustedProtectedBaseCommit,
-        DeterministicEvaluationPluginRegistry? plugins = null,
-        bool emitAuthoritativeV2 = false,
-        TrustedGatePluginRegistry? authorityRegistry = null,
-        HostOwnedReceiptStore? authoritativeReceiptStore = null,
-        string? hostOwnedClaimRoot = null)
+        DeterministicEvaluationPluginRegistry? plugins = null)
+        : this(executor, repository, trustedWorkingDirectory, trustedProtectedBaseCommit,
+            plugins, TrustedGatePluginRegistry.BuiltIns, null)
+    {
+    }
+
+    public GateRunner(
+        ICommandExecutor executor,
+        IRepositoryIdentityReader repository,
+        string trustedWorkingDirectory,
+        string trustedProtectedBaseCommit,
+        TrustedEvaluationPluginRegistry registry)
+        : this(executor, repository, trustedWorkingDirectory, trustedProtectedBaseCommit,
+            (registry ?? throw new ArgumentNullException(nameof(registry))).Plugins,
+            registry.Authority, null)
+    {
+    }
+
+    internal GateRunner(
+        ICommandExecutor executor,
+        IRepositoryIdentityReader repository,
+        string trustedWorkingDirectory,
+        string trustedProtectedBaseCommit,
+        DeterministicEvaluationPluginRegistry? plugins,
+        TrustedGatePluginRegistry? authorityRegistry,
+        string? hostOwnedClaimRoot)
     {
         _executor = executor;
         _repository = repository;
@@ -40,13 +59,7 @@ public sealed class GateRunner
         _trustedProtectedBaseCommit = trustedProtectedBaseCommit;
         _plugins = plugins ?? DeterministicEvaluationPluginRegistry.CreateBuiltIns();
         _plugins.AssertMatchesAuthorityRegistry(authorityRegistry ?? TrustedGatePluginRegistry.BuiltIns);
-        _emitAuthoritativeV2 = emitAuthoritativeV2;
-        _authoritativeReceiptStore = authoritativeReceiptStore;
         _hostOwnedClaimRoot = hostOwnedClaimRoot is null ? null : Path.GetFullPath(hostOwnedClaimRoot);
-        if (_emitAuthoritativeV2 && _authoritativeReceiptStore is null)
-            throw new ArgumentException("Authoritative v2 emission requires a host-owned receipt store.");
-        if (_emitAuthoritativeV2 && _hostOwnedClaimRoot is null)
-            throw new ArgumentException("Authoritative v2 emission requires a stable host-owned claim root.");
     }
     private static readonly JsonSerializerOptions ContractJson = CreateContractJson();
 
@@ -513,53 +526,29 @@ public sealed class GateRunner
                 request.GateId, request.Policy.PolicyIdentity, before.HeadCommit,
                 plugin.Id, plugin.Version, request.Capability.Tool, request.Capability.Version,
                 request.Capability.ExecutableIdentity ?? "sha256:" + new string('0', 64),
-                request.ConfigurationIdentity, plugin.InputSetIdentity,
+                request.ConfigurationIdentity, plugin.RuntimeClosureIdentity, plugin.InputSetIdentity,
                 plugin.Enabled, PluginStatusText(plugin.Status),
                 normalized.ProductionCapable,
                 normalized.ProductionCapable ? "production" : "advisory"));
 
-        byte[] receiptBytes;
-        if (_emitAuthoritativeV2)
-        {
-            var provisionalBytes = SerializeReceipt(provisional);
-            var receipt = provisional with { Identity = CanonicalJson.ComputeIdentity(provisionalBytes) };
-            receiptBytes = SerializeReceipt(receipt);
-        }
-        else
-        {
-            var legacy = new GateReceiptContract(
-                "1.0.0", provisional.Kind, provisional.Identity, provisional.GateId,
-                provisional.PolicyIdentity, provisional.BaseCommit, provisional.HeadCommit,
-                provisional.TreeId, provisional.Command, provisional.StartedAt, provisional.CompletedAt,
-                provisional.ExitCode, provisional.Outcome, provisional.Reason, provisional.ArtifactHashes,
-                provisional.SourceChanged, provisional.Limitations, provisional.NotApplicableRationale);
-            var provisionalBytes = SerializeReceipt(legacy);
-            legacy = legacy with { Identity = CanonicalJson.ComputeIdentity(provisionalBytes) };
-            receiptBytes = SerializeReceipt(legacy);
-        }
-        string receiptPath;
-        if (_emitAuthoritativeV2)
-        {
-            var validated = ContractValidator.ParseAndValidate(receiptBytes);
-            receiptPath = _authoritativeReceiptStore!.Append(validated);
-        }
-        else
-        {
-            receiptPath = await new AppendOnlyContractStore(Path.Combine(gateDirectory, "receipts"))
-                .WriteImmutableAsync(receiptBytes, cancellationToken).ConfigureAwait(false);
-        }
+        var legacy = new GateReceiptContract(
+            "1.0.0", provisional.Kind, provisional.Identity, provisional.GateId,
+            provisional.PolicyIdentity, provisional.BaseCommit, provisional.HeadCommit,
+            provisional.TreeId, provisional.Command, provisional.StartedAt, provisional.CompletedAt,
+            provisional.ExitCode, provisional.Outcome, provisional.Reason, provisional.ArtifactHashes,
+            provisional.SourceChanged, provisional.Limitations, provisional.NotApplicableRationale);
+        var provisionalBytes = SerializeReceipt(legacy);
+        legacy = legacy with { Identity = CanonicalJson.ComputeIdentity(provisionalBytes) };
+        var receiptBytes = SerializeReceipt(legacy);
+        var receiptPath = await new AppendOnlyContractStore(Path.Combine(gateDirectory, "receipts"))
+            .WriteImmutableAsync(receiptBytes, cancellationToken).ConfigureAwait(false);
 
         return new GateRunResult(
             normalized.Outcome, normalized.Reason, normalized.Fixture, normalized.ProductionCapable,
             limitations, sourceChanged, request.Invocation, execution, before, after,
             request.Policy.PolicyIdentity, request.Capability.ExecutableIdentity ?? "unavailable", request.ConfigurationIdentity, request.Scope,
             artifactHashes, receiptPath, normalized.NotApplicableRationale)
-        {
-            Plugin = plugin,
-            TrustedReceiptProvenance = _emitAuthoritativeV2
-                ? _authoritativeReceiptStore!.Provenance
-                : null
-        };
+        { Plugin = plugin, TrustedReceiptProvenance = null };
     }
 
     private static async Task<Dictionary<string, string>> WriteArtifactsAsync(
@@ -721,8 +710,7 @@ public sealed class GateRunner
             return pluginAuthorityFailure;
         if (!request.Policy.AuthorityVerified ||
             !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
-            request.Capability.Fixture || !HasTrustedProductionExecution() ||
-            !_emitAuthoritativeV2 || _authoritativeReceiptStore is null)
+            request.Capability.Fixture || !HasTrustedProductionExecution())
             return NormalizedEvidence.Incomplete(
                 "NOT_APPLICABLE is advisory unless the same trusted production capability, required-gate, code-owned execution, and durable v2 provenance bindings as PASS are present.");
         return null;
@@ -831,11 +819,9 @@ public sealed class GateRunner
 
     private bool HasTrustedProductionExecution()
     {
-        var process = _executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } ||
-            _executor is IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true };
-        var repository = _repository is GitRepositoryIdentityReader { SupportsCreationOwnedBoundedRead: true } ||
-            _repository is IBoundedRepositoryFixtureReader { SupportsCreationOwnedBoundedRead: true };
-        return process && repository;
+        // This repository has no enforceable separate-principal launcher/signer. Bounded
+        // same-uid execution is useful evidence, but never production authority.
+        return false;
     }
 
     private static TimeSpan Remaining(DateTimeOffset deadline)

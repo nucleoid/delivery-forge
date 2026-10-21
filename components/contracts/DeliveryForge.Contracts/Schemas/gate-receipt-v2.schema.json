@@ -28,7 +28,7 @@
     "authorityBinding": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["gateId", "policyIdentity", "headCommit", "pluginId", "pluginVersion", "tool", "toolVersion", "toolIdentity", "configurationIdentity", "inputSetIdentity", "enabled", "status", "productionCapable", "authority"],
+      "required": ["gateId", "policyIdentity", "headCommit", "pluginId", "pluginVersion", "tool", "toolVersion", "toolIdentity", "configurationIdentity", "runtimeClosureIdentity", "inputSetIdentity", "enabled", "status", "productionCapable", "authority"],
       "properties": {
         "gateId": { "$ref": "#/$defs/nonEmpty" },
         "policyIdentity": { "$ref": "#/$defs/identity" },
@@ -39,6 +39,7 @@
         "toolVersion": { "$ref": "#/$defs/nonEmpty" },
         "toolIdentity": { "$ref": "#/$defs/identity" },
         "configurationIdentity": { "$ref": "#/$defs/identity" },
+        "runtimeClosureIdentity": { "$ref": "#/$defs/identity" },
         "inputSetIdentity": { "$ref": "#/$defs/identity" },
         "enabled": { "type": "boolean" },
         "status": { "enum": ["SELECTED", "DISABLED", "EXECUTED", "NOT_APPLICABLE"] },

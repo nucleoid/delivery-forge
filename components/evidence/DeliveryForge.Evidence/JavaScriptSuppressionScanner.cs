@@ -15,6 +15,7 @@ internal static class JavaScriptSuppressionScanner
     internal const int MaximumRulesPerDirective = 256;
     internal const int MaximumRuleBytes = 256;
     internal const int MaximumNestingDepth = 256;
+    internal const int MaximumLinesPerInput = 262_144;
     private const int CheckIntervalBytes = 16 * 1024;
 
     private static readonly DirectiveName[] DirectiveNames =
@@ -56,6 +57,31 @@ internal static class JavaScriptSuppressionScanner
                 return true;
         }
         return false;
+    }
+
+    internal static int CountLogicalLines(ReadOnlySpan<byte> source)
+    {
+        var lines = 1;
+        for (var index = 0; index < source.Length; index++)
+        {
+            if (source[index] == (byte)'\r')
+            {
+                if (index + 1 < source.Length && source[index + 1] == (byte)'\n') index++;
+                lines++;
+            }
+            else if (source[index] == (byte)'\n')
+                lines++;
+            else if (index + 2 < source.Length && source[index] == 0xe2 && source[index + 1] == 0x80 &&
+                     source[index + 2] is 0xa8 or 0xa9)
+            {
+                index += 2;
+                lines++;
+            }
+            if (lines > MaximumLinesPerInput)
+                throw new EvidenceRepositoryException(
+                    $"JavaScript-family blob exceeds the {MaximumLinesPerInput}-line suppression scan ceiling.");
+        }
+        return lines;
     }
 
     private static void ScanCode(
@@ -136,6 +162,8 @@ internal static class JavaScriptSuppressionScanner
             if (current == (byte)'/' && canStartRegularExpression &&
                 (index == 0 || content[index - 1] != (byte)'<'))
             {
+                if (IsLikelyJsxText(content, index))
+                    throw Ambiguous("a slash in possible JSX text cannot be classified without pinned parser evidence");
                 if (!SkipRegularExpression(content, ref index, budget))
                     throw Ambiguous("unterminated regular-expression literal");
                 canStartRegularExpression = false;
@@ -608,6 +636,7 @@ internal sealed record SuppressionCoverage(
         Rule.StartsWith("anti-slop-effect/", StringComparison.Ordinal) ||
         string.Equals(Rule, "oxc/no-accumulating-spread", StringComparison.Ordinal) ||
         KnownBareAntiSlopRules.Contains(Rule) ||
+        KnownBareAntiSlopRules.Contains(Rule[(Rule.LastIndexOf('/') + 1)..]) ||
         !Rule.Contains('/') && !KnownSafeBareRules.Contains(Rule);
 
     private static readonly HashSet<string> KnownBareAntiSlopRules = new(StringComparer.Ordinal)
@@ -640,6 +669,7 @@ internal sealed class SuppressionProfile
     internal SuppressionProfile(ReadOnlySpan<byte> source)
     {
         sourceLength = source.Length;
+        _ = JavaScriptSuppressionScanner.CountLogicalLines(source);
         var starts = new List<int> { 0 };
         for (var index = 0; index < source.Length; index++)
         {
@@ -709,6 +739,10 @@ internal sealed class SuppressionProfile
             for (var index = open.Count - 1; index >= 0; index--)
             {
                 var disabled = open[index];
+                // A rule-specific enable only re-enables that rule. It cannot terminate a
+                // blanket disable; pinned Oxlint 1.78.0 preserves the blanket for all other rules.
+                if (disabled.Rule == "*" && directive.Rule != "*")
+                    continue;
                 if (directive.Rule != "*" && disabled.Rule != "*" &&
                     !string.Equals(directive.Rule, disabled.Rule, StringComparison.Ordinal))
                     continue;

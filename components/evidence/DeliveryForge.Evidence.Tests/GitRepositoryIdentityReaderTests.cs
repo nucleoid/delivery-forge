@@ -290,6 +290,44 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Fact]
+    public void Jsx_text_slash_cannot_hide_the_reviewed_suppression_attack()
+    {
+        const string source =
+            "export function f(input: { x: number }) { return <p>/[</p>; } // eslint-disable-line anti-slop/no-object-parameters ]/";
+
+        var error = Assert.Throws<EvidenceRepositoryException>(() =>
+            GitRepositoryIdentityReader.ContainsSuppressionDirective(source));
+
+        Assert.Contains("ambiguous", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Rule_specific_enable_does_not_end_blanket_disable_and_prefixed_alias_is_dangerous()
+    {
+        var blanket = JavaScriptSuppressionScanner.Scan(System.Text.Encoding.UTF8.GetBytes(
+            "/* eslint-disable */\n/* eslint-enable no-console */\nexport function f(input: { x: number }) { return input.x; }\n"),
+            TestContext.Current.CancellationToken);
+        var alias = JavaScriptSuppressionScanner.Scan(System.Text.Encoding.UTF8.GetBytes(
+            "// eslint-disable-next-line other/no-object-parameters\nexport function f(input: { x: number }) { return input.x; }\n"),
+            TestContext.Current.CancellationToken);
+
+        Assert.True(JavaScriptSuppressionScanner.IntroducesDangerousCoverage(blanket, null));
+        Assert.True(JavaScriptSuppressionScanner.IntroducesDangerousCoverage(alias, null));
+    }
+
+    [Fact]
+    public void Line_dense_suppression_input_fails_before_allocating_unbounded_line_hashes()
+    {
+        var source = System.Text.Encoding.UTF8.GetBytes(
+            new string('\n', JavaScriptSuppressionScanner.MaximumLinesPerInput));
+
+        var error = Assert.Throws<EvidenceRepositoryException>(() =>
+            JavaScriptSuppressionScanner.Scan(source, TestContext.Current.CancellationToken));
+
+        Assert.Contains("line", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Regex_after_closing_brace_is_ambiguous_and_fails_closed()
     {
         var error = Assert.Throws<EvidenceRepositoryException>(() =>
@@ -313,6 +351,31 @@ public sealed class GitRepositoryIdentityReaderTests
         var identity = await reader.ReadAsync(TestContext.Current.CancellationToken);
 
         Assert.Equal(TestEvidence.Repository(), identity);
+    }
+
+    [Theory]
+    [InlineData("filter.evil.clean", "touch-should-never-run")]
+    [InlineData("include.path", "/tmp/patch-controlled-git-include")]
+    [InlineData("core.attributesFile", "/tmp/patch-controlled-gitattributes")]
+    public async Task Production_identity_rejects_unsafe_repository_local_configuration(
+        string key, string value)
+    {
+        using var temp = new TempDirectory();
+        await Git(temp.Path, "init");
+        await Git(temp.Path, "config", "user.name", "Delivery Forge Test");
+        await Git(temp.Path, "config", "user.email", "forge@example.invalid");
+        await File.WriteAllTextAsync(System.IO.Path.Combine(temp.Path, "app.ts"),
+            "export const value = 1;\n", TestContext.Current.CancellationToken);
+        await Git(temp.Path, "add", ".");
+        await Git(temp.Path, "commit", "-m", "base");
+        var commit = (await Git(temp.Path, "rev-parse", "HEAD")).Trim();
+        await Git(temp.Path, "config", "--local", key, value);
+
+        var error = await Assert.ThrowsAsync<EvidenceRepositoryException>(() =>
+            new GitRepositoryIdentityReader(new ProcessCommandExecutor(), temp.Path, commit)
+                .ReadAsync(TestContext.Current.CancellationToken));
+
+        Assert.Contains("forbidden", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

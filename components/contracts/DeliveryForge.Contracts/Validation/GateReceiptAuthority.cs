@@ -47,7 +47,7 @@ public static class GateReceiptAuthority
             return false;
         }
 
-        foreach (var field in new[] { "toolVersion", "toolIdentity", "configurationIdentity", "inputSetIdentity" })
+        foreach (var field in new[] { "toolVersion", "toolIdentity", "configurationIdentity", "runtimeClosureIdentity", "inputSetIdentity" })
         {
             if (!binding.TryGetProperty(field, out var value) || value.ValueKind != JsonValueKind.String ||
                 string.IsNullOrWhiteSpace(value.GetString()))
@@ -69,6 +69,13 @@ public static class GateReceiptAuthority
             commandValue.ValueKind != JsonValueKind.String ||
             !TryValidateCommandEnvelope(commandValue.GetString()!, binding, trusted, out reason))
             return false;
+
+        if (trusted.ExpectedRuntimeClosureIdentity is not null &&
+            !Same(binding, "runtimeClosureIdentity", trusted.ExpectedRuntimeClosureIdentity))
+        {
+            reason = "Gate authority binding does not use the registry-pinned executable runtime closure.";
+            return false;
+        }
 
         reason = string.Empty;
         return true;
@@ -103,6 +110,7 @@ public static class GateReceiptAuthority
                 !Same(binding, "toolIdentity", Text(command, "executableIdentity")) ||
                 !Same(binding, "configurationIdentity", Text(command, "configurationIdentity")) ||
                 !command.TryGetProperty("plugin", out var plugin) ||
+                !Same(binding, "runtimeClosureIdentity", Text(plugin, "runtimeClosureIdentity")) ||
                 !Same(binding, "inputSetIdentity", Text(plugin, "inputSetIdentity")))
             {
                 reason = "Gate authority binding disagrees with its immutable command/configuration/input envelope.";

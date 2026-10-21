@@ -55,6 +55,7 @@ public sealed class SchemaValidationTests
             ["toolVersion"] = "10.0.401",
             ["toolIdentity"] = "sha256:" + new string('a', 64),
             ["configurationIdentity"] = "sha256:" + new string('b', 64),
+            ["runtimeClosureIdentity"] = "sha256:" + new string('b', 64),
             ["inputSetIdentity"] = "sha256:" + new string('c', 64),
             ["enabled"] = true,
             ["status"] = "EXECUTED",
@@ -729,7 +730,10 @@ public sealed class SchemaValidationTests
             "anti-slop" => ("dmmulroy.anti-slop", "0.1.2+13909c9e07590f5a85d93c62712259fe14a883f7", "oxlint", "1.78.0", "oxlint-json-v1"),
             _ => ("delivery-forge.dotnet", "1.0.0", "dotnet", "10.0.401", "trx-v1")
         };
-        gate["command"] = CommandEnvelope(tool, toolVersion, format);
+        var runtimeClosure = gateId == "anti-slop"
+            ? "sha256:f3c39acbe45af98d4ea005347660992ac47a75fb6511a9ba6c2563792a3be267"
+            : "sha256:" + new string('b', 64);
+        gate["command"] = CommandEnvelope(tool, toolVersion, format, runtimeClosure);
         gate["authorityBinding"] = new JsonObject
         {
             ["gateId"] = gateId,
@@ -741,6 +745,7 @@ public sealed class SchemaValidationTests
             ["toolVersion"] = toolVersion,
             ["toolIdentity"] = "sha256:" + new string('a', 64),
             ["configurationIdentity"] = "sha256:" + new string('b', 64),
+            ["runtimeClosureIdentity"] = runtimeClosure,
             ["inputSetIdentity"] = "sha256:" + new string('c', 64),
             ["enabled"] = true,
             ["status"] = "EXECUTED",
@@ -751,15 +756,20 @@ public sealed class SchemaValidationTests
         return gate;
     }
 
-    private static string CommandEnvelope(string tool, string version, string format) => new JsonObject
-    {
-        ["capabilityTool"] = tool,
-        ["capabilityVersion"] = version,
-        ["capabilityFormat"] = format,
-        ["executableIdentity"] = "sha256:" + new string('a', 64),
-        ["configurationIdentity"] = "sha256:" + new string('b', 64),
-        ["plugin"] = new JsonObject { ["inputSetIdentity"] = "sha256:" + new string('c', 64) }
-    }.ToJsonString();
+    private static string CommandEnvelope(string tool, string version, string format,
+        string? runtimeClosure = null) => new JsonObject
+        {
+            ["capabilityTool"] = tool,
+            ["capabilityVersion"] = version,
+            ["capabilityFormat"] = format,
+            ["executableIdentity"] = "sha256:" + new string('a', 64),
+            ["configurationIdentity"] = "sha256:" + new string('b', 64),
+            ["plugin"] = new JsonObject
+            {
+                ["runtimeClosureIdentity"] = runtimeClosure ?? "sha256:" + new string('b', 64),
+                ["inputSetIdentity"] = "sha256:" + new string('c', 64)
+            }
+        }.ToJsonString();
 
     private static ReadOnlyMemory<byte> Bytes(JsonObject node) => Utf8(node.ToJsonString());
 

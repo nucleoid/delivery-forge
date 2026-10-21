@@ -13,6 +13,7 @@ public sealed class GitRepositoryIdentityReader(
     internal const int MaximumFrozenInputCount = 100_000;
     internal const long MaximumFrozenInputBytes = 512L * 1024 * 1024;
     internal const long MaximumTotalSuppressionScanBytes = 64L * 1024 * 1024;
+    internal const int MaximumTotalSuppressionScanLines = 1_000_000;
     internal const int MaximumFrozenObjectBytes = 64 * 1024 * 1024;
     internal const int MaximumBatchPayloadBytes = 16 * 1024 * 1024;
     private readonly string _repositoryRoot = Path.GetFullPath(repositoryRoot);
@@ -37,6 +38,7 @@ public sealed class GitRepositoryIdentityReader(
         if (!Path.IsPathFullyQualified(_repositoryRoot) ||
             !IsGitObject(protectedBaseCommit))
             throw new EvidenceRepositoryException("Repository root and a full protected base commit are required.");
+        var localConfigIdentity = ReadSafeLocalConfigIdentity();
 
         var head = await GitAsync(["rev-parse", "HEAD"], cancellationToken, deadline).ConfigureAwait(false);
         var resolvedBase = await GitAsync(
@@ -54,6 +56,8 @@ public sealed class GitRepositoryIdentityReader(
         if (!IsGitObject(treeId))
             throw new EvidenceRepositoryException("Git returned a malformed head or tree identity.");
 
+        if (!string.Equals(localConfigIdentity, ReadSafeLocalConfigIdentity(), StringComparison.Ordinal))
+            throw new EvidenceRepositoryException("Repository-local Git configuration changed during identity capture.");
         return new RepositoryIdentity(
             baseId,
             headId,
@@ -68,7 +72,9 @@ public sealed class GitRepositoryIdentityReader(
     {
         if (timeout <= TimeSpan.Zero)
             throw new EvidenceRepositoryException("Evaluation scope requires a positive finite deadline.");
+        cancellationToken.ThrowIfCancellationRequested();
         var deadline = DateTimeOffset.UtcNow + timeout;
+        var localConfigIdentity = ReadSafeLocalConfigIdentity();
         if (!IsGitObject(expectedHeadCommit))
             throw new EvidenceRepositoryException("A full frozen head commit is required for evaluation scope.");
         var head = await GitAsync(["rev-parse", "HEAD"], cancellationToken, deadline).ConfigureAwait(false);
@@ -141,6 +147,11 @@ public sealed class GitRepositoryIdentityReader(
             hash.AppendData([0]);
             hash.AppendData(Encoding.UTF8.GetBytes(retired));
             hash.AppendData([0]);
+        }
+        if (!string.Equals(localConfigIdentity, ReadSafeLocalConfigIdentity(), StringComparison.Ordinal))
+        {
+            DeleteMaterialization(materializedRoot);
+            throw new EvidenceRepositoryException("Repository-local Git configuration changed during frozen scope capture.");
         }
         return new RepositoryEvaluationScope(
             files,
@@ -268,11 +279,15 @@ public sealed class GitRepositoryIdentityReader(
                 $"Base plus head suppression input exceeds the {MaximumTotalSuppressionScanBytes}-byte aggregate ceiling.");
 
         var root = Path.Combine(Path.GetTempPath(), "delivery-forge-frozen-" + Guid.NewGuid().ToString("N"));
+        CleanupStaleMaterializations(Path.GetTempPath());
         Directory.CreateDirectory(root);
         if (!OperatingSystem.IsWindows())
             File.SetUnixFileMode(root, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        File.WriteAllText(root + ".owner",
+            $"{Environment.ProcessId}:{System.Diagnostics.Process.GetCurrentProcess().StartTime.ToUniversalTime().Ticks}");
         var headProfiles = new Dictionary<string, SuppressionProfile>(StringComparer.Ordinal);
         var baseProfiles = new Dictionary<string, SuppressionProfile>(StringComparer.Ordinal);
+        var scannedLines = 0;
         var materializedPaths = new HashSet<string>(PathComparer);
         try
         {
@@ -291,13 +306,25 @@ public sealed class GitRepositoryIdentityReader(
                     foreach (var entry in objectConsumers.Head)
                     {
                         if (changedPaths.Contains(entry.Path))
+                        {
+                            scannedLines = checked(scannedLines + JavaScriptSuppressionScanner.CountLogicalLines(bytes));
+                            if (scannedLines > MaximumTotalSuppressionScanLines)
+                                throw new EvidenceRepositoryException(
+                                    $"Base plus head suppression input exceeds the {MaximumTotalSuppressionScanLines}-line aggregate ceiling.");
                             headProfiles[entry.Path] = JavaScriptSuppressionScanner.Scan(
                                 bytes, cancellationToken, deadline);
+                        }
                         await MaterializeFrozenObjectAsync(
                             root, entry, bytes, materializedPaths, cancellationToken).ConfigureAwait(false);
                     }
                     foreach (var path in objectConsumers.BasePaths)
+                    {
+                        scannedLines = checked(scannedLines + JavaScriptSuppressionScanner.CountLogicalLines(bytes));
+                        if (scannedLines > MaximumTotalSuppressionScanLines)
+                            throw new EvidenceRepositoryException(
+                                $"Base plus head suppression input exceeds the {MaximumTotalSuppressionScanLines}-line aggregate ceiling.");
                         baseProfiles[path] = JavaScriptSuppressionScanner.Scan(bytes, cancellationToken, deadline);
+                    }
                 }
             }
 
@@ -555,10 +582,56 @@ public sealed class GitRepositoryIdentityReader(
 
     internal static void DeleteMaterialization(string? root)
     {
-        if (string.IsNullOrWhiteSpace(root) || !Directory.Exists(root)) return;
-        foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
-            File.SetAttributes(file, FileAttributes.Normal);
-        Directory.Delete(root, recursive: true);
+        if (string.IsNullOrWhiteSpace(root)) return;
+        if (Directory.Exists(root))
+        {
+            foreach (var file in Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories))
+                File.SetAttributes(file, FileAttributes.Normal);
+            Directory.Delete(root, recursive: true);
+        }
+        try { File.Delete(root + ".owner"); } catch (IOException) { }
+    }
+
+    private static void CleanupStaleMaterializations(string temporaryRoot)
+    {
+        foreach (var root in Directory.EnumerateDirectories(
+                     temporaryRoot, "delivery-forge-frozen-*", SearchOption.TopDirectoryOnly).Take(1024))
+        {
+            var ownerPath = root + ".owner";
+            var stale = false;
+            try
+            {
+                if (!File.Exists(ownerPath))
+                {
+                    stale = Directory.GetCreationTimeUtc(root) < DateTime.UtcNow.AddHours(-1);
+                }
+                else
+                {
+                    var fields = File.ReadAllText(ownerPath).Split(':', 2);
+                    stale = fields.Length != 2 || !int.TryParse(fields[0], out var processId) ||
+                        !long.TryParse(fields[1], out var startTicks) || !ProcessMatches(processId, startTicks);
+                }
+                if (stale) DeleteMaterialization(root);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or ArgumentException)
+            {
+                // Cleanup is best effort; the bounded gate still owns and deletes its current root.
+            }
+        }
+    }
+
+    private static bool ProcessMatches(int processId, long startTicks)
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(processId);
+            return process.StartTime.ToUniversalTime().Ticks == startTicks;
+        }
+        catch (Exception exception) when (exception is ArgumentException or InvalidOperationException or
+                                           System.ComponentModel.Win32Exception)
+        {
+            return false;
+        }
     }
 
     private async Task<ProtectedIgnoreSelection> ReadProtectedIgnoresAsync(
@@ -663,12 +736,83 @@ public sealed class GitRepositoryIdentityReader(
             ["GIT_CONFIG_NOSYSTEM"] = "1",
             ["GIT_CONFIG_SYSTEM"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
             ["GIT_CONFIG_GLOBAL"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
-            ["GIT_CONFIG_COUNT"] = "2",
+            ["GIT_CONFIG_COUNT"] = "3",
             ["GIT_CONFIG_KEY_0"] = "core.hooksPath",
             ["GIT_CONFIG_VALUE_0"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null",
             ["GIT_CONFIG_KEY_1"] = "core.fsmonitor",
-            ["GIT_CONFIG_VALUE_1"] = "false"
+            ["GIT_CONFIG_VALUE_1"] = "false",
+            ["GIT_CONFIG_KEY_2"] = "core.attributesFile",
+            ["GIT_CONFIG_VALUE_2"] = OperatingSystem.IsWindows() ? "NUL" : "/dev/null"
         };
+
+    private string ReadSafeLocalConfigIdentity()
+    {
+        if (executor is not ProcessCommandExecutor)
+            return "fixture-local-config";
+        var dotGit = Path.Combine(_repositoryRoot, ".git");
+        string gitDirectory;
+        if (Directory.Exists(dotGit))
+            gitDirectory = dotGit;
+        else
+        {
+            var pointer = File.ReadAllText(dotGit).Trim();
+            const string prefix = "gitdir:";
+            if (!pointer.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                throw new EvidenceRepositoryException("Worktree Git directory pointer is malformed.");
+            var target = pointer[prefix.Length..].Trim();
+            gitDirectory = Path.GetFullPath(Path.IsPathFullyQualified(target)
+                ? target
+                : Path.Combine(_repositoryRoot, target));
+        }
+
+        var commonDirectory = gitDirectory;
+        var commonPointer = Path.Combine(gitDirectory, "commondir");
+        if (File.Exists(commonPointer))
+        {
+            var target = File.ReadAllText(commonPointer).Trim();
+            commonDirectory = Path.GetFullPath(Path.IsPathFullyQualified(target)
+                ? target
+                : Path.Combine(gitDirectory, target));
+        }
+
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        foreach (var path in new[] { Path.Combine(commonDirectory, "config"), Path.Combine(gitDirectory, "config.worktree") }
+                     .Distinct(PathComparer))
+        {
+            if (!File.Exists(path)) continue;
+            var bytes = File.ReadAllBytes(path);
+            RejectUnsafeLocalConfig(Encoding.UTF8.GetString(bytes));
+            hash.AppendData(Encoding.UTF8.GetBytes(Path.GetFileName(path)));
+            hash.AppendData([0]);
+            hash.AppendData(bytes);
+            hash.AppendData([0]);
+        }
+        return Convert.ToHexStringLower(hash.GetHashAndReset());
+    }
+
+    private static void RejectUnsafeLocalConfig(string config)
+    {
+        var section = string.Empty;
+        foreach (var raw in config.Split('\n'))
+        {
+            var line = raw.Trim();
+            if (line.Length == 0 || line[0] is '#' or ';') continue;
+            if (line.StartsWith('['))
+            {
+                section = line.ToLowerInvariant();
+                if (section.StartsWith("[filter", StringComparison.Ordinal) ||
+                    section.StartsWith("[include", StringComparison.Ordinal))
+                    throw new EvidenceRepositoryException(
+                        "Repository-local Git filter/include configuration is forbidden for host identity reads.");
+                continue;
+            }
+            var key = line.Split('=', 2)[0].Trim();
+            if (section.StartsWith("[core", StringComparison.Ordinal) &&
+                key.Equals("attributesfile", StringComparison.OrdinalIgnoreCase))
+                throw new EvidenceRepositoryException(
+                    "Repository-local core.attributesFile is forbidden for host identity reads.");
+        }
+    }
 
     private static StringComparison PathComparison => OperatingSystem.IsWindows()
         ? StringComparison.OrdinalIgnoreCase
