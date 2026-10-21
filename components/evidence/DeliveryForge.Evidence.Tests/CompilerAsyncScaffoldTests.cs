@@ -21,7 +21,7 @@ public sealed class CompilerAsyncScaffoldTests
         await actual.WaitAsync(TestContext.Current.CancellationToken);
         Assert.True(actual.IsCompletedSuccessfully);
 
-        using var files = new InstalledToolFiles(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var files = new InstalledToolFiles(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var testOutput = Path.GetDirectoryName(typeof(CompilerAsyncScaffoldTests).Assembly.Location)!;
         var evidence = Path.GetFullPath(Path.Combine(testOutput, "../../../.."));
         const string role = "components/evidence/DeliveryForge.Evidence.AsyncFixture/AsyncSubject.cs";
@@ -46,7 +46,7 @@ public sealed class CompilerAsyncScaffoldTests
             .Single(index => lines[index].Contains("ASYNC_AWAIT_ONE", StringComparison.Ordinal)) + 1;
         Assert.Contains(inventory.Points, point => point.LogicalPath == "AsyncSubject.cs" && point.StartLine == line);
         Assert.All(inventory.Points, point => Assert.Equal("AsyncSubject.cs", point.LogicalPath));
-        Assert.Equal(1, inventory.Points.Select(point => point.StartLine).Distinct().Count());
+        Assert.Single(inventory.Points.Select(point => point.StartLine).Distinct());
     }
 
     private static CompilerLineCensus.Build Expected(byte[] bytes)
