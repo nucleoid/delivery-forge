@@ -5,7 +5,7 @@ namespace DeliveryForge.Tool.Tests;
 public sealed class OwnedLinuxOrdinaryCaptureTests
 {
     public static bool IsLinux => OperatingSystem.IsLinux();
-    [Fact(Timeout = 90000, SkipUnless = nameof(IsLinux))]
+    [Fact(Timeout = 90000, Skip = "Creation-owned Linux scope requires Linux.", SkipUnless = nameof(IsLinux))]
     public async Task Genuine_ordinary_capture_reuses_creation_scope_and_original_work_before_foreign_budget_refusal()
     {
         using var affinity = new OwnedDuplexProcessTests.Affinity(); using var original = new ToolLifetime(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);

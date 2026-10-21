@@ -16,7 +16,7 @@ public sealed class PackageLifecycleTests
         public FilePin Host() { var p = Path.Combine(Root, "explicit-runtime-host"); File.WriteAllText(p, "DATA host fixture, never invoked"); var b = File.ReadAllBytes(p); return new(p, b.Length, BoundedFiles.Sha(b)); }
         public void Dispose() { var expected = Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar + "delivery-forge-package-fixture-"; if (!Path.GetFullPath(Root).StartsWith(expected, OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal)) throw new IOException("Fixture cleanup target escaped owned temporary root."); if (Directory.Exists(Root)) Directory.Delete(Root, true); }
     }
-    [Fact(SkipUnless = nameof(IsLinux))]
+    [Fact(Skip = "Unix execute-mode control requires Linux.", SkipUnless = nameof(IsLinux))]
     public void Genuine_owned_gate_install_records_execute_mode_and_refuses_drift_before_resume_deletion()
     {
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Actual Unix execute-mode control requires Linux.");
