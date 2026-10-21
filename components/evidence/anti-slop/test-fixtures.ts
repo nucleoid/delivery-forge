@@ -64,6 +64,8 @@ function run(fixture:
   | "violation-multiline-jsx-expression-backtick"
   | "suppression-jsx-expression-string-brace-backtick"
   | "violation-jsx-expression-string-brace-backtick"
+  | "suppression-jsx-expression-comment-brace-backtick"
+  | "violation-jsx-expression-comment-brace-backtick"
   | "suppression-same-line-jsx-expression-quote"
   | "violation-same-line-jsx-expression-quote"
   | "suppression-blanket-specific-enable"
@@ -93,6 +95,8 @@ function run(fixture:
         fixture === "violation-multiline-jsx-expression-backtick" ||
         fixture === "suppression-jsx-expression-string-brace-backtick" ||
         fixture === "violation-jsx-expression-string-brace-backtick" ||
+        fixture === "suppression-jsx-expression-comment-brace-backtick" ||
+        fixture === "violation-jsx-expression-comment-brace-backtick" ||
         fixture === "suppression-same-line-jsx-expression-quote" ||
         fixture === "violation-same-line-jsx-expression-quote"
           ? "tsx"
@@ -190,6 +194,7 @@ for (const [suppressedName, violationName] of [
   ["suppression-multiline-jsx-backtick", "violation-multiline-jsx-backtick"],
   ["suppression-multiline-jsx-expression-backtick", "violation-multiline-jsx-expression-backtick"],
   ["suppression-jsx-expression-string-brace-backtick", "violation-jsx-expression-string-brace-backtick"],
+  ["suppression-jsx-expression-comment-brace-backtick", "violation-jsx-expression-comment-brace-backtick"],
   ["suppression-same-line-jsx-expression-quote", "violation-same-line-jsx-expression-quote"],
 ] as const) {
   const violationControl = run(violationName);

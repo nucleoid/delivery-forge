@@ -323,7 +323,8 @@ public sealed class ProcessCommandExecutorTests
     {
         var request = TestEvidence.GateRequest(output);
         var (fileName, arguments) = OperatingSystem.IsWindows()
-            ? (Environment.GetEnvironmentVariable("ComSpec")!, new[] { "/d", "/s", "/c", "ping -n 30 127.0.0.1 >NUL" })
+            ? (Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "PING.EXE"),
+                new[] { "-n", "30", "127.0.0.1" })
             : ("/bin/sh", new[] { "-c", "exec sleep 30" });
         var executableIdentity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(fileName)))}";
         var capability = ToolCapability.FromDetection(

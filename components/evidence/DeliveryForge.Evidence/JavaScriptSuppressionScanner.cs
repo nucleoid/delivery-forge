@@ -651,6 +651,9 @@ internal static class JavaScriptSuppressionScanner
             previous--;
             while (previous >= 0 && depth > 0)
             {
+                if (previous > 0 && content[previous] == (byte)'/' &&
+                    content[previous - 1] is (byte)'/' or (byte)'*')
+                    throw Ambiguous("JSX text following an expression comment cannot be reverse-matched safely");
                 if (content[previous] is (byte)'\'' or (byte)'"')
                 {
                     if (!TrySkipQuotedBackward(content, ref previous, content[previous]))

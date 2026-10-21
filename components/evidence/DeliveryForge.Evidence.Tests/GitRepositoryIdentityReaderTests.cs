@@ -318,6 +318,20 @@ public sealed class GitRepositoryIdentityReaderTests
         Assert.Contains("JSX text", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public void Jsx_expression_comment_braces_cannot_hide_directives()
+    {
+        const string source =
+            "export const View = () => (\n  <p>\n    {/* } */ format(value)} use ` here\n  </p>\n);\n" +
+            "// eslint-disable-next-line anti-slop/no-chained-type-assertions\n" +
+            "export const hidden = x as unknown as string[];\n// `\n";
+
+        var error = Assert.Throws<EvidenceRepositoryException>(() =>
+            GitRepositoryIdentityReader.ContainsSuppressionDirective(source));
+
+        Assert.Contains("JSX text", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Theory]
     [InlineData("const of = 4; x = of / 2 // eslint-disable-line\n")]
     [InlineData("x = object.in / 2 // eslint-disable-line\n")]
