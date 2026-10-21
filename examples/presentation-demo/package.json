@@ -5,7 +5,7 @@
   "type": "module",
   "description": "DEMO-ONLY synthetic UX-1 presentation prototypes; no live adapters",
   "scripts": {
-    "test": "node --test",
+    "test": "node --test \"test/*.test.mjs\"",
     "demo": "node scripts/demo.mjs",
     "usage-ledger": "node scripts/usage-ledger.mjs",
     "capture": "node scripts/capture-evidence.mjs",

@@ -57,9 +57,10 @@ export function register(on: any) {
     const currentView = await read($, view), currentScenario = await read($, scenario), currentSelected = await read($, selected), showDetail = await read($, detail), message = await read($, notice)
     const state = findState(currentScenario), safeSelected = Math.max(0, Math.min(state.evidence.length - 1, currentSelected)), vm = { ...state, selected: safeSelected, detail: state.details[safeSelected] || ['No evidence selected.'] }
     const width = Number(e?.props?.bodyColumns) || 72
+    const bodyRows = Number(e?.props?.scroll?.bodyRows) || 12
     const redraw = () => $.ui.invalidate('ui.render')
     const chooseView = (name: string, label: string, hotkey: string) => Button({ key: `view-${name}`, label, hotkey, plain: true, dimColor: currentView !== name, onPress: async () => { await setView($, name); redraw() } })
-    const header = vm.header.slice(0, width < 32 ? 4 : 5).map((value: string, i: number) => Text({ key: `header-${i}`, bold: i === 0 || i === 2, dimColor: i === 4, children: [value] }))
+    const header = vm.header.slice(0, width < 32 || bodyRows < 12 ? 4 : 5).map((value: string, i: number) => Text({ key: `header-${i}`, bold: i === 0 || i === 2, dimColor: i === 4, children: [value] }))
     let body: any[] = []
     if (currentView === 'evidence' && showDetail) {
       body = [Button({ key: 'evidence-back', label: '< Back to Evidence', onPress: async () => { await update($, detail, () => false); redraw() } }), ...vm.detail.map((value: string, i: number) => Text({ key: `detail-${i}`, bold: i === 0, children: [value] }))]
@@ -70,6 +71,6 @@ export function register(on: any) {
     const tabs = width < 32
       ? Select({ key: 'view-select', options: COCKPIT_VIEWS.map((name) => ({ value: name, label: name[0].toUpperCase() + name.slice(1) })), onSelect: async (name: string) => { await setView($, name); redraw() } })
       : Box({ flexDirection: 'row', columnGap: width >= 72 ? 3 : 1, children: [chooseView('overview', 'Overview', '1'), chooseView('evidence', 'Evidence', '2'), chooseView('usage', 'Usage', '3'), chooseView('activity', 'Activity', '4')] })
-    return Box({ flexDirection: 'column', children: [...header, Text({ children: [' '] }), tabs, Text({ children: [' '] }), ...(message ? [Text({ dimColor: true, children: [message] })] : []), ...body, Text({ dimColor: true, children: ['Read-only synthetic fixture · no execution or publication controls'] })] })
+    return Box({ flexDirection: 'column', children: [...header, tabs, ...(message ? [Text({ dimColor: true, children: [message] })] : []), ...body, Text({ dimColor: true, children: ['Read-only synthetic fixture · no execution or publication controls'] })] })
   })
 }
