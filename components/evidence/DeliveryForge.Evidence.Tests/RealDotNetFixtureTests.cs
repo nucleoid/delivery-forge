@@ -2,6 +2,7 @@ using System.Xml.Linq;
 
 namespace DeliveryForge.Evidence.Tests;
 
+[Collection(RealDotNetFixtureCollection.Name)]
 public sealed class RealDotNetFixtureTests
 {
     [Fact(Timeout = 180_000)]
@@ -53,7 +54,13 @@ public sealed class RealDotNetFixtureTests
         var redResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "red-gate",
             ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={redTrx}"]);
         ArchiveFixtureEvidence(evidence.Path, redResult);
-        Assert.NotNull(redResult.Execution.ExitCode);
+        Assert.True(redResult.Execution.ExitCode.HasValue,
+            $"RED process did not reach a valid exit: outcome={redResult.Outcome}; reason={redResult.Reason}; " +
+            $"timeout={redResult.Execution.TimedOut}; cancelled={redResult.Execution.Cancelled}; " +
+            $"quiescent={redResult.Execution.OwnedProcessQuiescent}; " +
+            $"native={redResult.Execution.LifecycleDiagnostics?.NativeFailure}; " +
+            $"startup={redResult.Execution.LifecycleDiagnostics?.Startup}\n" +
+            redResult.Execution.StandardOutput + "\n" + redResult.Execution.StandardError);
         Assert.NotEqual(0, redResult.Execution.ExitCode);
         Assert.True(redResult.Outcome == GateOutcome.Fail,
             $"RED gate: {redResult.Outcome}; reason: {redResult.Reason}; " +
