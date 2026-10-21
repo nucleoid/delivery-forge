@@ -47,7 +47,7 @@ public sealed class TrustedGatePluginRegistry
         new("crap4csharp", "delivery-forge.crap4csharp", "1.0.0", "crap4csharp", "0.1.0+1129c9d3280168b294f9fed1542f81ca716c6d53", "1.0", LegacyV1Authority: true),
         new("mutation", "delivery-forge.mutate4csharp", "1.0.0", "mutate4csharp", "0.1.0-format-only", "2", LegacyV1Authority: true),
         new("anti-slop", "dmmulroy.anti-slop", "0.1.2+13909c9e07590f5a85d93c62712259fe14a883f7", "oxlint", "1.78.0", "oxlint-json-v1",
-            "sha256:f3c39acbe45af98d4ea005347660992ac47a75fb6511a9ba6c2563792a3be267"),
+            "sha256:74eb6bfe76e45e488e4ca336bc15818b093db2672050c2fccb5f036a259e76a0"),
         new("ci", "delivery-forge.ci", "1.0.0", "ci", "github-actions-v1", "github-checks-v1")
     ]);
 

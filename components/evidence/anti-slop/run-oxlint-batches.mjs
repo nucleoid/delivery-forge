@@ -70,7 +70,10 @@ for (const paths of batches) {
   } catch {
     fail("Oxlint batch returned malformed JSON");
   }
-  if (!Array.isArray(report.diagnostics) || !Number.isInteger(report.number_of_files) ||
+  if (report === null || typeof report !== "object" || Array.isArray(report) ||
+      !Array.isArray(report.diagnostics) ||
+      report.diagnostics.some((diagnostic) => diagnostic === null || typeof diagnostic !== "object" || Array.isArray(diagnostic)) ||
+      !Number.isInteger(report.number_of_files) ||
       !Number.isInteger(report.number_of_rules))
     fail("Oxlint batch returned an unsupported report");
   if (numberOfRules !== undefined && numberOfRules !== report.number_of_rules)

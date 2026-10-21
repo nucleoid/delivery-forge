@@ -12,6 +12,7 @@ namespace DeliveryForge.Evidence;
 
 public sealed class GateRunner
 {
+    internal const string AntiSlopBindingArtifact = "anti-slop-binding.json";
     internal const int AntiSlopMaximumCapturedBytesPerStream = 1024 * 1024;
     internal const int ExistingGateMaximumCapturedBytesPerStream = 64 * 1024 * 1024;
     private readonly ICommandExecutor _executor;
@@ -485,16 +486,20 @@ public sealed class GateRunner
         EvaluationPluginReceiptMetadata plugin,
         CancellationToken cancellationToken)
     {
+        var persistedArtifactHashes = new Dictionary<string, string>(artifactHashes, StringComparer.Ordinal);
+        if (plugin.Id == "dmmulroy.anti-slop")
+            AppendAntiSlopBindingArtifact(
+                gateDirectory, request, before, normalized, plugin, persistedArtifactHashes);
         var limitations = normalized.Limitations
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.Ordinal).ToArray();
         var provisional = BuildFutureV2Receipt(
-            request, before, execution, artifactHashes, normalized, sourceChanged, limitations, plugin);
+            request, before, execution, persistedArtifactHashes, normalized, sourceChanged, limitations, plugin);
 
         var legacy = new GateReceiptContract(
             "1.0.0", provisional.Kind, provisional.Identity, provisional.GateId,
             provisional.PolicyIdentity, provisional.BaseCommit, provisional.HeadCommit,
-            provisional.TreeId, BuildLegacyV1CommandEnvelope(request),
+            provisional.TreeId, BuildLegacyV1CommandEnvelope(request, plugin),
             provisional.StartedAt, provisional.CompletedAt,
             provisional.ExitCode, provisional.Outcome, provisional.Reason, provisional.ArtifactHashes,
             provisional.SourceChanged, provisional.Limitations, provisional.NotApplicableRationale);
@@ -508,7 +513,7 @@ public sealed class GateRunner
             normalized.Outcome, normalized.Reason, normalized.Fixture, normalized.ProductionCapable,
             limitations, sourceChanged, request.Invocation, execution, before, after,
             request.Policy.PolicyIdentity, request.Capability.ExecutableIdentity ?? "unavailable", request.ConfigurationIdentity, request.Scope,
-            artifactHashes, receiptPath, normalized.NotApplicableRationale)
+            persistedArtifactHashes, receiptPath, normalized.NotApplicableRationale)
         { Plugin = plugin, TrustedReceiptProvenance = null };
     }
 
@@ -538,12 +543,16 @@ public sealed class GateRunner
                 normalized.ProductionCapable,
                 normalized.ProductionCapable ? "production" : "advisory"));
 
-    private static string BuildLegacyV1CommandEnvelope(GateRequest request) =>
+    private static string BuildLegacyV1CommandEnvelope(
+        GateRequest request,
+        EvaluationPluginReceiptMetadata plugin) =>
         JsonSerializer.Serialize(new
         {
             request.Invocation.FileName,
             request.Invocation.Arguments,
-            request.Invocation.WorkingDirectory,
+            WorkingDirectory = plugin.Id == "dmmulroy.anti-slop"
+                ? "<host-owned-frozen-inputs>"
+                : request.Invocation.WorkingDirectory,
             Environment = request.Invocation.Environment ?? new Dictionary<string, string>(),
             request.Scope,
             request.Capability.ExecutableIdentity,
@@ -557,6 +566,61 @@ public sealed class GateRunner
             PolicyContentIdentity = request.Policy.ContentIdentity,
             request.ConfigurationIdentity
         }, ContractJson);
+
+    private static void AppendAntiSlopBindingArtifact(
+        string gateDirectory,
+        GateRequest request,
+        RepositoryIdentity repository,
+        NormalizedEvidence normalized,
+        EvaluationPluginReceiptMetadata plugin,
+        IDictionary<string, string> artifactHashes)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            schemaVersion = "1.0.0",
+            kind = "anti-slop-evaluation-binding",
+            gateId = request.GateId,
+            policyIdentity = request.Policy.PolicyIdentity,
+            finalOutcome = OutcomeText(normalized.Outcome),
+            normalized.ProductionCapable,
+            authority = normalized.ProductionCapable ? "production-capable" : "advisory",
+            repository = new
+            {
+                baseCommit = repository.BaseCommit,
+                headCommit = repository.HeadCommit,
+                treeId = repository.TreeId
+            },
+            plugin = new
+            {
+                id = plugin.Id,
+                version = plugin.Version,
+                plugin.Enabled,
+                status = PluginStatusText(plugin.Status),
+                configurationIdentity = plugin.ConfigurationIdentity,
+                runtimeClosureIdentity = plugin.RuntimeClosureIdentity,
+                inputSetIdentity = plugin.InputSetIdentity,
+                inputs = plugin.Inputs,
+                pluginRawOutcome = plugin.PluginRawOutcome,
+                effectRulesEnabled = request.Plugin?.EnableEffectRules ?? false
+            },
+            tool = new
+            {
+                name = request.Capability.Tool,
+                version = request.Capability.Version,
+                formatVersion = request.Capability.FormatVersion,
+                executableIdentity = request.Capability.ExecutableIdentity
+            },
+            logicalWorkingDirectory = "<host-owned-frozen-inputs>",
+            scope = request.Scope
+        }, ContractJson);
+        var path = Path.Combine(gateDirectory, AntiSlopBindingArtifact);
+        using var stream = new FileStream(
+            path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough);
+        stream.Write(bytes);
+        stream.Flush(true);
+        artifactHashes[AntiSlopBindingArtifact] =
+            $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
+    }
 
     private static string BuildFutureV2CommandEnvelope(
         GateRequest request,
@@ -876,14 +940,20 @@ public sealed class GateRunner
             !binding.LegacyV1Authority)
             return false;
 
-        return string.Equals(binding.PluginId, plugin.Id, StringComparison.Ordinal) &&
+        return LegacyV1CapabilityMatches(binding, request.Capability) &&
+               string.Equals(binding.PluginId, plugin.Id, StringComparison.Ordinal) &&
                string.Equals(binding.PluginVersion, plugin.Version, StringComparison.Ordinal) &&
-               string.Equals(binding.Tool, request.Capability.Tool, StringComparison.Ordinal) &&
-               (binding.ExpectedToolVersion is null ||
-                string.Equals(binding.ExpectedToolVersion, request.Capability.Version, StringComparison.Ordinal)) &&
-               (binding.ExpectedFormatVersion is null ||
-                string.Equals(binding.ExpectedFormatVersion, request.Capability.FormatVersion, StringComparison.Ordinal));
+               string.Equals(binding.Tool, request.Capability.Tool, StringComparison.Ordinal);
     }
+
+    internal static bool LegacyV1CapabilityMatches(
+        TrustedGatePluginBinding binding,
+        ToolCapability capability) =>
+        // Protected-base v1 trusted detector-verified policy ranges. Registry tool pins
+        // remain exact for future-v2 consumers without becoming a new v1 rollout gate.
+        string.Equals(binding.Tool, capability.Tool, StringComparison.Ordinal) &&
+        (binding.ExpectedFormatVersion is null ||
+         string.Equals(binding.ExpectedFormatVersion, capability.FormatVersion, StringComparison.Ordinal));
 
     private static TimeSpan Remaining(DateTimeOffset deadline)
     {

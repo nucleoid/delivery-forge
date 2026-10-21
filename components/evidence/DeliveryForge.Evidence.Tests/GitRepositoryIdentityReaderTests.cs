@@ -275,6 +275,13 @@ public sealed class GitRepositoryIdentityReaderTests
     [InlineData("const view = <div>{x}'</div>; /* ' */ // eslint-disable-line anti-slop/no-chained-type-assertions\n")]
     [InlineData("await /'/.test(input) /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = [] as unknown as string[];\n")]
     [InlineData("for (const match of /x'/.exec(input)) { // eslint-disable-next-line anti-slop/no-chained-type-assertions -- '\nconst hidden = [] as unknown as string[];\n}\n")]
+    [InlineData("check(input)\nreturn /'/.test(input) /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\n  && ([] as unknown as string[]).length > 0;\n")]
+    [InlineData("check(input)\nthrow /'/.test(input) /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\n  && ([] as unknown as string[]).length > 0;\n")]
+    [InlineData("check(input)\nyield /'/.test(input) /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\n  && ([] as unknown as string[]).length > 0;\n")]
+    [InlineData("check(input)\nawait /'/.test(input) /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\n  && ([] as unknown as string[]).length > 0;\n")]
+    [InlineData("check(input)\n/* line terminator remains significant */ return /'/.test(input) /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\n  && ([] as unknown as string[]).length > 0;\n")]
+    [InlineData("for await (const match of /x'/.exec(input)) { // eslint-disable-next-line anti-slop/no-chained-type-assertions -- '\nconst hidden = [] as unknown as string[];\n}\n")]
+    [InlineData("#!/usr/bin/env node `\nexport const hidden = [] as unknown as string[]; // eslint-disable-line anti-slop/no-chained-type-assertions\n// `\n")]
     public void Statement_regex_and_jsx_boundaries_cannot_hide_directives(string source)
     {
         try

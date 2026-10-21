@@ -40,6 +40,12 @@ function run(fixture:
   | "violation-await-regex"
   | "suppression-for-of-regex"
   | "violation-for-of-regex"
+  | "suppression-asi-statement-regex"
+  | "violation-asi-statement-regex"
+  | "suppression-for-await-of-regex"
+  | "violation-for-await-of-regex"
+  | "suppression-hashbang-backtick"
+  | "violation-hashbang-backtick"
   | "suppression-jsx-expression-container"
   | "violation-jsx-expression-container"
   | "suppression-blanket-specific-enable"
@@ -144,6 +150,9 @@ for (const [suppressedName, violationName] of [
   ["suppression-statement-regex", "violation-statement-regex"],
   ["suppression-await-regex", "violation-await-regex"],
   ["suppression-for-of-regex", "violation-for-of-regex"],
+  ["suppression-asi-statement-regex", "violation-asi-statement-regex"],
+  ["suppression-for-await-of-regex", "violation-for-await-of-regex"],
+  ["suppression-hashbang-backtick", "violation-hashbang-backtick"],
   ["suppression-jsx-expression-container", "violation-jsx-expression-container"],
 ] as const) {
   const violationControl = run(violationName);
@@ -183,4 +192,4 @@ for (const name of ["suppression-bare", "suppression-unknown"] as const) {
   assert.deepEqual(result.report.diagnostics, []);
 }
 
-console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, eleven clean suppression attacks plus matched template and exact statement-regex/await/for-of/JSX-container controls verified");
+console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, suppression attacks plus matched ASI statement-regex/for-await/hashbang and prior controls verified");

@@ -97,16 +97,38 @@ internal static class JavaScriptSuppressionScanner
         var expectForParenthesis = false;
         var controlParentheses = new Stack<bool>();
         var forParentheses = new Stack<bool>();
+        var lineTerminatorSinceLastToken = false;
 
         while (index < content.Length)
         {
             budget.Check(index);
             var current = content[index];
+            if (index == 0 && current == (byte)'#' && content.Length > 1 && content[1] == (byte)'!')
+            {
+                index = 2;
+                while (index < content.Length && content[index] is not ((byte)'\r') and not ((byte)'\n') &&
+                       !IsUnicodeLineTerminator(content, index))
+                {
+                    budget.Check(index);
+                    index++;
+                }
+                continue;
+            }
             if (IsWhitespace(current))
             {
+                if (current is (byte)'\r' or (byte)'\n')
+                    lineTerminatorSinceLastToken = true;
                 index++;
                 continue;
             }
+            if (IsUnicodeLineTerminator(content, index))
+            {
+                lineTerminatorSinceLastToken = true;
+                index += 3;
+                continue;
+            }
+            var startsAfterLineTerminator = lineTerminatorSinceLastToken;
+            lineTerminatorSinceLastToken = false;
             if (current is (byte)'\'' or (byte)'"')
             {
                 if (IsLikelyJsxText(content, index))
@@ -146,6 +168,7 @@ internal static class JavaScriptSuppressionScanner
                     index++;
                 }
                 ParseComment(content, start, index, profile);
+                lineTerminatorSinceLastToken = startsAfterLineTerminator;
                 continue;
             }
             if (current == (byte)'/' && index + 1 < content.Length && content[index + 1] == (byte)'*')
@@ -155,12 +178,16 @@ internal static class JavaScriptSuppressionScanner
                        !(content[index] == (byte)'*' && content[index + 1] == (byte)'/'))
                 {
                     budget.Check(index);
+                    if (content[index] is (byte)'\r' or (byte)'\n' ||
+                        IsUnicodeLineTerminator(content, index))
+                        lineTerminatorSinceLastToken = true;
                     index++;
                 }
                 if (index + 1 >= content.Length)
                     throw Ambiguous("unterminated block comment");
                 ParseComment(content, start, index, profile);
                 index += 2;
+                lineTerminatorSinceLastToken |= startsAfterLineTerminator;
                 continue;
             }
             if (current == (byte)'/' && canStartRegularExpression &&
@@ -234,13 +261,18 @@ internal static class JavaScriptSuppressionScanner
                     index++;
                 }
                 var identifier = Encoding.ASCII.GetString(content.Slice(start, index - start));
+                keywordPosition = keywordPosition || startsAfterLineTerminator &&
+                    (ExpressionPrefixKeywords.Contains(identifier) ||
+                     identifier is "if" or "while" or "for" or "with" or "switch" or "catch");
                 var contextualForOf = !keywordPosition && identifier == "of" &&
                     forParentheses.Count > 0 && forParentheses.Peek() &&
                     PreviousSignificantByte(content, start) != (byte)'.';
-                expectControlParenthesis = keywordPosition &&
+                var forAwait = identifier == "await" && expectForParenthesis &&
+                    PreviousSignificantByte(content, start) != (byte)'.';
+                expectControlParenthesis = forAwait || keywordPosition &&
                     identifier is "if" or "while" or "for" or "with" or "switch" or "catch";
-                expectForParenthesis = keywordPosition && identifier == "for";
-                canStartRegularExpression = contextualForOf ||
+                expectForParenthesis = forAwait || keywordPosition && identifier == "for";
+                canStartRegularExpression = contextualForOf || forAwait ||
                     keywordPosition && ExpressionPrefixKeywords.Contains(identifier);
                 continue;
             }

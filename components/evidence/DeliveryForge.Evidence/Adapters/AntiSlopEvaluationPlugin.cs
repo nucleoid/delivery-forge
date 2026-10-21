@@ -12,11 +12,11 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
     private const string ReviewedLockSha256 = "556259ea811200192cd7dc75016408cf76a4718a813245cb9f3b820d74ed8567";
     private const string ReviewedConfigSha256 = "5226e689d45cb10f4a25df0e31f52092f52b958fdd179862a0312815df9c8e10";
     private const string ReviewedEffectConfigSha256 = "d4e372437c08bfc5d4db784bb78ae78b2e3950442379b526cede50b5f3c8e907";
-    private const string ReviewedBatchRunnerSha256 = "cc9853de43920adb20a9ec459f77ed072606c41b5ddf37d378db4abb98c74d01";
+    private const string ReviewedBatchRunnerSha256 = "36c0882a2dffcb207393649ad1e013b0f81a76fced84d702e3fd0b3b32c3aa39";
     public const string ReviewedLinuxX64GnuRuntimeClosureSha256 =
-        "sha256:f3c39acbe45af98d4ea005347660992ac47a75fb6511a9ba6c2563792a3be267";
+        "sha256:74eb6bfe76e45e488e4ca336bc15818b093db2672050c2fccb5f036a259e76a0";
     public const string ReviewedLinuxX64GnuEffectRuntimeClosureSha256 =
-        "sha256:232567ab4655c415110837439dc85ef9d408ea86afedbac682aea0568d9a4fce";
+        "sha256:6cc88c912de3f61f066b807eda906546aa5d4786af1c7e3c6a8a20a9e7269bc4";
     internal const int MaximumDirectArgumentBytes = 24_000;
     private static readonly HashSet<string> SupportedExtensions = new(
         [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"],
@@ -328,8 +328,11 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         if (root.ValueKind != JsonValueKind.Object)
             return null;
         if (root.TryGetProperty("diagnostics", out var diagnostics) && diagnostics.ValueKind == JsonValueKind.Array &&
-            root.TryGetProperty("number_of_files", out var fileCount) && fileCount.TryGetInt32(out var analyzedFileCount) &&
-            root.TryGetProperty("number_of_rules", out var ruleCount) && ruleCount.TryGetInt32(out var analyzedRuleCount))
+            diagnostics.EnumerateArray().All(item => item.ValueKind == JsonValueKind.Object) &&
+            root.TryGetProperty("number_of_files", out var fileCount) && fileCount.ValueKind == JsonValueKind.Number &&
+            fileCount.TryGetInt32(out var analyzedFileCount) &&
+            root.TryGetProperty("number_of_rules", out var ruleCount) && ruleCount.ValueKind == JsonValueKind.Number &&
+            ruleCount.TryGetInt32(out var analyzedRuleCount))
             return new AntiSlopReport(
                 diagnostics.EnumerateArray().Select(ReadDiagnostic).ToList(),
                 analyzedFileCount,

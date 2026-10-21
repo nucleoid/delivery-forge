@@ -8,10 +8,15 @@ public sealed class DeterministicEvaluationPluginTests
     [Fact]
     public void Reviewed_installed_anti_slop_runtime_closure_is_exact()
     {
+        if (!OperatingSystem.IsLinux() ||
+            System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture !=
+            System.Runtime.InteropServices.Architecture.X64)
+            return;
         var root = System.IO.Path.GetFullPath(System.IO.Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..", "anti-slop"));
-        var baseIdentity = AntiSlopEvaluationPlugin.ComputeRuntimeClosureIdentity(root, "/usr/bin/node", false);
-        var effectIdentity = AntiSlopEvaluationPlugin.ComputeRuntimeClosureIdentity(root, "/usr/bin/node", true);
+        var nodePath = TestEvidence.ResolveNodeExecutable();
+        var baseIdentity = AntiSlopEvaluationPlugin.ComputeRuntimeClosureIdentity(root, nodePath, false);
+        var effectIdentity = AntiSlopEvaluationPlugin.ComputeRuntimeClosureIdentity(root, nodePath, true);
         Assert.Equal(AntiSlopEvaluationPlugin.ReviewedLinuxX64GnuRuntimeClosureSha256, baseIdentity);
         Assert.Equal(AntiSlopEvaluationPlugin.ReviewedLinuxX64GnuEffectRuntimeClosureSha256, effectIdentity);
     }
@@ -198,6 +203,20 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.Contains("complete frozen input set", noAnalyzedFiles.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData("{\"diagnostics\":[],\"number_of_files\":\"one\",\"number_of_rules\":19}")]
+    [InlineData("{\"diagnostics\":[],\"number_of_files\":1,\"number_of_rules\":{}}")]
+    [InlineData("{\"diagnostics\":[\"not-an-object\"],\"number_of_files\":1,\"number_of_rules\":19}")]
+    [InlineData("{\"diagnostics\":[null],\"number_of_files\":1,\"number_of_rules\":19}")]
+    [InlineData("{\"diagnostics\":[7],\"number_of_files\":1,\"number_of_rules\":19}")]
+    public void Anti_slop_malformed_json_shapes_normalize_incomplete(string report)
+    {
+        var result = AntiSlopEvaluationPlugin.CreateBundled().NormalizeReport(
+            System.Text.Encoding.UTF8.GetBytes(report), ["app.ts"], 0);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+    }
+
     [Fact]
     public async Task Anti_slop_not_applicable_requires_non_fixture_production_authority()
     {
@@ -258,6 +277,10 @@ public sealed class DeterministicEvaluationPluginTests
         bool fixtureCapability,
         bool violation)
     {
+        if (!OperatingSystem.IsLinux() ||
+            System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture !=
+            System.Runtime.InteropServices.Architecture.X64)
+            return;
         using var repository = new TempDirectory();
         using var artifacts = new TempDirectory();
         await Git(repository.Path, "init");
@@ -275,7 +298,7 @@ public sealed class DeterministicEvaluationPluginTests
         var commit = (await Git(repository.Path, "rev-parse", "HEAD")).Trim();
         var antiSlopRoot = System.IO.Path.GetFullPath(System.IO.Path.Combine(
             AppContext.BaseDirectory, "..", "..", "..", "..", "anti-slop"));
-        var nodePath = "/usr/bin/node";
+        var nodePath = TestEvidence.ResolveNodeExecutable();
         var reader = new GitRepositoryIdentityReader(new ProcessCommandExecutor(), repository.Path, commit);
         var expected = await reader.ReadAsync(TestContext.Current.CancellationToken);
         var executableIdentity = $"sha256:{Convert.ToHexStringLower(
@@ -313,6 +336,45 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.Equal(violation ? 1 : 0, result.Execution.ExitCode);
         if (!violation)
             Assert.Contains("advisory", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(result.ArtifactHashes.TryGetValue(GateRunner.AntiSlopBindingArtifact, out var bindingHash));
+        var gateDirectory = System.IO.Path.GetDirectoryName(
+            System.IO.Path.GetDirectoryName(result.ReceiptPath)!)!;
+        var bindingPath = System.IO.Path.Combine(gateDirectory, GateRunner.AntiSlopBindingArtifact);
+        var bindingBytes = await File.ReadAllBytesAsync(bindingPath, TestContext.Current.CancellationToken);
+        Assert.Equal($"sha256:{Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bindingBytes))}",
+            bindingHash);
+        using (var binding = System.Text.Json.JsonDocument.Parse(bindingBytes))
+        {
+            Assert.Equal("anti-slop-evaluation-binding", binding.RootElement.GetProperty("kind").GetString());
+            Assert.Equal("advisory", binding.RootElement.GetProperty("authority").GetString());
+            Assert.False(binding.RootElement.GetProperty("productionCapable").GetBoolean());
+            Assert.Equal("dmmulroy.anti-slop",
+                binding.RootElement.GetProperty("plugin").GetProperty("id").GetString());
+            Assert.Equal(expected.HeadCommit,
+                binding.RootElement.GetProperty("repository").GetProperty("headCommit").GetString());
+            Assert.Equal(expected.TreeId,
+                binding.RootElement.GetProperty("repository").GetProperty("treeId").GetString());
+            Assert.Equal(result.Plugin.InputSetIdentity,
+                binding.RootElement.GetProperty("plugin").GetProperty("inputSetIdentity").GetString());
+            Assert.Equal(result.Plugin.RuntimeClosureIdentity,
+                binding.RootElement.GetProperty("plugin").GetProperty("runtimeClosureIdentity").GetString());
+            Assert.Equal("<host-owned-frozen-inputs>",
+                binding.RootElement.GetProperty("logicalWorkingDirectory").GetString());
+            Assert.Equal(violation ? "FAIL" : "PASS",
+                binding.RootElement.GetProperty("plugin").GetProperty("pluginRawOutcome").GetString());
+            Assert.Equal(violation ? "FAIL" : "INCOMPLETE",
+                binding.RootElement.GetProperty("finalOutcome").GetString());
+        }
+        using (var receipt = System.Text.Json.JsonDocument.Parse(
+            await File.ReadAllBytesAsync(result.ReceiptPath, TestContext.Current.CancellationToken)))
+        using (var command = System.Text.Json.JsonDocument.Parse(
+            receipt.RootElement.GetProperty("command").GetString()!))
+        {
+            Assert.Equal("<host-owned-frozen-inputs>",
+                command.RootElement.GetProperty("workingDirectory").GetString());
+            Assert.Equal(violation ? "FAIL" : "INCOMPLETE",
+                receipt.RootElement.GetProperty("outcome").GetString());
+        }
         var error = Assert.Throws<NotSupportedException>(() => new AuthoritativeEvaluationHost(
             new ProcessCommandExecutor(), reader, repository.Path, commit,
             DeterministicEvaluationPluginRegistry.CreateBuiltIns(antiSlopRoot, nodePath)));
@@ -503,8 +565,11 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.Equal(GateOutcome.Incomplete, toolErrorWithFindings.Outcome);
     }
 
-    [Fact]
-    public async Task Code_owned_builtins_with_anti_slop_configuration_retain_legacy_v1_dotnet_authority()
+    [Theory]
+    [InlineData("10.0.401")]
+    [InlineData("10.0.402")]
+    public async Task Code_owned_builtins_with_anti_slop_configuration_retain_legacy_v1_dotnet_authority(
+        string detectedVersion)
     {
         using var temp = new TempDirectory();
         var original = TestEvidence.GateRequest(temp.Path);
@@ -518,7 +583,7 @@ public sealed class DeterministicEvaluationPluginTests
                 requiredGatePluginBindings:
                 [new RequiredGatePluginBinding("test", "delivery-forge.dotnet", "1.0.0", "dotnet")]),
             Capability = ToolCapability.FromDetection(
-                "dotnet", "10.0.401", "trx-v1", false, [],
+                "dotnet", detectedVersion, "trx-v1", false, [],
                 original.Capability.ExecutablePath!, original.Capability.ExecutableIdentity!, ["test"],
                 original.Invocation.WorkingDirectory),
             Plugin = new EvaluationPluginSelection(
@@ -544,6 +609,46 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.True(result.Outcome == GateOutcome.Pass,
             $"Expected PASS, received {result.Outcome}: {result.Reason}");
         Assert.True(result.ProductionCapable);
+    }
+
+    [Theory]
+    [InlineData("build")]
+    [InlineData("test")]
+    [InlineData("coverage")]
+    [InlineData("crap")]
+    [InlineData("crap4csharp")]
+    [InlineData("mutation")]
+    public void Legacy_v1_bindings_retain_exact_future_v2_pins_without_narrowing_v1(string gateId)
+    {
+        Assert.True(TrustedGatePluginRegistry.BuiltIns.TryGet(gateId, out var binding));
+        Assert.True(binding.LegacyV1Authority);
+        Assert.NotNull(binding.ExpectedToolVersion);
+        Assert.NotNull(binding.ExpectedFormatVersion);
+
+        Assert.True(TrustedGatePluginRegistry.BuiltIns.TryGet("anti-slop", out var antiSlop));
+        Assert.Equal("1.78.0", antiSlop.ExpectedToolVersion);
+        Assert.Equal("oxlint-json-v1", antiSlop.ExpectedFormatVersion);
+        Assert.Equal(AntiSlopEvaluationPlugin.ReviewedLinuxX64GnuRuntimeClosureSha256,
+            antiSlop.ExpectedRuntimeClosureIdentity);
+        Assert.False(antiSlop.LegacyV1Authority);
+    }
+
+    [Theory]
+    [InlineData("test", "dotnet", "10.0.402", "trx-v1")]
+    [InlineData("crap4csharp", "crap4csharp", "0.1.0+compatible-build", "1.0")]
+    [InlineData("mutation", "mutate4csharp", "0.1.0-format-only+compatible-build", "2")]
+    public void Legacy_v1_capabilities_use_detector_range_and_exact_report_format(
+        string gateId,
+        string tool,
+        string compatibleVersion,
+        string format)
+    {
+        Assert.True(TrustedGatePluginRegistry.BuiltIns.TryGet(gateId, out var binding));
+        Assert.NotEqual(binding.ExpectedToolVersion, compatibleVersion);
+        Assert.True(GateRunner.LegacyV1CapabilityMatches(
+            binding, new ToolCapability(tool, compatibleVersion, format, true, false)));
+        Assert.False(GateRunner.LegacyV1CapabilityMatches(
+            binding, new ToolCapability(tool, compatibleVersion, format + "-wrong", true, false)));
     }
 
     [Fact]

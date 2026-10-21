@@ -90,6 +90,22 @@ internal static class TestEvidence
     }
 
     public static string WorkingDirectory(string output) => System.IO.Path.Combine(output, "work");
+
+    public static string ResolveNodeExecutable()
+    {
+        var names = OperatingSystem.IsWindows() ? new[] { "node.exe", "node" } : new[] { "node" };
+        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                     .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!Path.IsPathFullyQualified(directory)) continue;
+            foreach (var name in names)
+            {
+                var candidate = Path.Combine(directory, name);
+                if (File.Exists(candidate)) return Path.GetFullPath(candidate);
+            }
+        }
+        throw new FileNotFoundException("The setup-provided Node.js executable was not found on PATH.");
+    }
 }
 
 internal sealed class QueueCommandExecutor(params CommandResult[] results) : ICommandExecutor
