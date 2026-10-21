@@ -292,6 +292,8 @@ public sealed class GitRepositoryIdentityReaderTests
     [InlineData("const value = --/'/.lastIndex /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = [] as unknown as string[];\n")]
     [InlineData("import { x } from'pkg' /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = x as unknown as string[];\n")]
     [InlineData("export const View = () => (\n  <p>\n    use ` here\n  </p>\n);\n// eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = x as unknown as string[];\n// `\n")]
+    [InlineData("export const View = () => (\n  <p>\n    {name} use ` here\n  </p>\n);\n// eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = x as unknown as string[];\n// `\n")]
+    [InlineData("export const View = () => <p>{name} x 'y</p>; // eslint-disable-line anti-slop/no-chained-type-assertions -- '\nexport const hidden = x as unknown as string[];\n")]
     public void Statement_regex_and_jsx_boundaries_cannot_hide_directives(string source)
     {
         try
