@@ -34,6 +34,6 @@ No push, PR mutation, merge, deployment, rebase, amend, queue restart, or extern
 
 - Focused scanner/plugin GREEN: 130 passed, 0 failed.
 - Pinned Oxlint 1.78.0: clean PASS, policy violations FAIL, malformed syntax/report shapes INCOMPLETE; all ASI statement-regex, `for await`, and byte-zero hashbang suppression/violation pairs passed.
-- Unfiltered Release solution: 1,125 passed, 0 failed.
+- Unfiltered Release solution: 1,124 passed, 0 failed.
 - Release solution and four external fixture helpers: 0 warnings, 0 errors.
 - `dotnet format DeliveryForge.slnx --no-restore --verify-no-changes --verbosity minimal`: clean.
