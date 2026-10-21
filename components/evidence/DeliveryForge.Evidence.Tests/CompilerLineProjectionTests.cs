@@ -243,24 +243,57 @@ public sealed class CompilerLineProjectionTests
             var contexts = new JsonArray(); var builds = new JsonArray(); var executions = new JsonArray(); var artifacts = new JsonArray();
             foreach (var id in secondContext ? new[] { "c", "c2" } : new[] { "c" })
             {
-                var inputs = new JsonArray(JsonSerializer.SerializeToNode(new { role = "source", logicalPath = "Subject.cs", repositoryPath = "Subject.cs",
-                    locator = "source", length = source.Length, sha256 = InstalledToolFiles.Identity(source)[7..], generated = false, encoding = "utf-8" }));
+                var inputs = new JsonArray(JsonSerializer.SerializeToNode(new
+                {
+                    role = "source",
+                    logicalPath = "Subject.cs",
+                    repositoryPath = "Subject.cs",
+                    locator = "source",
+                    length = source.Length,
+                    sha256 = InstalledToolFiles.Identity(source)[7..],
+                    generated = false,
+                    encoding = "utf-8"
+                }));
                 if (incompleteSecond && id == "c2")
                 {
                     data["extra"] = "#if true\npublic interface Extra {}\n#endif\n"u8.ToArray();
-                    inputs.Add(JsonSerializer.SerializeToNode(new { role = "compiler-source", logicalPath = "Extra.cs", locator = "extra",
-                        length = data["extra"].Length, sha256 = InstalledToolFiles.Identity(data["extra"])[7..], generated = true, encoding = "utf-8" }));
+                    inputs.Add(JsonSerializer.SerializeToNode(new
+                    {
+                        role = "compiler-source",
+                        logicalPath = "Extra.cs",
+                        locator = "extra",
+                        length = data["extra"].Length,
+                        sha256 = InstalledToolFiles.Identity(data["extra"])[7..],
+                        generated = true,
+                        encoding = "utf-8"
+                    }));
                 }
                 contexts.Add(new JsonObject { ["id"] = id, ["inputs"] = inputs });
                 var bid = id + "b"; var eid = id + "e";
-                builds.Add(JsonSerializer.SerializeToNode(new { id = bid, contextId = id, moduleIdentity = build.ModuleIdentity, mvid = build.Mvid,
-                    debugIdentity = build.DebugIdentity, assemblySha256 = InstalledToolFiles.Identity(pe)[7..], pdbSha256 = InstalledToolFiles.Identity(pdb)[7..] }));
+                builds.Add(JsonSerializer.SerializeToNode(new
+                {
+                    id = bid,
+                    contextId = id,
+                    moduleIdentity = build.ModuleIdentity,
+                    mvid = build.Mvid,
+                    debugIdentity = build.DebugIdentity,
+                    assemblySha256 = InstalledToolFiles.Identity(pe)[7..],
+                    pdbSha256 = InstalledToolFiles.Identity(pdb)[7..]
+                }));
                 executions.Add(JsonSerializer.SerializeToNode(new { id = eid, contextId = id, buildId = bid, completed = true, exitCode = 0 }));
                 foreach (var role in new[] { "assembly", "pdb" })
                 {
                     var locator = role == "assembly" ? "pe" : "pdb";
-                    artifacts.Add(JsonSerializer.SerializeToNode(new { id = id + role, kind = role, locator, contextId = id, buildId = bid,
-                        length = data[locator].Length, sha256 = InstalledToolFiles.Identity(data[locator])[7..] }));
+                    artifacts.Add(JsonSerializer.SerializeToNode(new
+                    {
+                        id = id + role,
+                        kind = role,
+                        locator,
+                        contextId = id,
+                        buildId = bid,
+                        length = data[locator].Length,
+                        sha256 = InstalledToolFiles.Identity(data[locator])[7..]
+                    }));
                 }
                 var selected = !secondContext || id == "c2";
                 var measured = rows.Where(line => !selected || line != omitLine).ToList();
@@ -274,12 +307,27 @@ public sealed class CompilerLineProjectionTests
                     new XElement("Classes", new XElement("Class", new XElement("Methods", methods))));
                 var xml = new XElement("CoverageSession", new XElement("Modules", module));
                 data[id + "coverage"] = Encoding.UTF8.GetBytes(xml.ToString(SaveOptions.DisableFormatting));
-                artifacts.Add(JsonSerializer.SerializeToNode(new { id = id + "coverage", kind = "coverage", locator = id + "coverage", contextId = id,
-                    buildId = bid, executionId = eid, format = "opencover", coordinateKind = "line", length = data[id + "coverage"].Length,
-                    sha256 = InstalledToolFiles.Identity(data[id + "coverage"])[7..] }));
+                artifacts.Add(JsonSerializer.SerializeToNode(new
+                {
+                    id = id + "coverage",
+                    kind = "coverage",
+                    locator = id + "coverage",
+                    contextId = id,
+                    buildId = bid,
+                    executionId = eid,
+                    format = "opencover",
+                    coordinateKind = "line",
+                    length = data[id + "coverage"].Length,
+                    sha256 = InstalledToolFiles.Identity(data[id + "coverage"])[7..]
+                }));
             }
-            using var manifest = JsonDocument.Parse(new JsonObject { ["contexts"] = contexts, ["builds"] = builds,
-                ["executions"] = executions, ["artifacts"] = artifacts }.ToJsonString());
+            using var manifest = JsonDocument.Parse(new JsonObject
+            {
+                ["contexts"] = contexts,
+                ["builds"] = builds,
+                ["executions"] = executions,
+                ["artifacts"] = artifacts
+            }.ToJsonString());
             var lines = text.Split('\n').SkipLast(1).ToArray();
             var diff = onlyLine is { } line
                 ? "+++ b/Subject.cs\n@@ -0,0 +" + line + ",1 @@\n+" + lines[line - 1] + "\n"

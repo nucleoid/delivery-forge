@@ -184,21 +184,59 @@ public sealed class CompilerPhysicalRoleTests
             // authored current-byte checks or XML physical path matching.
             mappings.Add(new JsonObject { ["reportRoot"] = AuthoredPath, ["logicalRoot"] = "Subject.cs" });
             var inputs = new JsonArray(
-                JsonSerializer.SerializeToNode(new { role = "source", logicalPath = "Subject.cs", repositoryPath = "Subject.cs", locator = "authored",
-                    length = authored.Length, sha256 = InstalledToolFiles.Identity(authored)[7..], generated = false, encoding = "utf-8" }),
-                JsonSerializer.SerializeToNode(new { role, logicalPath = GeneratedLogical, repositoryPath = GeneratedLogical, locator = "generated",
-                    length = capturedGenerated.Length, sha256 = InstalledToolFiles.Identity(capturedGenerated)[7..], generated = true, encoding = "utf-8" }));
-            var contexts = new JsonArray(new JsonObject { ["id"] = "c", ["inputs"] = inputs,
-                ["pathPolicy"] = new JsonObject { ["casePolicy"] = "insensitive", ["reportRootMappings"] = mappings } });
-            var builds = new JsonArray(JsonSerializer.SerializeToNode(new { id = "b", contextId = "c", moduleIdentity = build.ModuleIdentity, mvid = build.Mvid,
-                debugIdentity = build.DebugIdentity, assemblySha256 = InstalledToolFiles.Identity(pe)[7..], pdbSha256 = InstalledToolFiles.Identity(pdb)[7..] }));
+                JsonSerializer.SerializeToNode(new
+                {
+                    role = "source",
+                    logicalPath = "Subject.cs",
+                    repositoryPath = "Subject.cs",
+                    locator = "authored",
+                    length = authored.Length,
+                    sha256 = InstalledToolFiles.Identity(authored)[7..],
+                    generated = false,
+                    encoding = "utf-8"
+                }),
+                JsonSerializer.SerializeToNode(new
+                {
+                    role,
+                    logicalPath = GeneratedLogical,
+                    repositoryPath = GeneratedLogical,
+                    locator = "generated",
+                    length = capturedGenerated.Length,
+                    sha256 = InstalledToolFiles.Identity(capturedGenerated)[7..],
+                    generated = true,
+                    encoding = "utf-8"
+                }));
+            var contexts = new JsonArray(new JsonObject
+            {
+                ["id"] = "c",
+                ["inputs"] = inputs,
+                ["pathPolicy"] = new JsonObject { ["casePolicy"] = "insensitive", ["reportRootMappings"] = mappings }
+            });
+            var builds = new JsonArray(JsonSerializer.SerializeToNode(new
+            {
+                id = "b",
+                contextId = "c",
+                moduleIdentity = build.ModuleIdentity,
+                mvid = build.Mvid,
+                debugIdentity = build.DebugIdentity,
+                assemblySha256 = InstalledToolFiles.Identity(pe)[7..],
+                pdbSha256 = InstalledToolFiles.Identity(pdb)[7..]
+            }));
             var executions = new JsonArray(JsonSerializer.SerializeToNode(new { id = "e", contextId = "c", buildId = "b", completed = true, exitCode = 0 }));
             var artifacts = new JsonArray();
             foreach (var kind in new[] { "assembly", "pdb" })
             {
                 var locator = kind == "assembly" ? "pe" : "pdb";
-                artifacts.Add(JsonSerializer.SerializeToNode(new { id = kind, kind, locator, contextId = "c", buildId = "b",
-                    length = data[locator].Length, sha256 = InstalledToolFiles.Identity(data[locator])[7..] }));
+                artifacts.Add(JsonSerializer.SerializeToNode(new
+                {
+                    id = kind,
+                    kind,
+                    locator,
+                    contextId = "c",
+                    buildId = "b",
+                    length = data[locator].Length,
+                    sha256 = InstalledToolFiles.Identity(data[locator])[7..]
+                }));
             }
             var method = new XElement("Method", new XElement("FileRef", new XAttribute("uid", "1")),
                 new XElement("SequencePoints", new XElement("SequencePoint", new XAttribute("fileid", "1"), new XAttribute("sl", "1"), new XAttribute("vc", "1"))));
@@ -206,10 +244,26 @@ public sealed class CompilerPhysicalRoleTests
                 new XElement("Files", new XElement("File", new XAttribute("uid", "1"), new XAttribute("fullPath", AuthoredPath))),
                 new XElement("Classes", new XElement("Class", new XElement("Methods", method))));
             data["coverage"] = Encoding.UTF8.GetBytes(new XElement("CoverageSession", new XElement("Modules", module)).ToString(SaveOptions.DisableFormatting));
-            artifacts.Add(JsonSerializer.SerializeToNode(new { id = "coverage", kind = "coverage", locator = "coverage", contextId = "c", buildId = "b", executionId = "e",
-                format = "opencover", coordinateKind = "line", length = data["coverage"].Length, sha256 = InstalledToolFiles.Identity(data["coverage"])[7..] }));
-            using var manifest = JsonDocument.Parse(new JsonObject { ["contexts"] = contexts, ["builds"] = builds,
-                ["executions"] = executions, ["artifacts"] = artifacts }.ToJsonString());
+            artifacts.Add(JsonSerializer.SerializeToNode(new
+            {
+                id = "coverage",
+                kind = "coverage",
+                locator = "coverage",
+                contextId = "c",
+                buildId = "b",
+                executionId = "e",
+                format = "opencover",
+                coordinateKind = "line",
+                length = data["coverage"].Length,
+                sha256 = InstalledToolFiles.Identity(data["coverage"])[7..]
+            }));
+            using var manifest = JsonDocument.Parse(new JsonObject
+            {
+                ["contexts"] = contexts,
+                ["builds"] = builds,
+                ["executions"] = executions,
+                ["artifacts"] = artifacts
+            }.ToJsonString());
             var diff = Encoding.UTF8.GetBytes("+++ b/Subject.cs\n@@ -0,0 +1,1 @@\n+" + AuthoredText);
             return raw ? ChangedLineCoverage.Read(diff, manifest.RootElement, root, locator => data[locator], files)
                 : ChangedLineCoverage.ReadCompilerBound(diff, manifest.RootElement, root, locator => data[locator], files);

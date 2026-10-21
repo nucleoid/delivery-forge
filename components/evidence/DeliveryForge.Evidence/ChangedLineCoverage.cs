@@ -66,7 +66,7 @@ internal static partial class ChangedLineCoverage
                 var text = Decode(raw);
                 var lines = PhysicalLines(text, files);
                 if (!documents.TryAdd(logical, new(path, repositoryPath, lines, logical, Text(input, "sha256"), text, generated)
-                    { CompilerPhysicalRole = path })) throw Refuse("Duplicate logical source path.");
+                { CompilerPhysicalRole = path })) throw Refuse("Duplicate logical source path.");
             }
             if (requireCompilerCensus) BindCompilerPhysicalRoles(context, repository, documents, files);
         }
