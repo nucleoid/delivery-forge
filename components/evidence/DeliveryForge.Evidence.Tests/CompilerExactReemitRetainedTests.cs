@@ -1,3 +1,6 @@
+using System.Reflection.Metadata;
+using System.Reflection.PortableExecutable;
+using System.Text;
 using System.Text.Json;
 
 namespace DeliveryForge.Evidence.Tests;
@@ -73,8 +76,11 @@ public sealed class CompilerExactReemitRetainedTests
             var request = new CompilerExactReemit.Request(value.GetProperty("baseDirectory").GetString()!,
                 value.GetProperty("scalarArguments").EnumerateArray().Select(argument => argument.GetString()!).ToArray(),
                 sources, references, embedded);
-            var result = CompilerExactReemit.Compare(request, Read(value.GetProperty("compilerCommon")),
-                Read(value.GetProperty("compilerCSharp")), Read(value.GetProperty("assembly")), Read(value.GetProperty("pdb")), files);
+            var common = Read(value.GetProperty("compilerCommon"));
+            var csharp = Read(value.GetProperty("compilerCSharp"));
+            var actualAssembly = Read(value.GetProperty("assembly"));
+            var actualPdb = Read(value.GetProperty("pdb"));
+            var result = CompilerExactReemit.Compare(request, common, csharp, actualAssembly, actualPdb, files);
             if (!result.Equal)
             {
                 files.Check();
@@ -90,9 +96,52 @@ public sealed class CompilerExactReemitRetainedTests
             Assert.NotEmpty(origins.RootElement.GetProperty("regions").EnumerateArray().ToArray());
             Assert.True(result.Equal, result.Reason);
             Assert.Contains("body-origin remains unproven", result.Reason, StringComparison.Ordinal);
-            // This is a read-only local compilation of retained bytes and exact
-            // output comparison. It is NOT a new actual producer run, freshness
-            // receipt, semantic body-origin proof, census or gate/baseline PASS.
+            Assert.True(result.HasProvenSourceOrigin);
+            // The fixed retained build used the repository-root /_/ PathMap.
+            // Derive roles lexically from its exact project base and captured
+            // source bytes; no current source/PDB document path is opened here.
+            var repositoryRoot = Path.GetFullPath(Path.Combine(request.BaseDirectory, "..", "..", ".."));
+            Assert.Equal("components/execution/DeliveryForge.Execution",
+                Path.GetRelativePath(repositoryRoot, request.BaseDirectory).Replace('\\', '/'));
+            var utf8 = new UTF8Encoding(false, true);
+            var documents = request.Sources.Select(source =>
+            {
+                files.Check();
+                var repositoryPath = Path.GetRelativePath(repositoryRoot, source.Path).Replace('\\', '/');
+                InstalledToolProfile.Relative(repositoryPath);
+                Assert.True(InstalledToolGateProvider.Inside(source.Path, repositoryRoot));
+                var text = utf8.GetString(source.Bytes);
+                var document = new CompilerLineCensus.Document(repositoryPath, repositoryPath, source.Path,
+                    InstalledToolFiles.Identity(source.Bytes)[7..], text, Generated: false);
+                files.Check(); return document;
+            }).ToArray();
+            Assert.Equal(27, documents.Length);
+            // Keep every captured compiler source eligible, including the three
+            // embedded/generated trees: no generated-source exclusion is used.
+            using var peReader = new PEReader(new MemoryStream(actualAssembly, writable: false));
+            var metadata = peReader.GetMetadataReader();
+            var module = metadata.GetModuleDefinition();
+            Assert.Equal("DeliveryForge.Execution.dll", metadata.GetString(module.Name));
+            var entry = Assert.Single(peReader.ReadDebugDirectory(), row => row.Type == DebugDirectoryEntryType.CodeView);
+            var codeView = peReader.ReadCodeViewDebugDirectoryData(entry);
+            using var provider = MetadataReaderProvider.FromPortablePdbStream(new MemoryStream(actualPdb, writable: false));
+            var pdbReader = provider.GetMetadataReader();
+            var header = pdbReader.DebugMetadataHeader ?? throw new IOException("Retained Execution PDB has no content identity.");
+            Assert.Equal(20, header.Id.Length);
+            var content = new BlobContentId(header.Id);
+            var build = new CompilerLineCensus.Build("DeliveryForge.Execution", metadata.GetGuid(module.Mvid).ToString("D"),
+                CompilerLineCensus.DebugIdentity(codeView.Guid, codeView.Age, entry.Stamp, content.Stamp));
+            files.Check();
+            var census = CompilerLineCensus.Inspect(actualAssembly, actualPdb, build, documents, files, result);
+            Assert.True(census.Complete, census.Reason);
+            Assert.Equal(3785, census.Points.Count);
+            Assert.NotEmpty(census.ProviderLines);
+            Assert.NotEmpty(census.PolicyLines);
+            files.Check();
+            // Actual retained compiler reconstruction, source-origin closure and
+            // complete PDB/H/E census only. No coverage hits are supplied or
+            // fabricated; this is no fresh producer/quality receipt, issuer,
+            // installed gate, freshness, or gate/baseline PASS.
         }
         finally { files.ReleaseKnown(); }
     }

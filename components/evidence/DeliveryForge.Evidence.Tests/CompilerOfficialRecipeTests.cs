@@ -41,6 +41,7 @@ public sealed class CompilerOfficialRecipeTests
             // Execution198 fixture. None of that fixture's assertions changes.
             Assert.Equal(4, value.Request.Sources.Length); Assert.Equal(167, value.Request.References.Length);
             Assert.Equal(3, value.Request.EmbeddedSourcePaths.Length);
+            Assert.True(CompilerExactReemit.Supports(value.Request, value.Common, value.CSharp, value.Assembly, value.Pdb, files));
             var result = CompilerExactReemit.Compare(value.Request, value.Common, value.CSharp, value.Assembly, value.Pdb, files);
             if (!result.Equal)
             {
@@ -90,6 +91,7 @@ public sealed class CompilerOfficialRecipeTests
         Assert.All(fixture.Reads, locator => Assert.StartsWith("inputs/", locator, StringComparison.Ordinal));
         // These deliberately noncompiler bytes are DATA decoder controls, not
         // target compiler acceptance; Compare would reject their hard pins.
+        Assert.False(CompilerExactReemit.Supports(value.Request, value.Common, value.CSharp, value.Assembly, value.Pdb, fixture.Files));
         Assert.Throws<IOException>(() => CompilerExactReemit.Compare(value.Request, value.Common, value.CSharp,
             value.Assembly, value.Pdb, fixture.Files));
     }

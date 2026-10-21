@@ -157,17 +157,30 @@ internal static class CompilerExactReemit
         finally { island.Unload(); } // Unload requests collection; no immediate-unload claim.
     }
 
-    private static void Validate(Request request, byte[] common, byte[] csharp, byte[] pe, byte[] pdb, InstalledToolFiles files)
+    // Pure bounded profile preflight; unsupported captured compiler profiles
+    // keep the legacy census incomplete without loading any captured code.
+    internal static bool Supports(Request request, byte[] common, byte[] csharp,
+        byte[] pe, byte[] pdb, InstalledToolFiles files)
+        => UnsupportedReason(request, common, csharp, pe, pdb, files) is null;
+
+    private static void Validate(Request request, byte[] common, byte[] csharp,
+        byte[] pe, byte[] pdb, InstalledToolFiles files)
+    {
+        if (UnsupportedReason(request, common, csharp, pe, pdb, files) is { } reason)
+            throw new IOException(reason);
+    }
+
+    private static string? UnsupportedReason(Request request, byte[] common, byte[] csharp, byte[] pe, byte[] pdb, InstalledToolFiles files)
     {
         if (common.Length != 8292136 || csharp.Length != 19191592 ||
             Convert.ToHexStringLower(SHA256.HashData(common)) != CommonHash ||
             Convert.ToHexStringLower(SHA256.HashData(csharp)) != CSharpHash)
-            throw new IOException("Only the selected exact SDK 10.0.401 Roslyn 5.9 compiler images are supported.");
+            return "Only the selected exact SDK 10.0.401 Roslyn 5.9 compiler images are supported.";
         if (!Path.IsPathFullyQualified(request.BaseDirectory) ||
             request.BaseDirectory != Path.GetFullPath(request.BaseDirectory) || request.BaseDirectory.Any(char.IsControl) ||
             request.Sources.Length is 0 or > MaximumRows || request.References.Length is 0 or > MaximumRows ||
             request.ScalarArguments.Length is 0 or > 32768 || pe.Length is 0 or > MaximumArtifactBytes || pdb.Length is 0 or > MaximumArtifactBytes)
-            throw new IOException("Exact compiler recipe exceeds the supported finite profile.");
+            return "Exact compiler recipe exceeds the supported finite profile.";
         long bytes = 0;
         foreach (var item in request.Sources.Select(input => (input.Path, input.Bytes))
             .Concat(request.References.Select(input => (input.Path, input.Bytes))))
@@ -176,7 +189,7 @@ internal static class CompilerExactReemit
             if (!Path.IsPathFullyQualified(item.Path) || item.Path != Path.GetFullPath(item.Path) ||
                 item.Path.Length > 16384 || item.Path.Any(char.IsControl) || item.Bytes.Length > MaximumArtifactBytes ||
                 (bytes = checked(bytes + item.Bytes.Length)) > MaximumArtifactBytes)
-                throw new IOException("Exact compiler input membership/extent is unsupported.");
+                return "Exact compiler input membership/extent is unsupported.";
         }
         long aliasCharacters = 0; var aliasCount = 0;
         foreach (var reference in request.References)
@@ -187,14 +200,14 @@ internal static class CompilerExactReemit
                 files.Check();
                 if (++aliasCount > MaximumRows || alias.Length > 16384 || alias.Any(char.IsControl) ||
                     (aliasCharacters += alias.Length) > 2 * 1024 * 1024)
-                    throw new IOException("Exact compiler reference alias membership exceeds the finite profile.");
+                    return "Exact compiler reference alias membership exceeds the finite profile.";
             }
         }
         if (request.Sources.Select(input => input.Path).Distinct(StringComparer.Ordinal).Count() != request.Sources.Length ||
             request.EmbeddedSourcePaths.Length > request.Sources.Length ||
             request.EmbeddedSourcePaths.Distinct(StringComparer.Ordinal).Count() != request.EmbeddedSourcePaths.Length ||
             request.EmbeddedSourcePaths.Any(path => !request.Sources.Any(input => input.Path == path)))
-            throw new IOException("Exact compiler role membership is ambiguous.");
+            return "Exact compiler role membership is ambiguous.";
         // Parser can read response/ruleset inputs: prohibit every unsupported
         // switch BEFORE loading ANY captured code, not after Parse has run.
         var allowed = new HashSet<string>(StringComparer.Ordinal)
@@ -208,12 +221,12 @@ internal static class CompilerExactReemit
             if (argument.Length is 0 or > 65536 || argument[0] != '/' || argument.Any(char.IsControl) ||
                 (argumentCharacters += argument.Length) > 2 * 1024 * 1024 ||
                 !allowed.Contains(argument[1..].Split(':', 2)[0]))
-                throw new IOException("Exact compiler scalar argument profile is unsupported.");
+                return "Exact compiler scalar argument profile is unsupported.";
         }
         if (!request.ScalarArguments.Contains("/noconfig", StringComparer.Ordinal) ||
             !request.ScalarArguments.Contains("/nostdlib+", StringComparer.Ordinal))
-            throw new IOException("Exact compiler profile requires explicit no-config/no-standard-library inputs.");
-        files.Check();
+            return "Exact compiler profile requires explicit no-config/no-standard-library inputs.";
+        files.Check(); return null;
     }
 
     private sealed class CompilerIsland(byte[] common, byte[] csharp) : AssemblyLoadContext(isCollectible: true)

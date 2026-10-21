@@ -110,10 +110,26 @@ internal static partial class ChangedLineCoverage
                         throw Refuse("Actual compiler artifact length/hash differs from the exact manifest build.");
                     files.Check(); return bytes;
                 }
-                var inventory = CompilerLineCensus.Inspect(ReadBuildArtifact("assembly", "assemblySha256"),
-                    ReadBuildArtifact("pdb", "pdbSha256"), new(Text(build, "moduleIdentity"), Text(build, "mvid"), Text(build, "debugIdentity")),
-                    context.Value.Values.Select(source => new CompilerLineCensus.Document(source.LogicalPath, source.RepositoryPath,
-                        source.CompilerPhysicalRole, source.Sha256, source.Text, source.Generated)).ToArray(), files);
+                var assembly = ReadBuildArtifact("assembly", "assemblySha256");
+                var pdb = ReadBuildArtifact("pdb", "pdbSha256");
+                var expected = new CompilerLineCensus.Build(Text(build, "moduleIdentity"), Text(build, "mvid"), Text(build, "debugIdentity"));
+                var documents = context.Value.Values.Select(source => new CompilerLineCensus.Document(source.LogicalPath, source.RepositoryPath,
+                    source.CompilerPhysicalRole, source.Sha256, source.Text, source.Generated)).ToArray();
+                var inventory = CompilerLineCensus.Inspect(assembly, pdb, expected, documents, files);
+                if (!inventory.Complete && artifacts.Any(row => Text(row, "kind") == "compiler-invocation-recipe" &&
+                    OptionalText(row, "contextId") == context.Key && OptionalText(row, "buildId") == buildId))
+                {
+                    // Existing source reads and exact repository/physical roles
+                    // above stay authoritative. Optional recipe DATA grants no
+                    // new path access or producer/currentness authority.
+                    var recipe = CompilerOfficialRecipe.Decode(manifest, context.Key, buildId, readArtifact, files);
+                    if (CompilerExactReemit.Supports(recipe.Request, recipe.Common, recipe.CSharp, recipe.Assembly, recipe.Pdb, files))
+                    {
+                        var comparison = CompilerExactReemit.Compare(recipe.Request, recipe.Common, recipe.CSharp, recipe.Assembly, recipe.Pdb, files);
+                        if (comparison.HasProvenSourceOrigin)
+                            inventory = CompilerLineCensus.Inspect(assembly, pdb, expected, documents, files, comparison);
+                    }
+                }
                 if (!inventory.Complete) { censusComplete = false; censusReason ??= inventory.Reason; }
                 else completeContexts.Add(context.Key);
                 foreach (var row in inventory.ProviderLines)
