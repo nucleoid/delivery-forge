@@ -102,7 +102,7 @@ public sealed class CompilerImplicitConstructorTests
             var type = metadata.TypeDefinitions.Select(metadata.GetTypeDefinition)
                 .Single(type => metadata.GetString(type.Name).Split('`')[0] == name);
             Constructor = type.GetMethods().Single(handle => metadata.GetString(metadata.GetMethodDefinition(handle).Name) == ".ctor" &&
-                metadata.GetBlobBytes(metadata.GetMethodDefinition(handle).Signature).AsSpan().SequenceEqual([0x20, 0x00, 0x01]));
+                metadata.GetBlobBytes(metadata.GetMethodDefinition(handle).Signature).AsSpan().SequenceEqual(new byte[] { 0x20, 0x00, 0x01 }));
         }
         internal CompilerLineCensus.Document Document(string path, string text)
             => new(path, path, null, InstalledToolFiles.Identity(Encoding.UTF8.GetBytes(text))[7..], text, false);

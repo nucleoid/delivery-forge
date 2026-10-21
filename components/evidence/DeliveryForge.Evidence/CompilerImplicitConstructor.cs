@@ -13,6 +13,7 @@ namespace DeliveryForge.Evidence;
 // Unknown syntax or IL stays opaque. No compiler/reference assembly is executed.
 internal sealed class CompilerImplicitConstructor(IReadOnlyList<CompilerLineCensus.Document> documents, InstalledToolFiles files)
 {
+    private static readonly byte[] ParameterlessInstanceVoid = [0x20, 0x00, 0x01];
     private Dictionary<string, List<BaseTypeDeclarationSyntax>>? declarations;
     private bool parsed;
 
@@ -25,7 +26,7 @@ internal sealed class CompilerImplicitConstructor(IReadOnlyList<CompilerLineCens
             (method.Attributes & ~MethodAttributes.MemberAccessMask) != constructorFlags ||
             method.ImplAttributes != MethodImplAttributes.IL ||
             method.GetGenericParameters().Count != 0 || method.GetCustomAttributes().Count != 0 ||
-            !reader.GetBlobBytes(method.Signature).AsSpan().SequenceEqual([0x20, 0x00, 0x01])) return false;
+            !reader.GetBlobBytes(method.Signature).AsSpan().SequenceEqual(ParameterlessInstanceVoid)) return false;
         var type = reader.GetTypeDefinition(method.GetDeclaringType());
         if (!type.GetDeclaringType().IsNil || type.GetGenericParameters().Count != 0 ||
             (type.Attributes & TypeAttributes.Interface) != 0 || type.BaseType.Kind != HandleKind.TypeReference) return false;
@@ -53,7 +54,7 @@ internal sealed class CompilerImplicitConstructor(IReadOnlyList<CompilerLineCens
         if ((uint)token >> 24 != 0x0a || row == 0 || row > reader.MemberReferences.Count) return false;
         var member = reader.GetMemberReference(MetadataTokens.MemberReferenceHandle(row));
         if (member.Parent != type.BaseType || reader.GetString(member.Name) != ".ctor" ||
-            !reader.GetBlobBytes(member.Signature).AsSpan().SequenceEqual([0x20, 0x00, 0x01])) return false;
+            !reader.GetBlobBytes(member.Signature).AsSpan().SequenceEqual(ParameterlessInstanceVoid)) return false;
         Nops();
         if (offset >= il.Length || il[offset++] != 0x2a) return false; // ret
         Nops(); files.Check();
