@@ -118,7 +118,8 @@ internal static class CompilerLineCensus
             var projection = new CompilerLineProjection(documents, files);
             if (projection.Reason is { } projectionReason) Unsupported(projectionReason);
             var implicitConstructors = new CompilerImplicitConstructor(documents, files);
-            if (HidesAuthoredCode(metadata, metadata.CustomAttributes, files))
+            var asyncScaffolds = new CompilerAsyncScaffold(documents, mapped, metadata, reader, pe, files);
+            if (HidesAuthoredCode(metadata, metadata.CustomAttributes, asyncScaffolds, files))
                 Unsupported("Debugger-hiding metadata is unsupported by the complete compiler-line profile.");
             foreach (var typeHandle in metadata.TypeDefinitions)
             {
@@ -159,7 +160,7 @@ internal static class CompilerLineCensus
                     // RVA=0 declares no executable method body (abstract/import/runtime).
                     // An opaque IL body cannot be presumed compiler-generated or exempt.
                     if (method.RelativeVirtualAddress != 0 && visible == 0 &&
-                        !implicitConstructors.Proves(methodHandle, metadata, pe))
+                        !implicitConstructors.Proves(methodHandle, metadata, pe) && !asyncScaffolds.Proves(methodHandle))
                         Unsupported("An executable compiler body has no usable nonhidden source points; authored completeness is unproven.");
                 }
             }
@@ -202,11 +203,12 @@ internal static class CompilerLineCensus
         return false;
     }
 
-    private static bool HidesAuthoredCode(MetadataReader reader, CustomAttributeHandleCollection attributes, InstalledToolFiles files)
+    private static bool HidesAuthoredCode(MetadataReader reader, CustomAttributeHandleCollection attributes, CompilerAsyncScaffold asyncScaffolds, InstalledToolFiles files)
     {
         foreach (var handle in attributes)
         {
             files.Check();
+            if (asyncScaffolds.ProvesHiding(handle)) continue;
             var constructor = reader.GetCustomAttribute(handle).Constructor;
             EntityHandle parent = constructor.Kind switch
             {

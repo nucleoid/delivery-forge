@@ -37,8 +37,7 @@ public sealed class CompilerAsyncScaffoldTests
             InstalledToolFiles.Identity(source)[7..], text, false);
         var inventory = CompilerLineCensus.Inspect(pe, pdb, Expected(pe), [document], files);
 
-        // Expected RED before a closed actual async-scaffold implementation.
-        // Never weaken this to expect INCOMPLETE or omit unknown bodies.
+        // Actual normal SDK source and all bodies must remain complete together.
         Assert.True(inventory.Complete, inventory.Reason);
         Assert.Empty(inventory.Limitations);
         var lines = text.Split('\n');
@@ -47,6 +46,56 @@ public sealed class CompilerAsyncScaffoldTests
         Assert.Contains(inventory.Points, point => point.LogicalPath == "AsyncSubject.cs" && point.StartLine == line);
         Assert.All(inventory.Points, point => Assert.Equal("AsyncSubject.cs", point.LogicalPath));
         Assert.Single(inventory.Points.Select(point => point.StartLine).Distinct());
+        files.ReleaseKnown();
+    }
+
+    [Theory]
+    [InlineData("AwaitOne", 2)]
+    [InlineData("MoveNext", 0)]
+    [InlineData("MoveNext", 100)]
+    [InlineData("SetStateMachine", 1)]
+    public void Altered_actual_scaffold_or_hidden_body_bytes_cannot_inherit_the_compiler_exemption(string name, int offset)
+    {
+        // Negative metadata DATA: mutate a byte of the genuine SDK output without
+        // loading/executing the altered target or claiming a producer receipt.
+        var files = new InstalledToolFiles(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var output = typeof(AsyncSubject).Assembly.Location;
+        var bytes = files.Read(output, 128 * 1024 * 1024);
+        var symbols = files.Read(Path.ChangeExtension(output, ".pdb"), 128 * 1024 * 1024);
+        using var image = new PEReader(new MemoryStream(bytes));
+        var metadata = image.GetMetadataReader();
+        var handle = Assert.Single(metadata.MethodDefinitions, candidate => metadata.GetString(metadata.GetMethodDefinition(candidate).Name) == name);
+        var method = metadata.GetMethodDefinition(handle);
+        var section = Assert.Single(image.PEHeaders.SectionHeaders, candidate => method.RelativeVirtualAddress >= candidate.VirtualAddress &&
+            method.RelativeVirtualAddress < candidate.VirtualAddress + candidate.VirtualSize);
+        var start = checked(section.PointerToRawData + method.RelativeVirtualAddress - section.VirtualAddress);
+        var header = (bytes[start] & 3) == 2 ? 1 : BinaryPrimitives.ReadUInt16LittleEndian(bytes.AsSpan(start, 2)) >> 12 << 2;
+        Assert.InRange(offset, 0, image.GetMethodBody(method.RelativeVirtualAddress).GetILBytes()!.Length - 1);
+        Assert.NotEqual((byte)0, bytes[start + header + offset]);
+        bytes[start + header + offset] = 0; // Additional/changed opcode, same debug identities.
+        var testOutput = Path.GetDirectoryName(typeof(CompilerAsyncScaffoldTests).Assembly.Location)!;
+        var sourcePath = Path.GetFullPath(Path.Combine(testOutput, "../../../../DeliveryForge.Evidence.AsyncFixture/AsyncSubject.cs"));
+        var source = files.Read(sourcePath, 128 * 1024 * 1024);
+        var document = new CompilerLineCensus.Document("AsyncSubject.cs",
+            "components/evidence/DeliveryForge.Evidence.AsyncFixture/AsyncSubject.cs", sourcePath,
+            InstalledToolFiles.Identity(source)[7..], new UTF8Encoding(false, true).GetString(source), false);
+        var inventory = CompilerLineCensus.Inspect(bytes, symbols, Expected(bytes), [document], files);
+        Assert.False(inventory.Complete);
+        Assert.Contains(inventory.Limitations, limitation => limitation.Contains("Debugger-hiding", StringComparison.Ordinal));
+        files.ReleaseKnown();
+    }
+
+    [Fact]
+    public void Actual_original_cancellation_is_not_recast_as_an_async_profile_limitation()
+    {
+        using var cancellation = new CancellationTokenSource();
+        var files = new InstalledToolFiles(TimeSpan.FromSeconds(30), cancellation.Token);
+        var output = typeof(AsyncSubject).Assembly.Location;
+        var bytes = files.Read(output, 128 * 1024 * 1024);
+        var symbols = files.Read(Path.ChangeExtension(output, ".pdb"), 128 * 1024 * 1024);
+        cancellation.Cancel();
+        Assert.ThrowsAny<OperationCanceledException>(() => CompilerLineCensus.Inspect(bytes, symbols, Expected(bytes), [], files));
+        files.ReleaseKnown();
     }
 
     private static CompilerLineCensus.Build Expected(byte[] bytes)
