@@ -29,6 +29,9 @@ function run(fixture:
   | "suppression-bare"
   | "suppression-unknown"
   | "suppression-jsx-slash"
+  | "suppression-template-regex"
+  | "suppression-template-regex-object"
+  | "violation-template-regex-object"
   | "suppression-blanket-specific-enable"
   | "suppression-prefixed-alias"): {
   status: number | null;
@@ -85,6 +88,30 @@ assert.equal(suppression.report.number_of_files, 1);
 assert.equal(suppression.report.number_of_rules, 19);
 assert.deepEqual(suppression.report.diagnostics, []);
 
+const templateRegexViolation = run("violation-template-regex-object");
+assert.equal(templateRegexViolation.status, 1);
+assert.ok(templateRegexViolation.report.diagnostics.some(
+  (diagnostic) => diagnostic.code === "anti-slop(no-object-parameters)",
+));
+
+const templateRegexExact = run("suppression-template-regex");
+assert.equal(templateRegexExact.status, 1);
+assert.ok(templateRegexExact.report.diagnostics.some(
+  (diagnostic) => diagnostic.code === "anti-slop(require-readable-spacing)",
+));
+assert.ok(templateRegexExact.report.diagnostics.every(
+  (diagnostic) => diagnostic.code !== "anti-slop(no-object-parameters)",
+));
+
+const templateRegexSuppressed = run("suppression-template-regex-object");
+assert.equal(templateRegexSuppressed.status, 1);
+assert.ok(templateRegexSuppressed.report.diagnostics.some(
+  (diagnostic) => diagnostic.code === "anti-slop(require-readable-spacing)",
+));
+assert.ok(templateRegexSuppressed.report.diagnostics.every(
+  (diagnostic) => diagnostic.code !== "anti-slop(no-object-parameters)",
+));
+
 for (const bypass of [
   "suppression-line-division",
   "suppression-reserved-method",
@@ -110,4 +137,4 @@ for (const name of ["suppression-bare", "suppression-unknown"] as const) {
   assert.deepEqual(result.report.diagnostics, []);
 }
 
-console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, eleven suppression attacks reproduced");
+console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, eleven clean suppression attacks plus template-regex directive suppression verified against an unsuppressed control");

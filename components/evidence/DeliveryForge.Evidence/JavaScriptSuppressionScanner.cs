@@ -330,6 +330,8 @@ internal static class JavaScriptSuppressionScanner
                 index += 2;
                 continue;
             }
+            if (current == (byte)'/')
+                throw Ambiguous("non-comment slash in template expression");
             if (current == (byte)'{')
             {
                 state.BraceDepth++;

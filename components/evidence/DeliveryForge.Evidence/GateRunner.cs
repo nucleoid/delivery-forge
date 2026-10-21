@@ -213,15 +213,6 @@ public sealed class GateRunner
                 request, gateDirectory, before, before, earlyCapabilityFailure,
                 pluginBinding, CancellationToken.None).ConfigureAwait(false);
 
-        if (pluginBinding.Enabled && !request.Capability.Fixture && request.Policy.AuthorityVerified &&
-            request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) &&
-            !HasTrustedProductionExecution())
-            return await PersistWithoutExecutionAsync(
-                request, gateDirectory, before, before,
-                NormalizedEvidence.Incomplete(
-                    "A required production gate requires code-owned bounded process and Git readers; caller-supplied execution is advisory only."),
-                pluginBinding, CancellationToken.None).ConfigureAwait(false);
-
         NormalizedEvidence? pluginValidation;
         try
         {
@@ -390,15 +381,18 @@ public sealed class GateRunner
         else if (normalized.Outcome == GateOutcome.Pass &&
                  (!request.Policy.AuthorityVerified ||
                   !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
+                  request.Capability.Fixture ||
+                  !HasTrustedProductionExecution() ||
                   !normalized.ProductionCapable))
             normalized = NormalizedEvidence.Incomplete(
-                "Tool PASS is advisory because protected policy/gate authority or certified producer evidence is absent.");
+                "Tool PASS is advisory because protected policy/gate authority, non-fixture execution, or separate-principal producer evidence is absent.");
         else if (normalized.Outcome == GateOutcome.NotApplicable &&
                  (string.IsNullOrWhiteSpace(normalized.NotApplicableRationale) ||
                   !request.Policy.AllowedNotApplicable.Contains(request.GateId) ||
                   !request.Policy.AuthorityVerified ||
                   !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
                   request.Capability.Fixture ||
+                  !HasTrustedProductionExecution() ||
                   !normalized.ProductionCapable))
             normalized = NormalizedEvidence.Incomplete(
                 "Tool NOT_APPLICABLE is advisory unless policy permits it and rationale, protected binding, non-fixture capability, and certified producer evidence are complete.");
@@ -417,6 +411,13 @@ public sealed class GateRunner
                     $"Frozen anti-slop inputs changed or became unverifiable during Oxlint execution: {exception.Message}");
             }
         }
+
+        if (request.Capability.Fixture || !HasTrustedProductionExecution())
+            normalized = normalized with
+            {
+                Fixture = normalized.Fixture || request.Capability.Fixture,
+                ProductionCapable = false
+            };
 
         var executedPlugin = DeterministicEvaluationPluginRegistry.Bind(
             request, plugin,
@@ -482,59 +483,14 @@ public sealed class GateRunner
         var limitations = normalized.Limitations
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.Ordinal).ToArray();
-        var provisional = new AuthoritativeGateReceiptContract(
-            "2.0.0", "gate-receipt", $"sha256:{new string('0', 64)}",
-            request.GateId, request.Policy.PolicyIdentity,
-            before.BaseCommit, before.HeadCommit, before.TreeId,
-            JsonSerializer.Serialize(new
-            {
-                request.Invocation.FileName,
-                request.Invocation.Arguments,
-                WorkingDirectory = plugin.Id == "dmmulroy.anti-slop"
-                    ? "<host-owned-frozen-inputs>"
-                    : request.Invocation.WorkingDirectory,
-                Environment = request.Invocation.Environment ?? new Dictionary<string, string>(),
-                request.Invocation.InheritEnvironment,
-                request.Scope,
-                request.Capability.ExecutableIdentity,
-                CapabilityTool = request.Capability.Tool,
-                CapabilityVersion = request.Capability.Version,
-                CapabilityFormat = request.Capability.FormatVersion,
-                CapabilityExecutable = request.Capability.ExecutablePath,
-                CapabilityFixture = request.Capability.Fixture,
-                CapabilityProbeWorkingDirectory = request.Capability.ProbeWorkingDirectory,
-                PolicySourceRevision = request.Policy.SourceRevision,
-                PolicyContentIdentity = request.Policy.ContentIdentity,
-                request.ConfigurationIdentity,
-                Plugin = new
-                {
-                    plugin.Id,
-                    plugin.Version,
-                    plugin.Enabled,
-                    Status = PluginStatusText(plugin.Status),
-                    plugin.ConfigurationIdentity,
-                    plugin.Inputs,
-                    plugin.InputSetIdentity,
-                    plugin.ToolOutcome,
-                    EffectRulesEnabled = request.Plugin?.EnableEffectRules ?? false
-                }
-            }, ContractJson),
-            execution.StartedAt, execution.CompletedAt, execution.ExitCode,
-            OutcomeText(normalized.Outcome), normalized.Reason, artifactHashes,
-            sourceChanged, limitations, normalized.NotApplicableRationale,
-            new GateAuthorityBindingContract(
-                request.GateId, request.Policy.PolicyIdentity, before.HeadCommit,
-                plugin.Id, plugin.Version, request.Capability.Tool, request.Capability.Version,
-                request.Capability.ExecutableIdentity ?? "sha256:" + new string('0', 64),
-                request.ConfigurationIdentity, plugin.RuntimeClosureIdentity, plugin.InputSetIdentity,
-                plugin.Enabled, PluginStatusText(plugin.Status),
-                normalized.ProductionCapable,
-                normalized.ProductionCapable ? "production" : "advisory"));
+        var provisional = BuildFutureV2Receipt(
+            request, before, execution, artifactHashes, normalized, sourceChanged, limitations, plugin);
 
         var legacy = new GateReceiptContract(
             "1.0.0", provisional.Kind, provisional.Identity, provisional.GateId,
             provisional.PolicyIdentity, provisional.BaseCommit, provisional.HeadCommit,
-            provisional.TreeId, provisional.Command, provisional.StartedAt, provisional.CompletedAt,
+            provisional.TreeId, BuildCommandEnvelope(request, plugin, includeRuntimeClosureIdentity: false),
+            provisional.StartedAt, provisional.CompletedAt,
             provisional.ExitCode, provisional.Outcome, provisional.Reason, provisional.ArtifactHashes,
             provisional.SourceChanged, provisional.Limitations, provisional.NotApplicableRationale);
         var provisionalBytes = SerializeReceipt(legacy);
@@ -549,6 +505,77 @@ public sealed class GateRunner
             request.Policy.PolicyIdentity, request.Capability.ExecutableIdentity ?? "unavailable", request.ConfigurationIdentity, request.Scope,
             artifactHashes, receiptPath, normalized.NotApplicableRationale)
         { Plugin = plugin, TrustedReceiptProvenance = null };
+    }
+
+    internal static AuthoritativeGateReceiptContract BuildFutureV2Receipt(
+        GateRequest request,
+        RepositoryIdentity before,
+        CommandResult execution,
+        IReadOnlyDictionary<string, string> artifactHashes,
+        NormalizedEvidence normalized,
+        bool sourceChanged,
+        IReadOnlyList<string> limitations,
+        EvaluationPluginReceiptMetadata plugin) =>
+        new(
+            "2.0.0", "gate-receipt", $"sha256:{new string('0', 64)}",
+            request.GateId, request.Policy.PolicyIdentity,
+            before.BaseCommit, before.HeadCommit, before.TreeId,
+            BuildCommandEnvelope(request, plugin, includeRuntimeClosureIdentity: true),
+            execution.StartedAt, execution.CompletedAt, execution.ExitCode,
+            OutcomeText(normalized.Outcome), normalized.Reason, artifactHashes,
+            sourceChanged, limitations, normalized.NotApplicableRationale,
+            new GateAuthorityBindingContract(
+                request.GateId, request.Policy.PolicyIdentity, before.HeadCommit,
+                plugin.Id, plugin.Version, request.Capability.Tool, request.Capability.Version,
+                request.Capability.ExecutableIdentity ?? "sha256:" + new string('0', 64),
+                request.ConfigurationIdentity, plugin.RuntimeClosureIdentity, plugin.InputSetIdentity,
+                plugin.Enabled, PluginStatusText(plugin.Status),
+                normalized.ProductionCapable,
+                normalized.ProductionCapable ? "production" : "advisory"));
+
+    private static string BuildCommandEnvelope(
+        GateRequest request,
+        EvaluationPluginReceiptMetadata plugin,
+        bool includeRuntimeClosureIdentity)
+    {
+        var envelope = JsonSerializer.SerializeToNode(new
+        {
+            request.Invocation.FileName,
+            request.Invocation.Arguments,
+            WorkingDirectory = plugin.Id == "dmmulroy.anti-slop"
+                ? "<host-owned-frozen-inputs>"
+                : request.Invocation.WorkingDirectory,
+            Environment = request.Invocation.Environment ?? new Dictionary<string, string>(),
+            request.Invocation.InheritEnvironment,
+            request.Scope,
+            request.Capability.ExecutableIdentity,
+            CapabilityTool = request.Capability.Tool,
+            CapabilityVersion = request.Capability.Version,
+            CapabilityFormat = request.Capability.FormatVersion,
+            CapabilityExecutable = request.Capability.ExecutablePath,
+            CapabilityFixture = request.Capability.Fixture,
+            CapabilityProbeWorkingDirectory = request.Capability.ProbeWorkingDirectory,
+            PolicySourceRevision = request.Policy.SourceRevision,
+            PolicyContentIdentity = request.Policy.ContentIdentity,
+            request.ConfigurationIdentity,
+            Plugin = new
+            {
+                plugin.Id,
+                plugin.Version,
+                plugin.Enabled,
+                Status = PluginStatusText(plugin.Status),
+                plugin.ConfigurationIdentity,
+                plugin.RuntimeClosureIdentity,
+                plugin.Inputs,
+                plugin.InputSetIdentity,
+                plugin.ToolOutcome,
+                EffectRulesEnabled = request.Plugin?.EnableEffectRules ?? false
+            }
+        }, ContractJson)?.AsObject()
+            ?? throw new InvalidOperationException("Gate command envelope serialization produced no object.");
+        if (!includeRuntimeClosureIdentity)
+            envelope["plugin"]!.AsObject().Remove("runtimeClosureIdentity");
+        return envelope.ToJsonString(ContractJson);
     }
 
     private static async Task<Dictionary<string, string>> WriteArtifactsAsync(

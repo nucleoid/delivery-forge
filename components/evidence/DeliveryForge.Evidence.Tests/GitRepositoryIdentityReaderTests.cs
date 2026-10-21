@@ -302,6 +302,23 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Fact]
+    public void Template_expression_regex_cannot_hide_the_reviewed_suppression_attack()
+    {
+        const string source = """
+            if (globalThis) {
+              const s = `${/"/.source}`; function h(input: { x: number }) { return input.x; } // eslint-disable-line anti-slop/no-object-parameters -- "
+            }
+            // `
+            """;
+
+        var error = Assert.Throws<EvidenceRepositoryException>(() =>
+            GitRepositoryIdentityReader.ContainsSuppressionDirective(source));
+
+        Assert.Contains("ambiguous", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("template expression", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Rule_specific_enable_does_not_end_blanket_disable_and_prefixed_alias_is_dangerous()
     {
         var blanket = JavaScriptSuppressionScanner.Scan(System.Text.Encoding.UTF8.GetBytes(

@@ -118,8 +118,9 @@ public sealed class DeterministicEvaluationPluginTests
         using var document = System.Text.Json.JsonDocument.Parse(receipt.CanonicalBytes);
 
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
-        Assert.Equal(EvaluationPluginStatus.Selected, result.Plugin.Status);
-        Assert.Contains("production gate", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(EvaluationPluginStatus.NotApplicable, result.Plugin.Status);
+        Assert.Equal(0, result.Execution.ExitCode);
+        Assert.Contains("advisory", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.False(document.RootElement.TryGetProperty("authorityBinding", out _));
     }
 
@@ -231,8 +232,13 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.False(result.ProductionCapable);
     }
 
-    [Fact]
-    public async Task Same_uid_anti_slop_execution_remains_incomplete_and_cannot_construct_authority()
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    public async Task Real_pinned_anti_slop_runs_but_same_uid_success_cannot_authorize(
+        bool fixtureCapability,
+        bool violation)
     {
         using var repository = new TempDirectory();
         using var artifacts = new TempDirectory();
@@ -242,7 +248,10 @@ public sealed class DeterministicEvaluationPluginTests
         await File.WriteAllTextAsync(System.IO.Path.Combine(repository.Path, "Subject.cs"),
             "public static class Subject { }\n", TestContext.Current.CancellationToken);
         await File.WriteAllTextAsync(System.IO.Path.Combine(repository.Path, "app.ts"),
-            "export const value = 1;\n", TestContext.Current.CancellationToken);
+            violation
+                ? "export function h(input: object) { return input; }\n"
+                : "export const value = 1;\n",
+            TestContext.Current.CancellationToken);
         await Git(repository.Path, "add", ".");
         await Git(repository.Path, "commit", "-m", "base");
         var commit = (await Git(repository.Path, "rev-parse", "HEAD")).Trim();
@@ -263,7 +272,7 @@ public sealed class DeterministicEvaluationPluginTests
                     $"0.1.2+{AntiSlopEvaluationPlugin.UpstreamCommit}", "oxlint")],
                 allowedNotApplicable: new HashSet<string>(["anti-slop"], StringComparer.Ordinal));
         var capability = ToolCapability.FromDetection(
-                "oxlint", AntiSlopEvaluationPlugin.OxlintVersion, "oxlint-json-v1", false, [],
+                "oxlint", AntiSlopEvaluationPlugin.OxlintVersion, "oxlint-json-v1", fixtureCapability, [],
                 nodePath, executableIdentity, ["lint"], repository.Path);
         var request = AntiSlopRequestFactory.Create(
             "anti-slop", policy, capability, expected, repository.Path, antiSlopRoot, nodePath,
@@ -278,9 +287,14 @@ public sealed class DeterministicEvaluationPluginTests
                 DeterministicEvaluationPluginRegistry.CreateBuiltIns(antiSlopRoot, nodePath))
             .RunAsync(request, TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        var expectedOutcome = violation ? GateOutcome.Fail : GateOutcome.Incomplete;
+        Assert.True(result.Outcome == expectedOutcome,
+            $"Expected {expectedOutcome}, received {result.Outcome}: {result.Reason}; exit={result.Execution.ExitCode}; stderr={result.Execution.StandardError}");
         Assert.False(result.ProductionCapable);
-        Assert.Contains("production gate", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(fixtureCapability, result.Fixture);
+        Assert.Equal(violation ? 1 : 0, result.Execution.ExitCode);
+        if (!violation)
+            Assert.Contains("advisory", result.Reason, StringComparison.OrdinalIgnoreCase);
         var error = Assert.Throws<NotSupportedException>(() => new AuthoritativeEvaluationHost(
             new ProcessCommandExecutor(), reader, repository.Path, commit,
             DeterministicEvaluationPluginRegistry.CreateBuiltIns(antiSlopRoot, nodePath)));
@@ -649,7 +663,7 @@ public sealed class DeterministicEvaluationPluginTests
         if (omitTrackedInput)
             Assert.Contains("protected-base scope", result.Reason, StringComparison.OrdinalIgnoreCase);
         else
-            Assert.Contains("production gate", result.Reason, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("runtime pin", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -720,7 +734,48 @@ public sealed class DeterministicEvaluationPluginTests
         var plugin = command.RootElement.GetProperty("plugin");
         Assert.Equal("delivery-forge.dotnet", plugin.GetProperty("id").GetString());
         Assert.Equal(result.Plugin.InputSetIdentity, plugin.GetProperty("inputSetIdentity").GetString());
+        Assert.False(plugin.TryGetProperty("runtimeClosureIdentity", out _));
         Assert.Equal(TestEvidence.Repository().HeadCommit, receipt.RootElement.GetProperty("headCommit").GetString());
+    }
+
+    [Fact]
+    public void Producer_built_future_v2_envelope_round_trips_through_authority_consumer()
+    {
+        using var temp = new TempDirectory();
+        var original = TestEvidence.GateRequest(temp.Path);
+        var request = original with
+        {
+            Policy = new ResolvedEvidencePolicy(
+                TestEvidence.Identity('1'), TestEvidence.Identity('2'), TestEvidence.Commit('a'),
+                PolicyAuthorityKind.ProtectedGitBase, 0m, ["test"], authorityVerified: true,
+                sourceRepositoryRoot: original.Invocation.WorkingDirectory,
+                requiredGatePluginBindings:
+                [new RequiredGatePluginBinding("test", "delivery-forge.dotnet", "1.0.0", "dotnet")]),
+            Capability = ToolCapability.FromDetection(
+                "dotnet", "10.0.401", "trx-v1", false, [],
+                original.Capability.ExecutablePath!, original.Capability.ExecutableIdentity!, ["test"],
+                original.Invocation.WorkingDirectory)
+        };
+        var inputIdentity = DeterministicEvaluationPluginRegistry.ComputeInputSetIdentity(
+            ["DeliveryForge.Tests.csproj"]);
+        var plugin = new EvaluationPluginReceiptMetadata(
+            "delivery-forge.dotnet", "1.0.0", true, EvaluationPluginStatus.Executed,
+            request.ConfigurationIdentity, request.ConfigurationIdentity,
+            ["DeliveryForge.Tests.csproj"], inputIdentity, "PASS");
+        var produced = GateRunner.BuildFutureV2Receipt(
+            request, TestEvidence.Repository(), TestEvidence.CommandResult(),
+            new Dictionary<string, string>(),
+            new NormalizedEvidence(GateOutcome.Pass, "complete", false, true, []),
+            sourceChanged: false, [], plugin);
+        var json = System.Text.Json.JsonSerializer.SerializeToElement(
+            produced, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+
+        Assert.True(GateReceiptAuthority.TryValidateAuthoritativeOutcome(
+            json, out var reason, TrustedGatePluginRegistry.BuiltIns), reason);
+        using var command = System.Text.Json.JsonDocument.Parse(
+            json.GetProperty("command").GetString()!);
+        Assert.Equal(request.ConfigurationIdentity,
+            command.RootElement.GetProperty("plugin").GetProperty("runtimeClosureIdentity").GetString());
     }
 
     [Fact]
@@ -819,7 +874,7 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
-    public async Task Caller_supplied_executor_cannot_authorize_a_non_fixture_required_gate()
+    public async Task Non_fixture_required_gate_executes_even_without_separate_principal()
     {
         using var temp = new TempDirectory();
         var original = TestEvidence.GateRequest(temp.Path);
@@ -845,8 +900,49 @@ public sealed class DeterministicEvaluationPluginTests
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
-        Assert.Contains("caller-supplied", result.Reason, StringComparison.OrdinalIgnoreCase);
-        Assert.Null(result.Execution.ExitCode);
+        Assert.Contains("TRX", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, result.Execution.ExitCode);
+    }
+
+    [Fact]
+    public async Task Non_fixture_required_existing_adapter_preserves_fail()
+    {
+        using var temp = new TempDirectory();
+        var original = TestEvidence.GateRequest(temp.Path);
+        var request = original with
+        {
+            GateId = "coverage",
+            Policy = new ResolvedEvidencePolicy(
+                TestEvidence.Identity('1'), TestEvidence.Identity('2'), TestEvidence.Commit('a'),
+                PolicyAuthorityKind.ProtectedGitBase, 0m, ["coverage"], authorityVerified: true,
+                sourceRepositoryRoot: original.Invocation.WorkingDirectory,
+                requiredGatePluginBindings:
+                [new RequiredGatePluginBinding(
+                    "coverage", "delivery-forge.crap4csharp", "1.0.0", "crap4csharp")]),
+            Capability = ToolCapability.FromDetection(
+                "crap4csharp", "1.2.0", "1.2", false, [],
+                original.Capability.ExecutablePath!, original.Capability.ExecutableIdentity!, ["check"],
+                original.Invocation.WorkingDirectory),
+            Adapter = EvidenceAdapterKind.Crap4CSharp,
+            Invocation = original.Invocation with { Arguments = ["check", "--format", "json"] },
+            Plugin = new EvaluationPluginSelection("delivery-forge.crap4csharp", Enabled: true)
+        };
+        var execution = TestEvidence.CommandResult() with
+        {
+            ExitCode = 2,
+            StandardOutput = TestEvidence.CrapReport(completed: true, decision: "fail", unknown: 0)
+        };
+        var runner = new GateRunner(
+            new StubCommandExecutor(execution),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
+            original.Invocation.WorkingDirectory,
+            TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Fail, result.Outcome);
+        Assert.Equal(2, result.Execution.ExitCode);
+        Assert.False(result.ProductionCapable);
     }
 
     private sealed class StubEvaluationPlugin(
