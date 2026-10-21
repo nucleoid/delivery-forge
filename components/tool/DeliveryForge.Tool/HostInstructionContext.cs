@@ -29,7 +29,9 @@ public sealed class HostInstructionContext
         var projection = JsonSerializer.SerializeToElement(new { Intent = intent, AcceptanceCriteria = body.GetProperty("acceptanceCriteria"), Scope = body.GetProperty("scope"), ChangeMap = body.GetProperty("changeMap"), Dependencies = body.GetProperty("dependencyDag"), Gates = body.GetProperty("gates"), Rollout = body.GetProperty("rollout") });
         return new(WorkerEnvelope.PrepareWorker(assignment), plan.Identity, projection);
     }
-    public static HostInstructionContext FromParentSelection(AgentRequest request, string independentlySelectedBundle, string task, IReadOnlyList<string> acceptance, IReadOnlyList<string> steps)
+    // Controlled fixture/native conformance selection only. Production callers
+    // must use FromFrozenPlan to bind instructions to the reconciled plan.
+    internal static HostInstructionContext FromParentSelection(AgentRequest request, string independentlySelectedBundle, string task, IReadOnlyList<string> acceptance, IReadOnlyList<string> steps)
     {
         if (string.IsNullOrWhiteSpace(task) || task.Length > 8192 || acceptance.Count is < 1 or > 64 || steps.Count is < 1 or > 64 || acceptance.Concat(steps).Any(x => string.IsNullOrWhiteSpace(x) || x.Length > 8192)) throw new WorkerEnvelopeException("Explicit finite selected task, acceptance and steps are required.");
         return new(request, independentlySelectedBundle, JsonSerializer.SerializeToElement(new { Intent = task, AcceptanceCriteria = acceptance.ToArray(), SelectedSteps = steps.ToArray() }));

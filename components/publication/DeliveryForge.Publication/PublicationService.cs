@@ -21,6 +21,16 @@ public sealed class PublicationService
     private readonly IPublicationJournal journal;
     private readonly PublicationLimits limits;
     private readonly ICoordinatedEffectAdmission? coordinationAdmission;
+    // Actual in-process diagnostics only; never serialized as publication proof.
+    private readonly List<Exception> uncertaintyFailures = [];
+    internal IReadOnlyList<Exception> ActualUncertaintyFailures
+    {
+        get { lock (uncertaintyFailures) return Array.AsReadOnly(uncertaintyFailures.ToArray()); }
+    }
+    private void RetainUncertaintyFailure(Exception actual)
+    {
+        lock (uncertaintyFailures) { if (uncertaintyFailures.Count < 16) uncertaintyFailures.Add(actual); }
+    }
 
     public PublicationService(
         PublicationAuthorityHost authority,
@@ -193,9 +203,16 @@ public sealed class PublicationService
 
     private async Task MarkUncertain(PublicationIntent intent)
     {
-        coordinationAdmission?.RetainUncertain(intent.RunIdentity, "Publication intent remains unresolved; no resend or lease release authority.");
+        // A failing owner notification cannot prevent the independent journal
+        // attempt or replace the conservative Blocked(Uncertain) result.
+        try { coordinationAdmission?.RetainUncertain(intent.RunIdentity, "Publication intent remains unresolved; no resend or lease release authority."); }
+        catch (Exception error) { RetainUncertaintyFailure(error); }
         try { await Append(intent with { State = PublicationIntentState.Uncertain }, CancellationToken.None).ConfigureAwait(false); }
-        catch (Exception) { /* The earlier durable Sent intent remains unresolved; no retry is authorized. */ }
+        catch (Exception error)
+        {
+            RetainUncertaintyFailure(error);
+            // Earlier durable Sent remains unresolved. No resend is authorized.
+        }
     }
 
     private static bool Matches(PublicationIntent i, PublicationRun run, PublicationRequest request, PublicationAction action)

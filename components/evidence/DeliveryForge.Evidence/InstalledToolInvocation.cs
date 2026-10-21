@@ -324,9 +324,16 @@ internal sealed class InstalledToolInvocation(
         if (profile.Tool == "crap4csharp" && result.Outcome is GateOutcome.Pass or GateOutcome.NotApplicable)
         {
             if (_lines is null) result = NormalizedEvidence.Incomplete("Complete true changed-LINE evidence is absent.", profile.Fixture);
-            else if (_lines.Outcome != GateOutcome.Pass)
+            else if (_lines.Outcome == GateOutcome.Incomplete)
                 result = new(_lines.Outcome, _lines.Reason + " Covered=" + _lines.CoveredChangedLines + "/" + _lines.ChangedExecutableLines,
                     profile.Fixture, false, [.. result.Limitations, "No baseline/exemption or publication authority is inferred."]);
+            else
+                // Reported points prove observations, not an exhaustive eligible-line
+                // denominator. No current producer contract supplies that independently
+                // bound compiler/PDB census. Preserve callable scoring, but fail closed
+                // at this existing protected installed-line boundary until it exists.
+                result = NormalizedEvidence.Incomplete("Protected changed-LINE coverage requires a complete compiler/PDB eligible-line census bound to the actual source/module/debug identities; reported-point coverage alone cannot establish it. Observed covered=" + _lines.CoveredChangedLines + "/" + _lines.ChangedExecutableLines, profile.Fixture)
+                    with { Limitations = [.. result.Limitations, "Observed line ratio is DATA only; complete executable-line census is unavailable."] };
         }
         return result with { ProducerVerified = !profile.Fixture && result.Outcome != GateOutcome.Error };
     }

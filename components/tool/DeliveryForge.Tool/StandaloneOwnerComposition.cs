@@ -93,7 +93,21 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
     }
     void CloseReviewOnce(bool cleanup)
     {
-        if (!reviewCloseEntered) { reviewCloseEntered = true; bridge.DisposeInstalledReviewWhenSettled(cleanup); reviewClosed = true; }
+        if (!reviewCloseEntered)
+        {
+            // A deterministic refusal before first entry must leave cleanup's
+            // first disposition available under the SAME original endpoint.
+            if (!cleanup) original.Check();
+            reviewCloseEntered = true;
+            try { bridge.DisposeInstalledReviewWhenSettled(cleanup); }
+            finally
+            {
+                // Only the actual host records callback return, before its
+                // independent WORK postcheck. Never infer return from a throw.
+                reviewClosed = bridge.InstalledReviewDispositionReturned;
+                if (!reviewClosed && !bridge.InstalledReviewDispositionEntered) reviewCloseEntered = false;
+            }
+        }
         if (!reviewClosed) throw new IOException("Original review disposition did not return; no retry.");
     }
     void CloseCoordinatorOnce()

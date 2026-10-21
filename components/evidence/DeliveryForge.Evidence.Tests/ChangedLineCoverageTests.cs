@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Xml.Linq;
 
 namespace DeliveryForge.Evidence.Tests;
@@ -9,7 +10,7 @@ namespace DeliveryForge.Evidence.Tests;
 public sealed class ChangedLineCoverageTests
 {
     [Fact]
-    public void Actual_line_denominator_passes_at_eighty_then_refuses_a_missed_changed_line()
+    public void Observed_reported_line_ratio_is_eighty_then_sixty_without_claiming_an_exhaustive_census()
     {
         using var fixture = new LineFixture();
         var positive = fixture.Read([1, 1, 1, 1, 0]);
@@ -58,19 +59,100 @@ public sealed class ChangedLineCoverageTests
         Assert.Throws<EvidenceWriteException>(() => ChangedLineCoverage.ReadHunks(Encoding.UTF8.GetBytes("+++ \"b/quoted.cs\"\n@@ -0,0 +1 @@\n+one\n")));
     }
 
+    [Fact]
+    public void Changed_file_absent_from_an_actual_context_report_is_unmeasured_not_a_zero_denominator_exemption()
+    {
+        using var fixture = new LineFixture();
+        Assert.Equal(GateOutcome.Pass, fixture.Read([1, 1, 1, 1, 0]).Outcome);
+        var result = fixture.Read([], xmlChange: xml => { xml.Descendants("File").Remove(); xml.Descendants("Method").Remove(); });
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Equal(5, result.UnmeasuredChangedLines);
+        Assert.Equal(0, result.ChangedExecutableLines); Assert.Null(result.Percent);
+        Assert.Contains("unmeasured", result.Reason, StringComparison.Ordinal);
+        var noReport = fixture.Read([], manifestChange: manifest => manifest["artifacts"] = new JsonArray());
+        Assert.Equal(GateOutcome.Incomplete, noReport.Outcome); Assert.Equal(5, noReport.UnmeasuredChangedLines);
+    }
+
+    [Theory]
+    [InlineData("xml")]
+    [InlineData("file-ref")]
+    [InlineData("uid")]
+    [InlineData("module")]
+    [InlineData("duplicate-module")]
+    [InlineData("manifest")]
+    public void Malformed_complete_inputs_refuse_as_evidence_without_raw_parser_shape_exceptions(string fault)
+    {
+        using var fixture = new LineFixture();
+        Action<XElement>? xmlChange = fault switch
+        {
+            "file-ref" => xml => xml.Descendants("FileRef").Remove(),
+            "uid" => xml => xml.Descendants("File").Single().Attribute("uid")!.Remove(),
+            "module" => xml => xml.Descendants("Module").Remove(),
+            "duplicate-module" => xml => xml.Element("Modules")!.Add(new XElement(xml.Descendants("Module").Single())),
+            _ => null
+        };
+        Assert.Throws<EvidenceWriteException>(() => fixture.Read([1], xmlChange: xmlChange,
+            coverageOverride: fault == "xml" ? "<broken"u8.ToArray() : null,
+            manifestChange: fault == "manifest" ? manifest => manifest.Remove("contexts") : null));
+    }
+
+    [Fact]
+    public void Invalid_actual_source_or_diff_UTF8_refuses_with_the_evidence_type()
+    {
+        using var fixture = new LineFixture([0xff]);
+        Assert.Throws<EvidenceWriteException>(() => fixture.Read([1]));
+        Assert.Throws<EvidenceWriteException>(() => ChangedLineCoverage.ReadHunks([0xff]));
+    }
+
+    [Fact]
+    public void Actual_owner_cancellation_remains_cancellation_instead_of_becoming_a_parser_refusal()
+    {
+        using var cancellation = new CancellationTokenSource();
+        using var fixture = new LineFixture(token: cancellation.Token);
+        Assert.Equal(GateOutcome.Pass, fixture.Read([1]).Outcome);
+        cancellation.Cancel();
+        Assert.ThrowsAny<OperationCanceledException>(() => fixture.Read([1], coverageOverride: "<broken"u8.ToArray()));
+    }
+
+    [Theory]
+    [InlineData("one\n")]
+    [InlineData("one\r\n")]
+    [InlineData("one\r")]
+    [InlineData("one\u0085")]
+    [InlineData("one\u2028")]
+    [InlineData("one\u2029")]
+    [InlineData("one")]
+    [InlineData("one\n\u001a")]
+    public void Terminated_and_unterminated_source_records_do_not_admit_a_phantom_next_line(string source)
+    {
+        using var fixture = new LineFixture(Encoding.UTF8.GetBytes(source));
+        Assert.Equal(1, fixture.Read([1]).ChangedExecutableLines);
+        Assert.Throws<EvidenceWriteException>(() => fixture.Read([1, 1]));
+    }
+
+    [Fact]
+    public void Empty_source_cannot_have_a_line_one_counter()
+    {
+        using var fixture = new LineFixture([]);
+        Assert.Throws<EvidenceWriteException>(() => fixture.Read([1]));
+    }
+
     private sealed class LineFixture : IDisposable
     {
         private readonly string _root = Path.Combine(Path.GetTempPath(), "forge-line-" + Guid.NewGuid().ToString("N"));
-        private readonly InstalledToolFiles _files = new(TimeSpan.FromSeconds(30));
+        private readonly InstalledToolFiles _files;
         internal string SourcePath => Path.Combine(_root, "src", "Subject.cs");
-        internal byte[] SourceBytes { get; } = "one\ntwo\nthree\nfour\nfive\n"u8.ToArray();
-        internal LineFixture()
+        internal byte[] SourceBytes { get; }
+        internal LineFixture(byte[]? sourceBytes = null, CancellationToken token = default)
         {
+            _files = new(TimeSpan.FromSeconds(30), token);
+            SourceBytes = sourceBytes ?? "one\ntwo\nthree\nfour\nfive\n"u8.ToArray();
             Directory.CreateDirectory(Path.Combine(_root, "src"));
             _files.WriteNew(SourcePath, SourceBytes);
         }
         internal ChangedLineCoverage.Result Read(int[] visits, bool duplicateFirst = false,
-            string coordinates = "line", bool mutateHash = false)
+            string coordinates = "line", bool mutateHash = false, Action<XElement>? xmlChange = null,
+            byte[]? coverageOverride = null, Action<JsonObject>? manifestChange = null)
         {
             var points = visits.Select((count, index) => new XElement("SequencePoint", new XAttribute("sl", index + 1),
                 new XAttribute("vc", count), new XAttribute("fileid", "1"))).ToList();
@@ -81,9 +163,10 @@ public sealed class ChangedLineCoverageTests
             var module = new XElement("Module", new XElement("ModuleName", "Subject"),
                 new XElement("Files", new XElement("File", new XAttribute("uid", "1"), new XAttribute("fullPath", SourcePath))), classes);
             var xml = new XElement("CoverageSession", new XElement("Modules", module));
-            var coverage = Encoding.UTF8.GetBytes(xml.ToString(SaveOptions.DisableFormatting));
+            xmlChange?.Invoke(xml);
+            var coverage = coverageOverride ?? Encoding.UTF8.GetBytes(xml.ToString(SaveOptions.DisableFormatting));
             var data = new Dictionary<string, byte[]>(StringComparer.Ordinal) { ["source.bin"] = SourceBytes, ["coverage.xml"] = coverage };
-            using var manifest = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(new
+            var manifestNode = JsonSerializer.SerializeToNode(new
             {
                 contexts = new[] { new { id = "c", inputs = new[] { new { role = "source", logicalPath = "src/Subject.cs",
                     repositoryPath = "src/Subject.cs", locator = "source.bin", generated = false, encoding = "utf-8",
@@ -93,7 +176,9 @@ public sealed class ChangedLineCoverageTests
                 artifacts = new[] { new { id = "a", kind = "coverage", locator = "coverage.xml", contextId = "c", buildId = "b",
                     executionId = "e", format = "opencover", coordinateKind = coordinates, length = coverage.Length,
                     sha256 = mutateHash ? new string('0', 64) : InstalledToolFiles.Identity(coverage)[7..] } }
-            }));
+            })!.AsObject();
+            manifestChange?.Invoke(manifestNode);
+            using var manifest = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(manifestNode));
             var diff = Encoding.UTF8.GetBytes("diff --git a/src/Subject.cs b/src/Subject.cs\n--- /dev/null\n+++ b/src/Subject.cs\n@@ -0,0 +1,5 @@\n+one\n+two\n+three\n+four\n+five\n");
             return ChangedLineCoverage.Read(diff, manifest.RootElement, _root, path => data[path], _files);
         }

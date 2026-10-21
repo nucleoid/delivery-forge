@@ -68,6 +68,37 @@ public sealed class LocalRealGoldenBoundaryTests
         Assert.Single(Directory.GetFiles(root));
     }
 
+    [Fact]
+    public async Task Actual_journal_nested_current_file_admission_settles_without_holding_parent_gate()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-nested-journal-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        var marker = Path.Combine(root, "current-input.data"); BoundedFiles.WriteNew(marker, "owned input"u8.ToArray(), original);
+        var gate = new object(); var revoked = false;
+        var admission = new ParentEffectAdmission(gate, run => run == "unit-journal" && !revoked, _ => revoked = true);
+        void Current()
+        {
+            original.Check(); Assert.False(Monitor.IsEntered(gate));
+            admission.EnterSynchronous("unit-journal", () =>
+            {
+                Assert.False(Monitor.IsEntered(gate));
+                Assert.Equal("owned input"u8.ToArray(), BoundedFiles.Read(marker, original, 1024));
+                return true;
+            });
+        }
+        var journal = new LocalRealGoldenOwner.LocalJournal(root, original, admission, "unit-journal", Current);
+        var intent = new PublicationIntent("unit-key", "unit-journal", "unit-revision", PublicationAction.CreateOrUpdatePr,
+            new("local-real/no-network", "refs/heads/unit", "refs/heads/base"), new('a', 40), new('b', 40), new('c', 40), PublicationIntentState.Prepared);
+        await journal.AppendAdmittedAsync(intent, original.Token);
+        Assert.Same(intent, await journal.ReadAdmittedAsync("unit-key", original.Token));
+        using (var file = new FileStream(Path.Combine(root, "00-intent.json"), FileMode.Open, FileAccess.Read, FileShare.None))
+        using (var data = JsonDocument.Parse(file)) Assert.Equal("unit-key", data.RootElement.GetProperty("IdempotencyKey").GetString());
+        Assert.Equal(5, admission.EnteredCount); Assert.True(admission.AllKnownSettled);
+        Assert.False(revoked); Assert.False(original.HasExplicitUnknown); original.Check();
+        // Actual nested file/journal admission only: no production realm,
+        // accepted review, gate receipt, lease or fake-publication positive.
+    }
+
     [Fact(Timeout = 10_000)]
     public async Task Actual_self_admitted_journal_prefix_leaves_revocation_free_and_refuses_later_file_birth()
     {

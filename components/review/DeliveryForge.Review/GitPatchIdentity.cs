@@ -18,7 +18,9 @@ public sealed class ControlledGitEvidenceContext : IDisposable
 {
     private readonly Action? _dispose;
     private readonly Action? _disposeOwnedWork;
+    // 0 open, 1 WORK entered, 2 WORK returned, 3 cleanup claimed, 4 cleanup returned.
     private int _workDisposition;
+    internal bool DispositionReturned => Volatile.Read(ref _workDisposition) is 2 or 4;
     private readonly HashSet<string> retainedScratch = new(StringComparer.Ordinal);
     public IReadOnlyList<string> RetainedScratchPaths { get { lock (retainedScratch) return retainedScratch.ToArray(); } }
     internal void RegisterScratch(params string[] paths)
@@ -110,15 +112,22 @@ public sealed class ControlledGitEvidenceContext : IDisposable
     {
         // A failed reconstruction/retirement retains the actual controlled view
         // and exact scratch paths. Do not erase evidence through a using-finally.
-        if (Volatile.Read(ref _workDisposition) == 0 && RetainedScratchPaths.Count == 0) _dispose?.Invoke();
+        if (RetainedScratchPaths.Count == 0 && Interlocked.CompareExchange(ref _workDisposition, 3, 0) == 0)
+        {
+            if (_dispose is null) return;
+            _dispose();
+            Volatile.Write(ref _workDisposition, 4);
+        }
     }
     internal void DisposeDuringWork()
     {
         if (Volatile.Read(ref _workDisposition) == 2) return;
         if (RetainedScratchPaths.Count != 0 || _disposeOwnedWork is null)
             throw new ReviewPreflightException("Original WORK view retirement is unavailable; exact view and scratch retained.");
-        if (Interlocked.CompareExchange(ref _workDisposition, 1, 0) != 0)
-            throw new ReviewPreflightException("Original WORK view first retirement did not return; exact view retained.");
+        var prior = Interlocked.CompareExchange(ref _workDisposition, 1, 0);
+        if (prior == 2) return;
+        if (prior != 0)
+            throw new ReviewPreflightException("WORK cannot follow an already entered view retirement.");
         _disposeOwnedWork();
         Volatile.Write(ref _workDisposition, 2);
     }

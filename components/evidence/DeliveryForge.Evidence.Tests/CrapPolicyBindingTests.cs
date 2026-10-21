@@ -49,6 +49,23 @@ public sealed class CrapPolicyBindingTests
         canonical["exemptionFiles"] = new JsonArray();
         Assert.Throws<EvidenceWriteException>(() => CrapPolicyBinding.RequireSame(Bytes(original), Bytes(canonical)));
     }
+    [Theory]
+    [InlineData("threshold", false)]
+    [InlineData("threshold", true)]
+    [InlineData("scope", false)]
+    [InlineData("baseline", true)]
+    public void Missing_or_wrongly_typed_policy_fields_refuse_with_the_evidence_type(string field, bool mistyped)
+    {
+        var original = Policy(); var malformed = Policy();
+        if (mistyped) malformed[field] = new JsonObject(); else malformed.Remove(field);
+        Assert.Throws<EvidenceWriteException>(() => CrapPolicyBinding.RequireSame(Bytes(original), Bytes(malformed)));
+    }
+    [Fact]
+    public void Malformed_policy_JSON_retains_the_private_parser_failure_under_the_evidence_type()
+    {
+        var failure = Assert.Throws<EvidenceWriteException>(() => CrapPolicyBinding.RequireSame(Bytes(Policy()), "{"u8.ToArray()));
+        Assert.IsAssignableFrom<JsonException>(failure.Data["CrapPolicyParserFailure"]);
+    }
     private static JsonObject Policy() => new()
     {
         ["schemaVersion"] = "repository-policy-v1",

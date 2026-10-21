@@ -15,12 +15,12 @@ public sealed class PiRpcProtocol
         {
             if (protocolFailure is not null) throw new IOException("Pi event stream previously refused.", protocolFailure);
             var type = Text(row, "type");
-            if (settled && type is "agent_start" or "message_end" or "agent_settled") throw new IOException("Pi state-changing event after settlement; success permanently refused.");
-            if (type == "agent_start") { if (!prompt) throw new IOException("Unrequested Pi run before actual prompt admission."); if (settled) throw new IOException("Pi restarted after settled; no automatic second dispatch admitted."); entered = true; }
-            if (type == "message_end") { var message = row.GetProperty("message"); if (Text(message, "role") == "assistant") finalAssistantStop = Text(message, "stopReason"); }
+            if (settled) throw new IOException("Pi event after settlement; success permanently refused.");
+            if (type == "agent_start") { if (!prompt || entered) throw new IOException("Unrequested or repeated Pi run; one actual admitted prompt only."); entered = true; finalAssistantStop = null; }
+            if (type == "message_end") { if (!entered) throw new IOException("Pi message completed before the actual admitted run entered."); var message = Member(row, "message"); if (Text(message, "role") == "assistant") finalAssistantStop = Text(message, "stopReason"); }
             if (type == "agent_settled") { if (!entered || settled) throw new IOException("Pi settled without actual run or repeated settlement."); Aborted = Boolean(row, "aborted"); settled = true; }
             if (type == "extension_error") throw new IOException("Actual Pi extension failed; no successful worker result inferred.");
-            if (type == "queue_update" && (row.GetProperty("steering").GetArrayLength() != 0 || row.GetProperty("followUp").GetArrayLength() != 0)) throw new IOException("Pi acquired unrequested queued work.");
+            if (type == "queue_update" && (ArrayCount(row, "steering") != 0 || ArrayCount(row, "followUp") != 0)) throw new IOException("Pi acquired unrequested queued work.");
         }
         catch (Exception failure) { protocolFailure ??= failure; throw; }
     }
@@ -37,10 +37,13 @@ public sealed class PiRpcProtocol
     public static string RequireIdleSession(JsonElement state, string? expected = null)
     {
         var session = Text(state, "sessionId"); if (expected is not null && session != expected) throw new IOException("Actual Pi session changed.");
-        if (Boolean(state, "isStreaming") || Boolean(state, "isCompacting") || !state.GetProperty("pendingMessageCount").TryGetInt32(out var count) || count != 0) throw new IOException("Actual Pi session is not idle without pending work.");
+        var pending = Member(state, "pendingMessageCount");
+        if (Boolean(state, "isStreaming") || Boolean(state, "isCompacting") || pending.ValueKind != JsonValueKind.Number || !pending.TryGetInt32(out var count) || count != 0) throw new IOException("Actual Pi session is not idle without pending work.");
         return session;
     }
     public static void RequireStarted(JsonElement response) { if (Text(response, "disposition") != "started") throw new IOException("Pi prompt was queued or handled without starting the assigned run."); }
     public static string Text(JsonElement row, string key) { if (row.ValueKind != JsonValueKind.Object || !row.TryGetProperty(key, out var value) || value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString()) || value.GetString()!.Length > 4096) throw new IOException("Invalid Pi " + key); return value.GetString()!; }
-    static bool Boolean(JsonElement row, string key) { var value = row.GetProperty(key); if (value.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new IOException("Pi boolean required: " + key); return value.GetBoolean(); }
+    static JsonElement Member(JsonElement row, string key) { if (row.ValueKind != JsonValueKind.Object || !row.TryGetProperty(key, out var value)) throw new IOException("Pi member required: " + key); return value; }
+    static int ArrayCount(JsonElement row, string key) { var value = Member(row, key); if (value.ValueKind != JsonValueKind.Array) throw new IOException("Pi array required: " + key); return value.GetArrayLength(); }
+    static bool Boolean(JsonElement row, string key) { var value = Member(row, key); if (value.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new IOException("Pi boolean required: " + key); return value.GetBoolean(); }
 }

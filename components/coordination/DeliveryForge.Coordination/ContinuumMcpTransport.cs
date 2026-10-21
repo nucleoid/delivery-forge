@@ -12,8 +12,12 @@ namespace DeliveryForge.Coordination;
 /// It never retries a mutation, changes its request UUID, follows redirects or reconnects automatically.</summary>
 public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDisposable
 {
-    // Bounded outgoing actual parsed renewal DATA. Never authority/session input.
-    public sealed record ActualRenewalData(string RequestId, string Scope, string Resource, string LeaseId, string RunId, string FencingToken, TransportOutcome Outcome);
+    // Bounded invocation DATA, not proof of HTTP send, server outcome, or absence.
+    // The reducer's exact PreparedRenew/actual Task remains the operation ledger.
+    public sealed record ActualRenewalData(string RequestId, string Scope, string Resource, string LeaseId, string RunId, string FencingToken, TransportOutcome Outcome)
+    {
+        public string InvocationState { get; init; } = "Returned";
+    }
     readonly List<ActualRenewalData> _actualRenewals = []; int _renewalObservationReservations;
     public IReadOnlyList<ActualRenewalData> ReadActualRenewalData() { lock (_state) return Array.AsReadOnly(_actualRenewals.ToArray()); }
     private const string Protocol = "2025-11-25";
@@ -104,6 +108,24 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
             lock (_state)
                 return !_fixture && !_invalid && !_disposed && _session is not null &&
                     _capabilities is not null && EvidenceCurrent(_evidence);
+        }
+    }
+
+    // A restriction on the SAME original interval, never a freshness issuer or
+    // a fresh cleanup clock. Caller has already required the production facet.
+    public void RequireOriginalEvidenceCoverage(long originalStarted, TimeSpan originalWholeLimit)
+    {
+        if (originalStarted <= 0 || originalStarted > Stopwatch.GetTimestamp() ||
+            originalWholeLimit <= TimeSpan.Zero || originalWholeLimit > TimeSpan.FromSeconds(1200))
+            throw new ArgumentOutOfRangeException(nameof(originalWholeLimit));
+        lock (_state)
+        {
+            if (_invalid || _disposed || _session is null || _capabilities is null || _evidence is null || _evidenceObservedAt == 0)
+                throw new CoordinationUnavailableException("Actual anchored deployment evidence is unavailable before lease admission.");
+            var originalRemaining = originalWholeLimit - Stopwatch.GetElapsedTime(originalStarted);
+            var evidenceRemaining = _evidenceRemaining - Stopwatch.GetElapsedTime(_evidenceObservedAt);
+            if (originalRemaining <= TimeSpan.Zero || evidenceRemaining < originalRemaining)
+                throw new CoordinationUnavailableException("Pinned deployment evidence cannot cover the SAME original remaining whole interval; no lease or worker may start.");
         }
     }
 
@@ -230,26 +252,41 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
     {
         RequireResource(request.Lease.Resource); RequireOwner(request.Lease.Owner); RequireUuid(request.RequestId);
         RequireUuid(request.Lease.LeaseId); request.Lease.Validate();
-        lock (_state) { if (_renewalObservationReservations >= 512) throw new CoordinationUnavailableException("Finite actual renewal observation bound."); _renewalObservationReservations++; }
-        var actual = await ToolAsync("continuum.lock_renew", new
+        int observation;
+        lock (_state)
         {
-            lease_id = request.Lease.LeaseId,
-            run_id = request.Lease.Owner.RunId,
-            request_id = request.RequestId,
-            ttl_seconds = 300,
-        }, result =>
+            if (_renewalObservationReservations >= 512) throw new CoordinationUnavailableException("Finite actual renewal observation bound.");
+            _renewalObservationReservations++; observation = _actualRenewals.Count;
+            _actualRenewals.Add(new(request.RequestId, request.Lease.Resource.Scope, request.Lease.Resource.ResourceKey,
+                request.Lease.LeaseId, request.Lease.Owner.RunId, request.Lease.FencingToken, TransportOutcome.Uncertain) { InvocationState = "Pending" });
+        }
+        try
         {
-            var code = ErrorCode(result);
-            if (code is not null) return new RenewTransportResult(code == "LEASE_LOST" ? TransportOutcome.LeaseLost : TransportOutcome.Uncertain, null, null, "continuum-renew-refused");
-            ContinuumWireJson.Shape(result, ["renewed", "lease_id", "run_id", "fencing_token", "expires_at", "server_time"]);
-            if (!ContinuumWireJson.Boolean(result, "renewed") || ContinuumWireJson.Uuid(result, "lease_id") != request.Lease.LeaseId ||
-                ContinuumWireJson.Uuid(result, "run_id") != request.Lease.Owner.RunId || ContinuumWireJson.Fence(result) != request.Lease.FencingToken)
-                throw ContinuumWireJson.Invalid();
-            var (server, expiry) = GrantTimes(result, ContinuumCoordinationAdapter.DefaultTtl);
-            return RenewTransportResult.Renewed(server, expiry);
-        }, cancellationToken).ConfigureAwait(false);
-        lock (_state) _actualRenewals.Add(new(request.RequestId, request.Lease.Resource.Scope, request.Lease.Resource.ResourceKey, request.Lease.LeaseId, request.Lease.Owner.RunId, request.Lease.FencingToken, actual.Outcome));
-        return actual;
+            var actual = await ToolAsync("continuum.lock_renew", new
+            {
+                lease_id = request.Lease.LeaseId,
+                run_id = request.Lease.Owner.RunId,
+                request_id = request.RequestId,
+                ttl_seconds = 300,
+            }, result =>
+            {
+                var code = ErrorCode(result);
+                if (code is not null) return new RenewTransportResult(code == "LEASE_LOST" ? TransportOutcome.LeaseLost : TransportOutcome.Uncertain, null, null, "continuum-renew-refused");
+                ContinuumWireJson.Shape(result, ["renewed", "lease_id", "run_id", "fencing_token", "expires_at", "server_time"]);
+                if (!ContinuumWireJson.Boolean(result, "renewed") || ContinuumWireJson.Uuid(result, "lease_id") != request.Lease.LeaseId ||
+                    ContinuumWireJson.Uuid(result, "run_id") != request.Lease.Owner.RunId || ContinuumWireJson.Fence(result) != request.Lease.FencingToken)
+                    throw ContinuumWireJson.Invalid();
+                var (server, expiry) = GrantTimes(result, ContinuumCoordinationAdapter.DefaultTtl);
+                return RenewTransportResult.Renewed(server, expiry);
+            }, cancellationToken).ConfigureAwait(false);
+            lock (_state) _actualRenewals[observation] = _actualRenewals[observation] with { Outcome = actual.Outcome, InvocationState = "Returned" };
+            return actual;
+        }
+        catch
+        {
+            lock (_state) _actualRenewals[observation] = _actualRenewals[observation] with { Outcome = TransportOutcome.Uncertain, InvocationState = "Uncertain" };
+            throw;
+        }
     }
 
     public async Task<InspectTransportResult> InspectAsync(InspectRequest request, CancellationToken cancellationToken = default)
@@ -430,7 +467,7 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
         if (media is not ("application/json" or "text/event-stream") ||
             response.Content.Headers.ContentLength is > MaximumResponseBytes) throw Uncertain();
         await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
-        var payload = await ReadMessageAsync(stream, media == "text/event-stream", cancellationToken).ConfigureAwait(false);
+        var payload = await ReadMessageAsync(stream, media == "text/event-stream", id, cancellationToken).ConfigureAwait(false);
         using var document = ContinuumWireJson.Parse(payload);
         var root = document.RootElement;
         ContinuumWireJson.Shape(root, ["jsonrpc", "id", "result"]);
@@ -452,7 +489,7 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
         return authorization;
     }
 
-    private static async Task<byte[]> ReadMessageAsync(Stream stream, bool sse, CancellationToken cancellationToken)
+    private static async Task<byte[]> ReadMessageAsync(Stream stream, bool sse, string responseId, CancellationToken cancellationToken)
     {
         var bytes = new byte[MaximumResponseBytes + 1];
         var used = 0;
@@ -480,17 +517,57 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
                     {
                         var line = raw.TrimEnd('\r');
                         if (line.Length == 0 || line.StartsWith(':')) continue;
-                        if (line is "event: message" or "event:message") continue;
-                        if (!line.StartsWith("data:", StringComparison.Ordinal)) throw ContinuumWireJson.Invalid();
-                        var part = line[5..];
-                        data.Add(part.StartsWith(' ') ? part[1..] : part);
+                        var colon = line.IndexOf(':');
+                        var field = colon < 0 ? line : line[..colon];
+                        var part = colon < 0 ? "" : line[(colon + 1)..];
+                        if (part.StartsWith(' ')) part = part[1..];
+                        // These are SSE framing metadata only. No resume cursor,
+                        // timer, GET/reconnect or replay is created from them.
+                        if (field is "id" or "retry") continue;
+                        if (field == "event") { if (part is not ("" or "message")) throw ContinuumWireJson.Invalid(); continue; }
+                        if (field == "data") data.Add(part);
+                        // SSE ignores fields not defined by its grammar.
                     }
                     start = index + delimiter;
                     index = start - 1;
-                    if (data.Count == 0) continue;
+                    var payload = Encoding.UTF8.GetBytes(string.Join('\n', data));
+                    if (payload.Length == 0) continue; // Includes id + empty-data priming.
+                    using var document = ContinuumWireJson.Parse(payload);
+                    var message = document.RootElement;
+                    if (message.TryGetProperty("method", out _))
+                    {
+                        // The client advertised no server-request capability.
+                        // Only inert progress/logging notifications may precede
+                        // this response; tool/schema changes must invalidate it.
+                        ContinuumWireJson.Shape(message, ["jsonrpc", "method", "params"]);
+                        if (ContinuumWireJson.Text(message, "jsonrpc", 8) != "2.0" ||
+                            ContinuumWireJson.Text(message, "method", 128) is not ("notifications/progress" or "notifications/message") ||
+                            message.GetProperty("params").ValueKind != JsonValueKind.Object) throw ContinuumWireJson.Invalid();
+                        var parameters = message.GetProperty("params");
+                        if (parameters.TryGetProperty("_meta", out var meta) && meta.ValueKind != JsonValueKind.Object) throw ContinuumWireJson.Invalid();
+                        if (message.GetProperty("method").GetString() == "notifications/progress")
+                        {
+                            ContinuumWireJson.Shape(parameters, ["progressToken", "progress"], "total", "message", "_meta");
+                            var token = parameters.GetProperty("progressToken");
+                            if (token.ValueKind != JsonValueKind.String && !(token.ValueKind == JsonValueKind.Number && token.TryGetInt64(out _)) ||
+                                !parameters.GetProperty("progress").TryGetDouble(out var progress) || !double.IsFinite(progress) ||
+                                parameters.TryGetProperty("total", out var total) && (!total.TryGetDouble(out var value) || !double.IsFinite(value)) ||
+                                parameters.TryGetProperty("message", out var detail) && detail.ValueKind != JsonValueKind.String) throw ContinuumWireJson.Invalid();
+                        }
+                        else
+                        {
+                            ContinuumWireJson.Shape(parameters, ["level", "data"], "logger", "_meta");
+                            if (ContinuumWireJson.Text(parameters, "level", 16) is not ("debug" or "info" or "notice" or "warning" or "error" or "critical" or "alert" or "emergency") ||
+                                parameters.TryGetProperty("logger", out var logger) && logger.ValueKind != JsonValueKind.String) throw ContinuumWireJson.Invalid();
+                        }
+                        continue;
+                    }
+                    ContinuumWireJson.Shape(message, ["jsonrpc", "id", "result"]);
+                    if (ContinuumWireJson.Text(message, "jsonrpc", 8) != "2.0" || ContinuumWireJson.Text(message, "id", 36) != responseId)
+                        throw ContinuumWireJson.Invalid();
                     for (var trailing = start; trailing < used; trailing++)
                         if (bytes[trailing] is not (9 or 10 or 13 or 32)) throw ContinuumWireJson.Invalid();
-                    return Encoding.UTF8.GetBytes(string.Join('\n', data));
+                    return payload;
                 }
                 if (read == 0) throw ContinuumWireJson.Invalid();
             }

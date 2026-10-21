@@ -62,6 +62,13 @@ public sealed class RestrictiveCaptureBudgetTests
         Assert.Equal(Stopwatch.Frequency, ordinary.Timing!.StopwatchFrequency);
         var actual = new InstalledToolFiles(TimeSpan.FromSeconds(30));
         _ = actual.CleanupRemaining;
+        if (OperatingSystem.IsLinux())
+        {
+            await Assert.ThrowsAsync<PlatformNotSupportedException>(() => executor.ExecuteBoundedCaptureAsync(invocation,
+                TimeSpan.FromSeconds(15), 65536, TestContext.Current.CancellationToken, actual));
+            actual.ReleaseKnown();
+            return; // Explicit unsupported owned route; no Linux group proof inferred.
+        }
         var refused = await executor.ExecuteBoundedCaptureAsync(invocation, TimeSpan.FromSeconds(15),
             65536, TestContext.Current.CancellationToken, actual);
         Assert.Null(refused.Command.ExitCode);

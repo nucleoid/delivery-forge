@@ -49,4 +49,41 @@ public sealed class ClaudeIndependentReviewDataTests
         using var noCost = JsonDocument.Parse("{\"usage\":{\"input_tokens\":5,\"output_tokens\":7,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}}");
         Assert.Throws<IOException>(() => ClaudeIndependentReviewData.Usage(noCost.RootElement));
     }
+    [Theory]
+    [InlineData("critical")]
+    [InlineData("high")]
+    public void Ship_with_material_unresolved_findings_refuses_instead_of_returning_PASS(string severity)
+    {
+        var text = JsonSerializer.Serialize(new { verdict = "ship", findings = new[] { new { code = "UNRESOLVED", severity, message = "Concrete unresolved defect", location = "file.cs:4" } } });
+        Assert.Throws<IOException>(() => ClaudeIndependentReviewData.ParseReport(text));
+    }
+    [Theory]
+    [InlineData("{\"verdict\":\"ship\"}")]
+    [InlineData("{\"verdict\":\"ship\",\"findings\":null}")]
+    [InlineData("{\"verdict\":\"needs-attention\",\"findings\":[{\"severity\":\"high\",\"message\":\"Defect\",\"location\":\"file.cs:4\"}]}")]
+    [InlineData("{\"verdict\":\"needs-attention\",\"findings\":[{\"code\":\"DEFECT\",\"severity\":\"high\",\"message\":{},\"location\":\"file.cs:4\"}]}")]
+    public void Malformed_complete_report_members_are_typed_IO_failures(string text)
+    {
+        Assert.Throws<IOException>(() => ClaudeIndependentReviewData.ParseReport(text));
+    }
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("{}")]
+    [InlineData("{\"usage\":[]}")]
+    [InlineData("{\"usage\":{\"input_tokens\":\"5\",\"output_tokens\":7,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0},\"total_cost_usd\":0}")]
+    [InlineData("{\"usage\":{\"input_tokens\":5,\"output_tokens\":7,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0},\"total_cost_usd\":\"0\"}")]
+    [InlineData("{\"usage\":{\"input_tokens\":9223372036854775807,\"output_tokens\":1,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0},\"total_cost_usd\":0}")]
+    public void Malformed_or_overflowed_usage_is_typed_IO_failure_without_fabricated_accounting(string text)
+    {
+        using var doc = JsonDocument.Parse(text);
+        Assert.Throws<IOException>(() => ClaudeIndependentReviewData.Usage(doc.RootElement));
+    }
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("{\"loggedIn\":true,\"authMethod\":{},\"apiProvider\":\"firstParty\"}")]
+    [InlineData("{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":{}}")]
+    public void Malformed_subscription_observation_refuses_with_existing_typed_profile_error(string text)
+    {
+        Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequireSubscription(Encoding.UTF8.GetBytes(text)));
+    }
 }

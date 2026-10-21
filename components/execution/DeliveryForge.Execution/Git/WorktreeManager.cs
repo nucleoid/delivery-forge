@@ -161,26 +161,29 @@ public sealed partial class WorktreeManager
         catch (Exception primary)
         {
             if (lease is null) throw;
-            try { _ = _originalBudget.CleanupRemaining; lease.Dispose(); _ = _originalBudget.CleanupRemaining; }
-            catch (Exception close)
-            {
-                lock (RetainedWriterBirths) RetainedWriterBirths.Add(lease);
-                if (_originalBudget is IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown();
-                throw new AggregateException("Original writer birth and first disposition failed.", primary, close);
-            }
-            // Preserve its durable lock as failure evidence; no revoked delete.
+            RetireFailedWriterBirth(lease, primary);
             throw;
         }
+    }
+    // Same concrete failure path used by AcquireWriter. Actual managed leases
+    // in controls do not supply provisioning or native execution authority.
+    internal void RetireFailedWriterBirth(WriterLease lease, Exception primary)
+    {
+        try { RetireFailedPreparationWriter(lease); }
+        catch (Exception close) { throw new AggregateException("Original writer birth and first disposition failed.", primary, close); }
+        // A known physical close never erases the failed birth or lock DATA.
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
     }
     // A failed preparation cannot erase the original durable writer evidence.
     // Only legacy managers retain their pre-existing Abandon/delete behavior.
     internal void RetireFailedPreparationWriter(WriterLease writer)
     {
         if (_originalBudget is null) { writer.Abandon(); return; }
+        var closeEntered = false;
         try
         {
             _ = _originalBudget.CleanupRemaining;
-            writer.Dispose();
+            closeEntered = true; writer.Dispose();
             _ = _originalBudget.CleanupRemaining;
         }
         catch (Exception close)
@@ -192,7 +195,11 @@ public sealed partial class WorktreeManager
             var failures = new List<Exception> { close };
             try { if (_originalBudget is IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown(); }
             catch (Exception observation) { failures.Add(observation); }
-            try { _effectAdmission?.RetainUncertain(writer.RunId, "Failed preparation writer first disposition did not return."); }
+            // A known unclosed handle after expiry still retains capacity and
+            // revokes its parent. Never close it outside the same allowance.
+            var reason = closeEntered ? "Failed preparation writer first disposition did not return."
+                : "Failed preparation writer remains held after cleanup expired before its first disposition.";
+            try { _effectAdmission?.RetainUncertain(writer.RunId, reason); }
             catch (Exception observation) { failures.Add(observation); }
             if (failures.Count > 1) throw new AggregateException("Failed preparation writer disposition/uncertainty observations retained.", failures);
             throw;

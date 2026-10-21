@@ -10,6 +10,103 @@ namespace DeliveryForge.Execution.Tests;
 // Actual semaphore/file-owner controls, not native-worker or stored authority.
 public sealed class OriginalWriterDispositionTests
 {
+    // These are actual managed stream/lease failure controls. The private DATA
+    // budget/parent below never issues Git provisioning or native authority.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Coordinator_first_close_attempt_notifies_both_owners_even_when_observers_throw(bool parentThrows)
+    {
+        using var directory = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        using var coordinator = new ExecutionCoordinator(new RunStore(directory.Path), new WorktreeManager(), processes);
+        var originalFailure = new IOException("Original uncertainty observer failed.");
+        var parentFailure = new IOException("Parent uncertainty observer failed.");
+        var original = new Original { UnknownFailure = originalFailure };
+        var parent = new Parent { UnknownFailure = parentThrows ? parentFailure : null };
+        coordinator.BindCoordinationAdmission(parent);
+        coordinator.BindOriginalScheduling(original, parent, "owned", new WorktreeManager());
+        var path = Path.Combine(directory.Path, "owned-writer");
+        var stream = new FaultAfterCloseStream(path); var lease = new WriterLease(path, stream, "owned", "token");
+        var failure = Assert.Throws<AggregateException>(() => coordinator.DisposeOriginalWriter("owned", lease));
+        var retained = failure.Flatten().InnerExceptions;
+        Assert.Same(stream.CloseFailure, retained[0]); Assert.Same(originalFailure, retained[1]);
+        Assert.Equal(parentThrows ? 3 : 2, retained.Count);
+        if (parentThrows) Assert.Same(parentFailure, retained[2]);
+        Assert.Equal(1, original.UnknownObservations); Assert.Equal(1, parent.UnknownObservations);
+        Assert.Throws<CoordinationUncertainException>(() => parent.CheckCurrent("owned"));
+        Assert.False(lease.FirstCloseReturned); Assert.Equal(1, stream.CloseAttempts);
+        lease.Dispose(); Assert.Equal(1, stream.CloseAttempts);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Acquire_failure_path_keeps_birth_primary_and_both_uncertainty_observations(bool parentThrows)
+    {
+        using var directory = new TemporaryDirectory();
+        var originalFailure = new IOException("Original uncertainty observer failed.");
+        var parentFailure = new IOException("Parent uncertainty observer failed.");
+        var original = new Original { UnknownFailure = originalFailure };
+        var parent = new Parent { UnknownFailure = parentThrows ? parentFailure : null };
+        var manager = new WorktreeManager(Environment.ProcessPath!, new ProcessCommandExecutor(), original).WithParentAdmission(parent, "owned");
+        var path = Path.Combine(directory.Path, "actual-managed-writer");
+        var stream = new FaultAfterCloseStream(path); var lease = new WriterLease(path, stream, "owned", "token");
+        var primary = new IOException("Writer birth primary DATA; no Git binding is fabricated.");
+        // Invoke the exact concrete catch routine called by AcquireWriter; no
+        // fake production binding is constructed merely to reach its failure.
+        var failure = Assert.Throws<AggregateException>(() => manager.RetireFailedWriterBirth(lease, primary));
+        Assert.Same(primary, failure.InnerExceptions[0]);
+        var retained = failure.Flatten().InnerExceptions;
+        Assert.Contains(stream.CloseFailure, retained); Assert.Contains(originalFailure, retained);
+        if (parentThrows) Assert.Contains(parentFailure, retained);
+        Assert.Equal(parentThrows ? 4 : 3, retained.Count);
+        Assert.Equal(1, original.UnknownObservations); Assert.Equal(1, parent.UnknownObservations);
+        Assert.Throws<CoordinationUncertainException>(() => parent.CheckCurrent("owned"));
+        Assert.False(lease.FirstCloseReturned); Assert.Equal(1, stream.CloseAttempts);
+        lease.Dispose(); Assert.Equal(1, stream.CloseAttempts);
+    }
+
+    [Fact]
+    public void Acquire_failure_known_first_close_with_expired_post_preserves_primary_without_false_unknown()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-acquire-known-close-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var original = new Original(); var parent = new Parent();
+        var manager = new WorktreeManager(Environment.ProcessPath!, new ProcessCommandExecutor(), original).WithParentAdmission(parent, "owned");
+        var path = Path.Combine(root, "writer-evidence"); var bytes = new byte[] { 2, 4, 6, 8 };
+        var stream = new ReturnThenExpireStream(path, () => original.CleanupExpired = true);
+        stream.Write(bytes); stream.Flush(true); var lease = new WriterLease(path, stream, "owned", "token");
+        var primary = new IOException("Writer birth primary DATA.");
+        var failure = Assert.Throws<AggregateException>(() => manager.RetireFailedWriterBirth(lease, primary));
+        Assert.Collection(failure.InnerExceptions, error => Assert.Same(primary, error), error => Assert.IsType<TimeoutException>(error));
+        Assert.True(lease.FirstCloseReturned); Assert.Equal(1, stream.CloseAttempts);
+        Assert.False(original.Unknown); Assert.Equal(0, original.UnknownObservations); Assert.Equal(0, parent.UnknownObservations);
+        Assert.Equal(bytes, File.ReadAllBytes(path));
+        using var exclusive = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+    }
+
+    [Fact]
+    public void Cleanup_expired_before_close_retains_known_held_writer_and_blocks_parent_without_closing()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-expired-held-writer-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root); // Keep this actual still-held failure namespace.
+        var original = new Original { CleanupExpired = true }; var parent = new Parent();
+        var manager = new WorktreeManager(Environment.ProcessPath!, new ProcessCommandExecutor(), original).WithParentAdmission(parent, "owned");
+        var path = Path.Combine(root, "writer-evidence"); var bytes = new byte[] { 1, 3, 5, 7 };
+        var stream = new ReturnThenExpireStream(path, () => { });
+        stream.Write(bytes); stream.Flush(true); var lease = new WriterLease(path, stream, "owned", "token");
+        Assert.Throws<TimeoutException>(() => manager.RetireFailedPreparationWriter(lease));
+        Assert.False(lease.FirstCloseReturned); Assert.Equal(0, stream.CloseAttempts);
+        Assert.Equal(bytes, lease.GetDiagnosticBytes());
+        Assert.True(original.Unknown); Assert.Equal(1, original.UnknownObservations); Assert.Equal(1, parent.UnknownObservations);
+        Assert.Throws<CoordinationUncertainException>(() => parent.CheckCurrent("owned"));
+        Assert.Contains("expired before", parent.LastUnknownReason!);
+        Assert.Throws<IOException>(() => { using var duplicate = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None); });
+        // Production's retained-writer list owns the same live lease. Do not
+        // close outside its expired allowance or repair/delete the lock.
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
@@ -105,22 +202,26 @@ public sealed class OriginalWriterDispositionTests
     sealed class Original : IOwnedDuplexBudget, IOwnedBudgetUnknownRetention
     {
         internal bool Unknown, CleanupExpired;
+        internal int UnknownObservations;
+        internal Exception? UnknownFailure;
         internal TimeSpan Limit = TimeSpan.FromSeconds(1100);
         public long OriginalStarted { get; } = Stopwatch.GetTimestamp();
         public TimeSpan WholeLimit => TimeSpan.FromSeconds(1200);
         public TimeSpan WorkLimit => Limit;
-        public TimeSpan CleanupRemaining => CleanupExpired ? throw new TimeoutException("Existing original cleanup endpoint expired after actual first close.") : TimeSpan.FromSeconds(60);
+        public TimeSpan CleanupRemaining => CleanupExpired ? throw new TimeoutException("Existing original cleanup endpoint expired.") : TimeSpan.FromSeconds(60);
         public CancellationToken Token => CancellationToken.None;
         public void CheckWork() { }
-        public void PreserveUnknown() => Unknown = true;
+        public void PreserveUnknown() { Unknown = true; UnknownObservations++; if (UnknownFailure is not null) throw UnknownFailure; }
     }
     sealed class Parent : ICoordinatedSynchronousEffectAdmission
     {
         internal int UnknownObservations;
-        public void CheckCurrent(string runId) { }
+        internal Exception? UnknownFailure;
+        internal string? LastUnknownReason;
+        public void CheckCurrent(string runId) { if (UnknownObservations != 0) throw new CoordinationUncertainException("Managed control parent has retained uncertainty."); }
         public T EnterSynchronous<T>(string runId, Func<T> invoke) => invoke();
         public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke) => invoke();
-        public void RetainUncertain(string runId, string reason) => UnknownObservations++;
+        public void RetainUncertain(string runId, string reason) { UnknownObservations++; LastUnknownReason = reason; if (UnknownFailure is not null) throw UnknownFailure; }
     }
     sealed class ReturnThenExpireStream(string path, Action afterClose) : FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None)
     {
@@ -134,10 +235,11 @@ public sealed class OriginalWriterDispositionTests
     sealed class FaultAfterCloseStream(string path) : FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None)
     {
         internal int CloseAttempts;
+        internal readonly IOException CloseFailure = new("Controlled actual writer first-close return failure.");
         protected override void Dispose(bool disposing)
         {
             CloseAttempts++; base.Dispose(disposing);
-            if (disposing) throw new IOException("Controlled actual writer first-close return failure.");
+            if (disposing) throw CloseFailure;
         }
     }
 }

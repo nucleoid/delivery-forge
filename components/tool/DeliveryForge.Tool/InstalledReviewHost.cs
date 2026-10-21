@@ -28,7 +28,9 @@ internal sealed class InstalledReviewHost : IDisposable
     ProductionReviewSourceOwner? sourceOwner; ProductionReviewBootstrap? bootstrap;
     ClaudeIndependentReviewer? independentReviewer;
     DeliveryForge.Contracts.Validation.ValidatedContract? protectedEvidencePolicy;
-    bool entered, disposed, uncertain;
+    bool entered, disposed, uncertain, dispositionEntered;
+    internal bool DispositionEntered => dispositionEntered;
+    internal bool DispositionReturned => disposed && (bootstrap is null || bootstrap.ActualDispositionReturned);
     internal bool Unknown => uncertain || sourceOwner?.Uncertain == true || independentReviewer?.Unknown == true;
     internal bool HasIndependentReviewer => selection.IndependentReviewer is not null;
     internal Task<bool> StopIndependentAsync(HostBridgeFrame frame)
@@ -103,9 +105,9 @@ internal sealed class InstalledReviewHost : IDisposable
             throw new WorkerEnvelopeException("Same original immutable source preparation and completed author required.");
         if (actualAuthorFamily != "gpt") return ToolResult.Incomplete("ACTUAL_AUTHOR_FAMILY_REQUIRED", "The completed native author did not expose unambiguous opposite-family provenance.");
         if (independentReviewer is not null) throw new ToolUsageException("Actual independent reviewer cannot replay.");
-        // Refuse this unsupported native route before creating a private CWD.
+        // Refuse this unsupported production profile before source/settings/CWD I/O.
         // RunAsync keeps the same guard as defense at its own boundary.
-        if (ClaudeIndependentReviewer.UnsupportedPlatform() is { } platformRefusal) return platformRefusal;
+        if (ClaudeIndependentReviewer.UnsupportedProductionProfile() is { } profileRefusal) return profileRefusal;
         sourceOwner.Check();
         async Task<(PatchIdentity Patch, byte[] FrozenPlan)> PrepareEvidence(CancellationToken token)
         {
@@ -321,14 +323,20 @@ internal sealed class InstalledReviewHost : IDisposable
         if (disposed) return;
         original.Check();
         if (Unknown) { original.RetainUnknown(); throw new IOException("Actual review object view remains uncertain; retain its owner."); }
-        bootstrap?.DisposeDuringWork(); disposed = true;
+        dispositionEntered = true;
+        bootstrap?.DisposeDuringWork();
+        disposed = bootstrap is null || bootstrap.ActualDispositionReturned;
+        if (!disposed) throw new IOException("Original review callback did not return its disposition; exact view retained.");
         original.Check();
     }
     public void Dispose()
     {
         if (disposed) return;
         if (Unknown) { original.RetainUnknown(); return; }
-        bootstrap?.Dispose(); disposed = true;
+        dispositionEntered = true;
+        bootstrap?.Dispose();
+        disposed = bootstrap is null || bootstrap.ActualDispositionReturned;
+        if (!disposed) throw new IOException("Original review callback did not return its disposition; exact view retained.");
     }
     internal async Task<(ClaudeIndependentReviewer.AcceptedLocalRevision Accepted, DeliveryForge.Contracts.Validation.ValidatedContract Policy)?> LocalRealEvidenceAsync(HostBridgeFrame frame, ParentCoordinationHost parent)
     {

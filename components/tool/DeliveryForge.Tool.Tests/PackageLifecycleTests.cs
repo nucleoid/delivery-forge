@@ -84,7 +84,7 @@ public sealed class PackageLifecycleTests
         using var f = new Fixture(); f.Package(); using var life = new ToolLifetime(TimeSpan.FromSeconds(30)); var installed = PackageLifecycle.Install(f.Archive, f.Prefix, f.Host(), life);
         var removal = PackageLifecycle.BeginRemoval(installed, life); var plan = BoundedFiles.ReadJson<RemovalPlan>(Path.Combine(removal.JournalDirectory, "plan.json"), life);
         File.WriteAllText(Path.Combine(removal.JournalDirectory, "0000.entered.json"), System.Text.Json.JsonSerializer.Serialize(new { Index = 0, Step = plan.Steps[0], State = "Entered" }));
-        var error = Assert.Throws<IOException>(() => PackageLifecycle.ContinueRemoval(removal, life)); Assert.Contains("actual return unknown", error.Message); Assert.True(File.Exists(Path.Combine(f.Prefix, "payload", "DeliveryForge.Tool.dll")));
+        var error = Assert.Throws<IOException>(() => PackageLifecycle.ContinueRemovalRetainingReceipt(removal, life)); Assert.Contains("actual return unknown", error.Message); Assert.Same(removal, error.Data["ActualRemovalReceipt"]); Assert.True(File.Exists(Path.Combine(f.Prefix, "payload", "DeliveryForge.Tool.dll")));
     }
     [Fact]
     public void Genuine_removal_journal_completed_reobservation_never_adopts_recreated_prefix()
@@ -110,12 +110,57 @@ public sealed class PackageLifecycleTests
         Assert.Empty(Directory.GetFiles(removal.JournalDirectory, "*.entered.json")); Assert.Empty(Directory.GetFiles(removal.JournalDirectory, "*.returned.json"));
         if (kind == "file") Assert.Equal("FOREIGN user file", File.ReadAllText(alias)); else Assert.True(Directory.Exists(alias));
     }
+    [Fact]
+    public void Serviced_external_runtime_host_blocks_launch_trust_but_not_exact_owned_removal()
+    {
+        using var f = new Fixture(); f.Package(); var host = f.Host();
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var receipt = PackageLifecycle.Install(f.Archive, f.Prefix, host, life);
+        File.AppendAllText(host.Path, " serviced outside owned prefix"); var serviced = File.ReadAllBytes(host.Path);
+        Assert.Throws<IOException>(() => PackageLifecycle.Verify(receipt, life));
+        PackageLifecycle.Uninstall(receipt, life);
+        Assert.False(Directory.Exists(f.Prefix)); Assert.Equal(serviced, File.ReadAllBytes(host.Path));
+    }
+    [Fact]
+    public void Actual_removal_failure_retains_its_exact_receipt_without_retrying_or_inventing_a_return()
+    {
+        using var f = new Fixture(); f.Package();
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var installed = PackageLifecycle.Install(f.Archive, f.Prefix, f.Host(), life);
+        var removal = PackageLifecycle.BeginRemoval(installed, life);
+        var path = Path.Combine(f.Prefix, "payload", "DeliveryForge.Tool.dll"); File.AppendAllText(path, " actual post-plan drift");
+        var actual = File.ReadAllBytes(path);
+        var primary = Assert.Throws<IOException>(() => PackageLifecycle.ContinueRemovalRetainingReceipt(removal, life));
+        Assert.Same(removal, primary.Data["ActualRemovalReceipt"]);
+        Assert.Equal(removal.PlanSha256, BoundedFiles.Sha(File.ReadAllBytes(Path.Combine(removal.JournalDirectory, "plan.json"))));
+        Assert.Equal(actual, File.ReadAllBytes(path)); Assert.Empty(Directory.GetFiles(removal.JournalDirectory, "*.entered.json"));
+        Assert.Throws<IOException>(() => PackageLifecycle.ContinueRemoval(removal, life));
+        Assert.Equal(actual, File.ReadAllBytes(path));
+        // Exact receipt is recovery DATA, not permission to retry entered effects.
+    }
+    [Theory]
+    [InlineData("file-parent")]
+    [InlineData("directory-role")]
+    public void Complete_payload_topology_is_validated_before_new_prefix_birth(string shape)
+    {
+        using var f = new Fixture();
+        using (var file = new FileStream(f.Archive, FileMode.CreateNew))
+        using (var zip = new ZipArchive(file, ZipArchiveMode.Create))
+        {
+            foreach (var name in new[] { "tools/net10.0/any/DeliveryForge.Tool.dll", "tools/net10.0/any/DeliveryForge.Tool.runtimeconfig.json", "tools/net10.0/any/content/SKILL.md", "tools/net10.0/any/blocked" })
+            { using var writer = new StreamWriter(zip.CreateEntry(name).Open(), new UTF8Encoding(false)); writer.Write(name.EndsWith(".json", StringComparison.Ordinal) ? "{}" : "inert archive DATA"); }
+            using var last = new StreamWriter(zip.CreateEntry(shape == "file-parent" ? "tools/net10.0/any/blocked/child" : "tools/net10.0/any/content").Open(), new UTF8Encoding(false)); last.Write("inert late conflict");
+        }
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        Assert.Throws<IOException>(() => PackageLifecycle.Install(f.Archive, f.Prefix, f.Host(), life));
+        Assert.False(Directory.Exists(f.Prefix));
+    }
     [Fact] public void Existing_prefix_is_never_adopted() { using var f = new Fixture(); f.Package(); var host = f.Host(); Directory.CreateDirectory(f.Prefix); using var life = new ToolLifetime(TimeSpan.FromSeconds(30)); Assert.Throws<IOException>(() => PackageLifecycle.Install(f.Archive, f.Prefix, host, life)); }
     [Theory]
     [InlineData("../escape.dll")]
     [InlineData("tools/net10.0/any/../escape.dll")]
     [InlineData("TOOLS/net10.0/any/DeliveryForge.Tool.dll")]
-    public void Archive_traversal_or_case_alias_refuses(string extra) { using var f = new Fixture(); f.Package(extra); using var life = new ToolLifetime(TimeSpan.FromSeconds(30)); Assert.Throws<IOException>(() => PackageLifecycle.Install(f.Archive, f.Prefix, f.Host(), life)); }
+    public void Archive_traversal_or_case_alias_refuses(string extra) { using var f = new Fixture(); f.Package(extra); using var life = new ToolLifetime(TimeSpan.FromSeconds(30)); Assert.Throws<IOException>(() => PackageLifecycle.Install(f.Archive, f.Prefix, f.Host(), life)); Assert.False(Directory.Exists(f.Prefix)); }
     [Fact] public void Manifest_pin_substitution_refuses_without_delete() { using var f = new Fixture(); f.Package(); using var life = new ToolLifetime(TimeSpan.FromSeconds(30)); var receipt = PackageLifecycle.Install(f.Archive, f.Prefix, f.Host(), life); Assert.Throws<IOException>(() => PackageLifecycle.Uninstall(receipt with { ManifestSha256 = new string('0', 64) }, life)); Assert.True(Directory.Exists(f.Prefix)); }
     [Theory]
     [InlineData("C:\\Users\\fixture-person\\secret.txt")]
@@ -125,7 +170,7 @@ public sealed class PackageLifecycleTests
     [Fact]
     public void Genuine_archive_JSON_escaped_private_path_is_refused_before_public_install_acceptance()
     {
-        using var f = new Fixture(); f.Package(json: System.Text.Json.JsonSerializer.Serialize(new { path = @"C:\Users\fixture-person\secret.txt" })); using var life = new ToolLifetime(TimeSpan.FromSeconds(30)); Assert.Throws<IOException>(() => PackageLifecycle.Install(f.Archive, f.Prefix, f.Host(), life)); Assert.False(File.Exists(Path.Combine(f.Prefix, ".delivery-forge-install.json")));
+        using var f = new Fixture(); f.Package(json: System.Text.Json.JsonSerializer.Serialize(new { path = @"C:\Users\fixture-person\secret.txt" })); using var life = new ToolLifetime(TimeSpan.FromSeconds(30)); Assert.Throws<IOException>(() => PackageLifecycle.Install(f.Archive, f.Prefix, f.Host(), life)); Assert.False(File.Exists(Path.Combine(f.Prefix, ".delivery-forge-install.json"))); Assert.False(Directory.Exists(f.Prefix));
     }
     [Theory]
     [InlineData("{\"path\":\"C:\\\\Users\\\\fixture-person\\\\secret.txt\"}")]

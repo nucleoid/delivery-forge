@@ -58,7 +58,7 @@ public sealed class PiRpcPort : IHostToolSessionPort, IOriginalBoundHostPort, IH
                 using var document = await framing!.ReadAsync(token).ConfigureAwait(false); if (document is null) { if (!shutdown) throw new IOException("Unexpected actual Pi EOF."); return; }
                 var row = document.RootElement; var type = PiRpcProtocol.Text(row, "type"); lock (trace) { if (trace.Count >= 4096) throw new IOException("Pi complete event trace exceeded."); trace.Add(row.Clone()); }
                 if (type == "response") { var id = PiRpcProtocol.Text(row, "id"); if (!pending.TryRemove(id, out var actual)) throw new IOException("Foreign or duplicate Pi command response."); try { actual.Reply.TrySetResult(PiRpcProtocol.Response(row, id, actual.Command)); } catch (Exception failure) { actual.Reply.TrySetException(failure); } continue; }
-                if (type == "extension_ui_request") { var id = PiRpcProtocol.Text(row, "id"); var method = PiRpcProtocol.Text(row, "method"); if (method is "select" or "confirm" or "input" or "editor") await framing.WriteAsync(new { type = "extension_ui_response", id, cancelled = true }, token).ConfigureAwait(false); continue; }
+                if (type == "extension_ui_request") { lock (gate) state.ObserveEvent(row); var id = PiRpcProtocol.Text(row, "id"); var method = PiRpcProtocol.Text(row, "method"); if (method is "select" or "confirm" or "input" or "editor") await framing.WriteAsync(new { type = "extension_ui_response", id, cancelled = true }, token).ConfigureAwait(false); continue; }
                 lock (gate) { state.ObserveEvent(row); if (state.Settled) settled.TrySetResult(true); }
             }
         }

@@ -29,9 +29,9 @@ internal static class ClaudeIndependentReviewData
     internal static void RequireSubscription(byte[] bytes)
     {
         _ = CanonicalJson.Canonicalize(bytes); using var doc = JsonDocument.Parse(bytes); var value = doc.RootElement;
-        if (!value.TryGetProperty("loggedIn", out var logged) || logged.ValueKind != JsonValueKind.True ||
-            !value.TryGetProperty("authMethod", out var method) || method.GetString() != "claude.ai" ||
-            !value.TryGetProperty("apiProvider", out var provider) || provider.GetString() != "firstParty")
+        if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty("loggedIn", out var logged) || logged.ValueKind != JsonValueKind.True ||
+            !value.TryGetProperty("authMethod", out var method) || method.ValueKind != JsonValueKind.String || method.GetString() != "claude.ai" ||
+            !value.TryGetProperty("apiProvider", out var provider) || provider.ValueKind != JsonValueKind.String || provider.GetString() != "firstParty")
             throw new ToolUsageException("Actual reviewer must use its existing first-party Claude subscription login.");
     }
     internal static string RequireModel(JsonElement init)
@@ -50,7 +50,7 @@ internal static class ClaudeIndependentReviewData
             throw new IOException("Reviewer must return the complete strict report object.");
         var raw = ClaudeStreamState.Text(root, "verdict");
         var verdict = raw switch { "ship" => "PASS", "needs-attention" or "do-not-ship" => "FAIL", _ => throw new IOException("Unknown actual reviewer verdict.") };
-        var findings = root.GetProperty("findings");
+        var findings = ClaudeStreamState.Member(root, "findings");
         if (findings.ValueKind != JsonValueKind.Array || findings.GetArrayLength() > 128) throw new IOException("Complete finite findings array required.");
         var result = new List<ReviewFinding>();
         foreach (var row in findings.EnumerateArray())
@@ -60,17 +60,19 @@ internal static class ClaudeIndependentReviewData
             if (severity is not ("critical" or "high" or "medium" or "low")) throw new IOException("Unknown reviewer severity.");
             result.Add(new(ClaudeStreamState.Text(row, "code"), severity, ClaudeStreamState.Text(row, "message"), ClaudeStreamState.Text(row, "location")));
         }
+        if (raw == "ship" && result.Any(finding => finding.Severity is "critical" or "high")) throw new IOException("Reviewer ship verdict contradicts material unresolved findings.");
         return (raw, verdict, result);
     }
     internal static (long Tokens, decimal Cost) Usage(JsonElement result)
     {
-        var usage = result.GetProperty("usage"); long tokens = 0;
+        var usage = ClaudeStreamState.Member(result, "usage"); long tokens = 0;
+        if (usage.ValueKind != JsonValueKind.Object) throw new IOException("Complete actual reviewer token usage is missing.");
         foreach (var name in new[] { "input_tokens", "output_tokens", "cache_creation_input_tokens", "cache_read_input_tokens" })
         {
-            if (!usage.TryGetProperty(name, out var value) || !value.TryGetInt64(out var count) || count < 0) throw new IOException("Complete actual reviewer token usage is missing.");
-            tokens = checked(tokens + count);
+            if (!usage.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.Number || !value.TryGetInt64(out var count) || count < 0) throw new IOException("Complete actual reviewer token usage is missing.");
+            try { tokens = checked(tokens + count); } catch (OverflowException failure) { throw new IOException("Complete actual reviewer token usage exceeds its finite representation.", failure); }
         }
-        if (!result.TryGetProperty("total_cost_usd", out var cost) || !cost.TryGetDecimal(out var amount) || amount < 0)
+        if (!result.TryGetProperty("total_cost_usd", out var cost) || cost.ValueKind != JsonValueKind.Number || !cost.TryGetDecimal(out var amount) || amount < 0)
             throw new IOException("Actual reviewer cost observation is missing.");
         return (tokens, amount);
     }

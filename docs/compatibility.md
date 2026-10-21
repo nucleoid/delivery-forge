@@ -9,3 +9,21 @@ Required pipeline chain: actual compiler RED of missing seam where applicable; f
 Codex app-server and Pi RPC ports use exact parent-selected task instructions. Installed runtime support requires actual conformance for the selected image and platform. Linux native commands require an explicitly provisioned creation-owned scope; missing host prerequisites remain INCOMPLETE. Windows process ownership does not certify Linux ownership.
 
 Linux independent Claude review currently returns INCOMPLETE before native observation or review. A process scope and separate file hashes do not prove that the executed image is the exact immutable selected image. This route requires a supported exact-image execution primitive before it can be enabled. No configuration flag or receipt DATA can supply that missing capability.
+
+Windows production independent Claude review currently returns INCOMPLETE before
+reviewer settings/CWD/evidence/auth/native observations or prompt dispatch. The
+selected CLI's safe mode disables user plugins, CLAUDE.md/memory, output styles
+and user status-line customization, but administrator-managed policy still
+applies. The exact pinned CLI does not expose an authoritative complete effective
+managed-policy/code-effect inspection contract. A local file or registry absence
+cannot prove that device/server policy is absent. Enabling requires a supported
+contract or a separately explicit owner trust-policy decision; neither a public
+DTO nor a configuration flag can fabricate it. Existing source preparation stays
+DATA only, and no positive runtime reviewer or golden acceptance is claimed.
+No settings, credentials/login, model, services or resource limits are changed.
+Development source-review tooling is a separate route with its own authorization.
+
+The immutable review-source profile retains the existing limits: at most 4,096 filesystem entries per admitted census and a complete Git archive, including headers, fitting the selected MaximumEvidenceBytes (at most 16 MiB). Object/archive grouping reduces parent-admission multiplication; it does not enlarge these bounds or certify the complete worker→gate→review chain for an arbitrary repository. Refusal preserves the actual bounded captures and owned namespace for diagnosis.
+
+
+Protected changed-line coverage remains INCOMPLETE until the supported producer/compiler contract provides a complete eligible-line census bound to the exact module, debug and source identities. Hash-bound reported sequence points and observed80% ratios alone do not establish denominator completeness. A changed authored document absent from a relevant context's actual line report is recorded as unmeasured, not removed from the denominator. Zero measurable changed executable lines remains INCOMPLETE; no automatic N/A, exclusion or exemption is inferred. Public callable metrics and preserved producer reports retain their existing semantics; no new protected installed/baseline PASS is issued from unsupported line completeness.

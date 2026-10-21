@@ -23,11 +23,11 @@ internal static class ScopedBoundedCapture
                 budget.CheckWork(); native = frame.Session.ObserveNativeForCapture(); if (stdout.Exceeded || frame.Session.ErrorQuotaExceeded || frame.Output.IsFaulted || frame.Output.IsCanceled) break;
                 if (native.Known && native.RootExited && native.ActiveProcesses == 0 && frame.Output.IsCompleted && frame.Session.OriginalErrorDrainTask?.IsCompleted == true) break;
                 // Finite source-owned kernel observation cadence; no fresh clock.
-                var left = budget.WorkLimit - Stopwatch.GetElapsedTime(budget.OriginalStarted); var delay = left < TimeSpan.FromSeconds(1) ? left : TimeSpan.FromSeconds(1); await Task.Delay(delay, budget.Token).ConfigureAwait(false);
+                await Task.Delay(budget.NextObservationDelay(), budget.Token).ConfigureAwait(false);
             }
             if (frame.Output.IsCompleted) await frame.Output.ConfigureAwait(false);
         }
-        catch (Exception error) { primary = error; frame.Failures.Add(error); cancelled = caller.IsCancellationRequested || actualParent.Token.IsCancellationRequested; timedOut = error is TimeoutException; }
+        catch (Exception error) { primary = error; frame.Failures.Add(error); (timedOut, cancelled) = budget.ClassifyFailure(error, caller.IsCancellationRequested); }
         if (frame.Session is not null)
         {
             try { var mustStop = primary is not null || stdout.Exceeded || frame.Session.ErrorQuotaExceeded || frame.Output?.IsFaulted == true; frame.Retirement = await frame.Session.RetireAsync(mustStop).ConfigureAwait(false); } catch (Exception error) { frame.Failures.Add(error); }

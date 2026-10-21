@@ -34,9 +34,9 @@ public sealed partial class ProductionReviewSourceOwner
         // per-file process, caller digest or newly issued execution authority.
         var archive = await GitAsync(controlled,
             ["-c", "core.autocrlf=false", "-c", "core.eol=lf", "archive", "--format=tar", headCommit], token).ConfigureAwait(false);
-        await RequireAttributes().ConfigureAwait(false);
         try
         {
+            await RequireAttributes().ConfigureAwait(false);
             return EnterSynchronous(() =>
             {
                 var expected = ParseSourceArchive(archive.StandardOutput, tree, headCommit, MaximumBytes, () => { Check(); token.ThrowIfCancellationRequested(); });

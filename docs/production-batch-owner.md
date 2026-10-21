@@ -103,3 +103,5 @@ results, first-node resource disposition while original WORK remains open, and
 second-node completion under that same original. It is unavailable until live
 coordination, current installed admissions and finite policy prerequisites are
 actually satisfied.
+
+Control input is a closed, fail-closed boundary. Operators should write one complete canonical JSON document to a separate fresh file and atomically rename it into the selected ControlPath. A malformed, foreign, oversized, torn, deleted-during-read or unreadable/locked file is a terminal refusal: it does not set or acknowledge a valid control latch, and the containing owner performs its existing finite cleanup. Input is not silently ignored to permit more dispatch. A read acknowledgement records only a valid command actually read at an existing boundary; it does not claim instantaneous active-worker pause.

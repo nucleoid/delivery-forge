@@ -110,8 +110,8 @@ public sealed class InstalledLocalRealGoldenTests
         Assert.Equal(selectedContract, row.GetProperty("PlanIdentity").GetString());
         Assert.Equal(selectedRichPlan, row.GetProperty("RichPlanIdentity").GetString());
         Assert.Equal(selectedPlan.RootElement.GetProperty("plan").GetProperty("baseCommit").GetString(), row.GetProperty("BaseCommit").GetString());
-        Assert.True(row.GetProperty("ActualWorker").GetBoolean()); Assert.True(row.GetProperty("ActualQualityWithOwnerBaseline").GetBoolean());
-        Assert.True(row.GetProperty("ActualOppositeFamilyReview").GetBoolean()); Assert.True(row.GetProperty("FakePublication").GetBoolean());
+        Assert.False(row.TryGetProperty("ActualWorker", out _)); Assert.False(row.TryGetProperty("ActualQualityWithOwnerBaseline", out _));
+        Assert.False(row.TryGetProperty("ActualOppositeFamilyReview", out _)); Assert.True(row.GetProperty("FakePublication").GetBoolean());
         Assert.Equal(0, row.GetProperty("RemoteWrites").GetInt32()); Assert.Equal(0, row.GetProperty("MergeCalls").GetInt32());
         Assert.False(row.GetProperty("ProductionPublicationAuthority").GetBoolean()); Assert.False(row.GetProperty("RecoveryCertified").GetBoolean());
         Assert.False(row.GetProperty("SchedulingCertified").GetBoolean());
@@ -137,7 +137,7 @@ public sealed class InstalledLocalRealGoldenTests
             Assert.Equal(row.GetProperty("HeadTree").GetString(), gateData.RootElement.GetProperty("treeId").GetString());
         }
         // Inspect the primary protocol/model artifacts and validated receipt;
-        // the three summary booleans above are not independent acceptance.
+        // summary labels cannot replace these independent artifact joins.
         var standalone = JsonSerializer.Deserialize<StandaloneRootSelection>(InstalledHostAdmission.ReadExact(
             config.StandaloneRoot ?? throw new IOException("Pinned standalone source selection required."), original, 65536), BoundedFiles.Json)!;
         Assert.Equal(Path.GetFullPath(fixture.ResultDirectory), Path.GetFullPath(standalone.WorkerPaths.ResultDirectory));

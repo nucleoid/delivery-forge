@@ -11,8 +11,8 @@ internal static class CrapPolicyBinding
     private static readonly string[] Overrides = ["frameworks", "scope", "includeTests", "includeGenerated", "coveragePathMappings"];
     internal static void RequireSame(byte[] rawConfiguration, byte[] actualCanonical)
     {
-        using var before = ProducerJson.Read(rawConfiguration);
-        using var canonical = ProducerJson.Read(actualCanonical);
+        using var before = Read(rawConfiguration);
+        using var canonical = Read(actualCanonical);
         if (Normalize(before.RootElement) != Normalize(canonical.RootElement))
             throw new EvidenceWriteException("Actual canonical Crap policy differs from the exact approved configuration semantics.");
     }
@@ -23,14 +23,15 @@ internal static class CrapPolicyBinding
         var result = new SortedDictionary<string, object?>(StringComparer.Ordinal);
         foreach (var name in TextFields)
         {
-            var value = root.GetProperty(name);
-            if (value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString())) throw new EvidenceWriteException("Malformed Crap policy scalar.");
+            if (!root.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String ||
+                string.IsNullOrWhiteSpace(value.GetString())) throw new EvidenceWriteException("Malformed or missing Crap policy scalar.");
             result.Add(name, value.GetString());
         }
         if (result["schemaVersion"] as string != "repository-policy-v1" || result["missingCoverage"] as string != "fail" ||
             result["ruleset"] as string != "callables-v1") throw new EvidenceWriteException("Unsupported Crap policy semantics.");
-        var threshold = root.GetProperty("threshold").GetDouble();
-        if (!double.IsFinite(threshold) || threshold < 0 || threshold > 30) throw new EvidenceWriteException("Approved CRAP30 ceiling cannot be raised.");
+        if (!root.TryGetProperty("threshold", out var thresholdValue) || thresholdValue.ValueKind != JsonValueKind.Number ||
+            !thresholdValue.TryGetDouble(out var threshold) || !double.IsFinite(threshold) || threshold < 0 || threshold > 30)
+            throw new EvidenceWriteException("Malformed/missing threshold or approved CRAP30 ceiling raised.");
         result.Add("threshold", threshold);
         foreach (var name in ArrayFields)
         {
@@ -48,7 +49,9 @@ internal static class CrapPolicyBinding
         var checks = (string[])result["requiredChecks"]!;
         if (!new[] { "tests", "coverage", "crap" }.All(c => checks.Contains(c, StringComparer.Ordinal)))
             throw new EvidenceWriteException("Actual policy omits a required quality check.");
-        result.Add("baseline", root.TryGetProperty("baseline", out var baseline) ? baseline.GetString() : null);
+        if (root.TryGetProperty("baseline", out var baseline) && baseline.ValueKind is not (JsonValueKind.Null or JsonValueKind.String))
+            throw new EvidenceWriteException("Malformed Crap baseline identity.");
+        result.Add("baseline", baseline.ValueKind == JsonValueKind.String ? baseline.GetString() : null);
         var flags = new SortedDictionary<string, bool>(StringComparer.Ordinal);
         if (root.TryGetProperty("allowedOverrides", out var options) &&
             (options.ValueKind != JsonValueKind.Object || options.EnumerateObject().Any(p => !Overrides.Contains(p.Name, StringComparer.Ordinal))))
@@ -65,5 +68,15 @@ internal static class CrapPolicyBinding
         }
         result.Add("allowedOverrides", flags);
         return JsonSerializer.Serialize(result);
+    }
+    private static JsonDocument Read(byte[] bytes)
+    {
+        try { return ProducerJson.Read(bytes); }
+        catch (JsonException error)
+        {
+            var failure = new EvidenceWriteException("Malformed complete Crap policy JSON.");
+            failure.Data["CrapPolicyParserFailure"] = error;
+            throw failure;
+        }
     }
 }

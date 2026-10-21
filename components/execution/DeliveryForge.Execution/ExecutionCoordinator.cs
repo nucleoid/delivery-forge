@@ -157,9 +157,12 @@ public sealed class ExecutionCoordinator : IDisposable
             // The lease's first attempt is sticky. Keep the actual owner even if
             // the coordinator is disposed; never retry an unknown first close.
             lock (UnsettledWriterDispositions) UnsettledWriterDispositions.Add((this, writer));
-            if (original is DeliveryForge.Evidence.IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown();
+            var failures = new List<Exception> { failure };
+            try { if (original is DeliveryForge.Evidence.IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown(); }
+            catch (Exception observation) { failures.Add(observation); }
             try { _coordinationAdmission?.RetainUncertain(runId, "Actual writer first disposition did not return."); }
-            catch (Exception observation) { throw new AggregateException("Writer disposition and original uncertainty observation failed.", failure, observation); }
+            catch (Exception observation) { failures.Add(observation); }
+            if (failures.Count > 1) throw new AggregateException("Writer first disposition and independent uncertainty observations failed.", failures);
             throw;
         }
     }

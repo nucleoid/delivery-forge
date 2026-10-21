@@ -9,7 +9,7 @@ public static partial class PackageLifecycle
 {
     public static RemovalReceipt BeginRemoval(InstallationReceipt installation, ToolLifetime life)
     {
-        var manifest = Verify(installation, life);
+        var manifest = VerifyOwnedInstallation(installation, life, requireRuntimeHost: false);
         var steps = manifest.Files.Where(x => x.Path != ClaimName).Select(x => "file:" + x.Path)
             .Concat(manifest.Directories.OrderByDescending(x => x.Count(c => c == '/')).ThenByDescending(x => x.Length).Select(x => "directory:" + x))
             .Concat(new[] { "file:" + ManifestName, "file:" + ClaimName, "root:" }).ToArray();

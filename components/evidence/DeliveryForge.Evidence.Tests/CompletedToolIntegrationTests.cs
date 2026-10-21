@@ -114,6 +114,20 @@ public sealed class CompletedToolIntegrationTests
     }
 
     [Fact]
+    public void Schema_optional_current_provenance_is_incomplete_while_missing_mode_or_null_reason_is_error()
+    {
+        var root = Crap(true, "pass", 0);
+        Assert.Equal(GateOutcome.Pass, Crap4CSharpAdapter.NormalizeCurrent(Bytes(root), CrapCapability(), 0).Outcome);
+        root["evaluation"]!.AsObject().Remove("provenance");
+        Assert.Equal(GateOutcome.Incomplete, Crap4CSharpAdapter.NormalizeCurrent(Bytes(root), CrapCapability(), 0).Outcome);
+        root = Crap(true, "pass", 0); root["evaluation"]!.AsObject().Remove("invocationMode");
+        Assert.Equal(GateOutcome.Error, Crap4CSharpAdapter.NormalizeCurrent(Bytes(root), CrapCapability(), 0).Outcome);
+        root = Crap(true, "pass", 0); root["evaluation"]!["checks"] = new JsonArray(Check("coverage", "pass", "observed"));
+        root["evaluation"]!["checks"]![0]!["reason"] = null;
+        Assert.Equal(GateOutcome.Error, Crap4CSharpAdapter.NormalizeCurrent(Bytes(root), CrapCapability(), 0).Outcome);
+    }
+
+    [Fact]
     public void Duplicate_and_truncated_crap_wire_are_not_last_value_success()
     {
         var source = Encoding.UTF8.GetString(Bytes(Crap(true, "pass", 0)));

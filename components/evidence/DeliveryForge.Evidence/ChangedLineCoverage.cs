@@ -13,7 +13,7 @@ internal static partial class ChangedLineCoverage
 {
     private const int MaximumArtifactBytes = 128 * 1024 * 1024; // Existing operative complete artifact-file bound; JSON reports remain8MiB.
     internal sealed record Result(int ChangedExecutableLines, int CoveredChangedLines, decimal? Percent,
-        GateOutcome Outcome, string Reason, string DiffSha256);
+        GateOutcome Outcome, string Reason, string DiffSha256, int UnmeasuredChangedLines = 0);
 
     internal static Result Read(byte[] diff, JsonElement manifest, string repository,
         Func<string, byte[]> readArtifact, InstalledToolFiles files)
@@ -22,27 +22,27 @@ internal static partial class ChangedLineCoverage
         var changes = ReadHunks(diff);
         var comparer = InstalledToolFiles.PathComparer;
         var sources = new Dictionary<string, Dictionary<string, Source>>(StringComparer.Ordinal);
-        var contexts = manifest.GetProperty("contexts").EnumerateArray().ToArray();
+        var contexts = Array(manifest, "contexts").ToArray();
         if (contexts.Length is 0 or > 10000) throw Refuse("Context membership is absent or exceeds the finite profile.");
         foreach (var context in contexts)
         {
             files.Check();
-            var id = context.GetProperty("id").GetString()!;
+            var id = Text(context, "id");
             var documents = new Dictionary<string, Source>(comparer);
             if (!sources.TryAdd(id, documents)) throw Refuse("Duplicate coverage context.");
-            foreach (var input in context.GetProperty("inputs").EnumerateArray())
+            foreach (var input in Array(context, "inputs"))
             {
                 files.Check();
-                if (input.GetProperty("role").GetString() != "source") continue;
-                var logical = input.GetProperty("logicalPath").GetString()!;
-                var locator = input.GetProperty("locator").GetString()!;
+                if (Text(input, "role") != "source") continue;
+                var logical = Text(input, "logicalPath");
+                var locator = Text(input, "locator");
                 InstalledToolProfile.Relative(locator);
                 var raw = readArtifact(locator);
-                if (raw.LongLength != input.GetProperty("length").GetInt64() ||
-                    InstalledToolFiles.Identity(raw) != "sha256:" + input.GetProperty("sha256").GetString())
+                if (raw.LongLength != Integer(input, "length") ||
+                    InstalledToolFiles.Identity(raw) != "sha256:" + Text(input, "sha256"))
                     throw Refuse("Captured source bytes differ from the current manifest.");
-                var repositoryPath = input.TryGetProperty("repositoryPath", out var rp) && rp.ValueKind == JsonValueKind.String ? rp.GetString() : null;
-                var generated = input.GetProperty("generated").GetBoolean();
+                var repositoryPath = OptionalText(input, "repositoryPath");
+                var generated = Boolean(input, "generated");
                 string? path = null;
                 if (!generated && repositoryPath is not null)
                 {
@@ -54,36 +54,38 @@ internal static partial class ChangedLineCoverage
                     if (!actual.AsSpan().SequenceEqual(raw)) throw Refuse("Current authored source differs from captured source.");
                 }
                 files.Check();
-                var encoding = input.TryGetProperty("encoding", out var enc) ? enc.GetString() : null;
+                var encoding = OptionalText(input, "encoding");
                 if (encoding is not (null or "utf-8" or "utf8" or "UTF-8"))
                     throw Refuse("This line profile cannot determine captured source encoding.");
-                var text = new UTF8Encoding(false, true).GetString(raw);
-                var lines = text.Count(c => c == '\n') + 1;
+                var text = Decode(raw);
+                var lines = PhysicalLines(text, files);
                 if (!documents.TryAdd(logical, new(path, repositoryPath, lines))) throw Refuse("Duplicate logical source path.");
             }
         }
         var executable = new Dictionary<string, Dictionary<string, bool>>(comparer);
         var coveredContexts = new HashSet<string>(StringComparer.Ordinal);
-        var builds = manifest.GetProperty("builds").EnumerateArray().ToDictionary(b => b.GetProperty("id").GetString()!, StringComparer.Ordinal);
-        var executions = manifest.GetProperty("executions").EnumerateArray().ToDictionary(e => e.GetProperty("id").GetString()!, StringComparer.Ordinal);
+        var reportedDocuments = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
+        var builds = Index(Array(manifest, "builds"), files);
+        var executions = Index(Array(manifest, "executions"), files);
         var reports = 0; var pointCount = 0;
-        foreach (var artifact in manifest.GetProperty("artifacts").EnumerateArray())
+        foreach (var artifact in Array(manifest, "artifacts"))
         {
             files.Check();
-            if (artifact.GetProperty("kind").GetString() != "coverage") continue;
-            if (++reports > 10000 || artifact.GetProperty("format").GetString() != "opencover" ||
-                artifact.GetProperty("coordinateKind").GetString() != "line") throw Refuse("Coverage is not the actual supported line projection.");
-            var contextId = artifact.GetProperty("contextId").GetString()!;
-            var buildId = artifact.GetProperty("buildId").GetString()!;
-            var executionId = artifact.GetProperty("executionId").GetString()!;
+            if (Text(artifact, "kind") != "coverage") continue;
+            if (++reports > 10000 || Text(artifact, "format") != "opencover" ||
+                Text(artifact, "coordinateKind") != "line") throw Refuse("Coverage is not the actual supported line projection.");
+            var contextId = Text(artifact, "contextId");
+            var buildId = Text(artifact, "buildId");
+            var executionId = Text(artifact, "executionId");
             if (!sources.TryGetValue(contextId, out var sourceSet) || !builds.TryGetValue(buildId, out var build) ||
-                build.GetProperty("contextId").GetString() != contextId || !executions.TryGetValue(executionId, out var execution) ||
-                execution.GetProperty("contextId").GetString() != contextId || execution.GetProperty("buildId").GetString() != buildId ||
-                !execution.GetProperty("completed").GetBoolean() || execution.GetProperty("exitCode").GetInt32() != 0)
+                Text(build, "contextId") != contextId || !executions.TryGetValue(executionId, out var execution) ||
+                Text(execution, "contextId") != contextId || Text(execution, "buildId") != buildId ||
+                !Boolean(execution, "completed") || Integer(execution, "exitCode") != 0)
                 throw Refuse("Line report lacks the same completed context/build/test execution.");
-            var bytes = readArtifact(artifact.GetProperty("locator").GetString()!);
-            if (bytes.LongLength != artifact.GetProperty("length").GetInt64() ||
-                InstalledToolFiles.Identity(bytes) != "sha256:" + artifact.GetProperty("sha256").GetString()) throw Refuse("Line artifact bytes changed.");
+            var locator = Text(artifact, "locator"); InstalledToolProfile.Relative(locator);
+            var bytes = readArtifact(locator);
+            if (bytes.LongLength != Integer(artifact, "length") ||
+                InstalledToolFiles.Identity(bytes) != "sha256:" + Text(artifact, "sha256")) throw Refuse("Line artifact bytes changed.");
             files.Check();
             if (bytes.Length > MaximumArtifactBytes) throw Refuse("Complete line artifact exceeds the existing operative artifact bound.");
             using (var shapeStream = new MemoryStream(bytes, writable: false))
@@ -96,12 +98,16 @@ internal static partial class ChangedLineCoverage
             }))
             {
                 var nodes = 0;
-                while (shape.Read())
+                try
                 {
-                    files.Check();
-                    if (shape.Depth > 64 || ++nodes > 1000000 || shape.AttributeCount > 32)
-                        throw Refuse("Finite complete line XML structure bound exceeded.");
+                    while (shape.Read())
+                    {
+                        files.Check();
+                        if (shape.Depth > 64 || ++nodes > 1000000 || shape.AttributeCount > 32)
+                            throw Refuse("Finite complete line XML structure bound exceeded.");
+                    }
                 }
+                catch (XmlException error) { throw Refuse("Malformed line XML.", error); }
             }
             using var stream = new MemoryStream(bytes, writable: false);
             using var xml = XmlReader.Create(stream, new()
@@ -111,26 +117,32 @@ internal static partial class ChangedLineCoverage
                 MaxCharactersInDocument = MaximumArtifactBytes,
                 MaxCharactersFromEntities = 0
             });
-            var document = XDocument.Load(xml, LoadOptions.None);
+            XDocument document;
+            try { document = XDocument.Load(xml, LoadOptions.None); }
+            catch (XmlException error) { throw Refuse("Malformed line XML.", error); }
             files.Check();
-            var module = document.Root?.Element("Modules")?.Elements("Module").Single() ?? throw Refuse("Missing single line module.");
-            if (document.Root!.Name != "CoverageSession" || document.Descendants("Module").Count() != 1 ||
-                module.Element("ModuleName")?.Value != build.GetProperty("moduleIdentity").GetString()) throw Refuse("Line module differs from the actual build.");
+            if (document.Root?.Name != "CoverageSession") throw Refuse("Missing line coverage root.");
+            var module = One(One(document.Root.Elements("Modules"), "Modules").Elements("Module"), "Module");
+            if (document.Descendants("Module").Count() != 1 ||
+                One(module.Elements("ModuleName"), "ModuleName").Value != Text(build, "moduleIdentity")) throw Refuse("Line module differs from the actual build.");
             var byId = new Dictionary<string, Source>(StringComparer.Ordinal);
-            foreach (var file in module.Element("Files")!.Elements("File"))
+            if (!reportedDocuments.TryGetValue(contextId, out var observed))
+                reportedDocuments.Add(contextId, observed = new(comparer));
+            foreach (var file in One(module.Elements("Files"), "Files").Elements("File"))
             {
                 files.Check();
-                var physical = file.Attribute("fullPath")?.Value ?? throw Refuse("Missing line document path.");
-                if (!Path.IsPathFullyQualified(physical)) throw Refuse("Line document is not the captured physical path.");
-                var matched = sourceSet.Values.Where(s => s.PhysicalPath is not null && comparer.Equals(s.PhysicalPath, Path.GetFullPath(physical))).ToArray();
+                var physical = Attribute(file, "fullPath");
+                var fullPath = PhysicalPath(physical);
+                var matched = sourceSet.Values.Where(s => s.PhysicalPath is not null && comparer.Equals(s.PhysicalPath, fullPath)).ToArray();
                 // Generated/nonrepository files are not silently accepted as authored changed
                 // evidence: this profile remains incomplete until their exact path model exists.
-                if (matched.Length != 1 || !byId.TryAdd(file.Attribute("uid")!.Value, matched[0])) throw Refuse("Ambiguous/unmapped line document.");
+                if (matched.Length != 1 || !byId.TryAdd(Attribute(file, "uid"), matched[0])) throw Refuse("Ambiguous/unmapped line document.");
+                if (matched[0].RepositoryPath is { } reported) observed.Add(reported);
             }
             foreach (var method in module.Descendants("Method"))
             {
                 files.Check();
-                var fileId = method.Descendants("FileRef").Single().Attribute("uid")!.Value;
+                var fileId = Attribute(One(method.Descendants("FileRef"), "FileRef"), "uid");
                 if (!byId.TryGetValue(fileId, out var source)) throw Refuse("Method has a foreign line document.");
                 foreach (var point in method.Descendants("SequencePoint"))
                 {
@@ -154,14 +166,25 @@ internal static partial class ChangedLineCoverage
         foreach (var path in changes.Keys)
             if (!sources.Values.Any(set => set.Values.Any(s => comparer.Equals(s.RepositoryPath, path))))
                 throw Refuse("Changed authored file is not in the complete captured compiler source set.");
-        foreach (var context in contexts)
-            if (context.GetProperty("inputs").EnumerateArray().Any(i => i.GetProperty("role").GetString() == "source" &&
-                i.TryGetProperty("repositoryPath", out var rp) && rp.ValueKind == JsonValueKind.String && changes.ContainsKey(rp.GetString()!)) &&
-                !coveredContexts.Contains(context.GetProperty("id").GetString()!))
-                throw Refuse("Changed context has no complete actual line report.");
+        var unmeasured = new HashSet<string>(comparer);
+        foreach (var context in sources)
+        {
+            files.Check();
+            var changed = context.Value.Values.Where(s => s.RepositoryPath is not null && changes.ContainsKey(s.RepositoryPath)).ToArray();
+            if (changed.Length != 0 && !coveredContexts.Contains(context.Key))
+                foreach (var source in changed) unmeasured.Add(source.RepositoryPath!);
+            else
+                foreach (var source in changed)
+                    if (!reportedDocuments.TryGetValue(context.Key, out var observed) || !observed.Contains(source.RepositoryPath!))
+                        unmeasured.Add(source.RepositoryPath!);
+        }
         files.Check();
         var count = executable.Count; var hit = executable.Values.Count(contextsForLine => contextsForLine.Values.All(v => v));
         decimal? percent = count == 0 ? null : 100m * hit / count;
+        if (unmeasured.Count != 0)
+            return new(count, hit, percent, GateOutcome.Incomplete,
+                "Changed authored documents are absent from an actual context's line reports; changed lines remain unmeasured, not excluded or presumed nonexecutable.",
+                InstalledToolFiles.Identity(diff), unmeasured.Sum(path => changes[path].Count));
         return new(count, hit, percent, count == 0 ? GateOutcome.Incomplete : percent >= 80m ? GateOutcome.Pass : GateOutcome.Fail,
             count == 0 ? "No measurable changed executable lines; no exemption or N/A is inferred." : "Actual changed executable LINE coverage (distinct lines; all observed contexts).", InstalledToolFiles.Identity(diff));
     }
@@ -170,7 +193,7 @@ internal static partial class ChangedLineCoverage
     internal static Dictionary<string, HashSet<int>> ReadHunks(byte[] diff)
     {
         if (diff.Length > ProducerJson.MaximumBytes) throw Refuse("Complete source diff exceeds capture profile.");
-        var text = new UTF8Encoding(false, true).GetString(diff);
+        var text = Decode(diff);
         var result = new Dictionary<string, HashSet<int>>(InstalledToolFiles.PathComparer);
         string? path = null; var oldRemaining = 0; var newRemaining = 0; var next = 0; var changed = 0;
         foreach (var raw in text.Split('\n'))
@@ -210,7 +233,80 @@ internal static partial class ChangedLineCoverage
         return result;
     }
     private static int Number(string value) => int.TryParse(value, NumberStyles.None, CultureInfo.InvariantCulture, out var number) && number <= 1000000 ? number : throw Refuse("Hunk extent exceeds profile.");
-    private static EvidenceWriteException Refuse(string message) => new("Changed-LINE coverage is incomplete: " + message);
+    private static JsonElement Property(JsonElement value, string name, JsonValueKind kind)
+        => value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out var item) && item.ValueKind == kind
+            ? item : throw Refuse("Missing or malformed line manifest field: " + name);
+    private static IEnumerable<JsonElement> Array(JsonElement value, string name) => Property(value, name, JsonValueKind.Array).EnumerateArray();
+    private static string Text(JsonElement value, string name)
+        => Property(value, name, JsonValueKind.String).GetString() is { Length: > 0 } text
+            ? text : throw Refuse("Empty line manifest field: " + name);
+    private static string? OptionalText(JsonElement value, string name)
+    {
+        if (value.ValueKind != JsonValueKind.Object) throw Refuse("Malformed line manifest object.");
+        if (!value.TryGetProperty(name, out var item) || item.ValueKind == JsonValueKind.Null) return null;
+        if (item.ValueKind != JsonValueKind.String) throw Refuse("Malformed optional line manifest field: " + name);
+        return item.GetString();
+    }
+    private static long Integer(JsonElement value, string name)
+        => Property(value, name, JsonValueKind.Number).TryGetInt64(out var number)
+            ? number : throw Refuse("Nonintegral/out-of-range line manifest field: " + name);
+    private static bool Boolean(JsonElement value, string name)
+    {
+        if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty(name, out var item) ||
+            item.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw Refuse("Malformed line manifest boolean: " + name);
+        return item.GetBoolean();
+    }
+    private static Dictionary<string, JsonElement> Index(IEnumerable<JsonElement> rows, InstalledToolFiles files)
+    {
+        var result = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        foreach (var row in rows)
+        {
+            files.Check();
+            if (!result.TryAdd(Text(row, "id"), row)) throw Refuse("Duplicate line manifest identity.");
+        }
+        return result;
+    }
+    private static XElement One(IEnumerable<XElement> elements, string name)
+    {
+        var found = elements.Take(2).ToArray();
+        return found.Length == 1 ? found[0] : throw Refuse("Missing/duplicate line XML element: " + name);
+    }
+    private static string Attribute(XElement element, string name)
+        => element.Attribute(name)?.Value is { Length: > 0 } text ? text : throw Refuse("Missing line XML attribute: " + name);
+    private static string PhysicalPath(string path)
+    {
+        if (!Path.IsPathFullyQualified(path)) throw Refuse("Line document is not the captured physical path.");
+        try { return Path.GetFullPath(path); }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException)
+        { throw Refuse("Malformed line document path.", error); }
+    }
+    private static string Decode(byte[] bytes)
+    {
+        try { return new UTF8Encoding(false, true).GetString(bytes); }
+        catch (DecoderFallbackException error) { throw Refuse("Malformed UTF-8 line input.", error); }
+    }
+    private static int PhysicalLines(string text, InstalledToolFiles files)
+    {
+        // C# 6.3.2/6.3.3: CRLF is one terminator; CR/LF/NEL/LS/PS
+        // also terminate lines. A final terminator creates no extra record.
+        var length = text.Length;
+        if (length != 0 && text[length - 1] == '\u001a') length--;
+        var count = 0; var start = 0;
+        for (var i = 0; i < length; i++)
+        {
+            if ((i & 4095) == 0) files.Check();
+            if (text[i] is not ('\r' or '\n' or '\u0085' or '\u2028' or '\u2029')) continue;
+            if (text[i] == '\r' && i + 1 < length && text[i + 1] == '\n') i++;
+            count++; start = i + 1;
+        }
+        return count + (start < length ? 1 : 0);
+    }
+    private static EvidenceWriteException Refuse(string message, Exception? parser = null)
+    {
+        var failure = new EvidenceWriteException("Changed-LINE coverage is incomplete: " + message);
+        if (parser is not null) failure.Data["ChangedLineParserFailure"] = parser;
+        return failure;
+    }
     [GeneratedRegex("^@@ -(\\d+)(?:,(\\d+))? \\+(\\d+)(?:,(\\d+))? @@(?:.*)$", RegexOptions.CultureInvariant)]
     private static partial Regex Hunk();
 }

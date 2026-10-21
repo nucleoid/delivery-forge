@@ -63,10 +63,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
     {
         if (_selectedLinuxScope is not null)
         {
-            var actualRoot = enclosing is OwnedWorkPhaseBudget phase ? phase.Parent : enclosing;
-            if (actualRoot is OwnedCleanupPhaseBudget cleanup) actualRoot = cleanup.Parent;
-            if (enclosing is not null && !ReferenceEquals(actualRoot, _selectedLinuxOriginal))
-                throw new InvalidOperationException("Configured owner cannot be replaced by a foreign enclosing budget.");
+            RequireSelectedLinuxCaptureOwner(_selectedLinuxScope, _selectedLinuxOriginal, enclosing, _selectedLinuxScope);
             return ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing ?? _selectedLinuxOriginal, _selectedLinuxScope);
         }
         if (!_creationOwnedWindows)
@@ -82,7 +79,10 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         if (OperatingSystem.IsWindows())
             return WindowsCommandLifetime.ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing);
         if (OperatingSystem.IsLinux())
-            return BoundedProcessCapture.ExecuteAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing);
+        {
+            RequireUnscopedLinuxCaptureHasNoEnclosingOwner(enclosing);
+            return BoundedProcessCapture.ExecuteAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken);
+        }
         throw new PlatformNotSupportedException("Creation-owned bounded capture supports Windows and Linux only.");
     }
 
@@ -94,6 +94,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
     {
         if (linuxScope is null)
             return ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing);
+        RequireSelectedLinuxCaptureOwner(_selectedLinuxScope, _selectedLinuxOriginal, enclosing, linuxScope);
         if (!_creationOwnedWindows || !OperatingSystem.IsLinux())
             throw new PlatformNotSupportedException("Explicit Linux scope requires the original production Linux owner.");
         ArgumentNullException.ThrowIfNull(enclosing);
@@ -107,6 +108,25 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             throw new ArgumentOutOfRangeException(nameof(enclosing));
         enclosing.CheckWork();
         return ScopedBoundedCapture.ExecuteAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing, linuxScope);
+    }
+
+    // These restrictive guards are shared by the actual pre-birth paths. They
+    // cannot issue a scope, native owner or authority from selection DATA.
+    internal static void RequireSelectedLinuxCaptureOwner(LinuxScopeSelection? selectedScope,
+        IOwnedDuplexBudget? selectedOriginal, IOwnedDuplexBudget? enclosing, LinuxScopeSelection requestedScope)
+    {
+        if (selectedScope is null) return;
+        if (!ReferenceEquals(requestedScope, selectedScope))
+            throw new InvalidOperationException("Configured Linux scope cannot be replaced by a foreign selection.");
+        var actualRoot = enclosing is OwnedWorkPhaseBudget phase ? phase.Parent : enclosing;
+        if (actualRoot is OwnedCleanupPhaseBudget cleanup) actualRoot = cleanup.Parent;
+        if (enclosing is not null && !ReferenceEquals(actualRoot, selectedOriginal))
+            throw new InvalidOperationException("Configured owner cannot be replaced by a foreign enclosing budget.");
+    }
+    internal static void RequireUnscopedLinuxCaptureHasNoEnclosingOwner(IOwnedDuplexBudget? enclosing)
+    {
+        if (enclosing is not null)
+            throw new PlatformNotSupportedException("An actual enclosing Linux owner requires its explicit creation-owned containing scope before process birth; legacy observation cannot adopt that owner.");
     }
 
     public async Task<CommandResult> ExecuteAsync(

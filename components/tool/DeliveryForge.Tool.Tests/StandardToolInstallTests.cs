@@ -38,7 +38,7 @@ public sealed class StandardToolInstallTests
         }
         await Install(); await ObserveAndRemove(); prefix = Path.Combine(root, "reinstall path with spaces"); await Install(); await ObserveAndRemove();
         Assert.Equal(sha, BoundedFiles.Sha(BoundedFiles.Read(package, life, 16 * 1024 * 1024))); Assert.Equal("preserve", File.ReadAllText(user));
-        // Both OS jobs must execute this actual SDK route. It proves ordinary
+        // The separately admitted installed scope must execute this actual SDK route; public CI excludes it. It proves ordinary
         // installation mechanics, not host discovery/live worker/reviewer quality.
     }
     static IReadOnlyList<FilePin> Snapshot(string prefix, ToolLifetime life)

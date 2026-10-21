@@ -203,10 +203,13 @@ public sealed class Crap4CSharpAdapter
                 return NormalizedEvidence.Incomplete("Crap required evidence incomplete: " + string.Join(",", reasons), capability.Fixture);
             return NormalizedEvidence.Error("Unclassified Crap exit1; original reasons retained.", capability.Fixture);
         }
-        var provenance = evaluation.GetProperty("provenance");
-        if (provenance.GetProperty("status").GetString() != "verified" ||
-            provenance.GetProperty("basis").GetString() != "currentWorkspaceMatch" ||
-            !provenance.GetProperty("postflightVerified").GetBoolean())
+        // Provenance is optional in the pinned result schema. Its absence is
+        // valid partial evidence, never an exception or current-workspace proof.
+        if (!evaluation.TryGetProperty("provenance", out var provenance) ||
+            provenance.ValueKind != JsonValueKind.Object ||
+            !TryString(provenance, "status", out var status) || status != "verified" ||
+            !TryString(provenance, "basis", out var basis) || basis != "currentWorkspaceMatch" ||
+            !TryBool(provenance, "postflightVerified", out var postflight) || !postflight)
             return NormalizedEvidence.Incomplete("Crap lacks complete verified current-workspace evidence.", capability.Fixture);
         return result with { Fixture = capability.Fixture, Limitations = capability.Limitations ?? [] };
     }

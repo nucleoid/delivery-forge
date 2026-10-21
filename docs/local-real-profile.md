@@ -63,3 +63,18 @@ Use the existing real stop conformance route for same-original stop. A new CLI
 process cannot resume an old native owner from saved JSON; that refusal is a
 required recovery behavior. Pause/resume capabilities remain unsupported unless
 independently conformed, and fixture crash drivers do not certify live recovery.
+
+The outer local-real summary records exact receipt identities and local fake
+publication constraints; it omits redundant `ActualWorker`,
+`ActualQualityWithOwnerBaseline` and `ActualOppositeFamilyReview` booleans.
+Acceptance depends on the retained same-frame native completion, private
+protected gate/baseline comparison, opposite-family reviewer issuer and the
+independently checked primary artifacts. Summary labels cannot replace these
+joins. The installed golden and two-node positives remain unaccepted until
+their genuine supported prerequisites and runtime checks succeed.
+
+Local fake journal receipts are kept in the separate selected artifact root.
+Do not present them to older binaries as production publication evidence:
+unchanged v1 syntax is DATA compatibility, not a backport of the newer
+local-reference refusal or a production issuer. Removing `LocalRealGolden`
+from configuration is required before using a binary that does not support it.

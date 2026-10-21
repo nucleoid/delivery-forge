@@ -301,6 +301,8 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
     {
         lock (registration) { if (installedReview is not null || frames.Count != 0) throw new ToolUsageException("Installed review binds the idle actual bridge once."); installedReview = actual; }
     }
+    internal bool InstalledReviewDispositionEntered => installedReview?.DispositionEntered == true;
+    internal bool InstalledReviewDispositionReturned => installedReview is null || installedReview.DispositionReturned;
     internal void DisposeInstalledReviewWhenSettled(bool cleanup = true)
     {
         if (frames.Values.Any(frame => frame.Unknown)) throw new IOException("Actual worker/review frames are not settled; retain the review object view.");

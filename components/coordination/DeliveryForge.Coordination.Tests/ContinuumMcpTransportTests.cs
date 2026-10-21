@@ -163,6 +163,125 @@ public sealed class ContinuumMcpTransportTests
         Assert.Equal(TransportOutcome.Acquired, (await sample.Transport.AcquireAsync(sample.Request(), TestContext.Current.CancellationToken)).Outcome);
     }
 
+    [Theory]
+    [InlineData("priming")]
+    [InlineData("progress")]
+    [InlineData("logging")]
+    [InlineData("multiline")]
+    [InlineData("chunks")]
+    [InlineData("event-limit")]
+    public async Task Same_sse_body_accepts_bounded_priming_or_inert_notifications_without_another_request(string framing)
+    {
+        await using var sample = new Sample();
+        await sample.Transport.DetectCapabilitiesAsync(TestContext.Current.CancellationToken);
+        var before = sample.Handler.Requests;
+        sample.Handler.UseSse = true;
+        sample.Handler.SsePrefix = framing switch
+        {
+            "priming" => ": keepalive\nid: event-1\nretry: 1000\ndata:\n\n",
+            "progress" => "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progressToken\":\"data-only\",\"progress\":1,\"total\":2}}\n\n",
+            "logging" => "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"level\":\"info\",\"data\":{\"fixture\":true}}}\n\n",
+            "chunks" => ": keepalive\r\nid: event-1\r\nretry: 1000\r\ndata:\r\n\r\n",
+            "event-limit" => string.Concat(Enumerable.Repeat("id: priming\ndata:\n\n", 31)),
+            _ => ""
+        };
+        sample.Handler.MultilineSse = framing == "multiline";
+        sample.Handler.ChunkedSse = framing == "chunks";
+        var grant = await sample.Transport.AcquireAsync(sample.Request(), TestContext.Current.CancellationToken);
+        Assert.Equal(TransportOutcome.Acquired, grant.Outcome);
+        Assert.Equal(before + 1, sample.Handler.Requests); Assert.Equal(1, sample.Handler.Acquisitions);
+    }
+
+    [Theory]
+    [InlineData("schema-change")]
+    [InlineData("server-request")]
+    [InlineData("foreign-response")]
+    [InlineData("malformed-notification")]
+    [InlineData("events")]
+    [InlineData("bytes")]
+    public async Task Unsupported_sse_messages_or_extent_refuse_without_reconnect_or_replay(string framing)
+    {
+        await using var sample = new Sample();
+        await sample.Transport.DetectCapabilitiesAsync(TestContext.Current.CancellationToken);
+        sample.Handler.UseSse = true;
+        sample.Handler.SsePrefix = framing switch
+        {
+            "schema-change" => "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\",\"params\":{}}\n\n",
+            "server-request" => "data: {\"jsonrpc\":\"2.0\",\"id\":\"server-request\",\"method\":\"ping\",\"params\":{}}\n\n",
+            "foreign-response" => "data: {\"jsonrpc\":\"2.0\",\"id\":\"foreign\",\"result\":{}}\n\n",
+            "malformed-notification" => "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{}}\n\n",
+            "events" => string.Concat(Enumerable.Repeat("id: priming\ndata:\n\n", 32)),
+            _ => ":" + new string('x', 1048576) + "\n\n"
+        };
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() => sample.Transport.AcquireAsync(sample.Request(), TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() => sample.Transport.AcquireAsync(sample.Request(), TestContext.Current.CancellationToken));
+        Assert.Equal(1, sample.Handler.Acquisitions); // Second explicit fixture call is refused before send.
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Existing_anchored_evidence_restricts_same_original_whole_interval_before_any_lease(bool fits)
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        await using var sample = new Sample();
+        var capabilities = await sample.Transport.DetectCapabilitiesAsync(TestContext.Current.CancellationToken);
+        var before = sample.Handler.Requests;
+        if (fits) sample.Transport.RequireOriginalEvidenceCoverage(started, TimeSpan.FromMinutes(5));
+        else Assert.Throws<CoordinationUnavailableException>(() => sample.Transport.RequireOriginalEvidenceCoverage(started, TimeSpan.FromMinutes(20)));
+        Assert.Equal(before, sample.Handler.Requests); Assert.Equal(0, sample.Handler.Acquisitions);
+        Assert.True(capabilities.Fixture); Assert.False(sample.Transport.ProductionCurrent);
+    }
+
+    [Fact]
+    public async Task Renew_invocation_uses_same_reserved_row_from_pending_to_actual_return()
+    {
+        using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
+        var armed = false;
+        await using var sample = new Sample(() =>
+        {
+            if (!armed) return;
+            entered.Set();
+            if (!release.Wait(TimeSpan.FromSeconds(5))) throw new TimeoutException("Synthetic projection barrier expired.");
+        });
+        await sample.Transport.DetectCapabilitiesAsync(TestContext.Current.CancellationToken);
+        var grant = await sample.Transport.AcquireAsync(sample.Request(), TestContext.Current.CancellationToken);
+        var lease = new LeaseEvidence(sample.Resource, sample.Owner, grant.LeaseId!, grant.FencingToken!,
+            grant.ServerTime!.Value, grant.ExpiresAt!.Value, TimeSpan.FromSeconds(300), TimeSpan.FromSeconds(100), Guid.NewGuid().ToString("D"));
+        armed = true; var request = Guid.NewGuid().ToString("D");
+        var actual = Task.Run(() => sample.Transport.RenewAsync(new(lease, request), TestContext.Current.CancellationToken), TestContext.Current.CancellationToken);
+        try
+        {
+            Assert.True(entered.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+            var pending = Assert.Single(sample.Transport.ReadActualRenewalData());
+            Assert.Equal(request, pending.RequestId); Assert.Equal("Pending", pending.InvocationState);
+            Assert.Equal(TransportOutcome.Uncertain, pending.Outcome);
+        }
+        finally { release.Set(); }
+        Assert.Equal(TransportOutcome.Renewed, (await actual).Outcome);
+        var returned = Assert.Single(sample.Transport.ReadActualRenewalData());
+        Assert.Equal(request, returned.RequestId); Assert.Equal("Returned", returned.InvocationState);
+        Assert.Equal(TransportOutcome.Renewed, returned.Outcome); Assert.Equal(1, sample.Handler.Renewals);
+    }
+
+    [Fact]
+    public async Task Renew_invocation_data_retains_uncertain_attempts_including_a_refusal_before_http()
+    {
+        await using var sample = new Sample();
+        await sample.Transport.DetectCapabilitiesAsync(TestContext.Current.CancellationToken);
+        var grant = await sample.Transport.AcquireAsync(sample.Request(), TestContext.Current.CancellationToken);
+        var lease = new LeaseEvidence(sample.Resource, sample.Owner, grant.LeaseId!, grant.FencingToken!,
+            grant.ServerTime!.Value, grant.ExpiresAt!.Value, TimeSpan.FromSeconds(300), TimeSpan.FromSeconds(100), Guid.NewGuid().ToString("D"));
+        sample.Handler.CorruptRenewal = true;
+        var first = Guid.NewGuid().ToString("D"); var second = Guid.NewGuid().ToString("D");
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() => sample.Transport.RenewAsync(new(lease, first), TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() => sample.Transport.RenewAsync(new(lease, second), TestContext.Current.CancellationToken));
+        var rows = sample.Transport.ReadActualRenewalData(); Assert.Equal(2, rows.Count);
+        Assert.Equal(first, rows[0].RequestId); Assert.Equal(second, rows[1].RequestId);
+        Assert.All(rows, row => { Assert.Equal("Uncertain", row.InvocationState); Assert.Equal(TransportOutcome.Uncertain, row.Outcome); Assert.Equal(lease.LeaseId, row.LeaseId); });
+        Assert.Equal(1, sample.Handler.Renewals); // Invocation is explicitly not proof of send.
+    }
+
     [Fact]
     public async Task Rotated_key_cannot_initialize_as_attested_principal_or_delete_old_session()
     {
@@ -372,7 +491,8 @@ public sealed class ContinuumMcpTransportTests
     {
         internal int Requests, Acquisitions, Renewals, Releases, Deletions, ScopeProbes, Dispositions;
         internal string? LastScope, LastRun, CorruptField, InspectionRun;
-        internal bool FailDelete, Disposed, FailDispose, UseSse;
+        internal bool FailDelete, Disposed, FailDispose, UseSse, MultilineSse, ChunkedSse, CorruptRenewal;
+        internal string SsePrefix = "";
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -434,7 +554,7 @@ public sealed class ContinuumMcpTransportTests
                     Assert.Equal(300, args.GetProperty("ttl_seconds").GetInt32());
                     payload = new()
                     {
-                        ["renewed"] = true,
+                        ["renewed"] = !CorruptRenewal,
                         ["lease_id"] = args.GetProperty("lease_id").GetString(),
                         ["run_id"] = args.GetProperty("run_id").GetString(),
                         ["fencing_token"] = "42",
@@ -447,10 +567,20 @@ public sealed class ContinuumMcpTransportTests
                 result = new { content = new[] { new { type = "text", text = JsonSerializer.Serialize(payload) } } };
             }
             var rpc = JsonSerializer.Serialize(new { jsonrpc = "2.0", id = root.GetProperty("id").GetString(), result });
+            var sse = "event: message\ndata: " + rpc + "\n\n";
+            if (MultilineSse)
+            {
+                var split = rpc.IndexOf(',') + 1;
+                sse = "event: message\ndata: " + rpc[..split] + "\ndata: " + rpc[split..] + "\n\n";
+            }
+            var body = UseSse ? SsePrefix + sse : rpc;
+            HttpContent content = ChunkedSse ? new StreamContent(new ChunkedFixtureStream(Encoding.UTF8.GetBytes(body)))
+                : new StringContent(body, Encoding.UTF8, UseSse ? "text/event-stream" : "application/json");
+            if (ChunkedSse) content.Headers.ContentType = new("text/event-stream");
             var response = new HttpResponseMessage(HttpStatusCode.OK)
             {
                 RequestMessage = request,
-                Content = new StringContent(UseSse ? "event: message\ndata: " + rpc + "\n\n" : rpc, Encoding.UTF8, UseSse ? "text/event-stream" : "application/json"),
+                Content = content,
             };
             if (method == "initialize") response.Headers.Add("Mcp-Session-Id", "synthetic-session");
             return response;
@@ -463,6 +593,13 @@ public sealed class ContinuumMcpTransportTests
         };
 
         protected override void Dispose(bool disposing) { Dispositions++; Disposed = true; if (FailDispose) throw new IOException("Synthetic handler first-close failure."); base.Dispose(disposing); }
+    }
+
+    // Finite HTTP fixture bytes only; actual parser still owns the same body.
+    private sealed class ChunkedFixtureStream(byte[] bytes) : MemoryStream(bytes)
+    {
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
+            base.ReadAsync(buffer[..Math.Min(buffer.Length, 3)], cancellationToken);
     }
 
     private sealed class Clock : IMonotonicClock

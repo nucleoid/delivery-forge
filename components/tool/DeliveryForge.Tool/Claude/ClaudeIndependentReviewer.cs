@@ -134,6 +134,14 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
     internal static ToolResult? UnsupportedPlatform() => OperatingSystem.IsLinux()
         ? ToolResult.Incomplete("INDEPENDENT_REVIEW_IMAGE_IDENTITY_UNSUPPORTED", "Linux independent review requires an immutable exact-image execution primitive; no native reviewer observation or review was dispatched.")
         : null;
+    // Safe mode leaves administrator-managed policy active. This selected CLI
+    // exposes no authoritative complete effective-policy/code-effect contract.
+    // File/registry absence, a DTO or a source reviewer cannot supply that proof.
+    internal static ToolResult? UnsupportedProductionProfile() => UnsupportedPlatform() ??
+        (OperatingSystem.IsWindows()
+            ? ToolResult.Incomplete("INDEPENDENT_REVIEW_MANAGED_POLICY_UNPROVEN",
+                "The selected Claude CLI does not expose authoritative complete effective managed-policy and code-effect provenance. Production independent review is unavailable until a supported contract or separately explicit owner trust-policy decision exists; no settings, authentication or models are changed.")
+            : null);
     internal static ToolResult BudgetIncomplete(string runId, BudgetDecision decision) =>
         ToolResult.Incomplete("INDEPENDENT_REVIEW_BUDGET", decision.Reason, new { runId, decision.Findings });
     async Task<BoundedCommandCaptureResult> Observe(string[] arguments)
@@ -239,10 +247,10 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         if (authorFamily != "gpt" || !bootstrap.Policy.AllowedFamilies.Any(pair => pair.Author.Equals("gpt", StringComparison.OrdinalIgnoreCase) && pair.Reviewer.Equals("claude", StringComparison.OrdinalIgnoreCase)) ||
             !bootstrap.Policy.AllowedScopes.Contains("source", StringComparer.Ordinal) || !bootstrap.Policy.Budget.IsFinite)
             return ToolResult.Incomplete("INDEPENDENT_REVIEW_POLICY_REQUIRED", "Actual author provenance and protected opposite-family source policy are required.");
-        // Creation-owned Linux scope proves process ownership, not immutable
-        // hash-to-launch image identity. No observation/paid review may reach
-        // production acceptance until that exact-image launch primitive exists.
-        if (UnsupportedPlatform() is { } platformRefusal) return platformRefusal;
+        // Refuse unsupported production profiles before subscription checks,
+        // budget reservation, evidence preparation or any native observation.
+        // Linux image identity and Windows managed policy remain distinct gaps.
+        if (UnsupportedProductionProfile() is { } profileRefusal) return profileRefusal;
         ClaudeIndependentReviewData.RequireSubscriptionEnvironment(Environment.GetEnvironmentVariable);
         var ledger = ReviewBudgetLedger.FromTrustedPolicy(bootstrap.Policy);
         if (!ledger.TryReserve(new(bootstrap.Policy.Budget.MaximumDuration, bootstrap.Policy.Budget.MaximumTokens, bootstrap.Policy.Budget.MaximumCost), out var reservation, out var decision))
@@ -254,6 +262,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         var allowance = Remaining(started); var validUntil = phaseBeganAt + allowance;
         phaseStop.CancelAfter(allowance);
         Exception? phaseFailure = null;
+        IReadOnlyList<ReviewFinding>? parsedFindings = null;
         try
         {
             verifyProtectedConfiguration();
@@ -317,6 +326,10 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             var usage = ClaudeIndependentReviewData.Usage(result.Value);
             if (!result.Value.TryGetProperty("result", out var resultText) || resultText.ValueKind != JsonValueKind.String) throw new IOException("Complete actual reviewer report text is missing.");
             var report = ClaudeIndependentReviewData.ParseReport(resultText.GetString()!);
+            // Keep complete parsed DATA before any post-retirement proof can
+            // fail. This never issues an accepted review or changes a timeout.
+            parsedFindings = Array.AsReadOnly(report.Findings.ToArray());
+            ledger.RecordFindings(parsedFindings);
             // Recompute the complete same-source evidence AFTER actual native
             // retirement before issuing any live capability or execution.
             _ = await GitPatchIdentity.ExportVerifiedPatchAsync(bootstrap.ObjectView, patch, phaseStop.Token).ConfigureAwait(false);
@@ -325,7 +338,6 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             // This is the original complete review-phase clock: preparation,
             // observations, native review, retirement and same-source postproof.
             // Native retirement does not grant a shorter accounting interval.
-            ledger.RecordFindings(report.Findings);
             var budget = ledger.Settle(reservation!, new(Stopwatch.GetElapsedTime(started), usage.Tokens, usage.Cost));
             if (budget.IsExhausted) return BudgetIncomplete(runId, budget);
             var rawHash = Hash(native);
@@ -353,6 +365,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         catch (Exception primary)
         {
             phaseFailure = primary;
+            if (parsedFindings is not null) primary.Data["IndependentReviewerParsedFindings"] = parsedFindings;
             phaseStop.Cancel();
             if (nativeBirthEntered && !nativeBirthReturned) RetainUncertain("Actual reviewer creation entered without returning its original owner.");
             if (process is not null)

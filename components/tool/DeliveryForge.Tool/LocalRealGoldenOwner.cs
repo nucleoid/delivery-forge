@@ -100,6 +100,8 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
         var journal = new LocalJournal(output, original, parent, frame.RunId, Current);
         var published = await LocalRealFakePublication.ExecuteAsync(frame.RunId, frozen.Identity, evidence, accepted.Receiver,
             original, parent, Verify, journal).ConfigureAwait(false);
+        if (published.Outcome != PublicationOutcome.PublishedFixture || published.Realm != PublicationRealm.Fixture || published.Receipt is null)
+            throw new WorkerEnvelopeException("Exact completed local-only publication readback required before local-real summary DATA.");
         await Verify().ConfigureAwait(false);
         var path = Path.Combine(output, "local-real-receipt.json");
         parent.EnterSynchronous(frame.RunId, () =>
@@ -123,9 +125,6 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
                 PublicationReceipt = published.Receipt?.Identity,
                 OriginalStarted = original.OriginalStarted,
                 Frequency = System.Diagnostics.Stopwatch.Frequency,
-                ActualWorker = true,
-                ActualQualityWithOwnerBaseline = true,
-                ActualOppositeFamilyReview = true,
                 FakePublication = true,
                 RemoteWrites = 0,
                 MergeCalls = 0,

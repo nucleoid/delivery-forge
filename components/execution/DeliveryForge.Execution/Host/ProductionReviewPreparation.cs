@@ -301,7 +301,7 @@ public sealed partial class ProductionReviewSourceOwner
     }
     internal void DisposeView(string directory, bool cleanup = true)
     {
-        if (cleanup && !MayCleanOwnedFiles) return;
+        if (cleanup && !MayCleanOwnedFiles) throw new ReviewPreflightException("Original review view cannot retire while its actual resources remain active; view retained.", residualProcessUncertain: true);
         void Endpoint() { if (cleanup) _ = original.CleanupRemaining; else Check(); if (!MayCleanOwnedFiles) throw new ReviewPreflightException("Original review scope remains active.", residualProcessUncertain: true); }
         void Delete(string path)
         {
@@ -396,6 +396,8 @@ public sealed class ProductionReviewBootstrap : IDisposable
     public ProtectedReviewSourceContext ProtectedSource { get; }
     public ReviewPolicy Policy { get; }
     public ReviewAuthorityRootContext RootContext { get; }
+    // Read-only state from this actual bootstrap; never a serialized owner or quiescence proof.
+    public bool ActualDispositionReturned => ObjectView.DispositionReturned;
     public void Dispose() => ObjectView.Dispose();
     public void DisposeDuringWork() => ObjectView.DisposeDuringWork();
 }

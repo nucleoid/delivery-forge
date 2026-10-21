@@ -76,6 +76,16 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
         var observed = await evidence.ObserveAsync(life.Token).ConfigureAwait(false);
         if (observed.Endpoint != settings.Endpoint || observed.Project != settings.Project || observed.PrincipalId != settings.PrincipalId)
             throw new ToolUsageException("Pinned operator evidence differs from parent endpoint/project/principal selection.");
+        // Rejection only, using the SAME already-read pinned evidence. It does
+        // not create a readiness facet; actual discovery rechecks below.
+        life.Check();
+        var now = DateTimeOffset.UtcNow;
+        var originalRemaining = life.WholeLimit - Stopwatch.GetElapsedTime(life.OriginalStarted);
+        var initialEvidenceRemaining = TimeSpan.FromTicks(Math.Min((observed.ValidUntil - now).Ticks,
+            (TimeSpan.FromMinutes(20) - (now - observed.VerifiedAt)).Ticks));
+        if (observed.VerifiedAt > now || initialEvidenceRemaining < originalRemaining)
+            throw new ToolUsageException("Pinned deployment evidence cannot cover the SAME original remaining whole interval; no checkpoint, lease or worker was created.");
+        life.Check();
         var creation = new CreationFrame(); lock (Creations) { if (Creations.Count >= 16) throw new ToolUsageException("Finite retained parent creation bound."); Creations.Add(creation); }
         try
         {
@@ -94,6 +104,9 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
                     new(host, host, store, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10)), life.Token);
                 host.coordinationTasks.Add(task);
                 host.reducer = await task.WaitAsync(life.Remaining).ConfigureAwait(false); life.Check();
+                // Discovery has anchored the actual evidence interval. Bootstrap
+                // may exist, but no lifecycle/lease/worker is admitted yet.
+                wire.RequireOriginalEvidenceCoverage(life.OriginalStarted, life.WholeLimit); life.Check();
                 return host;
             }
             catch (Exception error) { host.failure = error; host.Revoke(error); life.RetainUnknown(); throw; }
@@ -265,22 +278,47 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
         catch (Exception error) { lock (gate) failure ??= error; original.RetainUnknown(); }
     }
 
-    // Observation only: a completed worker's evidence refusal may already have
-    // entered this parent's own stop. Cleanup must await that SAME retained Task
-    // before attempting its exact writer disposition. No new stop is born here.
+    // Restrictive cleanup observation: a completed worker's evidence refusal may
+    // already have entered this parent's own stop. Fence renewal and await both
+    // SAME retained Tasks before exact writer disposition. No new stop is born.
     internal async Task<bool> ObserveExistingLossStopAsync(string runId, ToolLifetime sameOriginal)
     {
-        Task? actual;
+        Task? actualRenewal, actualStop;
         lock (gate)
         {
             if (!ReferenceEquals(sameOriginal, original) || parentRunId != runId)
                 throw new CoordinationUncertainException("Same original parent stop observation required.");
-            actual = lossStop;
+            // Fence every future Revoke/renewal before cleanup closes WORK.
+            // This is not entry into the parent's first resource disposition.
+            CloseAdmission();
+            actualRenewal = renewal;
+            actualStop = lossStop;
         }
         _ = original.CleanupRemaining;
-        if (actual is not null) await actual.WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
-        _ = original.CleanupRemaining;
-        if (original.HasExplicitUnknown) throw new CoordinationUncertainException("Actual original stop retained uncertainty.");
+        Exception? primary = null;
+        foreach (var actual in new[] { actualRenewal, actualStop })
+        {
+            if (actual is null) continue;
+            try { await WaitActualDispositionTaskAsync(actual, original, true).ConfigureAwait(false); }
+            catch (Exception error) { primary = primary is null ? error : new AggregateException("Original renewal and stop observation failures.", primary, error); }
+        }
+        // The loop's WORK-clipped wait can finish while the underlying reducer
+        // request remains pending. Once the loop/stop are terminal no further
+        // rows can be enrolled: join those retained actual Tasks too, not merely
+        // the observer which timed out. Never replace or reissue a request.
+        Task[] actualCoordination;
+        lock (gate) actualCoordination = coordinationTasks.ToArray();
+        foreach (var actual in actualCoordination)
+        {
+            if (ReferenceEquals(actual, actualRenewal) || ReferenceEquals(actual, actualStop)) continue;
+            try { await WaitActualDispositionTaskAsync(actual, original, true).ConfigureAwait(false); }
+            catch (Exception error) { primary = primary is null ? error : new AggregateException("Original coordination observation failures.", primary, error); }
+        }
+        try { _ = original.CleanupRemaining; }
+        catch (Exception error) { primary = primary is null ? error : new AggregateException("Original coordination observations and SAME cleanup postcheck failed.", primary, error); }
+        if (original.HasExplicitUnknown)
+            throw new CoordinationUncertainException("Actual original stop retained uncertainty.", primary);
+        if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
         return true;
     }
 
@@ -309,14 +347,18 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
         await actual.WaitAsync(cleanup ? original.CleanupRemaining : original.Remaining).ConfigureAwait(false);
         if (cleanup) _ = original.CleanupRemaining; else original.Check();
     }
-    void CloseDispositionAdmission()
+    void CloseAdmission()
     {
         lock (gate)
         {
-            disposeEntered = true; closed = true;
+            closed = true;
             renewalHandoff.Revoke(new CoordinationUncertainException("Original parent disposition closed admission."));
             renewalStop.Cancel();
         }
+    }
+    void CloseDispositionAdmission()
+    {
+        lock (gate) { disposeEntered = true; CloseAdmission(); }
     }
     async Task CompleteDispositionAsync(bool cleanup)
     {
@@ -328,6 +370,11 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
             if (original.HasExplicitUnknown || !effects.AllKnownSettled || coordinationTasks.Any(task =>
                 !ReferenceEquals(task, releaseTask) && !ReferenceEquals(task, cleanupReleaseTask) && !task.IsCompletedSuccessfully))
                 throw new CoordinationUncertainException("Original effect/coordination task remains unsettled or failed; owners retained.");
+            // Cleanup is restrictive disposition, not a waiver of actual work
+            // settlement. Enforce this here as well as at the forward caller.
+            if ((authority is not null || releaseContinuation is not null) &&
+                (parentRunId is null || bridge is null || !bridge.ObserveCoordinationWorkSettled(parentRunId)))
+                throw new CoordinationUncertainException("Actual original work remains unsettled before lease disposition; owners retained.");
         }
         if (!releaseEntered)
         {
