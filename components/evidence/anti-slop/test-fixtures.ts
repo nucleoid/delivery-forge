@@ -32,6 +32,8 @@ function run(fixture:
   | "suppression-template-regex"
   | "suppression-template-regex-object"
   | "violation-template-regex-object"
+  | "suppression-template-jsx-object"
+  | "violation-template-jsx-object"
   | "suppression-blanket-specific-enable"
   | "suppression-prefixed-alias"): {
   status: number | null;
@@ -46,7 +48,13 @@ function run(fixture:
       "json",
       "--no-ignore",
       "--disable-nested-config",
-      path.join(root, "fixtures", `${fixture}.${fixture === "suppression-jsx-slash" ? "tsx" : "ts"}`),
+      path.join(root, "fixtures", `${fixture}.${
+        fixture === "suppression-jsx-slash" ||
+        fixture === "suppression-template-jsx-object" ||
+        fixture === "violation-template-jsx-object"
+          ? "tsx"
+          : "ts"
+      }`),
     ],
     {
       cwd: root,
@@ -112,6 +120,16 @@ assert.ok(templateRegexSuppressed.report.diagnostics.every(
   (diagnostic) => diagnostic.code !== "anti-slop(no-object-parameters)",
 ));
 
+const templateJsxViolation = run("violation-template-jsx-object");
+assert.equal(templateJsxViolation.status, 1);
+assert.ok(templateJsxViolation.report.diagnostics.some(
+  (diagnostic) => diagnostic.code === "anti-slop(no-object-parameters)",
+));
+
+const templateJsxSuppressed = run("suppression-template-jsx-object");
+assert.equal(templateJsxSuppressed.status, 0);
+assert.deepEqual(templateJsxSuppressed.report.diagnostics, []);
+
 for (const bypass of [
   "suppression-line-division",
   "suppression-reserved-method",
@@ -137,4 +155,4 @@ for (const name of ["suppression-bare", "suppression-unknown"] as const) {
   assert.deepEqual(result.report.diagnostics, []);
 }
 
-console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, eleven clean suppression attacks plus template-regex directive suppression verified against an unsuppressed control");
+console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, eleven clean suppression attacks plus matched template-regex and exact template-JSX directive controls verified");

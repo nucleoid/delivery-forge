@@ -3,8 +3,8 @@ using System.Text.Json;
 namespace DeliveryForge.Contracts.Validation;
 
 /// <summary>
-/// Code-owned authority boundary for policy-satisfying gate outcomes. Schema-v1
-/// receipts remain readable historical data but are never authoritative.
+/// Code-owned future-v2 authority boundary for policy-satisfying gate outcomes. Schema-v1
+/// receipts retain their legacy producer/consumer behavior outside this future-v2 validator.
 /// Receipt provenance is supplied by the host-owned append-only receipt store;
 /// the content identity is integrity evidence, not a signature.
 /// </summary>

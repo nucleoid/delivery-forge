@@ -639,6 +639,22 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Fact]
+    public void Template_expression_jsx_cannot_hide_the_exact_reviewed_directive()
+    {
+        const string source = """
+            if (globalThis) {
+              const s = `${<a>it's</a>}`; const f = (input: object) => input; // eslint-disable-line anti-slop/no-object-parameters -- '
+            }
+            // `
+            """;
+
+        var error = Assert.Throws<EvidenceRepositoryException>(() =>
+            GitRepositoryIdentityReader.ContainsSuppressionDirective(source));
+
+        Assert.Contains("JSX-shaped", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public void Deleting_enable_extends_blanket_coverage_over_changed_code()
     {
         var @base = JavaScriptSuppressionScanner.Scan(System.Text.Encoding.UTF8.GetBytes(

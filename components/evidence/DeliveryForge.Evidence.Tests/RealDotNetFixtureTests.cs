@@ -37,7 +37,7 @@ public sealed class RealDotNetFixtureTests
         var detection = await new ToolCapabilityDetector(executor).DetectAsync(
             new CapabilityProbe(
                 "dotnet", ExecutableSource.TrustedExplicit, dotnet, temp.Path, null,
-                ["--version"], ["--help"], "10.0.401", "trx-v1", true),
+                ["--version"], ["--help"], "10.0.401", "trx-v1", false),
             TestContext.Current.CancellationToken);
         var capability = detection.Capability;
         Assert.True(capability.Supported,
@@ -81,8 +81,8 @@ public sealed class RealDotNetFixtureTests
         Assert.Equal(0, greenResult.Execution.ExitCode);
         Assert.True(File.Exists(assembly));
         Assert.Equal((1, 1, 1, 0), ReadCounts(greenTrx));
-        Assert.Equal(GateOutcome.Incomplete, greenResult.Outcome);
-        Assert.Contains("advisory", greenResult.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(GateOutcome.Pass, greenResult.Outcome);
+        Assert.True(greenResult.ProductionCapable);
         Assert.True(File.Exists(greenResult.ReceiptPath));
         Assert.Contains("evidence.trx", greenResult.ArtifactHashes.Keys);
         Assert.StartsWith("sha256:", greenResult.ArtifactHashes["evidence.trx"]);
@@ -109,9 +109,15 @@ public sealed class RealDotNetFixtureTests
     {
         var reader = new GitRepositoryIdentityReader(executor, repository, protectedBase);
         var identity = await reader.ReadAsync(TestContext.Current.CancellationToken);
+        var policy = new ResolvedEvidencePolicy(
+            TestEvidence.Identity('1'), TestEvidence.Identity('2'), protectedBase,
+            PolicyAuthorityKind.ProtectedGitBase, 0m, ["test"], authorityVerified: true,
+            sourceRepositoryRoot: repository,
+            requiredGatePluginBindings:
+            [new RequiredGatePluginBinding("test", "delivery-forge.dotnet", "1.0.0", "dotnet")]);
         return await new GateRunner(executor, reader, repository, protectedBase).RunAsync(
             new GateRequest(
-                "test", TestEvidence.ResolvedPolicy(), capability, EvidenceAdapterKind.DotNet,
+                "test", policy, capability, EvidenceAdapterKind.DotNet,
                 TestEvidence.Identity('6'), identity,
                 new CommandInvocation(capability.ExecutablePath!, arguments, repository),
                 "fixture", TimeSpan.FromSeconds(90), System.IO.Path.Combine(outputRoot, outputName)),

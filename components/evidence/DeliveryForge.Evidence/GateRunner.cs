@@ -19,6 +19,8 @@ public sealed class GateRunner
     private readonly string _trustedWorkingDirectory;
     private readonly string _trustedProtectedBaseCommit;
     private readonly DeterministicEvaluationPluginRegistry _plugins;
+    private readonly TrustedGatePluginRegistry _authorityRegistry;
+    private readonly bool _usesBuiltInExecutionRegistry;
     private readonly string? _hostOwnedClaimRoot;
 
     public GateRunner(
@@ -57,8 +59,11 @@ public sealed class GateRunner
         _repository = repository;
         _trustedWorkingDirectory = Path.GetFullPath(trustedWorkingDirectory);
         _trustedProtectedBaseCommit = trustedProtectedBaseCommit;
+        _usesBuiltInExecutionRegistry = plugins is null &&
+            (authorityRegistry is null || ReferenceEquals(authorityRegistry, TrustedGatePluginRegistry.BuiltIns));
         _plugins = plugins ?? DeterministicEvaluationPluginRegistry.CreateBuiltIns();
-        _plugins.AssertMatchesAuthorityRegistry(authorityRegistry ?? TrustedGatePluginRegistry.BuiltIns);
+        _authorityRegistry = authorityRegistry ?? TrustedGatePluginRegistry.BuiltIns;
+        _plugins.AssertMatchesAuthorityRegistry(_authorityRegistry);
         _hostOwnedClaimRoot = hostOwnedClaimRoot is null ? null : Path.GetFullPath(hostOwnedClaimRoot);
     }
     private static readonly JsonSerializerOptions ContractJson = CreateContractJson();
@@ -353,7 +358,7 @@ public sealed class GateRunner
         {
             normalized = NormalizedEvidence.Error($"Evidence normalizer failed: {exception.Message}");
         }
-        var toolOutcome = normalized.Outcome;
+        var pluginRawOutcome = normalized.Outcome;
         if (identityReadFailed)
             normalized = NormalizedEvidence.Incomplete("Repository identity could not be read after evaluation.");
         else if (sourceChanged)
@@ -382,17 +387,17 @@ public sealed class GateRunner
                  (!request.Policy.AuthorityVerified ||
                   !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
                   request.Capability.Fixture ||
-                  !HasTrustedProductionExecution() ||
+                  !HasTrustedLegacyV1Authority(request, plugin) ||
                   !normalized.ProductionCapable))
             normalized = NormalizedEvidence.Incomplete(
-                "Tool PASS is advisory because protected policy/gate authority, non-fixture execution, or separate-principal producer evidence is absent.");
+                "Tool PASS is advisory because the protected policy, required built-in legacy-v1 gate binding, non-fixture capability, or production-capable evidence is absent.");
         else if (normalized.Outcome == GateOutcome.NotApplicable &&
                  (string.IsNullOrWhiteSpace(normalized.NotApplicableRationale) ||
                   !request.Policy.AllowedNotApplicable.Contains(request.GateId) ||
                   !request.Policy.AuthorityVerified ||
                   !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
                   request.Capability.Fixture ||
-                  !HasTrustedProductionExecution() ||
+                  !HasTrustedLegacyV1Authority(request, plugin) ||
                   !normalized.ProductionCapable))
             normalized = NormalizedEvidence.Incomplete(
                 "Tool NOT_APPLICABLE is advisory unless policy permits it and rationale, protected binding, non-fixture capability, and certified producer evidence are complete.");
@@ -412,7 +417,7 @@ public sealed class GateRunner
             }
         }
 
-        if (request.Capability.Fixture || !HasTrustedProductionExecution())
+        if (request.Capability.Fixture || !HasTrustedLegacyV1Authority(request, plugin))
             normalized = normalized with
             {
                 Fixture = normalized.Fixture || request.Capability.Fixture,
@@ -421,10 +426,10 @@ public sealed class GateRunner
 
         var executedPlugin = DeterministicEvaluationPluginRegistry.Bind(
             request, plugin,
-            toolOutcome == GateOutcome.NotApplicable
+            pluginRawOutcome == GateOutcome.NotApplicable
                 ? EvaluationPluginStatus.NotApplicable
                 : EvaluationPluginStatus.Executed,
-            OutcomeText(toolOutcome));
+            OutcomeText(pluginRawOutcome));
         if (scopeValidation.InputSetIdentity is not null)
             executedPlugin = executedPlugin with { InputSetIdentity = scopeValidation.InputSetIdentity };
         var publishedDirectory = PublishAttemptDirectory(gateDirectory, out var publicationFailure);
@@ -489,7 +494,7 @@ public sealed class GateRunner
         var legacy = new GateReceiptContract(
             "1.0.0", provisional.Kind, provisional.Identity, provisional.GateId,
             provisional.PolicyIdentity, provisional.BaseCommit, provisional.HeadCommit,
-            provisional.TreeId, BuildCommandEnvelope(request, plugin, includeRuntimeClosureIdentity: false),
+            provisional.TreeId, BuildLegacyV1CommandEnvelope(request),
             provisional.StartedAt, provisional.CompletedAt,
             provisional.ExitCode, provisional.Outcome, provisional.Reason, provisional.ArtifactHashes,
             provisional.SourceChanged, provisional.Limitations, provisional.NotApplicableRationale);
@@ -520,7 +525,7 @@ public sealed class GateRunner
             "2.0.0", "gate-receipt", $"sha256:{new string('0', 64)}",
             request.GateId, request.Policy.PolicyIdentity,
             before.BaseCommit, before.HeadCommit, before.TreeId,
-            BuildCommandEnvelope(request, plugin, includeRuntimeClosureIdentity: true),
+            BuildFutureV2CommandEnvelope(request, plugin),
             execution.StartedAt, execution.CompletedAt, execution.ExitCode,
             OutcomeText(normalized.Outcome), normalized.Reason, artifactHashes,
             sourceChanged, limitations, normalized.NotApplicableRationale,
@@ -533,10 +538,29 @@ public sealed class GateRunner
                 normalized.ProductionCapable,
                 normalized.ProductionCapable ? "production" : "advisory"));
 
-    private static string BuildCommandEnvelope(
+    private static string BuildLegacyV1CommandEnvelope(GateRequest request) =>
+        JsonSerializer.Serialize(new
+        {
+            request.Invocation.FileName,
+            request.Invocation.Arguments,
+            request.Invocation.WorkingDirectory,
+            Environment = request.Invocation.Environment ?? new Dictionary<string, string>(),
+            request.Scope,
+            request.Capability.ExecutableIdentity,
+            CapabilityTool = request.Capability.Tool,
+            CapabilityVersion = request.Capability.Version,
+            CapabilityFormat = request.Capability.FormatVersion,
+            CapabilityExecutable = request.Capability.ExecutablePath,
+            CapabilityFixture = request.Capability.Fixture,
+            CapabilityProbeWorkingDirectory = request.Capability.ProbeWorkingDirectory,
+            PolicySourceRevision = request.Policy.SourceRevision,
+            PolicyContentIdentity = request.Policy.ContentIdentity,
+            request.ConfigurationIdentity
+        }, ContractJson);
+
+    private static string BuildFutureV2CommandEnvelope(
         GateRequest request,
-        EvaluationPluginReceiptMetadata plugin,
-        bool includeRuntimeClosureIdentity)
+        EvaluationPluginReceiptMetadata plugin)
     {
         var envelope = JsonSerializer.SerializeToNode(new
         {
@@ -568,13 +592,11 @@ public sealed class GateRunner
                 plugin.RuntimeClosureIdentity,
                 plugin.Inputs,
                 plugin.InputSetIdentity,
-                plugin.ToolOutcome,
+                plugin.PluginRawOutcome,
                 EffectRulesEnabled = request.Plugin?.EnableEffectRules ?? false
             }
         }, ContractJson)?.AsObject()
             ?? throw new InvalidOperationException("Gate command envelope serialization produced no object.");
-        if (!includeRuntimeClosureIdentity)
-            envelope["plugin"]!.AsObject().Remove("runtimeClosureIdentity");
         return envelope.ToJsonString(ContractJson);
     }
 
@@ -737,9 +759,9 @@ public sealed class GateRunner
             return pluginAuthorityFailure;
         if (!request.Policy.AuthorityVerified ||
             !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
-            request.Capability.Fixture || !HasTrustedProductionExecution())
+            request.Capability.Fixture || !HasTrustedLegacyV1Authority(request, plugin))
             return NormalizedEvidence.Incomplete(
-                "NOT_APPLICABLE is advisory unless the same trusted production capability, required-gate, code-owned execution, and durable v2 provenance bindings as PASS are present.");
+                "NOT_APPLICABLE is advisory unless the protected policy allows it and the same trusted built-in legacy-v1, non-fixture, production-capable bindings as PASS are present.");
         return null;
     }
 
@@ -844,11 +866,23 @@ public sealed class GateRunner
         _ => throw new ArgumentOutOfRangeException(nameof(status))
     };
 
-    private bool HasTrustedProductionExecution()
+    private bool HasTrustedLegacyV1Authority(
+        GateRequest request,
+        IDeterministicEvaluationPlugin plugin)
     {
-        // This repository has no enforceable separate-principal launcher/signer. Bounded
-        // same-uid execution is useful evidence, but never production authority.
-        return false;
+        if (!_usesBuiltInExecutionRegistry ||
+            !ReferenceEquals(_authorityRegistry, TrustedGatePluginRegistry.BuiltIns) ||
+            !_authorityRegistry.TryGet(request.GateId, out var binding) ||
+            !binding.LegacyV1Authority)
+            return false;
+
+        return string.Equals(binding.PluginId, plugin.Id, StringComparison.Ordinal) &&
+               string.Equals(binding.PluginVersion, plugin.Version, StringComparison.Ordinal) &&
+               string.Equals(binding.Tool, request.Capability.Tool, StringComparison.Ordinal) &&
+               (binding.ExpectedToolVersion is null ||
+                string.Equals(binding.ExpectedToolVersion, request.Capability.Version, StringComparison.Ordinal)) &&
+               (binding.ExpectedFormatVersion is null ||
+                string.Equals(binding.ExpectedFormatVersion, request.Capability.FormatVersion, StringComparison.Ordinal));
     }
 
     private static TimeSpan Remaining(DateTimeOffset deadline)

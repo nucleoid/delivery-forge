@@ -297,6 +297,9 @@ internal static class JavaScriptSuppressionScanner
             }
 
             var current = content[index];
+            if (current == (byte)'<' && index + 1 < content.Length &&
+                (IsIdentifierStart(content[index + 1]) || content[index + 1] is (byte)'/' or (byte)'>'))
+                throw Ambiguous("JSX-shaped syntax in a template expression cannot be classified without pinned parser evidence");
             if (current is (byte)'\'' or (byte)'"')
             {
                 if (!SkipQuoted(content, ref index, current, budget))

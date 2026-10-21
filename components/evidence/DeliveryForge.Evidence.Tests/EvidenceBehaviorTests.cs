@@ -134,7 +134,7 @@ public sealed class EvidenceBehaviorTests
     {
         var result = new DotNetAdapter().Normalize(TestEvidence.DotNetRun());
         Assert.Equal(GateOutcome.Pass, result.Outcome);
-        Assert.False(result.ProductionCapable);
+        Assert.True(result.ProductionCapable);
     }
 
     [Theory]

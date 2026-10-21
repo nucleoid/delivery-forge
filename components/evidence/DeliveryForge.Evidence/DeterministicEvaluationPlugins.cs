@@ -33,7 +33,7 @@ public sealed record EvaluationPluginReceiptMetadata(
     string RuntimeClosureIdentity,
     IReadOnlyList<string> Inputs,
     string InputSetIdentity,
-    string? ToolOutcome)
+    string? PluginRawOutcome)
 {
     internal static EvaluationPluginReceiptMetadata Unbound { get; } = new(
         "unbound", "unbound", false, EvaluationPluginStatus.Selected,
@@ -180,7 +180,7 @@ public sealed class DeterministicEvaluationPluginRegistry
         GateRequest request,
         IDeterministicEvaluationPlugin plugin,
         EvaluationPluginStatus status,
-        string? toolOutcome = null)
+        string? pluginRawOutcome = null)
     {
         var explicitInputs = request.Plugin?.Inputs;
         var inputs = explicitInputs is null
@@ -195,7 +195,7 @@ public sealed class DeterministicEvaluationPluginRegistry
             plugin.GetRuntimeClosureIdentity(request),
             inputs,
             ComputeInputSetIdentity(inputs),
-            toolOutcome);
+            pluginRawOutcome);
     }
 
     internal void AssertMatchesAuthorityRegistry(TrustedGatePluginRegistry authority)

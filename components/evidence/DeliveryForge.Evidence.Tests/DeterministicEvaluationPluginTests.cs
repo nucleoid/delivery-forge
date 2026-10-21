@@ -589,7 +589,7 @@ public sealed class DeterministicEvaluationPluginTests
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Error, result.Outcome);
-        Assert.Null(result.Plugin.ToolOutcome);
+        Assert.Null(result.Plugin.PluginRawOutcome);
         Assert.Contains("required-gate binding", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
@@ -697,7 +697,7 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
-    public async Task Receipt_command_envelope_binds_plugin_version_config_inputs_and_tool_outcome()
+    public async Task Canonical_v1_envelope_remains_legacy_shaped_while_result_exposes_plugin_raw_outcome()
     {
         using var temp = new TempDirectory();
         var original = TestEvidence.GateRequest(temp.Path);
@@ -722,7 +722,7 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.Equal(TestEvidence.Identity('6'), result.Plugin.ConfigurationIdentity);
         Assert.Equal(["DeliveryForge.Tests.csproj"], result.Plugin.Inputs);
         Assert.StartsWith("sha256:", result.Plugin.InputSetIdentity);
-        Assert.Equal("INCOMPLETE", result.Plugin.ToolOutcome);
+        Assert.Equal("INCOMPLETE", result.Plugin.PluginRawOutcome);
 
         var receiptBytes = await File.ReadAllBytesAsync(result.ReceiptPath, TestContext.Current.CancellationToken);
         var validatedReceipt = ContractValidator.ParseAndValidate(receiptBytes);
@@ -731,10 +731,29 @@ public sealed class DeterministicEvaluationPluginTests
         using var receipt = System.Text.Json.JsonDocument.Parse(receiptBytes);
         using var command = System.Text.Json.JsonDocument.Parse(
             receipt.RootElement.GetProperty("command").GetString()!);
-        var plugin = command.RootElement.GetProperty("plugin");
-        Assert.Equal("delivery-forge.dotnet", plugin.GetProperty("id").GetString());
-        Assert.Equal(result.Plugin.InputSetIdentity, plugin.GetProperty("inputSetIdentity").GetString());
-        Assert.False(plugin.TryGetProperty("runtimeClosureIdentity", out _));
+        Assert.False(command.RootElement.TryGetProperty("plugin", out _));
+        Assert.False(command.RootElement.TryGetProperty("inheritEnvironment", out _));
+        Assert.Equal(request.Invocation.WorkingDirectory,
+            command.RootElement.GetProperty("workingDirectory").GetString());
+        var expectedLegacyEnvelope = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            request.Invocation.FileName,
+            request.Invocation.Arguments,
+            request.Invocation.WorkingDirectory,
+            Environment = request.Invocation.Environment ?? new Dictionary<string, string>(),
+            request.Scope,
+            request.Capability.ExecutableIdentity,
+            CapabilityTool = request.Capability.Tool,
+            CapabilityVersion = request.Capability.Version,
+            CapabilityFormat = request.Capability.FormatVersion,
+            CapabilityExecutable = request.Capability.ExecutablePath,
+            CapabilityFixture = request.Capability.Fixture,
+            CapabilityProbeWorkingDirectory = request.Capability.ProbeWorkingDirectory,
+            PolicySourceRevision = request.Policy.SourceRevision,
+            PolicyContentIdentity = request.Policy.ContentIdentity,
+            request.ConfigurationIdentity
+        }, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web));
+        Assert.Equal(expectedLegacyEnvelope, receipt.RootElement.GetProperty("command").GetString());
         Assert.Equal(TestEvidence.Repository().HeadCommit, receipt.RootElement.GetProperty("headCommit").GetString());
     }
 
@@ -776,6 +795,53 @@ public sealed class DeterministicEvaluationPluginTests
             json.GetProperty("command").GetString()!);
         Assert.Equal(request.ConfigurationIdentity,
             command.RootElement.GetProperty("plugin").GetProperty("runtimeClosureIdentity").GetString());
+        Assert.Equal("PASS",
+            command.RootElement.GetProperty("plugin").GetProperty("pluginRawOutcome").GetString());
+        Assert.False(command.RootElement.GetProperty("plugin").TryGetProperty("toolOutcome", out _));
+    }
+
+    [Fact]
+    public async Task Integrity_override_retains_only_explicit_plugin_raw_pass_metadata()
+    {
+        using var temp = new TempDirectory();
+        var original = TestEvidence.GateRequest(temp.Path);
+        var executable = original.Capability.ExecutablePath!;
+        var plugin = new StubEvaluationPlugin(
+            "host.custom", "2.0.0", "custom-tool",
+            new NormalizedEvidence(GateOutcome.Pass, "raw pass", false, true, []));
+        var registry = new TrustedEvaluationPluginRegistry(
+            [new TrustedEvaluationPluginRegistration("custom", plugin, "3.0.0", "custom-v1")]);
+        var request = original with
+        {
+            GateId = "custom",
+            Adapter = EvidenceAdapterKind.External,
+            Plugin = new EvaluationPluginSelection("host.custom", Enabled: true, Inputs: ["scope.custom"]),
+            Capability = ToolCapability.FromDetection(
+                "custom-tool", "3.0.0", "custom-v1", false, [], executable,
+                original.Capability.ExecutableIdentity!, ["evaluate"], original.Invocation.WorkingDirectory),
+            Invocation = original.Invocation with { Arguments = ["evaluate"] },
+            Policy = new ResolvedEvidencePolicy(
+                TestEvidence.Identity('1'), TestEvidence.Identity('2'), TestEvidence.Commit('a'),
+                PolicyAuthorityKind.ProtectedGitBase, 0m, ["custom"], authorityVerified: true,
+                sourceRepositoryRoot: original.Invocation.WorkingDirectory,
+                requiredGatePluginBindings:
+                [new RequiredGatePluginBinding("custom", "host.custom", "2.0.0", "custom-tool")])
+        };
+        var changed = TestEvidence.Repository() with { TreeId = TestEvidence.Commit('d') };
+        var runner = new GateRunner(
+            new StubCommandExecutor(TestEvidence.CommandResult()),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), changed),
+            original.Invocation.WorkingDirectory, TestEvidence.Commit('a'), registry);
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal("PASS", result.Plugin.PluginRawOutcome);
+        using var receipt = System.Text.Json.JsonDocument.Parse(await File.ReadAllBytesAsync(
+            result.ReceiptPath, TestContext.Current.CancellationToken));
+        using var envelope = System.Text.Json.JsonDocument.Parse(
+            receipt.RootElement.GetProperty("command").GetString()!);
+        Assert.False(envelope.RootElement.TryGetProperty("plugin", out _));
     }
 
     [Fact]
