@@ -288,8 +288,12 @@ public sealed class CompilerOfficialRecipeTests
             void Argument(string role, int ordinal, string? name, string argument)
             {
                 var raw = Encoding.UTF8.GetBytes(argument); var position = arguments.Count;
-                arguments.Add(new JsonObject { ["ordinal"] = position, ["utf8Length"] = raw.Length,
-                    ["sha256"] = InstalledToolFiles.Identity(raw)[7..] });
+                arguments.Add(new JsonObject
+                {
+                    ["ordinal"] = position,
+                    ["utf8Length"] = raw.Length,
+                    ["sha256"] = InstalledToolFiles.Identity(raw)[7..]
+                });
                 roles.Add(new JsonObject { ["ordinal"] = position, ["role"] = role, ["inputOrdinal"] = ordinal, ["name"] = name });
             }
             for (var index = 0; index < request.ScalarArguments.Length; index++)
