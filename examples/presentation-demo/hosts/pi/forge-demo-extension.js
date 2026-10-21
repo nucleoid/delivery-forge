@@ -1,74 +1,82 @@
 import { snapshotsFromCatalog } from '../../src/fixtures.mjs';
-import { renderCockpit, renderEvidenceDetail, renderEvidenceList, renderStatusLine, renderUsagePanel } from '../../src/render-cockpit.mjs';
-import { displayWidth, stripAnsi } from '../../src/safety.mjs';
+import { cockpitView, COCKPIT_VIEWS, linesForView } from '../../src/cockpit-view-model.mjs';
+import { renderCockpit, renderStatusLine } from '../../src/render-cockpit.mjs';
+import { displayWidth, sliceByColumns, stripAnsi, truncateToWidth } from '../../src/safety.mjs';
 
-const ENTRY='forge-demo-state-v1',WIDGET='forge-demo-widget',STATUS='forge-demo-status',MAX_PANEL_ROWS=18;
-const HINTS='/forge-demo detail · usage · next · prev · reset';
+const ENTRY='forge-demo-state-v2',LEGACY_ENTRY='forge-demo-state-v1',WIDGET='forge-demo-widget',STATUS='forge-demo-status';
+const HINTS='/forge-demo cockpit · view overview|evidence|usage|activity · scenario <name> · next · prev · reset';
 const states=snapshotsFromCatalog();
-// ANSI colour only when the host hands us a real theme; test doubles and NO_COLOR stay plain
 const useColor=(theme)=>Boolean(theme&&typeof theme.fg==='function')&&process.env.NO_COLOR!=='1';
-// strip control characters but keep ESC (0x1b): renderer output carries SGR colour sequences, fixture text was already cleaned by the projector
-const clean=(value,max=4096)=>String(value??'').replace(/[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f]/g,' ').slice(0,max);
-const clip=(line,width)=>displayWidth(line)<=Math.max(1,width)?line:[...stripAnsi(line)].slice(0,Math.max(1,width)).join('');
+// Preserve ESC only for renderer-owned SGR sequences; fixture text is sanitised by the projector.
+const clean=(value,max=4096)=>String(value??'').replace(/[\x00-\x08\x0b\x0c\x0e-\x1a\x1c-\x1f\x7f-\x9f]/g,' ').slice(0,max);
+const clip=(line,width)=>displayWidth(line)<=Math.max(1,width)?line:truncateToWidth(stripAnsi(line),Math.max(1,width),'…');
+const validView=(value)=>COCKPIT_VIEWS.includes(value)?value:'overview';
 
 export function restoreFromActiveBranch(ctx){
   const branch=ctx.sessionManager.getBranch(),entries=Array.isArray(branch)?branch:[];
-  for(let i=entries.length-1;i>=0;i--){const item=entries[i];if(item?.customType===ENTRY&&item.data&&Number.isInteger(item.data.cursor)&&item.data.cursor>=0&&item.data.cursor<states.length)return{cursor:item.data.cursor,scenario:states[item.data.cursor].name,detail:Boolean(item.data.detail)};}
-  return{cursor:0,scenario:states[0].name,detail:false};
+  for(let i=entries.length-1;i>=0;i--){const item=entries[i];if([ENTRY,LEGACY_ENTRY].includes(item?.customType)&&item.data&&Number.isInteger(item.data.cursor)&&item.data.cursor>=0&&item.data.cursor<states.length)return{cursor:item.data.cursor,scenario:states[item.data.cursor].name,view:validView(item.data.view),selected:Number.isInteger(item.data.selected)?Math.max(0,item.data.selected):0};}
+  return{cursor:0,scenario:states[0].name,view:'overview',selected:0};
 }
 
-export function createDetailComponent(snapshot,{tui,theme,keybindings,done,presentation='native'}){
-  let selected=0,showDetail=false,scroll=0;
+const key=(keybindings,data,name,fallback)=>keybindings?.matches?.(data,name)||data===fallback;
+const rowBudget=(tui)=>Math.max(10,Math.min(40,(Number(tui?.terminal?.rows)||24)-5));
+
+export function createCockpitComponent(snapshot,{tui,theme,keybindings,done,history=states,initialView='overview',initialSelected=0,onState=()=>{}}){
+  let view=validView(initialView),selected=Math.max(0,initialSelected),detail=false,search=false,query='',scroll=0,help=false;
   const request=()=>tui.requestRender();
-  const color=useColor(theme);
+  const setView=(next)=>{view=validView(next);detail=false;search=false;scroll=0;help=false;onState({view,selected});request();};
+  const evidence=()=>cockpitView(snapshot,{selected,history}).evidence.filter((x)=>!query||x.search.includes(query.toLowerCase()));
+  const selectedIndex=()=>{const rows=evidence();if(!rows.length)return 0;const id=cockpitView(snapshot,{selected,history}).evidence[selected]?.id;const index=rows.findIndex((x)=>x.id===id);return index<0?0:index;};
+  const selectFiltered=(index)=>{const rows=evidence(),item=rows[Math.max(0,Math.min(rows.length-1,index))];if(item){const all=cockpitView(snapshot,{history}).evidence;selected=Math.max(0,all.findIndex((x)=>x.id===item.id));onState({view,selected});}};
   return{
     render(width){
-      const safeWidth=Math.max(20,Number(width)||80);
-      const body=showDetail?renderEvidenceDetail(snapshot,selected,{width:safeWidth,presentation,color}):renderEvidenceList(snapshot,selected,{width:safeWidth,presentation,color});
-      const bodyRows=MAX_PANEL_ROWS-1,maxOffset=Math.max(0,body.length-bodyRows);
-      if(!showDetail){const marker=body.findIndex(line=>stripAnsi(line).startsWith('>'));if(marker>=0&&marker<scroll)scroll=marker;else if(marker>=scroll+bodyRows)scroll=marker-bodyRows+1;}
-      scroll=Math.max(0,Math.min(scroll,maxOffset));
-      const help=showDetail?'j/k: scroll | Esc: evidence list':'j/k or arrows: select | Enter: detail | Esc: close';
-      return[...body.slice(scroll,scroll+bodyRows),help].map(line=>clip(line,safeWidth));
+      const W=Math.max(20,Number(width)||80),rows=rowBudget(tui),vm=cockpitView(snapshot,{selected,history}),out=[];
+      out.push(...vm.header.slice(0,4),`[1 Overview] [2 Evidence] [3 Usage] [4 Activity]   ${view.toUpperCase()}`,'');
+      if(help)out.push('HELP · 1–4 views · j/k or arrows move · Enter opens · / search · Esc back/close · ? help');
+      else if(view==='evidence'){
+        const filtered=evidence();
+        if(search)out.push(`Search evidence: ${query || ' '}`);
+        if(W>=100){const left=Math.min(46,Math.floor(W*.44)),right=W-left-3;const details=vm.detail;const list=filtered.length?filtered.map((x,i)=>`${i===selectedIndex()?'>':' '} ${x.text}`):['  No matching evidence'];const n=Math.max(list.length,details.length);for(let i=0;i<n;i++)out.push(`${truncateToWidth(list[i]||'',left).padEnd(left)} │ ${truncateToWidth(details[i]||'',right)}`);}
+        else if(detail)out.push('< Back to Evidence','',...vm.detail);
+        else out.push(...(filtered.length?filtered.map((x,i)=>`${i===selectedIndex()?'>':' '} ${x.text}`):['No matching evidence']));
+      }else out.push(...linesForView(snapshot,view,{selected,history}));
+      const footer=search?'Type to filter · Backspace edits · Esc clears search':detail?'j/k scroll · Esc evidence':'j/k scroll · Enter select · / search · Esc close · ? help';
+      const bodyRows=Math.max(4,rows-1),max=Math.max(0,out.length-bodyRows);scroll=Math.max(0,Math.min(scroll,max));
+      if(view==='evidence'&&!detail&&!search){const marker=out.findIndex((x)=>x.startsWith('>'));if(marker>=scroll+bodyRows)scroll=marker-bodyRows+1;else if(marker>=0&&marker<scroll)scroll=marker;}
+      return[...out.slice(scroll,scroll+bodyRows),footer].map((x)=>clip(x,W));
     },
     handleInput(data){
-      const up=keybindings.matches(data,'tui.select.up')||data==='k',down=keybindings.matches(data,'tui.select.down')||data==='j';
-      if(up){if(showDetail)scroll=Math.max(0,scroll-1);else selected=Math.max(0,selected-1);request();}
-      else if(down){if(showDetail)scroll+=1;else selected=Math.min(Math.max(0,snapshot.gates.length-1),selected+1);request();}
-      else if(keybindings.matches(data,'tui.select.confirm')){showDetail=true;scroll=0;request();}
-      else if(keybindings.matches(data,'tui.select.cancel')){if(showDetail){showDetail=false;scroll=0;request();}else done(undefined);}
-      else if(data==='?'){showDetail=false;scroll=0;request();}
-    },
-    invalidate(){},
-    dispose(){showDetail=false;scroll=0;}
+      if(search){if(key(keybindings,data,'tui.select.cancel','\x1b')){search=false;query='';scroll=0;request();return;}if(data==='\x7f'||data==='\b')query=query.slice(0,-1);else if(typeof data==='string'&&data.length===1&&data>=' ')query=clean(query+data,64);selectFiltered(0);scroll=0;request();return;}
+      if(data>='1'&&data<='4'){setView(COCKPIT_VIEWS[Number(data)-1]);return;}
+      if(data==='?'){help=!help;scroll=0;request();return;}
+      if(data==='/'&&view==='evidence'&&!detail){search=true;query='';scroll=0;request();return;}
+      const up=key(keybindings,data,'tui.select.up','k'),down=key(keybindings,data,'tui.select.down','j');
+      if(up){if(view==='evidence'&&!detail)selectFiltered(selectedIndex()-1);else scroll=Math.max(0,scroll-1);request();return;}
+      if(down){if(view==='evidence'&&!detail)selectFiltered(selectedIndex()+1);else scroll++;request();return;}
+      if(key(keybindings,data,'tui.select.confirm','\r')){if(view==='evidence'){detail=true;scroll=0;request();}return;}
+      if(key(keybindings,data,'tui.select.cancel','\x1b')){if(help){help=false;request();}else if(detail){detail=false;scroll=0;request();}else done(undefined);}
+    },invalidate(){},dispose(){query='';search=false;detail=false;}
   };
 }
 
-export function createUsageComponent(snapshot,{tui,theme,keybindings,done,presentation='native'}){
-  let scroll=0;const request=()=>tui.requestRender();const color=useColor(theme);
-  return{render(width){const safeWidth=Math.max(20,Number(width)||80),body=renderUsagePanel(snapshot,{width:safeWidth,presentation,color}),rows=MAX_PANEL_ROWS-1,max=Math.max(0,body.length-rows);scroll=Math.max(0,Math.min(scroll,max));return[...body.slice(scroll,scroll+rows),'j/k or arrows: scroll | Esc: close'].map(line=>clip(line,safeWidth));},handleInput(data){const up=keybindings.matches(data,'tui.select.up')||data==='k',down=keybindings.matches(data,'tui.select.down')||data==='j';if(up){scroll=Math.max(0,scroll-1);request();}else if(down){scroll++;request();}else if(keybindings.matches(data,'tui.select.cancel'))done(undefined);},invalidate(){},dispose(){scroll=0;}};
-}
+export function createDetailComponent(snapshot,options){return createCockpitComponent(snapshot,{...options,initialView:'evidence'});}
+export function createUsageComponent(snapshot,options){return createCockpitComponent(snapshot,{...options,initialView:'usage'});}
 
 export default function forgeDemo(pi){
-  let state={cursor:0,scenario:states[0].name,detail:false},activeCtx=null;
+  let state={cursor:0,scenario:states[0].name,view:'overview',selected:0},activeCtx=null,activeDone=null;
   const current=()=>states[state.cursor].snapshot;
-  const persist=()=>pi.appendEntry(ENTRY,{cursor:state.cursor,scenario:state.scenario,detail:state.detail});
-  const fallback=()=>pi.sendMessage({customType:'forge-demo-output',content:renderCockpit(current(),{width:80,ascii:false,color:false,presentation:'native',hints:HINTS}),display:true,details:{demoOnly:true,scenario:state.scenario,sideEffects:0,authorityIssued:false}},{triggerTurn:false});
-  const clear=()=>{if(activeCtx?.mode==='tui'){activeCtx.ui.setWidget(WIDGET,undefined);activeCtx.ui.setStatus(STATUS,undefined);}};
-  const paint=(ctx)=>{
-    activeCtx=ctx;if(ctx.mode!=='tui')return;const snapshot=current();
-    ctx.ui.setStatus(STATUS,`FORGE DEMO ${snapshot.run.id} ${snapshot.workflow.phase}`);
-    // persistent 4-line UX-2 status widget above the editor; colour only with a real host theme
-    ctx.ui.setWidget(WIDGET,(_tui,theme)=>({render(width){return renderStatusLine(snapshot,{width,presentation:'native',color:useColor(theme)}).map(line=>clip(clean(line),width));},invalidate(){}}),{placement:'aboveEditor'});
-  };
-  const move=(delta,ctx)=>{state.cursor=Math.max(0,Math.min(states.length-1,state.cursor+delta));state.scenario=states[state.cursor].name;persist();paint(ctx);};
-  pi.registerCommand('forge-demo',{description:'Replay synthetic Forge UX-1 fixture states; no model turn or live side effects',handler:async(args,ctx)=>{
-    const parts=clean(args).trim().split(/\s+/).filter(Boolean),cmd=parts[0]||'status';
-    if(cmd==='next')move(1,ctx);else if(cmd==='prev')move(-1,ctx);else if(cmd==='reset'){state={cursor:0,scenario:states[0].name,detail:false};persist();paint(ctx);}
-    else if(cmd==='scenario'){const index=states.findIndex(x=>x.name===parts[1]);if(index<0){if(ctx.hasUI)ctx.ui.notify(`Unknown fixture scenario: ${clean(parts[1])}`,'error');return;}state={cursor:index,scenario:states[index].name,detail:false};persist();paint(ctx);}
-    else if(cmd==='detail'){if(ctx.mode!=='tui'){fallback();return;}await ctx.ui.custom((tui,theme,keybindings,done)=>createDetailComponent(current(),{tui,theme,keybindings,done}));}
-    else if(cmd==='usage'){if(ctx.mode!=='tui'){pi.sendMessage({customType:'forge-demo-output',content:renderUsagePanel(current(),{width:80,ascii:true,presentation:'native'}).join('\n'),display:true,details:{demoOnly:true,scenario:state.scenario,sideEffects:0,authorityIssued:false}},{triggerTurn:false});return;}await ctx.ui.custom((tui,theme,keybindings,done)=>createUsageComponent(current(),{tui,theme,keybindings,done}));}
-    else paint(ctx);if(ctx.mode!=='tui'&&cmd!=='detail')fallback();
+  const persist=()=>pi.appendEntry(ENTRY,{cursor:state.cursor,scenario:state.scenario,view:state.view,selected:state.selected});
+  const fallback=(view=state.view)=>pi.sendMessage({customType:'forge-demo-output',content:['DEMO • SYNTHETIC',...cockpitView(current(),{selected:state.selected,history:states.slice(0,state.cursor+1)}).header,...linesForView(current(),view,{selected:state.selected,history:states.slice(0,state.cursor+1)})].join('\n'),display:true,details:{demoOnly:true,scenario:state.scenario,view,sideEffects:0,authorityIssued:false}},{triggerTurn:false});
+  const clear=()=>{if(activeCtx?.mode==='tui'){activeCtx.ui.setWidget(WIDGET,undefined);activeCtx.ui.setStatus(STATUS,undefined);}if(activeDone){activeDone(undefined);activeDone=null;}};
+  const paint=(ctx)=>{activeCtx=ctx;if(ctx.mode!=='tui')return;const snapshot=current();ctx.ui.setStatus(STATUS,`FORGE SYNTHETIC ${snapshot.run.id} ${snapshot.workflow.phase}`);ctx.ui.setWidget(WIDGET,(_tui,theme)=>({render(width){return renderStatusLine(snapshot,{width,presentation:'native',color:useColor(theme)}).slice(0,4).map((x)=>clip(clean(x),width));},invalidate(){}}),{placement:'aboveEditor'});};
+  const move=(delta,ctx)=>{state.cursor=Math.max(0,Math.min(states.length-1,state.cursor+delta));state.scenario=states[state.cursor].name;state.selected=0;persist();paint(ctx);};
+  const open=async(ctx,view=state.view)=>{state.view=validView(view);if(ctx.mode!=='tui'){fallback(state.view);return;}await ctx.ui.custom((tui,theme,keybindings,done)=>{activeDone=done;return createCockpitComponent(current(),{tui,theme,keybindings,done:(value)=>{activeDone=null;done(value);},history:states.slice(0,state.cursor+1),initialView:state.view,initialSelected:state.selected,onState:(next)=>{state={...state,...next};persist();}});});};
+  pi.registerCommand('forge-demo',{description:'Inspect the synthetic Forge cockpit; no model turn or live side effects',handler:async(args,ctx)=>{
+    const parts=clean(args).trim().split(/\s+/).filter(Boolean),cmd=parts[0]||'cockpit';
+    if(cmd==='next')move(1,ctx);else if(cmd==='prev')move(-1,ctx);else if(cmd==='reset'){state={cursor:0,scenario:states[0].name,view:'overview',selected:0};persist();paint(ctx);}
+    else if(cmd==='scenario'){const index=states.findIndex((x)=>x.name===parts[1]);if(index<0){if(ctx.hasUI)ctx.ui.notify(`Unknown fixture scenario: ${clean(parts[1])}`,'error');return;}state={cursor:index,scenario:states[index].name,view:'overview',selected:0};persist();paint(ctx);}
+    else if(cmd==='view'){if(!COCKPIT_VIEWS.includes(parts[1])){if(ctx.hasUI)ctx.ui.notify('View must be overview, evidence, usage, or activity','error');return;}await open(ctx,parts[1]);}
+    else if(cmd==='detail')await open(ctx,'evidence');else if(cmd==='usage')await open(ctx,'usage');else if(cmd==='cockpit'||cmd==='status')await open(ctx,state.view);else if(ctx.hasUI)ctx.ui.notify(`Unknown forge-demo command: ${cmd}`,'error');
   }});
   pi.on('session_start',(_event,ctx)=>{activeCtx=ctx;state=restoreFromActiveBranch(ctx);paint(ctx);});
   pi.on('session_shutdown',()=>{clear();activeCtx=null;});

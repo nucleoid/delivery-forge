@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import forgeDemo,{createDetailComponent,createUsageComponent,restoreFromActiveBranch} from '../hosts/pi/forge-demo-extension.js';
+import forgeDemo,{createCockpitComponent,createDetailComponent,createUsageComponent,restoreFromActiveBranch} from '../hosts/pi/forge-demo-extension.js';
 import { getScenario } from '../src/fixtures.mjs';
 
 function harness(mode='tui',branch=[]){
@@ -28,3 +28,14 @@ test('Pi component invalidation is cache-only and widget rendering receives host
 test('Pi usage command opens a bounded keyboard panel and non-TUI emits no model turn',async()=>{const h=harness();h.handlers.session_start({},h.ctx);await h.commands['forge-demo'].handler('scenario failed-gate',h.ctx);await h.commands['forge-demo'].handler('usage',h.ctx);const component=h.calls.findLast(x=>x[0]==='custom')[1];for(const width of [40,80,120])assert.ok(component.render(width).length<=18&&component.render(width).every(line=>[...line].length<=width));assert.match(component.render(80).join('\n'),/USD API-EQUIVALENT/);component.handleInput('j');component.handleInput('\x1b');const rpc=harness('rpc');await rpc.commands['forge-demo'].handler('usage',rpc.ctx);const message=rpc.calls.find(x=>x[0]==='message');assert.equal(message[2].triggerTurn,false);assert.match(message[1].content,/SYNTHETIC TOKENS/);});
 
 test('Pi widget keeps ANSI colour intact when the host supplies a real theme, and stays width-bounded',()=>{const h=harness();h.handlers.session_start({},h.ctx);const widget=h.calls.find(x=>x[0]==='widget');const colored=widget[2]({requestRender(){}},{fg(){return '';}});const lines=colored.render(80);assert.ok(lines.some(line=>line.includes('\x1b[')),'SGR sequences present');for(const line of lines){assert.doesNotMatch(line,/(^|[^\x1b])\[38;2;/,'no literal colour code');assert.ok([...line.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g,'')].length<=80);}const plain=widget[2]({requestRender(){}},{});assert.ok(plain.render(80).every(line=>!line.includes('\x1b')));});
+
+test('Pi cockpit has four keyboard views, bounded search, retained evidence selection and help',()=>{
+  const renders=[],done=[];const keys={matches:(d,k)=>({j:'tui.select.down',k:'tui.select.up','\r':'tui.select.confirm','\x1b':'tui.select.cancel'}[d]===k)};
+  const c=createCockpitComponent(getScenario('failed-gate').snapshot,{tui:{terminal:{rows:30,columns:120},requestRender:()=>renders.push(1)},keybindings:keys,done:(x)=>done.push(x)});
+  c.handleInput('2');assert.match(c.render(120).join('\n'),/EVIDENCE/);c.handleInput('j');c.handleInput('/');for(const ch of 'tests')c.handleInput(ch);assert.match(c.render(120).join('\n'),/>.*Tests/);c.handleInput('\x1b');c.handleInput('\r');assert.match(c.render(80).join('\n'),/receipt-tests/);c.handleInput('\x1b');assert.match(c.render(80).join('\n'),/>.*Tests/);c.handleInput('?');assert.match(c.render(80).join('\n'),/HELP/);assert.ok(renders.length>0);assert.equal(done.length,0);
+});
+
+test('Pi cockpit uses actual terminal height and wide list/detail composition',()=>{
+  const keys={matches:()=>false};
+  for(const rows of [24,30]){const c=createCockpitComponent(getScenario('failed-gate').snapshot,{tui:{terminal:{rows,columns:120},requestRender(){}},keybindings:keys,done(){},initialView:'evidence'});const out=c.render(120);assert.ok(out.length<=rows-4);assert.match(out.join('\n'),/│/);assert.match(out.join('\n'),/receipt-build/);}
+});
