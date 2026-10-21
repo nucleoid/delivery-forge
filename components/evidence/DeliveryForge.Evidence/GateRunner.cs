@@ -245,9 +245,10 @@ public sealed class GateRunner
         EvaluationPluginSnapshot evidenceSnapshot;
         try
         {
-            _ = Remaining(deadline);
-            evidenceSnapshot = plugin.CaptureBefore(request);
-            _ = Remaining(deadline);
+            using var snapshotDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            snapshotDeadline.CancelAfter(Remaining(deadline));
+            evidenceSnapshot = await plugin.CaptureBeforeAsync(request, snapshotDeadline.Token)
+                .ConfigureAwait(false);
         }
         catch (OperationCanceledException exception)
         {
@@ -257,7 +258,8 @@ public sealed class GateRunner
                     $"Evidence snapshot exceeded the finite gate deadline: {exception.Message}"),
                 pluginBinding, CancellationToken.None).ConfigureAwait(false);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or
+                                           ArgumentException or NotSupportedException or JsonException)
         {
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, before, before,
@@ -268,6 +270,11 @@ public sealed class GateRunner
                 pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
         }
+        pluginBinding = DeterministicEvaluationPluginRegistry.Bind(
+            request, plugin, EvaluationPluginStatus.Selected, snapshot: evidenceSnapshot) with
+        {
+            InputSetIdentity = pluginBinding.InputSetIdentity
+        };
 
         CommandResult execution;
         var captureBoundExceeded = false;
@@ -360,13 +367,14 @@ public sealed class GateRunner
             normalized = NormalizedEvidence.Error($"Evidence normalizer failed: {exception.Message}");
         }
         var pluginRawOutcome = normalized.Outcome;
+        var postExecutionValidation = plugin.ValidateAfterExecution(request, evidenceSnapshot);
         if (identityReadFailed)
             normalized = NormalizedEvidence.Incomplete("Repository identity could not be read after evaluation.");
         else if (sourceChanged)
             normalized = NormalizedEvidence.Error("Repository source/index/status identity changed during evaluation.");
         else if (ValidateCapabilityBinding(request, plugin) is { } postCapabilityValidation)
             normalized = postCapabilityValidation;
-        else if (plugin.ValidateAfterExecution(request, evidenceSnapshot) is { } postExecutionValidation)
+        else if (postExecutionValidation is not null)
             normalized = postExecutionValidation;
         else if (!execution.OwnedProcessQuiescent)
             normalized = NormalizedEvidence.Incomplete(
@@ -430,7 +438,8 @@ public sealed class GateRunner
             pluginRawOutcome == GateOutcome.NotApplicable
                 ? EvaluationPluginStatus.NotApplicable
                 : EvaluationPluginStatus.Executed,
-            OutcomeText(pluginRawOutcome));
+            OutcomeText(pluginRawOutcome),
+            evidenceSnapshot);
         if (scopeValidation.InputSetIdentity is not null)
             executedPlugin = executedPlugin with { InputSetIdentity = scopeValidation.InputSetIdentity };
         var publishedDirectory = PublishAttemptDirectory(gateDirectory, out var publicationFailure);

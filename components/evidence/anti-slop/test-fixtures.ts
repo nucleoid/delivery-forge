@@ -46,8 +46,21 @@ function run(fixture:
   | "violation-for-await-of-regex"
   | "suppression-hashbang-backtick"
   | "violation-hashbang-backtick"
+  | "bom-hashbang"
+  | "suppression-eslint-accumulating-spread"
+  | "violation-eslint-accumulating-spread"
   | "suppression-jsx-expression-container"
   | "violation-jsx-expression-container"
+  | "suppression-less-than-regex"
+  | "violation-less-than-regex"
+  | "suppression-export-default-regex"
+  | "violation-export-default-regex"
+  | "suppression-extends-regex"
+  | "violation-extends-regex"
+  | "suppression-property-keyword-newline"
+  | "violation-property-keyword-newline"
+  | "suppression-prefix-update-regex"
+  | "violation-prefix-update-regex"
   | "suppression-blanket-specific-enable"
   | "suppression-prefixed-alias"): {
   status: number | null;
@@ -154,6 +167,11 @@ for (const [suppressedName, violationName] of [
   ["suppression-for-await-of-regex", "violation-for-await-of-regex"],
   ["suppression-hashbang-backtick", "violation-hashbang-backtick"],
   ["suppression-jsx-expression-container", "violation-jsx-expression-container"],
+  ["suppression-less-than-regex", "violation-less-than-regex"],
+  ["suppression-export-default-regex", "violation-export-default-regex"],
+  ["suppression-extends-regex", "violation-extends-regex"],
+  ["suppression-property-keyword-newline", "violation-property-keyword-newline"],
+  ["suppression-prefix-update-regex", "violation-prefix-update-regex"],
 ] as const) {
   const violationControl = run(violationName);
   assert.equal(violationControl.status, 1);
@@ -166,6 +184,26 @@ for (const [suppressedName, violationName] of [
     (diagnostic) => diagnostic.code !== "anti-slop(no-chained-type-assertions)",
   ), `${suppressedName}: pinned Oxlint must honor the exact reviewer directive`);
 }
+
+const accumulatingSpreadViolation = run("violation-eslint-accumulating-spread");
+assert.equal(accumulatingSpreadViolation.status, 1);
+assert.ok(accumulatingSpreadViolation.report.diagnostics.some(
+  (diagnostic) => diagnostic.code === "oxc(no-accumulating-spread)",
+), "matched control must prove the configured oxc/no-accumulating-spread rule executes");
+
+const accumulatingSpreadAlias = run("suppression-eslint-accumulating-spread");
+assert.equal(accumulatingSpreadAlias.status, 0);
+assert.ok(accumulatingSpreadAlias.report.diagnostics.every(
+  (diagnostic) => diagnostic.code !== "oxc(no-accumulating-spread)",
+), "pinned Oxlint must honor eslint/no-accumulating-spread as an alias for the configured oxc rule");
+
+const bomHashbang = run("bom-hashbang");
+assert.equal(bomHashbang.status, 1);
+assert.equal(bomHashbang.report.number_of_files, 1);
+assert.equal(bomHashbang.report.number_of_rules, 19);
+assert.ok(bomHashbang.report.diagnostics.some(
+  (diagnostic) => diagnostic.code === undefined,
+), "pinned Oxlint 1.78.0 must expose BOM+hashbang as a parser diagnostic, which normalizes to INCOMPLETE");
 
 for (const bypass of [
   "suppression-line-division",
@@ -192,4 +230,4 @@ for (const name of ["suppression-bare", "suppression-unknown"] as const) {
   assert.deepEqual(result.report.diagnostics, []);
 }
 
-console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, suppression attacks plus matched ASI statement-regex/for-await/hashbang and prior controls verified");
+console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, suppression attacks plus matched regex/division ambiguity controls verified");

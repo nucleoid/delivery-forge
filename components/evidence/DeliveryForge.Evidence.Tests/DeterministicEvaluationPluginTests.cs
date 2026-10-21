@@ -265,7 +265,7 @@ public sealed class DeterministicEvaluationPluginTests
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
-        Assert.Contains("runtime pin", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("advisory", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.False(result.ProductionCapable);
     }
 
@@ -448,12 +448,13 @@ public sealed class DeterministicEvaluationPluginTests
         });
         Assert.Equal(GateOutcome.Incomplete, poisoned?.Outcome);
         Assert.Contains("allow-listed", poisoned?.Reason, StringComparison.OrdinalIgnoreCase);
-        var mismatched = plugin.ValidateBeforeExecution(canonical with
+        var mismatched = canonical with
         {
             ConfigurationIdentity = TestEvidence.Identity('9')
-        });
-        Assert.Equal(GateOutcome.Incomplete, mismatched?.Outcome);
-        Assert.Contains("configuration closure", mismatched?.Reason, StringComparison.OrdinalIgnoreCase);
+        };
+        var mismatchError = await Assert.ThrowsAsync<InvalidOperationException>(async () =>
+            await plugin.CaptureBeforeAsync(mismatched, TestContext.Current.CancellationToken));
+        Assert.Contains("configuration closure", mismatchError.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -486,7 +487,7 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
-    public void Anti_slop_revalidates_the_configuration_and_runtime_closure_after_execution()
+    public async Task Anti_slop_reuses_the_deadline_bounded_configuration_and_runtime_snapshot()
     {
         using var temp = new TempDirectory();
         var (config, nodePath, entryPoint) = CreateFixtureAntiSlopClosure(temp.Path);
@@ -508,15 +509,107 @@ public sealed class DeterministicEvaluationPluginTests
         };
         var plugin = AntiSlopEvaluationPlugin.CreateBundledForFixture(
             System.IO.Path.GetDirectoryName(config)!, nodePath);
-        var snapshot = plugin.CaptureBefore(request);
+        var snapshot = await plugin.CaptureBeforeAsync(request, TestContext.Current.CancellationToken);
         File.AppendAllText(
             System.IO.Path.Combine(temp.Path, "anti-slop-bundle", "vendor", "anti-slop", "index.ts"),
             "// changed");
 
         var result = plugin.ValidateAfterExecution(request, snapshot);
 
-        Assert.Equal(GateOutcome.Incomplete, result?.Outcome);
-        Assert.Contains("changed", result?.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(result);
+    }
+
+    [Fact]
+    public async Task Anti_slop_runtime_snapshot_honors_cancellation_before_closure_reads()
+    {
+        using var temp = new TempDirectory();
+        var (config, nodePath, entryPoint) = CreateFixtureAntiSlopClosure(temp.Path);
+        var original = TestEvidence.GateRequest(temp.Path);
+        var invocation = original.Invocation with
+        {
+            FileName = nodePath,
+            Arguments = [entryPoint, "--config", config, "--format", "json", "--no-ignore", "--disable-nested-config", "src/app.ts"],
+            Environment = new Dictionary<string, string>(StringComparer.Ordinal),
+            InheritEnvironment = false
+        };
+        var request = original with
+        {
+            Adapter = EvidenceAdapterKind.External,
+            ConfigurationIdentity = AntiSlopEvaluationPlugin.ComputeConfigurationIdentity(invocation, false),
+            Invocation = invocation,
+            Plugin = new EvaluationPluginSelection("dmmulroy.anti-slop", true, ["src/app.ts"])
+        };
+        var plugin = AntiSlopEvaluationPlugin.CreateBundledForFixture(
+            System.IO.Path.GetDirectoryName(config)!, nodePath);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(async () =>
+            await plugin.CaptureBeforeAsync(request, cancellation.Token));
+    }
+
+    [Theory]
+    [InlineData("closure-file")]
+    [InlineData("binding")]
+    [InlineData("node")]
+    public async Task Broken_anti_slop_runtime_closure_persists_incomplete_without_execution(string missing)
+    {
+        using var temp = new TempDirectory();
+        var (config, nodePath, entryPoint) = CreateFixtureAntiSlopClosure(temp.Path);
+        var root = System.IO.Path.GetDirectoryName(config)!;
+        var original = TestEvidence.GateRequest(temp.Path);
+        var invocation = original.Invocation with
+        {
+            FileName = nodePath,
+            Arguments = [entryPoint, "--config", config, "--format", "json", "--no-ignore", "--disable-nested-config", "src/app.ts"],
+            Environment = new Dictionary<string, string>(StringComparer.Ordinal),
+            InheritEnvironment = false
+        };
+        var executableIdentity = $"sha256:{Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(nodePath)))}";
+        var request = original with
+        {
+            Capability = ToolCapability.FromDetection(
+                "oxlint", "1.78.0", "oxlint-json-v1", false, [], nodePath,
+                executableIdentity, ["lint"], invocation.WorkingDirectory),
+            Adapter = EvidenceAdapterKind.External,
+            ConfigurationIdentity = AntiSlopEvaluationPlugin.ComputeConfigurationIdentity(invocation, false),
+            Invocation = invocation,
+            Plugin = new EvaluationPluginSelection("dmmulroy.anti-slop", true, ["src/app.ts"])
+        };
+        switch (missing)
+        {
+            case "closure-file":
+                File.Delete(System.IO.Path.Combine(root, "vendor", "anti-slop", "index.ts"));
+                break;
+            case "binding":
+                Directory.Delete(System.IO.Path.Combine(root, "node_modules", "@oxlint", "binding-fixture"), true);
+                break;
+            case "node":
+                File.Delete(nodePath);
+                break;
+        }
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new ScopedSequenceRepositoryIdentityReader(
+                new RepositoryEvaluationScope(["src/app.ts"], new HashSet<string>(StringComparer.Ordinal)),
+                TestEvidence.Repository()),
+            invocation.WorkingDirectory,
+            TestEvidence.Commit('a'),
+            DeterministicEvaluationPluginRegistry.CreateBuiltIns(root, nodePath));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains(
+            missing == "node" ? "capability executable" : "closure",
+            result.Reason,
+            StringComparison.OrdinalIgnoreCase);
+        Assert.Null(result.Execution.ExitCode);
+        Assert.True(File.Exists(result.ReceiptPath));
+        using var receipt = System.Text.Json.JsonDocument.Parse(
+            await File.ReadAllBytesAsync(result.ReceiptPath, TestContext.Current.CancellationToken));
+        Assert.Equal("INCOMPLETE", receipt.RootElement.GetProperty("outcome").GetString());
     }
 
     [Fact]
@@ -834,7 +927,7 @@ public sealed class DeterministicEvaluationPluginTests
         if (omitTrackedInput)
             Assert.Contains("protected-base scope", result.Reason, StringComparison.OrdinalIgnoreCase);
         else
-            Assert.Contains("runtime pin", result.Reason, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains("runtime closure", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -1194,7 +1287,13 @@ public sealed class DeterministicEvaluationPluginTests
         public string ExpectedTool => expectedTool;
         public EvidenceAdapterKind CompatibilityAdapter => EvidenceAdapterKind.External;
 
-        public EvaluationPluginSnapshot CaptureBefore(GateRequest request) => EvaluationPluginSnapshot.Empty;
+        public ValueTask<EvaluationPluginSnapshot> CaptureBeforeAsync(
+            GateRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(EvaluationPluginSnapshot.Empty);
+        }
 
         public NormalizedEvidence Normalize(
             GateRequest request,

@@ -103,9 +103,15 @@ internal static class JavaScriptSuppressionScanner
         {
             budget.Check(index);
             var current = content[index];
-            if (index == 0 && current == (byte)'#' && content.Length > 1 && content[1] == (byte)'!')
+            if (index == 0 && content.Length >= 3 && content[0] == 0xef && content[1] == 0xbb && content[2] == 0xbf)
             {
-                index = 2;
+                index = 3;
+                continue;
+            }
+            if ((index == 0 || index == 3 && content[0] == 0xef && content[1] == 0xbb && content[2] == 0xbf) &&
+                current == (byte)'#' && index + 1 < content.Length && content[index + 1] == (byte)'!')
+            {
+                index += 2;
                 while (index < content.Length && content[index] is not ((byte)'\r') and not ((byte)'\n') &&
                        !IsUnicodeLineTerminator(content, index))
                 {
@@ -190,8 +196,11 @@ internal static class JavaScriptSuppressionScanner
                 lineTerminatorSinceLastToken |= startsAfterLineTerminator;
                 continue;
             }
-            if (current == (byte)'/' && canStartRegularExpression &&
-                (index == 0 || content[index - 1] != (byte)'<'))
+            if (current == (byte)'/' && index > 0 && content[index - 1] == (byte)'<')
+                throw Ambiguous("a slash directly after '<' can be division or a regular expression");
+            if (current == (byte)'/' && PreviousSignificantTokenIsUpdateOperator(content, index))
+                throw Ambiguous("a slash after '++' or '--' can be division or a regular expression");
+            if (current == (byte)'/' && canStartRegularExpression)
             {
                 if (PreviousSignificantByte(content, index) == (byte)'}')
                     throw Ambiguous(
@@ -253,7 +262,6 @@ internal static class JavaScriptSuppressionScanner
             }
             if (IsIdentifierStart(current))
             {
-                var keywordPosition = canStartRegularExpression;
                 var start = index++;
                 while (index < content.Length && IsIdentifierPart(content[index]))
                 {
@@ -261,14 +269,21 @@ internal static class JavaScriptSuppressionScanner
                     index++;
                 }
                 var identifier = Encoding.ASCII.GetString(content.Slice(start, index - start));
+                var previousSignificantByte = PreviousSignificantByte(content, start);
+                var keywordPosition = canStartRegularExpression &&
+                    previousSignificantByte is not ((byte)'.') and not ((byte)'#');
                 keywordPosition = keywordPosition || startsAfterLineTerminator &&
+                    previousSignificantByte is not ((byte)'.') and not ((byte)'#') &&
                     (ExpressionPrefixKeywords.Contains(identifier) ||
                      identifier is "if" or "while" or "for" or "with" or "switch" or "catch");
+                keywordPosition = keywordPosition ||
+                    previousSignificantByte is not ((byte)'.') and not ((byte)'#') &&
+                    identifier is "default" or "extends";
                 var contextualForOf = !keywordPosition && identifier == "of" &&
                     forParentheses.Count > 0 && forParentheses.Peek() &&
-                    PreviousSignificantByte(content, start) != (byte)'.';
+                    previousSignificantByte != (byte)'.';
                 var forAwait = identifier == "await" && expectForParenthesis &&
-                    PreviousSignificantByte(content, start) != (byte)'.';
+                    previousSignificantByte != (byte)'.';
                 expectControlParenthesis = forAwait || keywordPosition &&
                     identifier is "if" or "while" or "for" or "with" or "switch" or "catch";
                 expectForParenthesis = forAwait || keywordPosition && identifier == "for";
@@ -607,6 +622,15 @@ internal static class JavaScriptSuppressionScanner
         return null;
     }
 
+    private static bool PreviousSignificantTokenIsUpdateOperator(ReadOnlySpan<byte> content, int index)
+    {
+        var previous = index - 1;
+        while (previous >= 0 && IsWhitespace(content[previous]))
+            previous--;
+        return previous > 0 && content[previous] is (byte)'+' or (byte)'-' &&
+            content[previous - 1] == content[previous];
+    }
+
     private static bool IsUnicodeLineTerminator(ReadOnlySpan<byte> content, int index) =>
         index + 2 < content.Length && content[index] == 0xe2 && content[index + 1] == 0x80 &&
         content[index + 2] is 0xa8 or 0xa9;
@@ -660,7 +684,7 @@ internal static class JavaScriptSuppressionScanner
         // await/yield are expression prefixes in the module-oriented JavaScript-family inputs
         // accepted by anti-slop. Treating their following slash as division can hide a later
         // directive by desynchronizing quotes inside a regular expression.
-        "await", "case", "delete", "do", "else", "in", "instanceof", "new", "return", "throw",
+        "await", "case", "default", "delete", "do", "else", "extends", "in", "instanceof", "new", "return", "throw",
         "typeof", "void", "yield"
     };
 
@@ -724,7 +748,7 @@ internal sealed record SuppressionCoverage(
 
     private static readonly HashSet<string> KnownBareAntiSlopRules = new(StringComparer.Ordinal)
     {
-        "no-array-filter-map", "no-chained-type-assertions", "no-conditional-empty-object-spread",
+        "no-accumulating-spread", "no-array-filter-map", "no-chained-type-assertions", "no-conditional-empty-object-spread",
         "no-known-value-widening", "no-module-mocking", "no-object-parameters",
         "no-reduce-accumulator-copy", "no-reflect-apply", "no-reflect-get",
         "no-runtime-typeof", "no-shape-in-symbol-names", "no-unknown-parameters",

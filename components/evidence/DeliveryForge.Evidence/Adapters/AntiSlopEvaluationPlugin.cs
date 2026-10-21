@@ -111,12 +111,34 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             .ToArray();
     }
 
-    public EvaluationPluginSnapshot CaptureBefore(GateRequest request)
+    public async ValueTask<EvaluationPluginSnapshot> CaptureBeforeAsync(
+        GateRequest request,
+        CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var inputs = DeterministicEvaluationPluginRegistry.NormalizeInputs(request.Plugin?.Inputs ?? []);
+        var effectRulesEnabled = request.Plugin?.EnableEffectRules == true;
+        var cache = new ClosureReadCache();
+        var runtimeClosureIdentity = !_enforceReviewedPins || _trustedBundleRoot is null || _trustedNodePath is null
+            ? request.ConfigurationIdentity
+            : await ComputeRuntimeClosureIdentityAsync(
+                _trustedBundleRoot, _trustedNodePath, effectRulesEnabled, cache, cancellationToken)
+                .ConfigureAwait(false);
+        if (_enforceReviewedPins && _trustedBundleRoot is not null && _trustedNodePath is not null)
+            await ValidateReviewedPinsAsync(
+                    _trustedBundleRoot, _trustedNodePath, effectRulesEnabled, runtimeClosureIdentity,
+                    cache, cancellationToken)
+                .ConfigureAwait(false);
+        var configurationIdentity = await ComputeConfigurationIdentityAsync(
+                request.Invocation, effectRulesEnabled, inputs, cache, cancellationToken)
+            .ConfigureAwait(false);
+        if (!string.Equals(configurationIdentity, request.ConfigurationIdentity, StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                "Anti-slop configuration closure does not match the frozen configuration identity.");
         return new EvaluationPluginSnapshot(new AntiSlopSnapshot(
             inputs,
-            ComputeConfigurationIdentity(request.Invocation, request.Plugin?.EnableEffectRules == true)));
+            configurationIdentity,
+            runtimeClosureIdentity));
     }
 
     public NormalizedEvidence? ValidateBeforeExecution(GateRequest request)
@@ -178,9 +200,6 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
                 !string.Equals(Path.GetFullPath(request.Invocation.FileName), _trustedNodePath, PathComparison))
                 return NormalizedEvidence.Incomplete(
                     "Anti-slop invocation does not use the code-owned registered bundle and Node runtime.");
-            if (_enforceReviewedPins)
-                ValidateReviewedPins(_trustedBundleRoot, _trustedNodePath,
-                    request.Plugin?.EnableEffectRules == true);
         }
         catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException or
                                            IOException or UnauthorizedAccessException or InvalidOperationException or JsonException)
@@ -188,22 +207,6 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             return NormalizedEvidence.Incomplete(
                 $"Anti-slop bundle/runtime pin or path is invalid: {exception.Message}");
         }
-        string configIdentity;
-        try
-        {
-            configIdentity = ComputeConfigurationIdentity(
-                request.Invocation,
-                request.Plugin?.EnableEffectRules == true);
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
-        {
-            return NormalizedEvidence.Incomplete(
-                $"Anti-slop configuration closure is unavailable: {exception.Message}");
-        }
-        if (!string.Equals(configIdentity, request.ConfigurationIdentity, StringComparison.Ordinal))
-            return NormalizedEvidence.Incomplete(
-                "Anti-slop configuration closure does not match the frozen configuration identity.");
-
         return null;
     }
 
@@ -213,27 +216,18 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
     {
         if (snapshot.State is not AntiSlopSnapshot state)
             return NormalizedEvidence.Error("Anti-slop snapshot is missing or mismatched.");
-        try
-        {
-            var after = ComputeConfigurationIdentity(
-                request.Invocation,
-                request.Plugin?.EnableEffectRules == true);
-            return string.Equals(after, state.ConfigurationIdentity, StringComparison.Ordinal)
-                ? null
-                : NormalizedEvidence.Incomplete("Anti-slop configuration or runtime closure changed during evaluation.");
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
-        {
-            return NormalizedEvidence.Incomplete(
-                $"Anti-slop configuration or runtime closure became unavailable: {exception.Message}");
-        }
+        return string.Equals(state.ConfigurationIdentity, request.ConfigurationIdentity, StringComparison.Ordinal)
+            ? null
+            : NormalizedEvidence.Incomplete(
+                "Anti-slop configuration snapshot does not match the frozen configuration identity.");
     }
 
-    public string GetRuntimeClosureIdentity(GateRequest request) =>
-        !_enforceReviewedPins || _trustedBundleRoot is null || _trustedNodePath is null
-            ? request.ConfigurationIdentity
-            : ComputeRuntimeClosureIdentity(
-                _trustedBundleRoot, _trustedNodePath, request.Plugin?.EnableEffectRules == true);
+    public string GetRuntimeClosureIdentity(
+        GateRequest request,
+        EvaluationPluginSnapshot? snapshot = null) =>
+        snapshot?.State is AntiSlopSnapshot state
+            ? state.RuntimeClosureIdentity
+            : request.ConfigurationIdentity;
 
     public NormalizedEvidence Normalize(
         GateRequest request,
@@ -375,7 +369,13 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             string.Equals(binding.PluginVersion, Version, StringComparison.Ordinal) &&
             string.Equals(binding.Tool, ExpectedTool, StringComparison.Ordinal));
 
-    private static void ValidateReviewedPins(string root, string nodePath, bool effectRulesEnabled)
+    private static async ValueTask ValidateReviewedPinsAsync(
+        string root,
+        string nodePath,
+        bool effectRulesEnabled,
+        string actualClosure,
+        ClosureReadCache cache,
+        CancellationToken cancellationToken)
     {
         var expected = new Dictionary<string, string>(StringComparer.Ordinal)
         {
@@ -388,13 +388,17 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             expected["oxlint.effect.config.ts"] = ReviewedEffectConfigSha256;
         foreach (var (relative, digest) in expected)
         {
-            var bytes = File.ReadAllBytes(Path.Combine(root, relative));
+            cancellationToken.ThrowIfCancellationRequested();
+            var bytes = await cache.ReadFileAsync(Path.Combine(root, relative), cancellationToken)
+                .ConfigureAwait(false);
             if (!string.Equals(Convert.ToHexStringLower(SHA256.HashData(bytes)), digest, StringComparison.Ordinal))
                 throw new InvalidOperationException(
                     $"Anti-slop runtime file '{relative}' does not match its reviewed immutable pin.");
         }
-        using var package = JsonDocument.Parse(File.ReadAllBytes(
-            Path.Combine(root, "node_modules", "oxlint", "package.json")));
+        var packageBytes = await cache.ReadFileAsync(
+                Path.Combine(root, "node_modules", "oxlint", "package.json"), cancellationToken)
+            .ConfigureAwait(false);
+        using var package = JsonDocument.Parse(packageBytes);
         if (package.RootElement.GetProperty("version").GetString() != OxlintVersion)
             throw new InvalidOperationException("Installed Oxlint package version differs from the reviewed runtime pin.");
         if (!OperatingSystem.IsLinux() || System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture !=
@@ -402,13 +406,155 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             !Directory.Exists(Path.Combine(root, "node_modules", "@oxlint", "binding-linux-x64-gnu")))
             throw new InvalidOperationException(
                 "The complete reviewed anti-slop runtime closure is not pinned for this platform binding.");
-        var actualClosure = ComputeRuntimeClosureIdentity(root, nodePath, effectRulesEnabled);
+        cancellationToken.ThrowIfCancellationRequested();
         var expectedClosure = effectRulesEnabled
             ? ReviewedLinuxX64GnuEffectRuntimeClosureSha256
             : ReviewedLinuxX64GnuRuntimeClosureSha256;
         if (!string.Equals(actualClosure, expectedClosure, StringComparison.Ordinal))
             throw new InvalidOperationException(
                 $"The complete anti-slop executable runtime closure differs from the reviewed pin: {actualClosure}.");
+    }
+
+    private static async ValueTask<string> ComputeRuntimeClosureIdentityAsync(
+        string root,
+        string nodePath,
+        bool effectRulesEnabled,
+        ClosureReadCache cache,
+        CancellationToken cancellationToken)
+    {
+        root = Path.GetFullPath(root);
+        nodePath = Path.GetFullPath(nodePath);
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        await AppendClosureFileAsync(hash, root, Path.Combine(root, "package.json"), cache, cancellationToken);
+        await AppendClosureFileAsync(hash, root, Path.Combine(root, "package-lock.json"), cache, cancellationToken);
+        await AppendClosureFileAsync(hash, root, Path.Combine(root, "oxlint.config.ts"), cache, cancellationToken);
+        await AppendClosureFileAsync(hash, root, Path.Combine(root, "run-oxlint-batches.mjs"), cache, cancellationToken);
+        if (effectRulesEnabled)
+            await AppendClosureFileAsync(
+                hash, root, Path.Combine(root, "oxlint.effect.config.ts"), cache, cancellationToken);
+        await AppendClosureDirectoryAsync(
+            hash, root, Path.Combine(root, "vendor", "anti-slop"), cache, cancellationToken);
+        await AppendClosureDirectoryAsync(
+            hash, root, Path.Combine(root, "node_modules", "@oxlint", "plugins"), cache, cancellationToken);
+        await AppendClosureDirectoryAsync(
+            hash, root, Path.Combine(root, "node_modules", "oxlint"), cache, cancellationToken);
+        var bindings = cache.EnumerateDirectories(
+            Path.Combine(root, "node_modules", "@oxlint"), "binding-*", cancellationToken);
+        if (bindings.Count != 1)
+            throw new InvalidOperationException("Exactly one reviewed Oxlint platform binding must be installed.");
+        await AppendClosureDirectoryAsync(hash, root, bindings[0], cache, cancellationToken);
+        await AppendClosureFileAsync(
+            hash, Path.GetDirectoryName(nodePath)!, nodePath, cache, cancellationToken, "runtime/node-bytes");
+        return $"sha256:{Convert.ToHexStringLower(hash.GetHashAndReset())}";
+    }
+
+    private static async ValueTask<string> ComputeConfigurationIdentityAsync(
+        CommandInvocation invocation,
+        bool effectRulesEnabled,
+        IReadOnlyList<string> expectedInputs,
+        ClosureReadCache cache,
+        CancellationToken cancellationToken)
+    {
+        var batched = invocation.Arguments.Count == 7 && invocation.Arguments[1] == "--oxlint";
+        var configIndex = batched ? 4 : 2;
+        if (invocation.Arguments.Count <= configIndex ||
+            invocation.Arguments[batched ? 3 : 1] != "--config")
+            throw new InvalidOperationException("The canonical Oxlint configuration argument is missing.");
+
+        var configPath = Path.GetFullPath(invocation.Arguments[configIndex]);
+        var root = Path.GetDirectoryName(configPath) ??
+            throw new InvalidOperationException("The Oxlint configuration root is unavailable.");
+        var expectedConfig = effectRulesEnabled ? "oxlint.effect.config.ts" : "oxlint.config.ts";
+        if (!string.Equals(Path.GetFileName(configPath), expectedConfig, StringComparison.Ordinal))
+            throw new InvalidOperationException($"The selected configuration is not {expectedConfig}.");
+
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        await AppendClosureFileAsync(hash, root, Path.Combine(root, "package.json"), cache, cancellationToken);
+        await AppendClosureFileAsync(hash, root, Path.Combine(root, "package-lock.json"), cache, cancellationToken);
+        await AppendClosureFileAsync(hash, root, Path.Combine(root, "oxlint.config.ts"), cache, cancellationToken);
+        await AppendClosureFileAsync(hash, root, Path.Combine(root, "run-oxlint-batches.mjs"), cache, cancellationToken);
+        if (effectRulesEnabled)
+            await AppendClosureFileAsync(
+                hash, root, Path.Combine(root, "oxlint.effect.config.ts"), cache, cancellationToken);
+        await AppendClosureDirectoryAsync(
+            hash, root, Path.Combine(root, "vendor", "anti-slop"), cache, cancellationToken);
+        await AppendClosureDirectoryAsync(
+            hash, root, Path.Combine(root, "node_modules", "oxlint"), cache, cancellationToken);
+        await AppendClosureDirectoryAsync(
+            hash, root, Path.Combine(root, "node_modules", "@oxlint", "plugins"), cache, cancellationToken);
+
+        var bindingsRoot = Path.Combine(root, "node_modules", "@oxlint");
+        var bindings = Directory.Exists(bindingsRoot)
+            ? cache.EnumerateDirectories(bindingsRoot, "binding-*", cancellationToken)
+            : [];
+        if (bindings.Count == 0)
+            throw new InvalidOperationException("The pinned Oxlint native binding is unavailable.");
+        foreach (var binding in bindings)
+            await AppendClosureDirectoryAsync(hash, root, binding, cache, cancellationToken);
+
+        var nodePath = invocation.FileName;
+        if (!Path.IsPathFullyQualified(nodePath))
+            throw new InvalidOperationException("The Node.js runtime path is not absolute.");
+        var expectedEntryPoint = Path.GetFullPath(Path.Combine(root, "node_modules", "oxlint", "bin", "oxlint"));
+        var actualEntryPoint = batched ? invocation.Arguments[2] : invocation.Arguments[0];
+        if (!string.Equals(Path.GetFullPath(actualEntryPoint), expectedEntryPoint, PathComparison))
+            throw new InvalidOperationException("The Oxlint entrypoint is not the pinned package-local launcher.");
+        if (batched)
+        {
+            var expectedRunner = Path.GetFullPath(Path.Combine(root, "run-oxlint-batches.mjs"));
+            if (!string.Equals(Path.GetFullPath(invocation.Arguments[0]), expectedRunner, PathComparison))
+                throw new InvalidOperationException("The anti-slop batch runner is not the code-owned launcher.");
+            var manifestBytes = await cache.ReadFileAsync(invocation.Arguments[6], cancellationToken)
+                .ConfigureAwait(false);
+            var manifestInputs = JsonSerializer.Deserialize<string[]>(manifestBytes) ??
+                throw new InvalidOperationException("The anti-slop input manifest is malformed.");
+            var normalizedManifestInputs = DeterministicEvaluationPluginRegistry.NormalizeInputs(manifestInputs);
+            if (!expectedInputs.SequenceEqual(normalizedManifestInputs, StringComparer.Ordinal))
+                throw new InvalidOperationException(
+                    "Anti-slop manifest inputs do not exactly match the frozen plugin input selection.");
+            await AppendClosureFileAsync(
+                hash, Path.GetDirectoryName(invocation.Arguments[6])!, invocation.Arguments[6],
+                cache, cancellationToken, "inputs/manifest.json");
+        }
+        AppendValue(hash, "runtime/node-path", Path.GetFullPath(nodePath));
+        await AppendClosureFileAsync(
+            hash, Path.GetDirectoryName(nodePath)!, nodePath, cache, cancellationToken, "runtime/node-bytes");
+        AppendValue(hash, "environment/inherit", invocation.InheritEnvironment.ToString());
+        foreach (var pair in (invocation.Environment ?? new Dictionary<string, string>())
+                     .OrderBy(pair => pair.Key, StringComparer.Ordinal))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            AppendValue(hash, $"environment/{pair.Key}", pair.Value);
+        }
+        return $"sha256:{Convert.ToHexStringLower(hash.GetHashAndReset())}";
+    }
+
+    private static async ValueTask AppendClosureDirectoryAsync(
+        IncrementalHash hash,
+        string root,
+        string directory,
+        ClosureReadCache cache,
+        CancellationToken cancellationToken)
+    {
+        if (!Directory.Exists(directory))
+            throw new InvalidOperationException($"Required anti-slop closure directory is unavailable: {directory}");
+        foreach (var file in cache.EnumerateFiles(directory, cancellationToken))
+            await AppendClosureFileAsync(hash, root, file, cache, cancellationToken);
+    }
+
+    private static async ValueTask AppendClosureFileAsync(
+        IncrementalHash hash,
+        string root,
+        string path,
+        ClosureReadCache cache,
+        CancellationToken cancellationToken,
+        string? logicalPath = null)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        AppendValue(hash, logicalPath ?? Path.GetRelativePath(root, path).Replace('\\', '/'), string.Empty);
+        var bytes = await cache.ReadFileAsync(path, cancellationToken).ConfigureAwait(false);
+        hash.AppendData(bytes);
+        hash.AppendData([0]);
     }
 
     internal static string ComputeRuntimeClosureIdentity(string root, string nodePath, bool effectRulesEnabled)
@@ -574,26 +720,98 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             error = "Anti-slop invocation is neither canonical direct execution nor the argv-safe code-owned batch host.";
             return false;
         }
-        try
+        configPath = arguments[4];
+        // Manifest bytes are parsed and compared with the frozen input selection by the
+        // deadline-linked asynchronous closure snapshot. This structural validator performs
+        // no pre-snapshot file I/O.
+        invocationInputs = inputs;
+        return true;
+    }
+
+    private sealed record AntiSlopSnapshot(
+        IReadOnlyList<string> Inputs,
+        string ConfigurationIdentity,
+        string RuntimeClosureIdentity);
+
+    private sealed class ClosureReadCache
+    {
+        private readonly Dictionary<string, byte[]> _files = new(PathComparer);
+        private readonly Dictionary<string, IReadOnlyList<string>> _fileLists = new(PathComparer);
+        private readonly Dictionary<string, IReadOnlyList<string>> _directoryLists = new(PathComparer);
+
+        internal async ValueTask<byte[]> ReadFileAsync(string path, CancellationToken cancellationToken)
         {
-            var manifest = JsonSerializer.Deserialize<string[]>(File.ReadAllBytes(arguments[6]));
-            if (manifest is null)
+            path = Path.GetFullPath(path);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_files.TryGetValue(path, out var cached))
+                return cached;
+            if (!File.Exists(path))
+                throw new InvalidOperationException($"Required anti-slop closure file is unavailable: {path}");
+            await using var stream = new FileStream(
+                path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            if (stream.Length > int.MaxValue)
+                throw new InvalidOperationException($"Anti-slop closure file is too large to snapshot: {path}");
+            var bytes = new byte[checked((int)stream.Length)];
+            var offset = 0;
+            while (offset < bytes.Length)
             {
-                error = "Anti-slop input manifest is malformed.";
-                return false;
+                var read = await stream.ReadAsync(bytes.AsMemory(offset), cancellationToken).ConfigureAwait(false);
+                if (read == 0)
+                    throw new EndOfStreamException($"Anti-slop closure file ended while it was being snapshotted: {path}");
+                offset += read;
             }
-            configPath = arguments[4];
-            invocationInputs = DeterministicEvaluationPluginRegistry.NormalizeInputs(manifest);
-            return true;
+            var trailing = new byte[1];
+            if (await stream.ReadAsync(trailing, cancellationToken).ConfigureAwait(false) != 0 ||
+                stream.Length != bytes.Length)
+                throw new InvalidOperationException(
+                    $"Anti-slop closure file changed while it was being snapshotted: {path}");
+            cancellationToken.ThrowIfCancellationRequested();
+            _files.Add(path, bytes);
+            return bytes;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or JsonException)
+
+        internal IReadOnlyList<string> EnumerateFiles(string directory, CancellationToken cancellationToken)
         {
-            error = $"Anti-slop input manifest is unavailable or malformed: {exception.Message}";
-            return false;
+            directory = Path.GetFullPath(directory);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_fileLists.TryGetValue(directory, out var cached))
+                return cached;
+            var files = new List<string>();
+            foreach (var file in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                files.Add(file);
+            }
+            files.Sort(StringComparer.Ordinal);
+            cancellationToken.ThrowIfCancellationRequested();
+            _fileLists.Add(directory, files);
+            return files;
+        }
+
+        internal IReadOnlyList<string> EnumerateDirectories(
+            string directory,
+            string pattern,
+            CancellationToken cancellationToken)
+        {
+            directory = Path.GetFullPath(directory);
+            var key = directory + "\0" + pattern;
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_directoryLists.TryGetValue(key, out var cached))
+                return cached;
+            var directories = new List<string>();
+            foreach (var child in Directory.EnumerateDirectories(directory, pattern, SearchOption.TopDirectoryOnly))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                directories.Add(child);
+            }
+            directories.Sort(StringComparer.Ordinal);
+            cancellationToken.ThrowIfCancellationRequested();
+            _directoryLists.Add(key, directories);
+            return directories;
         }
     }
 
-    private sealed record AntiSlopSnapshot(IReadOnlyList<string> Inputs, string ConfigurationIdentity);
     private sealed record AntiSlopFinding(string? File, string? Rule, bool IsParserOrToolDiagnostic);
     private sealed record AntiSlopReport(
         IReadOnlyList<AntiSlopFinding> Findings,
@@ -603,4 +821,8 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
     private static StringComparison PathComparison => OperatingSystem.IsWindows()
         ? StringComparison.OrdinalIgnoreCase
         : StringComparison.Ordinal;
+
+    private static StringComparer PathComparer => OperatingSystem.IsWindows()
+        ? StringComparer.OrdinalIgnoreCase
+        : StringComparer.Ordinal;
 }

@@ -66,7 +66,13 @@ public interface IDeterministicEvaluationPlugin
 
     string GetRuntimeClosureIdentity(GateRequest request) => request.ConfigurationIdentity;
 
-    EvaluationPluginSnapshot CaptureBefore(GateRequest request);
+    string GetRuntimeClosureIdentity(
+        GateRequest request,
+        EvaluationPluginSnapshot? snapshot) => GetRuntimeClosureIdentity(request);
+
+    ValueTask<EvaluationPluginSnapshot> CaptureBeforeAsync(
+        GateRequest request,
+        CancellationToken cancellationToken);
 
     NormalizedEvidence Normalize(
         GateRequest request,
@@ -189,7 +195,8 @@ public sealed class DeterministicEvaluationPluginRegistry
         GateRequest request,
         IDeterministicEvaluationPlugin plugin,
         EvaluationPluginStatus status,
-        string? pluginRawOutcome = null)
+        string? pluginRawOutcome = null,
+        EvaluationPluginSnapshot? snapshot = null)
     {
         var explicitInputs = request.Plugin?.Inputs;
         var inputs = explicitInputs is null
@@ -201,7 +208,7 @@ public sealed class DeterministicEvaluationPluginRegistry
             request.Plugin?.Enabled ?? true,
             status,
             request.ConfigurationIdentity,
-            plugin.GetRuntimeClosureIdentity(request),
+            plugin.GetRuntimeClosureIdentity(request, snapshot),
             inputs,
             ComputeInputSetIdentity(inputs),
             pluginRawOutcome);
@@ -277,8 +284,14 @@ public sealed class DeterministicEvaluationPluginRegistry
         public string ExpectedTool => expectedTool;
         public EvidenceAdapterKind CompatibilityAdapter => compatibilityAdapter;
 
-        public EvaluationPluginSnapshot CaptureBefore(GateRequest request) =>
-            new(EvidenceAdapterDispatcher.CaptureBefore(request));
+        public ValueTask<EvaluationPluginSnapshot> CaptureBeforeAsync(
+            GateRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return ValueTask.FromResult(
+                new EvaluationPluginSnapshot(EvidenceAdapterDispatcher.CaptureBefore(request)));
+        }
 
         public NormalizedEvidence Normalize(
             GateRequest request,

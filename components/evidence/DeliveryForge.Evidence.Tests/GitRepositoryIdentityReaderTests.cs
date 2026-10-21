@@ -282,6 +282,14 @@ public sealed class GitRepositoryIdentityReaderTests
     [InlineData("check(input)\n/* line terminator remains significant */ return /'/.test(input) /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\n  && ([] as unknown as string[]).length > 0;\n")]
     [InlineData("for await (const match of /x'/.exec(input)) { // eslint-disable-next-line anti-slop/no-chained-type-assertions -- '\nconst hidden = [] as unknown as string[];\n}\n")]
     [InlineData("#!/usr/bin/env node `\nexport const hidden = [] as unknown as string[]; // eslint-disable-line anti-slop/no-chained-type-assertions\n// `\n")]
+    [InlineData("\uFEFF#!/usr/bin/env node `\nexport const hidden = [] as unknown as string[]; // eslint-disable-line anti-slop/no-chained-type-assertions\n// `\n")]
+    [InlineData("const ok = a</'/.source.length /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = [] as unknown as string[];\n")]
+    [InlineData("export default /'/.source /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = [] as unknown as string[];\n")]
+    [InlineData("export class Child extends /'/.constructor { static hidden = [] as unknown as string[]; } /* ' */ // eslint-disable-line anti-slop/no-chained-type-assertions\n")]
+    [InlineData("const half = metrics.\n  return / 2 // eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = [] as unknown as string[];\n")]
+    [InlineData("class Counter { #delete = 4; value() { return this.#delete / 2 // eslint-disable-next-line anti-slop/no-chained-type-assertions\n;([] as unknown as string[]).length; } }\n")]
+    [InlineData("const value = ++/'/.lastIndex /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = [] as unknown as string[];\n")]
+    [InlineData("const value = --/'/.lastIndex /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = [] as unknown as string[];\n")]
     public void Statement_regex_and_jsx_boundaries_cannot_hide_directives(string source)
     {
         try
@@ -299,6 +307,8 @@ public sealed class GitRepositoryIdentityReaderTests
     [InlineData("x = object.in / 2 // eslint-disable-line\n")]
     [InlineData("x = object.delete / 2 // eslint-disable-line\n")]
     [InlineData("x = object.return / 2 // eslint-disable-line\n")]
+    [InlineData("x = object.\nreturn / 2 // eslint-disable-line\n")]
+    [InlineData("class C { #delete = 2; value() { return this.#delete / 2 // eslint-disable-line\n} }\n")]
     [InlineData("for (of / 2; of < 3; of++) {} // eslint-disable-line\n")]
     [InlineData("for (let value = object.of / 2; value < 3; value++) {} // eslint-disable-line\n")]
     public void Identifier_and_property_division_cannot_hide_directives(string source)
@@ -353,9 +363,13 @@ public sealed class GitRepositoryIdentityReaderTests
         var alias = JavaScriptSuppressionScanner.Scan(System.Text.Encoding.UTF8.GetBytes(
             "// eslint-disable-next-line other/no-object-parameters\nexport function f(input: { x: number }) { return input.x; }\n"),
             TestContext.Current.CancellationToken);
+        var eslintAlias = JavaScriptSuppressionScanner.Scan(System.Text.Encoding.UTF8.GetBytes(
+            "// eslint-disable-next-line eslint/no-accumulating-spread\nexport const copied = values.reduce((acc, value) => [...acc, value], []);\n"),
+            TestContext.Current.CancellationToken);
 
         Assert.True(JavaScriptSuppressionScanner.IntroducesDangerousCoverage(blanket, null));
         Assert.True(JavaScriptSuppressionScanner.IntroducesDangerousCoverage(alias, null));
+        Assert.True(JavaScriptSuppressionScanner.IntroducesDangerousCoverage(eslintAlias, null));
     }
 
     [Fact]
