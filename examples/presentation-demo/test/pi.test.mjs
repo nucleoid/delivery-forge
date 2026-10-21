@@ -39,3 +39,11 @@ test('Pi cockpit uses actual terminal height and wide list/detail composition',(
   const keys={matches:()=>false};
   for(const rows of [24,30]){const c=createCockpitComponent(getScenario('failed-gate').snapshot,{tui:{terminal:{rows,columns:120},requestRender(){}},keybindings:keys,done(){},initialView:'evidence'});const out=c.render(120);assert.ok(out.length<=rows-4);assert.match(out.join('\n'),/│/);assert.match(out.join('\n'),/receipt-build/);}
 });
+
+test('Pi cockpit uses host theme tokens and cycles fixtures without leaving the native component',()=>{
+  const scenarios=[getScenario('failed-gate'),getScenario('repair')];let cursor=0;
+  const theme={fg:(token,text)=>`\x1b[3${token==='error'?1:token==='warning'?3:token==='success'?2:6}m${text}\x1b[0m`,bold:(text)=>`\x1b[1m${text}\x1b[22m`};
+  const c=createCockpitComponent(scenarios[0].snapshot,{tui:{terminal:{rows:30,columns:120},requestRender(){}},theme,keybindings:{matches:()=>false},done(){},initialScenario:'failed-gate',onScenarioChange:(delta)=>{cursor=Math.max(0,Math.min(scenarios.length-1,cursor+delta));return{snapshot:scenarios[cursor].snapshot,history:scenarios.slice(0,cursor+1),name:scenarios[cursor].name};}});
+  assert.match(c.render(120).join('\n'),/\x1b\[/);assert.match(c.render(120).join('\n'),/failed-gate/);
+  c.handleInput('n');const repaired=c.render(120).join('\n');assert.match(repaired,/fixture repair/);assert.match(repaired,/EXACT_HEAD_RERUN_REQUIRED/);assert.match(repaired,/SYNTHETIC · READ ONLY/);
+});
