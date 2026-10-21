@@ -529,7 +529,11 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
                         // this parent's own loss-stop. Observe that exact Task;
                         // never issue a second stop or race its writer handling.
                         if (coordination is null) throw;
-                        _ = await frame.EnterCleanup(_ => coordination.ObserveExistingLossStopAsync(plan.RunId, original)).ConfigureAwait(false);
+                        try { _ = await frame.EnterCleanup(_ => coordination.ObserveExistingLossStopAsync(plan.RunId, original)).ConfigureAwait(false); }
+                        catch (Exception observation)
+                        {
+                            throw new AggregateException("Completed evidence capture failed and its original loss-stop observation also failed.", error, observation);
+                        }
                         if (!SettledBatchEvidenceFailure(frame) || !ObservePipelineSettled(plan.RunId) ||
                             !CompletedNativeOwnedResourcesClosed(frame)) throw;
                         evidenceFailure = error;

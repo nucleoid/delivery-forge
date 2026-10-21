@@ -134,6 +134,13 @@ jobs:
           $toolPackageSha = (Get-FileHash -LiteralPath $toolPackage.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
           "DELIVERY_FORGE_TOOL_PACKAGE=$($toolPackage.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           "DELIVERY_FORGE_TOOL_PACKAGE_SHA256=$toolPackageSha" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+      - name: Build genuine compiler-line census fixture
+        shell: pwsh
+        run: |
+          # This solution-only fixture is not built by the per-test-project dotnet test route.
+          # Keep its standard output location for the genuine PE/PDB/source controls.
+          dotnet build components/evidence/DeliveryForge.Evidence.CensusFixture/DeliveryForge.Evidence.CensusFixture.csproj --no-restore --configuration Release --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run public tests with explicitly configured host fixtures
         shell: pwsh
         run: |

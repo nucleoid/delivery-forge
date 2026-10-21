@@ -216,16 +216,21 @@ internal static partial class ChangedLineCoverage
             if (!sources.Values.Any(set => set.Values.Any(s => comparer.Equals(s.RepositoryPath, path))))
                 throw Refuse("Changed authored file is not in the complete captured compiler source set.");
         var unmeasured = new HashSet<string>(comparer);
-        foreach (var context in sources)
+        // Raw report DATA has no independent executable-line inventory. In compiler
+        // mode only required line/context membership can establish missing measurement.
+        if (!requireCompilerCensus)
         {
-            files.Check();
-            var changed = context.Value.Values.Where(s => s.RepositoryPath is not null && changes.ContainsKey(s.RepositoryPath)).ToArray();
-            if (changed.Length != 0 && !coveredContexts.Contains(context.Key))
-                foreach (var source in changed) unmeasured.Add(source.RepositoryPath!);
-            else
-                foreach (var source in changed)
-                    if (!reportedDocuments.TryGetValue(context.Key, out var observed) || !observed.Contains(source.RepositoryPath!))
-                        unmeasured.Add(source.RepositoryPath!);
+            foreach (var context in sources)
+            {
+                files.Check();
+                var changed = context.Value.Values.Where(s => s.RepositoryPath is not null && changes.ContainsKey(s.RepositoryPath)).ToArray();
+                if (changed.Length != 0 && !coveredContexts.Contains(context.Key))
+                    foreach (var source in changed) unmeasured.Add(source.RepositoryPath!);
+                else
+                    foreach (var source in changed)
+                        if (!reportedDocuments.TryGetValue(context.Key, out var observed) || !observed.Contains(source.RepositoryPath!))
+                            unmeasured.Add(source.RepositoryPath!);
+            }
         }
         files.Check();
         var missing = new HashSet<string>(comparer);

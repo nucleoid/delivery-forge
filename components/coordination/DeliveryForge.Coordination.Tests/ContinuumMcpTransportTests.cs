@@ -193,7 +193,48 @@ public sealed class ContinuumMcpTransportTests
     }
 
     [Theory]
+    [InlineData("\r", 1)]
+    [InlineData("\n", 1)]
+    [InlineData("\r\n", 1)]
+    [InlineData("\r\n", 3)]
+    [InlineData("mixed", 1)]
+    [InlineData("mixed", 4)]
+    public async Task Sse_line_endings_and_fragmented_CRLF_preserve_one_correlated_response(string ending, int chunkBytes)
+    {
+        await using var sample = new Sample();
+        await sample.Transport.DetectCapabilitiesAsync(TestContext.Current.CancellationToken);
+        var before = sample.Handler.Requests;
+        sample.Handler.UseSse = sample.Handler.MultilineSse = sample.Handler.ChunkedSse = true;
+        sample.Handler.SseLineEnding = ending; sample.Handler.SseChunkBytes = chunkBytes;
+        sample.Handler.SsePrefix = ": keepalive\nid: priming\nretry: 1000\ndata:\n\n" +
+            "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{\"level\":\"info\",\"data\":\"café\"}}\n\n";
+        var grant = await sample.Transport.AcquireAsync(sample.Request(), TestContext.Current.CancellationToken);
+        Assert.Equal(TransportOutcome.Acquired, grant.Outcome);
+        Assert.Equal(before + 1, sample.Handler.Requests); Assert.Equal(1, sample.Handler.Acquisitions);
+    }
+
+    [Theory]
+    [InlineData("\r", false)]
+    [InlineData("\r\n", false)]
+    [InlineData("\r", true)]
+    public async Task Sse_line_framing_still_requires_a_complete_event_and_strict_UTF8(string ending, bool malformedUtf8)
+    {
+        await using var sample = new Sample();
+        await sample.Transport.DetectCapabilitiesAsync(TestContext.Current.CancellationToken);
+        sample.Handler.UseSse = sample.Handler.ChunkedSse = true;
+        sample.Handler.SseLineEnding = ending; sample.Handler.SseChunkBytes = 1;
+        sample.Handler.OmitSseFinalBlankLine = !malformedUtf8; sample.Handler.MalformedSseUtf8 = malformedUtf8;
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() => sample.Transport.AcquireAsync(sample.Request(), TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() => sample.Transport.AcquireAsync(sample.Request(), TestContext.Current.CancellationToken));
+        Assert.Equal(1, sample.Handler.Acquisitions); // No reconnect or second send after invalidation.
+    }
+
+    [Theory]
     [InlineData("schema-change")]
+    [InlineData("cancelled")]
+    [InlineData("resource-notification")]
+    [InlineData("events-cr")]
+    [InlineData("events-crlf")]
     [InlineData("server-request")]
     [InlineData("foreign-response")]
     [InlineData("malformed-notification")]
@@ -207,12 +248,20 @@ public sealed class ContinuumMcpTransportTests
         sample.Handler.SsePrefix = framing switch
         {
             "schema-change" => "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\",\"params\":{}}\n\n",
+            "cancelled" => "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/cancelled\",\"params\":{\"requestId\":\"unknown\",\"reason\":\"cancelled\"}}\n\n",
+            "resource-notification" => "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/resources/updated\",\"params\":{\"uri\":\"fixture:resource\"}}\n\n",
+            "events-cr" or "events-crlf" => string.Concat(Enumerable.Repeat("id: priming\ndata:\n\n", 32)),
             "server-request" => "data: {\"jsonrpc\":\"2.0\",\"id\":\"server-request\",\"method\":\"ping\",\"params\":{}}\n\n",
             "foreign-response" => "data: {\"jsonrpc\":\"2.0\",\"id\":\"foreign\",\"result\":{}}\n\n",
             "malformed-notification" => "data: {\"jsonrpc\":\"2.0\",\"method\":\"notifications/message\",\"params\":{}}\n\n",
             "events" => string.Concat(Enumerable.Repeat("id: priming\ndata:\n\n", 32)),
             _ => ":" + new string('x', 1048576) + "\n\n"
         };
+        if (framing is "events-cr" or "events-crlf")
+        {
+            sample.Handler.SseLineEnding = framing == "events-cr" ? "\r" : "\r\n";
+            sample.Handler.ChunkedSse = true; sample.Handler.SseChunkBytes = 1;
+        }
         await Assert.ThrowsAsync<CoordinationUncertainException>(() => sample.Transport.AcquireAsync(sample.Request(), TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<CoordinationUncertainException>(() => sample.Transport.AcquireAsync(sample.Request(), TestContext.Current.CancellationToken));
         Assert.Equal(1, sample.Handler.Acquisitions); // Second explicit fixture call is refused before send.
@@ -493,6 +542,9 @@ public sealed class ContinuumMcpTransportTests
         internal string? LastScope, LastRun, CorruptField, InspectionRun;
         internal bool FailDelete, Disposed, FailDispose, UseSse, MultilineSse, ChunkedSse, CorruptRenewal;
         internal string SsePrefix = "";
+        internal string? SseLineEnding;
+        internal int SseChunkBytes = 3;
+        internal bool OmitSseFinalBlankLine, MalformedSseUtf8;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
@@ -573,8 +625,17 @@ public sealed class ContinuumMcpTransportTests
                 var split = rpc.IndexOf(',') + 1;
                 sse = "event: message\ndata: " + rpc[..split] + "\ndata: " + rpc[split..] + "\n\n";
             }
+            if (OmitSseFinalBlankLine) sse = sse[..^1];
             var body = UseSse ? SsePrefix + sse : rpc;
-            HttpContent content = ChunkedSse ? new StreamContent(new ChunkedFixtureStream(Encoding.UTF8.GetBytes(body)))
+            if (UseSse && SseLineEnding is { } ending)
+            {
+                var line = 0;
+                body = string.Join("", body.Split('\n').Select((text, index) => index == 0 ? text :
+                    (ending == "mixed" ? new[] { "\r", "\r\n", "\n" }[line++ % 3] : ending) + text));
+            }
+            var bodyBytes = Encoding.UTF8.GetBytes(body);
+            if (MalformedSseUtf8) bodyBytes[0] = 0xff;
+            HttpContent content = ChunkedSse ? new StreamContent(new ChunkedFixtureStream(bodyBytes, SseChunkBytes))
                 : new StringContent(body, Encoding.UTF8, UseSse ? "text/event-stream" : "application/json");
             if (ChunkedSse) content.Headers.ContentType = new("text/event-stream");
             var response = new HttpResponseMessage(HttpStatusCode.OK)
@@ -596,10 +657,10 @@ public sealed class ContinuumMcpTransportTests
     }
 
     // Finite HTTP fixture bytes only; actual parser still owns the same body.
-    private sealed class ChunkedFixtureStream(byte[] bytes) : MemoryStream(bytes)
+    private sealed class ChunkedFixtureStream(byte[] bytes, int maximumChunkBytes = 3) : MemoryStream(bytes)
     {
         public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default) =>
-            base.ReadAsync(buffer[..Math.Min(buffer.Length, 3)], cancellationToken);
+            base.ReadAsync(buffer[..Math.Min(buffer.Length, maximumChunkBytes)], cancellationToken);
     }
 
     private sealed class Clock : IMonotonicClock

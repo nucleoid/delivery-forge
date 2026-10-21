@@ -147,7 +147,28 @@ public sealed class OriginalWriterDispositionTests
         Assert.Throws<IOException>(() => coordinator.DisposeOriginalWriter("owned", lease));
         Assert.True(original.Unknown); Assert.Equal(1, parent.UnknownObservations); Assert.Equal(1, stream.CloseAttempts);
         Assert.Equal(WriterNamespaceIdentityOutcome.Unknown, lease.ObserveCurrentNamespaceIdentity().Outcome);
+        Assert.Throws<WorktreeBoundaryException>(() => coordinator.DisposeOriginalWriter("owned", lease));
+        Assert.False(lease.FirstCloseReturned); Assert.Equal(1, stream.CloseAttempts);
+        Assert.Equal(2, original.UnknownObservations); Assert.Equal(2, parent.UnknownObservations);
+        Assert.Throws<CoordinationUncertainException>(() => parent.CheckCurrent("owned"));
         lease.Dispose(); Assert.Equal(1, stream.CloseAttempts); // Sticky lease never repeats the first close.
+    }
+
+    [Fact]
+    public async Task Returned_writer_close_remains_known_on_repeated_coordinator_disposition()
+    {
+        using var directory = new TemporaryDirectory();
+        await using var processes = new ProcessControl();
+        using var coordinator = new ExecutionCoordinator(new RunStore(directory.Path), new WorktreeManager(), processes);
+        var original = new Original(); var parent = new Parent(); coordinator.BindCoordinationAdmission(parent);
+        coordinator.BindOriginalScheduling(original, parent, "owned", new WorktreeManager());
+        var path = Path.Combine(directory.Path, "owned-writer");
+        var stream = new ReturnThenExpireStream(path, () => { });
+        var lease = new WriterLease(path, stream, "owned", "token");
+        coordinator.DisposeOriginalWriter("owned", lease); coordinator.DisposeOriginalWriter("owned", lease);
+        Assert.True(lease.FirstCloseReturned); Assert.Equal(1, stream.CloseAttempts);
+        Assert.Equal(0, original.UnknownObservations); Assert.Equal(0, parent.UnknownObservations);
+        parent.CheckCurrent("owned");
     }
 
     [Fact]

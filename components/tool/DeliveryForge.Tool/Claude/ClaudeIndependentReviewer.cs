@@ -141,7 +141,8 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         (OperatingSystem.IsWindows()
             ? ToolResult.Incomplete("INDEPENDENT_REVIEW_MANAGED_POLICY_UNPROVEN",
                 "The selected Claude CLI does not expose authoritative complete effective managed-policy and code-effect provenance. Production independent review is unavailable until a supported contract or separately explicit owner trust-policy decision exists; no settings, authentication or models are changed.")
-            : null);
+            : ToolResult.Incomplete("INDEPENDENT_REVIEW_PLATFORM_UNSUPPORTED",
+                "No supported independent-review production contract exists for this platform; no settings, authentication, native observation or prompt was dispatched."));
     internal static ToolResult BudgetIncomplete(string runId, BudgetDecision decision) =>
         ToolResult.Incomplete("INDEPENDENT_REVIEW_BUDGET", decision.Reason, new { runId, decision.Findings });
     async Task<BoundedCommandCaptureResult> Observe(string[] arguments)
@@ -223,7 +224,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
                 var type = ClaudeStreamState.Text(row, "type");
                 if (type == "control_response")
                 {
-                    var response = row.GetProperty("response");
+                    var response = ClaudeStreamState.Member(row, "response");
                     if (initialized.Task.IsCompleted || ClaudeStreamState.Text(response, "request_id") != "forge-review-initialize" || ClaudeStreamState.Text(response, "subtype") != "success")
                         throw new IOException("Foreign/duplicate/refused independent reviewer initialization.");
                     initialized.TrySetResult(true); continue;
@@ -318,6 +319,9 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             var retirement = Keep(process.RetireAsync(false)); var retired = await retirement.ConfigureAwait(false);
             HostTransportRetirement.RequireSuccessful(retired);
             await pump.WaitAsync(Remaining(started), phaseStop.Token).ConfigureAwait(false);
+            // Retirement joins the complete pump, including activity after the first
+            // result/idle. An earlier completion signal cannot certify later state.
+            state.RequireSuccess();
             if (pumpFailure is not null || model is null || result is null || protocol.Unknown || Unknown)
                 throw new IOException("Actual complete independent review provenance is unavailable.");
             var completedAt = DateTimeOffset.UtcNow;
@@ -340,6 +344,10 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             // Native retirement does not grant a shorter accounting interval.
             var budget = ledger.Settle(reservation!, new(Stopwatch.GetElapsedTime(started), usage.Tokens, usage.Cost));
             if (budget.IsExhausted) return BudgetIncomplete(runId, budget);
+            if (report.RawVerdict == "ship" && report.Findings.Count != 0)
+                return new("BLOCKED", "ACTUAL_INDEPENDENT_REVIEW_CONTRADICTORY",
+                    "A ship verdict cannot carry unresolved findings. Complete parsed findings are retained; no capability or accepted review was issued.",
+                    new { runId, report.RawVerdict, Findings = parsedFindings });
             var rawHash = Hash(native);
             var proof = Hash(JsonSerializer.SerializeToUtf8Bytes(new { requestId, Model = model, RouteHash = authHash, selection.Image, selection.Version, Native = rawHash }));
             if (DateTimeOffset.UtcNow > validUntil) return ToolResult.Incomplete("INDEPENDENT_REVIEW_PROOF_EXPIRED", "Actual reviewer proof expired inside its original frozen allowance.");

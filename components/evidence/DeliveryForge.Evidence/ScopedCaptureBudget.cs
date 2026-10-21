@@ -50,10 +50,16 @@ internal sealed class ScopedCaptureBudget : IOwnedDuplexBudget, IOwnedFailureCle
     }
     internal (bool TimedOut, bool Cancelled) ClassifyFailure(Exception failure, bool callerCancellationRequested)
     {
+        // An unrelated primary failure is not caused by a later deadline or a
+        // concurrent cancellation. Its exact exception remains with the frame.
+        if (failure is not (TimeoutException or OperationCanceledException)) return (false, false);
         // Parent CancelAfter(WORK) can race CheckWork/Delay. The SAME immutable
-        // endpoint distinguishes that deadline from explicit caller cancellation.
+        // endpoint classifies cancellation only when its actual token belongs
+        // to this budget or its parent; foreign cancellation is not that proof.
+        var originalCancellation = failure is OperationCanceledException cancelled && cancelled.CancellationToken.CanBeCanceled &&
+            (cancelled.CancellationToken == Token || cancelled.CancellationToken == parent.Token);
         var timedOut = !callerCancellationRequested &&
-            (failure is TimeoutException || Stopwatch.GetElapsedTime(OriginalStarted) >= WorkLimit);
+            (failure is TimeoutException || originalCancellation && Stopwatch.GetElapsedTime(OriginalStarted) >= WorkLimit);
         return (timedOut, !timedOut && (callerCancellationRequested || parent.Token.IsCancellationRequested));
     }
     internal bool CanStillFinish { get { try { if (LocalCleanupEntered is not null) _ = CleanupRemaining; else CheckWork(); return true; } catch (OperationCanceledException) { return false; } catch (TimeoutException) { return false; } catch (IOException) { return false; } } }

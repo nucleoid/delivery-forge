@@ -78,14 +78,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
             throw new ToolUsageException("Pinned operator evidence differs from parent endpoint/project/principal selection.");
         // Rejection only, using the SAME already-read pinned evidence. It does
         // not create a readiness facet; actual discovery rechecks below.
-        life.Check();
-        var now = DateTimeOffset.UtcNow;
-        var originalRemaining = life.WholeLimit - Stopwatch.GetElapsedTime(life.OriginalStarted);
-        var initialEvidenceRemaining = TimeSpan.FromTicks(Math.Min((observed.ValidUntil - now).Ticks,
-            (TimeSpan.FromMinutes(20) - (now - observed.VerifiedAt)).Ticks));
-        if (observed.VerifiedAt > now || initialEvidenceRemaining < originalRemaining)
-            throw new ToolUsageException("Pinned deployment evidence cannot cover the SAME original remaining whole interval; no checkpoint, lease or worker was created.");
-        life.Check();
+        RestrictOriginalToPinnedEvidence(life, observed);
         var creation = new CreationFrame(); lock (Creations) { if (Creations.Count >= 16) throw new ToolUsageException("Finite retained parent creation bound."); Creations.Add(creation); }
         try
         {
@@ -112,6 +105,24 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
             catch (Exception error) { host.failure = error; host.Revoke(error); life.RetainUnknown(); throw; }
         }
         catch (Exception error) { creation.Failure = error; life.RetainUnknown(); throw; }
+    }
+
+    // Restrict the existing original, never refresh evidence or create another
+    // lifetime/clock. Sample monotonic time BEFORE UTC so rounding or the sampling
+    // interval cannot extend the admitted proof window. Discovery still requires
+    // its actual anchored evidence to cover this same restricted original.
+    internal static void RestrictOriginalToPinnedEvidence(ToolLifetime life, ContinuumDeploymentEvidence observed)
+    {
+        life.Check();
+        var sampled = Stopwatch.GetTimestamp();
+        var now = DateTimeOffset.UtcNow;
+        var remaining = TimeSpan.FromTicks(Math.Min((observed.ValidUntil - now).Ticks,
+            (TimeSpan.FromMinutes(20) - (now - observed.VerifiedAt)).Ticks));
+        if (observed.VerifiedAt > now || observed.ValidUntil <= observed.VerifiedAt || remaining <= TimeSpan.Zero)
+            throw new ToolUsageException("Pinned deployment evidence has no current interval; no checkpoint, lease or worker was created.");
+        var endpoint = Stopwatch.GetElapsedTime(life.OriginalStarted, sampled) + remaining;
+        if (endpoint < life.WholeLimit) life.Restrict(endpoint);
+        life.Check();
     }
 
     sealed class CreationFrame { internal bool StoreEntered, StoreReturned, TransportEntered, TransportReturned; internal FileCoordinationCheckpointStore? Store; internal ContinuumMcpTransport? Transport; internal ParentCoordinationHost? Host; internal Exception? Failure; }
@@ -243,7 +254,10 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
                     // Close births before the reducer synchronously withdraws the old authority.
                     pending = renewalHandoff.Begin(parentRunId!, fixtureRenewalInputs.Min(lease => lease.SafeDeadline));
                 }
-                var task = reducer!.RenewAllAsync(actual, renewalStop.Token); lock (gate) { coordinationTasks.Add(task); fixtureRenewalTask = task; }
+                // Closing future renewal admission cancels the loop's delay, not an
+                // already entered RPC. The existing original token still bounds
+                // caller cancellation/WORK; cleanup must observe that SAME task.
+                var task = reducer!.RenewAllAsync(actual, original.Token); lock (gate) { coordinationTasks.Add(task); fixtureRenewalTask = task; }
                 var result = await task.WaitAsync(original.Remaining).ConfigureAwait(false);
                 // Retain the exact returned cleanup continuation BEFORE the
                 // WORK postcheck; no late dispatch authority is installed.

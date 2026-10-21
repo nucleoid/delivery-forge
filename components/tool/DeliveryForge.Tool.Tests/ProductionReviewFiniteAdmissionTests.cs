@@ -26,6 +26,7 @@ public sealed class ProductionReviewFiniteAdmissionTests
         var parent = new ParentEffectAdmission(gate, run => current && run == "owned", _ => current = false);
         var git = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator).Where(Path.IsPathFullyQualified)
             .Select(path => Path.Combine(path, "git.exe")).First(File.Exists);
+        var gitCalls = 0;
         async Task<string> Git(string directory, params string[] args)
         {
             var environment = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
@@ -37,6 +38,20 @@ public sealed class ProductionReviewFiniteAdmissionTests
                 ["-c", "core.hooksPath=NUL", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", .. args], directory, environment)
             { EnvironmentIsComplete = true }, TimeSpan.FromSeconds(15), 1048576,
                 TestContext.Current.CancellationToken, new OwnedWorkPhaseBudget(original));
+            // The finite observation already exists: retain it before assertions.
+            var call = ++gitCalls;
+            File.WriteAllBytes(Path.Combine(root, $"git-{call:D3}-stdout.bin"), capture.StandardOutputBytes);
+            File.WriteAllBytes(Path.Combine(root, $"git-{call:D3}-stderr.bin"), capture.StandardErrorBytes);
+            var observation = System.Text.Json.JsonSerializer.Serialize(new
+            {
+                Arguments = args, Directory = directory, capture.Command,
+                capture.RootExitObserved, capture.StandardOutputDrainCompleted, capture.StandardErrorDrainCompleted,
+                capture.CaptureBoundExceeded, capture.Timing,
+                OutputBytes = capture.StandardOutputBytes.Length, ErrorBytes = capture.StandardErrorBytes.Length
+            });
+            File.WriteAllText(Path.Combine(root, $"git-{call:D3}-capture.json"), observation);
+            if (capture.Command.ExitCode != 0 || !capture.Command.OwnedProcessQuiescent)
+                TestContext.Current.TestOutputHelper!.WriteLine("Actual fixture Git failed: " + observation);
             Assert.Equal(0, capture.Command.ExitCode); Assert.True(capture.Command.OwnedProcessQuiescent);
             Assert.True(capture.RootExitObserved); Assert.True(capture.StandardOutputDrainCompleted); Assert.True(capture.StandardErrorDrainCompleted);
             Assert.True(capture.Command.LifecycleDiagnostics?.OwnedTree is { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 });

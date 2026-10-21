@@ -91,10 +91,15 @@ internal static class CompilerLineCensus
                 files.Check();
                 var document = reader.GetDocument(handle);
                 var name = reader.GetString(document.Name).Replace('\\', '/');
-                if (name.Length is 0 or > 16384 || name.Any(char.IsControl) || !names.Add(name) ||
-                    document.HashAlgorithm.IsNil || reader.GetGuid(document.HashAlgorithm) != sha256 ||
-                    reader.GetBlobReader(document.Hash).Length != 32)
-                    throw Refuse("Compiler document identity/checksum profile is unsupported or duplicated.");
+                if (name.Length is 0 or > 16384 || name.Any(char.IsControl) || !names.Add(name))
+                    throw Refuse("Compiler document identity is malformed or duplicated.");
+                if (document.HashAlgorithm.IsNil || reader.GetGuid(document.HashAlgorithm) != sha256)
+                {
+                    Unsupported("Compiler document checksum algorithm is unsupported by the complete SHA-256 source profile.");
+                    continue;
+                }
+                if (reader.GetBlobReader(document.Hash).Length != 32)
+                    throw Refuse("Compiler SHA-256 document checksum has a malformed byte extent.");
                 var hash = Convert.ToHexStringLower(reader.GetBlobBytes(document.Hash));
                 if (!roles.TryGetValue(name, out var candidates) || candidates.Count != 1)
                 {

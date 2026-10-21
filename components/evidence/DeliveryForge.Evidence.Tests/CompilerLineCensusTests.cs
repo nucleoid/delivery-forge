@@ -31,6 +31,71 @@ public sealed class CompilerLineCensusTests
     }
 
     [Fact]
+    public void Genuine_declaration_only_input_does_not_add_unmeasured_lines_to_a_fully_covered_compiler_change()
+    {
+        using var fixture = new Fixture();
+        using var stream = new MemoryStream(fixture.Pe, writable: false);
+        using var pe = new PEReader(stream);
+        var metadata = pe.GetMetadataReader();
+        var declaration = metadata.TypeDefinitions.Select(metadata.GetTypeDefinition)
+            .Single(type => metadata.GetString(type.Name) == "IDeclarations");
+        var method = metadata.GetMethodDefinition(Assert.Single(declaration.GetMethods()));
+        Assert.Equal("Ping", metadata.GetString(method.Name)); Assert.Equal(0, method.RelativeVirtualAddress);
+        var result = fixture.Read(includeDeclarations: true);
+        Assert.True(result.CompilerCensusComplete); Assert.Equal(GateOutcome.Pass, result.Outcome);
+        Assert.Equal(3, result.ChangedExecutableLines); Assert.Equal(3, result.CoveredChangedLines);
+        Assert.Equal(100m, result.Percent); Assert.Equal(0, result.UnmeasuredChangedLines);
+        // Raw report DATA still cannot infer executability from absent file membership.
+        var raw = fixture.Read(includeDeclarations: true, rawReports: true);
+        Assert.False(raw.CompilerCensusComplete); Assert.Equal(GateOutcome.Incomplete, raw.Outcome);
+        Assert.True(raw.UnmeasuredChangedLines > 0);
+    }
+
+    [Fact]
+    public void Genuine_declaration_only_change_has_no_missing_compiled_measurement_and_no_automatic_exemption()
+    {
+        using var fixture = new Fixture();
+        var result = fixture.Read(declarationsOnly: true);
+        Assert.True(result.CompilerCensusComplete); Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Equal(0, result.ChangedExecutableLines); Assert.Equal(0, result.UnmeasuredChangedLines);
+        Assert.Null(result.Percent); Assert.Contains("No measurable", result.Reason, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("ff1816ec-aa5e-4d10-87f7-6f4963833460")]
+    [InlineData("00000000-0000-0000-0000-000000000000")]
+    public void Unsupported_checksum_algorithm_in_genuine_pdb_metadata_is_incomplete_without_source_attribution(string replacement)
+    {
+        using var fixture = new Fixture();
+        var bytes = fixture.Pdb.ToArray();
+        var original = new Guid("8829d00f-11b8-4213-878b-770e8597ac16").ToByteArray();
+        var offsets = Enumerable.Range(0, bytes.Length - original.Length + 1)
+            .Where(offset => bytes.AsSpan(offset, original.Length).SequenceEqual(original)).ToArray();
+        new Guid(replacement).ToByteArray().CopyTo(bytes, Assert.Single(offsets));
+        // Adversarial metadata DATA: retain the genuine PE and PDB content-id bytes,
+        // changing only the declared checksum algorithm, never a production receipt.
+        var inventory = CompilerLineCensus.Inspect(fixture.Pe, bytes, fixture.Build,
+            [fixture.Document, fixture.DeclarationDocument], fixture.Files);
+        Assert.False(inventory.Complete); Assert.Empty(inventory.Points);
+        Assert.Contains("checksum algorithm is unsupported", inventory.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Malformed_sha256_extent_in_genuine_pdb_metadata_remains_an_identity_refusal()
+    {
+        using var fixture = new Fixture();
+        var bytes = fixture.Pdb.ToArray();
+        var checksum = SHA256.HashData(fixture.Source);
+        var offsets = Enumerable.Range(1, bytes.Length - checksum.Length)
+            .Where(offset => bytes.AsSpan(offset, checksum.Length).SequenceEqual(checksum)).ToArray();
+        var offset = Assert.Single(offsets);
+        Assert.Equal((byte)32, bytes[offset - 1]); bytes[offset - 1] = 31;
+        var error = Assert.Throws<EvidenceWriteException>(() => CompilerLineCensus.Inspect(fixture.Pe, bytes, fixture.Build,
+            [fixture.Document, fixture.DeclarationDocument], fixture.Files));
+        Assert.Contains("malformed byte extent", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Missing_excluded_method_measurement_cannot_shrink_the_compiler_denominator()
     {
         using var fixture = new Fixture();
@@ -46,7 +111,7 @@ public sealed class CompilerLineCensusTests
         using var fixture = new Fixture();
         var result = fixture.Read(omitFile: true);
         Assert.Equal(3, result.ChangedExecutableLines); Assert.Equal(0, result.CoveredChangedLines);
-        Assert.True(result.UnmeasuredChangedLines >= 3); Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Equal(3, result.UnmeasuredChangedLines); Assert.Equal(GateOutcome.Incomplete, result.Outcome);
     }
 
     [Fact]
@@ -55,7 +120,7 @@ public sealed class CompilerLineCensusTests
         using var fixture = new Fixture();
         var absent = fixture.Read(omitReport: true);
         Assert.Equal(GateOutcome.Incomplete, absent.Outcome); Assert.Equal(3, absent.ChangedExecutableLines);
-        Assert.True(absent.UnmeasuredChangedLines >= 3);
+        Assert.Equal(3, absent.UnmeasuredChangedLines);
         var comments = fixture.Read(commentOnly: true);
         Assert.True(comments.CompilerCensusComplete); Assert.Equal(GateOutcome.Incomplete, comments.Outcome);
         Assert.Equal(0, comments.ChangedExecutableLines); Assert.Null(comments.Percent);
@@ -214,11 +279,13 @@ public sealed class CompilerLineCensusTests
     {
         private const string ProjectRole = "components/evidence/DeliveryForge.Evidence.CensusFixture";
         internal readonly InstalledToolFiles Files;
-        internal readonly string Repository, SourcePath;
-        internal readonly byte[] Source, Pe, Pdb;
+        internal readonly string Repository, SourcePath, DeclarationPath;
+        internal readonly byte[] Source, DeclarationSource, Pe, Pdb;
         internal readonly CompilerLineCensus.Build Build;
         internal CompilerLineCensus.Document Document => new("Subject.cs", ProjectRole + "/Subject.cs", SourcePath,
             InstalledToolFiles.Identity(Source)[7..], new UTF8Encoding(false, true).GetString(Source), false);
+        internal CompilerLineCensus.Document DeclarationDocument => new("Declarations.cs", ProjectRole + "/Declarations.cs", DeclarationPath,
+            InstalledToolFiles.Identity(DeclarationSource)[7..], new UTF8Encoding(false, true).GetString(DeclarationSource), false);
         internal Fixture(CancellationToken token = default)
         {
             Files = new(TimeSpan.FromSeconds(30), token);
@@ -230,6 +297,8 @@ public sealed class CompilerLineCensusTests
             var project = Path.Combine(evidence, "DeliveryForge.Evidence.CensusFixture");
             SourcePath = Path.Combine(project, "Subject.cs");
             Source = Files.Read(SourcePath, 128 * 1024 * 1024);
+            DeclarationPath = Path.Combine(project, "Declarations.cs");
+            DeclarationSource = Files.Read(DeclarationPath, 128 * 1024 * 1024);
             var output = Path.Combine(project, "bin", configuration, framework, "DeliveryForge.Evidence.CensusFixture.dll");
             Pe = Files.Read(output, 128 * 1024 * 1024); Pdb = Files.Read(Path.ChangeExtension(output, ".pdb"), 128 * 1024 * 1024);
             Build = Expected(Pe);
@@ -240,9 +309,10 @@ public sealed class CompilerLineCensusTests
             return Enumerable.Range(0, lines.Length).Single(index => lines[index].Contains(marker, StringComparison.Ordinal)) + 1;
         }
         internal CompilerLineCensus.Inventory Inventory(CompilerLineCensus.Document? document = null)
-            => CompilerLineCensus.Inspect(Pe, Pdb, Build, [document ?? Document], Files);
+            => CompilerLineCensus.Inspect(Pe, Pdb, Build, [document ?? Document, DeclarationDocument], Files);
         internal ChangedLineCoverage.Result Read(int? omitLine = null, int? zeroLine = null, bool omitFile = false,
-            bool secondContext = false, string? fault = null, bool omitReport = false, bool commentOnly = false)
+            bool secondContext = false, string? fault = null, bool omitReport = false, bool commentOnly = false,
+            bool includeDeclarations = false, bool declarationsOnly = false, bool rawReports = false)
         {
             var rawSource = fault == "checksum" ? Source.Concat(" "u8.ToArray()).ToArray() : Source;
             // Only the checksum-negative uses a separate logical copy. Physical source
@@ -252,6 +322,7 @@ public sealed class CompilerLineCensusTests
             var data = new Dictionary<string, byte[]>(StringComparer.Ordinal)
             {
                 ["source"] = rawSource,
+                ["declaration"] = DeclarationSource,
                 ["pe"] = Pe,
                 ["pdb"] = fault == "malformed-pdb" ? [0xff] : Pdb
             };
@@ -263,7 +334,9 @@ public sealed class CompilerLineCensusTests
                     id = context,
                     project = ProjectRole + "/DeliveryForge.Evidence.CensusFixture.csproj",
                     inputs = new[] { new { role = "source", logicalPath = "Subject.cs", repositoryPath = ProjectRole + "/Subject.cs", locator = "source",
-                        length = Source.Length, sha256 = InstalledToolFiles.Identity(Source)[7..], generated = false, encoding = "utf-8" } }
+                        length = Source.Length, sha256 = InstalledToolFiles.Identity(Source)[7..], generated = false, encoding = "utf-8" },
+                        new { role = "source", logicalPath = "Declarations.cs", repositoryPath = ProjectRole + "/Declarations.cs", locator = "declaration",
+                        length = DeclarationSource.Length, sha256 = InstalledToolFiles.Identity(DeclarationSource)[7..], generated = false, encoding = "utf-8" } }
                 }));
                 var build = context + "b";
                 builds.Add(JsonSerializer.SerializeToNode(new
@@ -329,7 +402,16 @@ public sealed class CompilerLineCensusTests
                 var line = Line("Deliberately");
                 diff = Encoding.UTF8.GetBytes("+++ b/" + ProjectRole + "/Subject.cs\n@@ -0,0 +" + line + " @@\n+" + sourceLines[line - 1] + "\n");
             }
-            return ChangedLineCoverage.ReadCompilerBound(diff, manifest.RootElement, Repository, path => data[path], Files);
+            if (includeDeclarations || declarationsOnly)
+            {
+                var lines = Encoding.UTF8.GetString(DeclarationSource).TrimEnd('\n').Split('\n');
+                var declarationDiff = Encoding.UTF8.GetBytes("+++ b/" + ProjectRole + "/Declarations.cs\n@@ -0,0 +1," + lines.Length + " @@\n" +
+                    string.Join("\n", lines.Select(line => "+" + line)) + "\n");
+                diff = declarationsOnly ? declarationDiff : diff.Concat(declarationDiff).ToArray();
+            }
+            return rawReports
+                ? ChangedLineCoverage.Read(diff, manifest.RootElement, Repository, path => data[path], Files)
+                : ChangedLineCoverage.ReadCompilerBound(diff, manifest.RootElement, Repository, path => data[path], Files);
         }
         private ChangedLineCoverage.Result ReadChecksumNegative()
         {

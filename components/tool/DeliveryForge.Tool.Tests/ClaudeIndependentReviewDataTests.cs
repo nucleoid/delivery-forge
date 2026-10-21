@@ -52,10 +52,16 @@ public sealed class ClaudeIndependentReviewDataTests
     [Theory]
     [InlineData("critical")]
     [InlineData("high")]
-    public void Ship_with_material_unresolved_findings_refuses_instead_of_returning_PASS(string severity)
+    [InlineData("medium")]
+    [InlineData("low")]
+    public void Ship_with_any_unresolved_findings_retains_DATA_and_returns_semantic_FAIL(string severity)
     {
         var text = JsonSerializer.Serialize(new { verdict = "ship", findings = new[] { new { code = "UNRESOLVED", severity, message = "Concrete unresolved defect", location = "file.cs:4" } } });
-        Assert.Throws<IOException>(() => ClaudeIndependentReviewData.ParseReport(text));
+        var report = ClaudeIndependentReviewData.ParseReport(text);
+        Assert.Equal("ship", report.RawVerdict); Assert.Equal("FAIL", report.Verdict);
+        var finding = Assert.Single(report.Findings);
+        Assert.Equal("UNRESOLVED", finding.Code); Assert.Equal(severity, finding.Severity);
+        Assert.Equal("Concrete unresolved defect", finding.Message); Assert.Equal("file.cs:4", finding.Location);
     }
     [Theory]
     [InlineData("{\"verdict\":\"ship\"}")]

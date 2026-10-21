@@ -253,6 +253,11 @@ public sealed class PublicationService
 
     private static void ObserveLate(Task task) => _ = task.ContinueWith(completed => _ = completed.Exception,
         CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
-    private static PublicationResult Blocked(PublicationDenial denial, string reason) =>
-        new(PublicationOutcome.Blocked, denial, reason, PublicationAction.None, PublicationRealm.Fixture);
+    private PublicationResult Blocked(PublicationDenial denial, string reason)
+    {
+        lock (uncertaintyFailures)
+            if (uncertaintyFailures.Count != 0)
+                reason += " This service retains uncertainty-notice or journal failures; explicit owner reconciliation is required.";
+        return new(PublicationOutcome.Blocked, denial, reason, PublicationAction.None, PublicationRealm.Fixture);
+    }
 }

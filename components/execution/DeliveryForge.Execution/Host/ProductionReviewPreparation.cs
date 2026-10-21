@@ -299,6 +299,24 @@ public sealed partial class ProductionReviewSourceOwner
         }
         catch (Exception failure) { failure.Data["RetainedProductionReviewScratch"] = path; throw; }
     }
+    // Rejection-only preflight on this actual owner. No path is read or deleted,
+    // and the eventual callback still checks every effect under its own claim.
+    internal void CheckViewDisposition(bool cleanup)
+    {
+        if (cleanup)
+        {
+            if (!MayCleanOwnedFiles)
+                throw new ReviewPreflightException("Original review view cannot retire while its actual resources remain active; view retained.", residualProcessUncertain: true);
+            _ = original.CleanupRemaining;
+        }
+        else EnterSynchronous(() =>
+        {
+            Check();
+            if (!MayCleanOwnedFiles)
+                throw new ReviewPreflightException("Original review scope remains active.", residualProcessUncertain: true);
+            return true;
+        });
+    }
     internal void DisposeView(string directory, bool cleanup = true)
     {
         if (cleanup && !MayCleanOwnedFiles) throw new ReviewPreflightException("Original review view cannot retire while its actual resources remain active; view retained.", residualProcessUncertain: true);
@@ -398,6 +416,7 @@ public sealed class ProductionReviewBootstrap : IDisposable
     public ReviewAuthorityRootContext RootContext { get; }
     // Read-only state from this actual bootstrap; never a serialized owner or quiescence proof.
     public bool ActualDispositionReturned => ObjectView.DispositionReturned;
+    public void CheckDisposition(bool cleanup) => ObjectView.CheckDisposition(cleanup);
     public void Dispose() => ObjectView.Dispose();
     public void DisposeDuringWork() => ObjectView.DisposeDuringWork();
 }
@@ -548,7 +567,8 @@ public sealed partial class ReviewAuthorityHost
                     maximumEvidenceBytes, rootId, owner.HeadCommit, "production-object-view:" + Guid.NewGuid().ToString("N"), ReviewAuthorityRealm.Production,
                     SHA256.HashData(index), issuer, () => owner.DisposeView(controlled), ownedGit: owner.GitAsync,
                     mayCleanOwnedFiles: () => owner.MayCleanOwnedFiles, checkOwnedWork: owner.Check, deleteOwnedScratch: owner.DeleteScratch,
-                    ownedSynchronous: owner.EnterSynchronousObject, readOwnedFile: owner.ReadFileAsync, ownedSourceSnapshot: owner.VerifySourceSnapshotAsync, disposeOwnedWork: () => owner.DisposeView(controlled, cleanup: false));
+                    ownedSynchronous: owner.EnterSynchronousObject, readOwnedFile: owner.ReadFileAsync, ownedSourceSnapshot: owner.VerifySourceSnapshotAsync, disposeOwnedWork: () => owner.DisposeView(controlled, cleanup: false),
+                    checkDisposition: owner.CheckViewDisposition);
                 _ = await GitPatchIdentity.ComputeAsync(view, owner.BaseCommit, owner.HeadCommit, plan.Identity, new Dictionary<string, string>(), cancellationToken).ConfigureAwait(false);
                 var source = new ProtectedReviewSourceContext(view, owner.BaseCommit, rootId);
                 var policy = await new ProtectedReviewPolicyResolver(source).ResolveBoundedAsync(relativePolicyPath, TimeSpan.FromSeconds(15), cancellationToken).ConfigureAwait(false);

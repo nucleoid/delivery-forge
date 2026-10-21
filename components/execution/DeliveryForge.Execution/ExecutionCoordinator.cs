@@ -151,7 +151,14 @@ public sealed class ExecutionCoordinator : IDisposable
 
     internal void DisposeOriginalWriter(string runId, WriterLease writer)
     {
-        try { writer.Dispose(); }
+        try
+        {
+            writer.Dispose();
+            // Dispose is sticky even when the first close threw. A repeated
+            // no-op cannot turn that exact unreturned close into settlement.
+            if (!writer.FirstCloseReturned)
+                throw new WorktreeBoundaryException("Actual writer first disposition has not returned; retain its original owner.");
+        }
         catch (Exception failure)
         {
             // The lease's first attempt is sticky. Keep the actual owner even if

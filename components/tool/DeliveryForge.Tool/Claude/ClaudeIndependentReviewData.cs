@@ -60,7 +60,10 @@ internal static class ClaudeIndependentReviewData
             if (severity is not ("critical" or "high" or "medium" or "low")) throw new IOException("Unknown reviewer severity.");
             result.Add(new(ClaudeStreamState.Text(row, "code"), severity, ClaudeStreamState.Text(row, "message"), ClaudeStreamState.Text(row, "location")));
         }
-        if (raw == "ship" && result.Any(finding => finding.Severity is "critical" or "high")) throw new IOException("Reviewer ship verdict contradicts material unresolved findings.");
+        // Structurally valid contradictory DATA must survive assignment/retention.
+        // Every caller receives a non-PASS verdict for findings of ANY severity;
+        // the original raw verdict remains unchanged for provenance matching.
+        if (raw == "ship" && result.Count != 0) verdict = "FAIL";
         return (raw, verdict, result);
     }
     internal static (long Tokens, decimal Cost) Usage(JsonElement result)

@@ -323,6 +323,7 @@ internal sealed class InstalledReviewHost : IDisposable
         if (disposed) return;
         original.Check();
         if (Unknown) { original.RetainUnknown(); throw new IOException("Actual review object view remains uncertain; retain its owner."); }
+        bootstrap?.CheckDisposition(cleanup: false);
         dispositionEntered = true;
         bootstrap?.DisposeDuringWork();
         disposed = bootstrap is null || bootstrap.ActualDispositionReturned;
@@ -333,6 +334,7 @@ internal sealed class InstalledReviewHost : IDisposable
     {
         if (disposed) return;
         if (Unknown) { original.RetainUnknown(); return; }
+        bootstrap?.CheckDisposition(cleanup: true);
         dispositionEntered = true;
         bootstrap?.Dispose();
         disposed = bootstrap is null || bootstrap.ActualDispositionReturned;

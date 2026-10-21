@@ -18,6 +18,7 @@ public sealed class ControlledGitEvidenceContext : IDisposable
 {
     private readonly Action? _dispose;
     private readonly Action? _disposeOwnedWork;
+    private readonly Action<bool>? _checkDisposition;
     // 0 open, 1 WORK entered, 2 WORK returned, 3 cleanup claimed, 4 cleanup returned.
     private int _workDisposition;
     internal bool DispositionReturned => Volatile.Read(ref _workDisposition) is 2 or 4;
@@ -56,7 +57,8 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         Func<Func<object?>, object?>? ownedSynchronous = null,
         Func<string, int, CancellationToken, Task<byte[]>>? readOwnedFile = null,
         OwnedReviewSourceSnapshot? ownedSourceSnapshot = null,
-        Action? disposeOwnedWork = null)
+        Action? disposeOwnedWork = null,
+        Action<bool>? checkDisposition = null)
     {
         SourceRoot = Path.GetFullPath(sourceRoot);
         WorkerGitDirectory = Path.GetFullPath(workerGitDirectory);
@@ -72,6 +74,7 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         QuiescenceAuthority = quiescenceAuthority;
         _dispose = dispose;
         _disposeOwnedWork = disposeOwnedWork;
+        _checkDisposition = checkDisposition;
         BeforeFinalRecheck = beforeFinalRecheck;
         OwnedGit = ownedGit;
         MayCleanOwnedFiles = mayCleanOwnedFiles;
@@ -108,11 +111,21 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         return (T)OwnedSynchronous(() => invoke())!;
     }
 
+    internal void CheckDisposition(bool cleanup)
+    {
+        if (Volatile.Read(ref _workDisposition) != 0) return;
+        if (SourceRealm == ReviewAuthorityRealm.Production && _checkDisposition is null)
+            throw new ReviewPreflightException("Actual original view disposition preflight is absent.");
+        _checkDisposition?.Invoke(cleanup);
+    }
+
     public void Dispose()
     {
         // A failed reconstruction/retirement retains the actual controlled view
         // and exact scratch paths. Do not erase evidence through a using-finally.
-        if (RetainedScratchPaths.Count == 0 && Interlocked.CompareExchange(ref _workDisposition, 3, 0) == 0)
+        if (RetainedScratchPaths.Count != 0 || Volatile.Read(ref _workDisposition) != 0) return;
+        CheckDisposition(cleanup: true);
+        if (Interlocked.CompareExchange(ref _workDisposition, 3, 0) == 0)
         {
             if (_dispose is null) return;
             _dispose();
@@ -124,6 +137,7 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         if (Volatile.Read(ref _workDisposition) == 2) return;
         if (RetainedScratchPaths.Count != 0 || _disposeOwnedWork is null)
             throw new ReviewPreflightException("Original WORK view retirement is unavailable; exact view and scratch retained.");
+        CheckDisposition(cleanup: false);
         var prior = Interlocked.CompareExchange(ref _workDisposition, 1, 0);
         if (prior == 2) return;
         if (prior != 0)

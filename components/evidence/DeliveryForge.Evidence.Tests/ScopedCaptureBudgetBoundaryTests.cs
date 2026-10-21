@@ -19,21 +19,25 @@ public sealed class ScopedCaptureBudgetBoundaryTests
     [Theory]
     [InlineData("cancelled")]
     [InlineData("timeout")]
-    [InlineData("io")]
+    [InlineData("linked")]
     public void Same_elapsed_WORK_endpoint_is_timeout_even_when_parent_timer_surfaces_as_cancellation(string kind)
     {
         using var stop = new CancellationTokenSource(); var actual = new Budget(stop.Token);
         using var budget = new ScopedCaptureBudget(actual, TimeSpan.FromSeconds(10), CancellationToken.None);
         actual.Limit = TimeSpan.FromTicks(1); stop.Cancel();
-        Exception failure = kind switch { "timeout" => new TimeoutException(), "io" => new IOException(), _ => new OperationCanceledException(stop.Token) };
+        Exception failure = kind switch { "timeout" => new TimeoutException(), "linked" => new OperationCanceledException(budget.Token), _ => new OperationCanceledException(stop.Token) };
         Assert.Equal((true, false), budget.ClassifyFailure(failure, callerCancellationRequested: false));
     }
-    [Fact]
-    public void Explicit_caller_cancellation_is_retained_without_relabeling_it_as_deadline()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Explicit_caller_cancellation_is_retained_without_relabeling_it_as_deadline(bool timeout)
     {
-        var actual = new Budget(); using var budget = new ScopedCaptureBudget(actual, TimeSpan.FromSeconds(10), CancellationToken.None);
-        actual.Limit = TimeSpan.FromTicks(1);
-        Assert.Equal((false, true), budget.ClassifyFailure(new OperationCanceledException(), callerCancellationRequested: true));
+        using var caller = new CancellationTokenSource(); var actual = new Budget();
+        using var budget = new ScopedCaptureBudget(actual, TimeSpan.FromSeconds(10), caller.Token);
+        actual.Limit = TimeSpan.FromTicks(1); caller.Cancel();
+        Exception failure = timeout ? new TimeoutException() : new OperationCanceledException(caller.Token);
+        Assert.Equal((false, true), budget.ClassifyFailure(failure, caller.IsCancellationRequested));
     }
     [Fact]
     public void Parent_cancellation_before_endpoint_and_non_deadline_failure_keep_distinct_classification()
@@ -43,6 +47,52 @@ public sealed class ScopedCaptureBudgetBoundaryTests
         Assert.Equal((false, false), budget.ClassifyFailure(new IOException(), callerCancellationRequested: false));
         stop.Cancel();
         Assert.Equal((false, true), budget.ClassifyFailure(new OperationCanceledException(stop.Token), callerCancellationRequested: false));
+    }
+    [Theory]
+    [InlineData(false, true, false)]
+    [InlineData(false, false, true)]
+    [InlineData(true, false, false)]
+    [InlineData(true, true, false)]
+    [InlineData(true, false, true)]
+    [InlineData(true, true, true)]
+    public void IO_primary_stays_distinct_from_elapsed_WORK_and_concurrent_cancellation(bool expired, bool parentCancelled, bool callerCancelled)
+    {
+        using var parent = new CancellationTokenSource(); using var caller = new CancellationTokenSource();
+        var actual = new Budget(parent.Token); using var budget = new ScopedCaptureBudget(actual, TimeSpan.FromSeconds(10), caller.Token);
+        if (expired) actual.Limit = TimeSpan.FromTicks(1);
+        if (parentCancelled) parent.Cancel();
+        if (callerCancelled) caller.Cancel();
+        Assert.Equal((false, false), budget.ClassifyFailure(new IOException("Actual managed capture read failed."), caller.IsCancellationRequested));
+        // Correct primary classification cannot reopen the SAME original WORK.
+        if (parentCancelled || callerCancelled) Assert.ThrowsAny<OperationCanceledException>(budget.CheckWork);
+        else Assert.Throws<TimeoutException>(budget.CheckWork);
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Foreign_or_unbound_cancellation_cannot_prove_original_WORK_timeout(bool foreign)
+    {
+        using var parent = new CancellationTokenSource(); using var other = new CancellationTokenSource();
+        var actual = new Budget(parent.Token); using var budget = new ScopedCaptureBudget(actual, TimeSpan.FromSeconds(10), CancellationToken.None);
+        actual.Limit = TimeSpan.FromTicks(1); parent.Cancel(); other.Cancel();
+        var failure = foreign ? new OperationCanceledException(other.Token) : new OperationCanceledException();
+        Assert.Equal((false, true), budget.ClassifyFailure(failure, callerCancellationRequested: false));
+        Assert.ThrowsAny<OperationCanceledException>(budget.CheckWork);
+    }
+    [Fact]
+    public void Unbound_cancellation_with_non_cancelable_parent_is_not_expired_original_cancellation_proof()
+    {
+        var actual = new Budget(); using var budget = new ScopedCaptureBudget(actual, TimeSpan.FromSeconds(10), CancellationToken.None);
+        actual.Limit = TimeSpan.FromTicks(1);
+        Assert.Equal((false, false), budget.ClassifyFailure(new OperationCanceledException(), callerCancellationRequested: false));
+        Assert.Throws<TimeoutException>(budget.CheckWork);
+    }
+    [Fact]
+    public void Actual_timeout_primary_remains_timeout_without_requiring_later_original_expiry()
+    {
+        var actual = new Budget(); using var budget = new ScopedCaptureBudget(actual, TimeSpan.FromSeconds(10), CancellationToken.None);
+        Assert.Equal((true, false), budget.ClassifyFailure(new TimeoutException(), callerCancellationRequested: false));
+        budget.CheckWork();
     }
     [Fact]
     public void First_and_later_parent_checks_receive_same_local_origin_and_bound_and_local_postcheck_still_refuses()

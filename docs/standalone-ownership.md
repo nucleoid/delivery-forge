@@ -44,3 +44,20 @@ completion, or through the existing quality-absent route. A successful tool
 result label is insufficient. This avoids spending review allowance on a chain
 whose protected prerequisites are incomplete; it does not certify the runtime
 reviewer or its independence.
+
+Pinned deployment evidence must cover the actual remaining original interval.
+Before creating a checkpoint store, the parent restricts the existing original
+with its existing `Restrict` operation to the earlier of the evidence's UTC
+expiry and its20-minute age endpoint. The1200s whole/1100s WORK values are upper
+ceilings; neither evidence nor a timer is renewed, and the original monotonic
+start/token remain unchanged. Discovery independently checks its anchored proof
+against the same restricted original. Old or expired evidence cannot admit work.
+Closing renewal admission cancels the future-delay wait; an entered renewal RPC
+keeps the existing original token and must settle before lease disposition.
+Historical uncertain renewals still require supported operator reconciliation.
+
+The review-source availability bounds are documented in
+[Compatibility and acceptance](compatibility.md):4,096 filesystem entries per
+admitted census and the complete archive, including headers, inside the selected
+MaximumEvidenceBytes (at most16MiB). These remain admission ceilings, not a promise
+that every repository completes under the original time/byte limits.

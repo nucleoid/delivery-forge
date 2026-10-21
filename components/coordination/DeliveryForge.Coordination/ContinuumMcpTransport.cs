@@ -495,6 +495,9 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
         var bytes = new byte[MaximumResponseBytes + 1];
         var used = 0;
         var start = 0;
+        var lineStart = 0;
+        var scan = 0;
+        var skipLf = false;
         var events = 0;
         while (true)
         {
@@ -506,17 +509,31 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
             if (!sse && read == 0) return bytes[..used];
             if (sse)
             {
-                for (var index = start; index < used; index++)
+                for (; scan < used; scan++)
                 {
-                    var delimiter = index + 1 < used && bytes[index] == 10 && bytes[index + 1] == 10 ? 2 :
-                        index + 3 < used && bytes[index] == 13 && bytes[index + 1] == 10 && bytes[index + 2] == 13 && bytes[index + 3] == 10 ? 4 : 0;
-                    if (delimiter == 0) continue;
+                    var index = scan;
+                    if (skipLf)
+                    {
+                        skipLf = false;
+                        if (bytes[index] == 10)
+                        {
+                            // A CR ended the previous line, including when CR/LF
+                            // arrived in separate reads. Its LF is not another line.
+                            if (start == index) start = index + 1;
+                            lineStart = index + 1;
+                            continue;
+                        }
+                    }
+                    if (bytes[index] is not (10 or 13)) continue;
+                    skipLf = bytes[index] == 13;
+                    var emptyLine = index == lineStart;
+                    lineStart = index + 1;
+                    if (!emptyLine) continue;
                     if (++events > 32) throw ContinuumWireJson.Invalid();
                     var text = new UTF8Encoding(false, true).GetString(bytes, start, index - start);
                     var data = new List<string>();
-                    foreach (var raw in text.Split('\n'))
+                    foreach (var line in text.Split(['\r', '\n']))
                     {
-                        var line = raw.TrimEnd('\r');
                         if (line.Length == 0 || line.StartsWith(':')) continue;
                         var colon = line.IndexOf(':');
                         var field = colon < 0 ? line : line[..colon];
@@ -529,8 +546,7 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
                         if (field == "data") data.Add(part);
                         // SSE ignores fields not defined by its grammar.
                     }
-                    start = index + delimiter;
-                    index = start - 1;
+                    start = index + 1;
                     var payload = Encoding.UTF8.GetBytes(string.Join('\n', data));
                     if (payload.Length == 0) continue; // Includes id + empty-data priming.
                     using var document = ContinuumWireJson.Parse(payload);

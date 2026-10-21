@@ -399,6 +399,31 @@ public sealed class ParentEffectAdmissionTests
         Assert.Throws<CoordinationUncertainException>(() => { _ = actual.EnterAsync("owned", () => Task.FromResult(2)); });
     }
 
+    [Fact]
+    public async Task Real_parent_uncertainty_latch_survives_a_throwing_revocation_observer()
+    {
+        var gate = new object(); var failure = new IOException("Actual revocation observer failed.");
+        var notices = 0; var births = 0;
+        var actual = new ParentEffectAdmission(gate, _ => true, _ =>
+        {
+            Assert.True(Monitor.IsEntered(gate)); notices++; throw failure;
+        });
+        var completed = Task.FromResult(7);
+        var returned = actual.EnterAsync("owned", () => { births++; return completed; });
+        Assert.Same(completed, returned); Assert.Equal(7, await returned);
+        Assert.True(actual.AllKnownSettled);
+        Assert.Same(failure, Assert.Throws<IOException>(() => actual.RetainUncertain("owned", "Unresolved actual mutation DATA.")));
+        Assert.False(actual.AllKnownSettled); Assert.Equal(1, actual.EnteredCount);
+        Assert.Same(failure, Assert.Throws<IOException>(() =>
+        {
+            _ = actual.EnterAsync("owned", () => { births++; return Task.FromResult(1); });
+        }));
+        Assert.Equal(1, births); Assert.Equal(1, actual.EnteredCount); Assert.Equal(2, notices);
+        Assert.False(actual.AllKnownSettled);
+        // Real production gate implementation with a failing local observer;
+        // no remote publication, native process, lease or issuer is fabricated.
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

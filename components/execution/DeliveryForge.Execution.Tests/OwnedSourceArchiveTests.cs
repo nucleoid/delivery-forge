@@ -69,12 +69,43 @@ public sealed class OwnedSourceArchiveTests
 // review/source authority. The linked real-Git control separately owns its view.
 public sealed class OwnedViewRetirementTests
 {
-    static ControlledGitEvidenceContext View(Action? cleanup, Action? work)
+    static ControlledGitEvidenceContext View(Action? cleanup, Action? work, Action<bool>? checkDisposition = null)
     {
         var root = Path.Combine(Path.GetTempPath(), "inert-view-contract-never-created");
         return new(root, root, root, Path.Combine(root, "not-an-executable"), "DATA", 1024,
             "test-source", new('a', 40), "test-view", ReviewAuthorityRealm.Test, [], new object(),
-            dispose: cleanup, disposeOwnedWork: work);
+            dispose: cleanup, disposeOwnedWork: work, checkDisposition: checkDisposition);
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Known_preclaim_refusal_keeps_unentered_callback_available_for_later_disposition(bool cleanupFirst)
+    {
+        var work = 0; var cleanup = 0; var refused = true;
+        var failure = new ReviewPreflightException("Known pre-entry refusal; no callback has entered.");
+        var view = View(() => cleanup++, () => work++, cleanupMode =>
+        {
+            Assert.Equal(cleanupFirst, cleanupMode);
+            if (refused) throw failure;
+        });
+        Action retire = cleanupFirst ? view.Dispose : view.DisposeDuringWork;
+        Assert.Same(failure, Assert.Throws<ReviewPreflightException>(retire));
+        Assert.Equal(0, work); Assert.Equal(0, cleanup); Assert.False(view.DispositionReturned);
+        refused = false; retire(); retire();
+        Assert.Equal(cleanupFirst ? 1 : 0, cleanup); Assert.Equal(cleanupFirst ? 0 : 1, work);
+        Assert.True(view.DispositionReturned);
+    }
+    [Fact]
+    public void Known_WORK_preclaim_refusal_allows_cleanup_without_reentering_WORK_callback()
+    {
+        var work = 0; var cleanup = 0;
+        var view = View(() => cleanup++, () => work++, cleanupMode =>
+        {
+            if (!cleanupMode) throw new ReviewPreflightException("Actual WORK preflight refused.");
+        });
+        Assert.Throws<ReviewPreflightException>(view.DisposeDuringWork);
+        view.Dispose();
+        Assert.Equal(0, work); Assert.Equal(1, cleanup); Assert.True(view.DispositionReturned);
     }
     [Fact]
     public void Explicit_work_retirement_invokes_exact_callback_once_without_later_cleanup()
@@ -87,11 +118,12 @@ public sealed class OwnedViewRetirementTests
     [Fact]
     public void Thrown_work_retirement_is_not_retried_by_explicit_or_ordinary_dispose()
     {
-        var work = 0; var cleanup = 0; var failure = new IOException("Actual callback did not return known retirement.");
-        var view = View(() => cleanup++, () => { work++; throw failure; });
+        var work = 0; var cleanup = 0; var checks = 0;
+        var failure = new IOException("Actual callback did not return known retirement.");
+        var view = View(() => cleanup++, () => { work++; throw failure; }, _ => checks++);
         Assert.Same(failure, Assert.Throws<IOException>(view.DisposeDuringWork));
         Assert.Throws<ReviewPreflightException>(view.DisposeDuringWork); view.Dispose();
-        Assert.Equal(1, work); Assert.Equal(0, cleanup); Assert.False(view.DispositionReturned);
+        Assert.Equal(1, work); Assert.Equal(0, cleanup); Assert.Equal(1, checks); Assert.False(view.DispositionReturned);
     }
     [Fact(Timeout = 15000)]
     public async Task Claimed_cleanup_excludes_concurrent_WORK_and_any_cleanup_replay()

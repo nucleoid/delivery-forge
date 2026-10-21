@@ -9,29 +9,56 @@ public sealed class NativeImageVerifierTests : IDisposable
     readonly string root = Path.Combine(Path.GetTempPath(), "forge-native-image-" + Guid.NewGuid().ToString("N"));
     string Image => Path.Combine(root, "inert-image.data");
     public NativeImageVerifierTests() { Directory.CreateDirectory(root); File.WriteAllText(Image, "inert image bytes\n"); }
+    bool retainImage;
     AdmissionFile Pin()
     {
+        // Fixture setup is also cancellable; this is not a production image pin issuer.
+        var token = TestContext.Current.CancellationToken;
+        token.ThrowIfCancellationRequested();
         using var stream = File.OpenRead(Image);
-        return new(Image, stream.Length, Convert.ToHexStringLower(SHA256.HashData(stream)));
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        var buffer = new byte[65536]; int count;
+        while ((count = stream.Read(buffer)) != 0)
+        {
+            token.ThrowIfCancellationRequested(); hash.AppendData(buffer, 0, count);
+        }
+        token.ThrowIfCancellationRequested();
+        return new(Image, stream.Length, Convert.ToHexStringLower(hash.GetHashAndReset()));
     }
 
     [Fact(Timeout = 60000)]
     public void Complete_image_above_old_array_bound_is_streamed_and_last_byte_drift_is_refused()
     {
-        using (var extent = new FileStream(Image, FileMode.Open, FileAccess.Write, FileShare.None))
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        void Stage(string value) => TestContext.Current.TestOutputHelper!.WriteLine(
+            $"Actual image stage={value}; elapsed={System.Diagnostics.Stopwatch.GetElapsedTime(started)}; root={root}");
+        Stage("started");
+        try
         {
-            extent.SetLength(256L * 1024 * 1024 + 1);
-            extent.Position = extent.Length - 1; extent.WriteByte(41);
+            using (var extent = new FileStream(Image, FileMode.Open, FileAccess.Write, FileShare.None))
+            {
+                extent.SetLength(256L * 1024 * 1024 + 1);
+                extent.Position = extent.Length - 1; extent.WriteByte(41);
+            }
+            Stage("extent-created");
+            var pin = Pin();
+            Stage("fixture-complete-hash-returned");
+            using var life = new ToolLifetime(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
+            BoundedFiles.VerifyNativeImage(pin, life, TestContext.Current.CancellationToken);
+            Stage("production-positive-returned");
+            using (var changed = new FileStream(Image, FileMode.Open, FileAccess.Write, FileShare.None))
+            { changed.Position = changed.Length - 1; changed.WriteByte(42); }
+            Assert.Throws<IOException>(() => BoundedFiles.VerifyNativeImage(pin, life, TestContext.Current.CancellationToken));
+            Stage("production-last-byte-refusal-returned");
+            Assert.False(life.HasRetainedUnknown);
+            // A failed complete hash must still close the actual original file handle.
+            using var exclusive = new FileStream(Image, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+            Stage("exclusive-first-close-proof-returned");
         }
-        var pin = Pin();
-        using var life = new ToolLifetime(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
-        BoundedFiles.VerifyNativeImage(pin, life, TestContext.Current.CancellationToken);
-        using (var changed = new FileStream(Image, FileMode.Open, FileAccess.Write, FileShare.None))
-        { changed.Position = changed.Length - 1; changed.WriteByte(42); }
-        Assert.Throws<IOException>(() => BoundedFiles.VerifyNativeImage(pin, life, TestContext.Current.CancellationToken));
-        Assert.False(life.HasRetainedUnknown);
-        // A failed complete hash must still close the actual original file handle.
-        using var exclusive = new FileStream(Image, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        catch
+        {
+            retainImage = true; Stage("failed-retained"); throw;
+        }
     }
 
     [Theory]
@@ -137,5 +164,5 @@ public sealed class NativeImageVerifierTests : IDisposable
         Assert.False(life.HasRetainedUnknown);
     }
 
-    public void Dispose() => Directory.Delete(root, recursive: true);
+    public void Dispose() { if (!retainImage) Directory.Delete(root, recursive: true); }
 }
