@@ -142,9 +142,8 @@ internal static class JavaScriptSuppressionScanner
                 if (current == (byte)'\'' && !canStartRegularExpression && index > 0 && index + 1 < content.Length &&
                     IsAsciiAlphaNumeric(content[index - 1]) && IsAsciiAlphaNumeric(content[index + 1]))
                 {
-                    // JSX text contractions are not JavaScript string delimiters.
-                    index++;
-                    continue;
+                    throw Ambiguous(
+                        "an apostrophe between word characters can be JSX text or a module string delimiter");
                 }
                 if (!SkipQuoted(content, ref index, current, budget))
                     throw Ambiguous("unterminated string literal");
@@ -650,8 +649,7 @@ internal static class JavaScriptSuppressionScanner
                     return false;
             }
         }
-        while (previous >= 0 && content[previous] is not (byte)'>' and not (byte)'{' and not (byte)'}' &&
-               content[previous] is not (byte)'\r' and not (byte)'\n')
+        while (previous >= 0 && content[previous] is not (byte)'>' and not (byte)'{' and not (byte)'}')
             previous--;
         if (previous < 0 || content[previous] != (byte)'>')
             return false;

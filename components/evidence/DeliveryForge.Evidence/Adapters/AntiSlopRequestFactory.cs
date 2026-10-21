@@ -6,6 +6,8 @@ namespace DeliveryForge.Evidence.Adapters;
 /// <summary>Code-owned construction of the complete canonical anti-slop request.</summary>
 public static class AntiSlopRequestFactory
 {
+    private const int MaximumManifestBytes = 16 * 1024 * 1024;
+
     public static GateRequest Create(
         string gateId,
         ResolvedEvidencePolicy policy,
@@ -28,6 +30,14 @@ public static class AntiSlopRequestFactory
         var bundle = Path.GetFullPath(bundleRoot);
         var node = Path.GetFullPath(nodePath);
         var selectedInputs = DeterministicEvaluationPluginRegistry.NormalizeInputs(inputs);
+        long inputBytes = 0;
+        foreach (var input in selectedInputs)
+        {
+            inputBytes = checked(inputBytes + Encoding.UTF8.GetByteCount(input) + 1L);
+            if (inputBytes > MaximumManifestBytes)
+                throw new EvaluationPluginException(
+                    $"Anti-slop input paths exceed the {MaximumManifestBytes}-byte request composition ceiling.");
+        }
         var config = Path.Combine(bundle, enableEffectRules ? "oxlint.effect.config.ts" : "oxlint.config.ts");
         var oxlint = Path.Combine(bundle, "node_modules", "oxlint", "bin", "oxlint");
         var direct = new List<string>
@@ -47,6 +57,9 @@ public static class AntiSlopRequestFactory
             var manifestRoot = Path.Combine(Path.GetFullPath(outputDirectory), "anti-slop-manifests");
             Directory.CreateDirectory(manifestRoot);
             var manifestBytes = JsonSerializer.SerializeToUtf8Bytes(selectedInputs);
+            if (manifestBytes.Length > MaximumManifestBytes)
+                throw new EvaluationPluginException(
+                    $"Canonical anti-slop manifest exceeds the {MaximumManifestBytes}-byte composition ceiling.");
             var manifestIdentity = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(manifestBytes));
             var manifest = Path.Combine(manifestRoot, manifestIdentity + ".json");
             if (File.Exists(manifest))
@@ -72,7 +85,7 @@ public static class AntiSlopRequestFactory
             new Dictionary<string, string>(StringComparer.Ordinal), InheritEnvironment: false);
         return new GateRequest(
             gateId, policy, capability, EvidenceAdapterKind.External,
-            AntiSlopEvaluationPlugin.ComputeConfigurationIdentity(invocation, enableEffectRules),
+            "unavailable",
             expectedRepository, invocation, scope, timeout, Path.GetFullPath(outputDirectory),
             new EvaluationPluginSelection(
                 AntiSlopEvaluationPlugin.CreateBundled(bundle, node).Id,

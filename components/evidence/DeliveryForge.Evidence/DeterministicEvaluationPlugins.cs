@@ -64,11 +64,19 @@ public interface IDeterministicEvaluationPlugin
         GateRequest request,
         EvaluationPluginSnapshot snapshot) => null;
 
+    string GetConfigurationIdentity(
+        GateRequest request,
+        EvaluationPluginSnapshot? snapshot) => request.ConfigurationIdentity;
+
     string GetRuntimeClosureIdentity(GateRequest request) => request.ConfigurationIdentity;
 
     string GetRuntimeClosureIdentity(
         GateRequest request,
         EvaluationPluginSnapshot? snapshot) => GetRuntimeClosureIdentity(request);
+
+    string? GetExecutableIdentity(
+        GateRequest request,
+        EvaluationPluginSnapshot? snapshot) => null;
 
     ValueTask<EvaluationPluginSnapshot> CaptureBeforeAsync(
         GateRequest request,
@@ -207,7 +215,7 @@ public sealed class DeterministicEvaluationPluginRegistry
             plugin.Version,
             request.Plugin?.Enabled ?? true,
             status,
-            request.ConfigurationIdentity,
+            plugin.GetConfigurationIdentity(request, snapshot),
             plugin.GetRuntimeClosureIdentity(request, snapshot),
             inputs,
             ComputeInputSetIdentity(inputs),

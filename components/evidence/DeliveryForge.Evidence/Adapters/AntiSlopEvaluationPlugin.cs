@@ -6,6 +6,7 @@ namespace DeliveryForge.Evidence.Adapters;
 
 public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
 {
+    private const long MaximumCachedClosureBytes = 256L * 1024 * 1024;
     public const string UpstreamCommit = "13909c9e07590f5a85d93c62712259fe14a883f7";
     public const string OxlintVersion = "1.78.0";
     private const string ReviewedPackageSha256 = "7bb09c43863e87b3721e61f5891e3798949c346212dcb6c07f30cd666652ca1f";
@@ -132,13 +133,18 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
         var configurationIdentity = await ComputeConfigurationIdentityAsync(
                 request.Invocation, effectRulesEnabled, inputs, cache, cancellationToken)
             .ConfigureAwait(false);
-        if (!string.Equals(configurationIdentity, request.ConfigurationIdentity, StringComparison.Ordinal))
+        if (!string.Equals(request.ConfigurationIdentity, "unavailable", StringComparison.Ordinal) &&
+            !string.Equals(configurationIdentity, request.ConfigurationIdentity, StringComparison.Ordinal))
             throw new InvalidOperationException(
                 "Anti-slop configuration closure does not match the frozen configuration identity.");
+        var executableBytes = await cache.ReadFileAsync(request.Invocation.FileName, cancellationToken)
+            .ConfigureAwait(false);
+        var executableIdentity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(executableBytes))}";
         return new EvaluationPluginSnapshot(new AntiSlopSnapshot(
             inputs,
             configurationIdentity,
-            runtimeClosureIdentity));
+            runtimeClosureIdentity,
+            executableIdentity));
     }
 
     public NormalizedEvidence? ValidateBeforeExecution(GateRequest request)
@@ -222,12 +228,26 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
                 "Anti-slop configuration snapshot does not match the frozen configuration identity.");
     }
 
+    public string GetConfigurationIdentity(
+        GateRequest request,
+        EvaluationPluginSnapshot? snapshot) =>
+        snapshot?.State is AntiSlopSnapshot state
+            ? state.ConfigurationIdentity
+            : "unavailable";
+
     public string GetRuntimeClosureIdentity(
         GateRequest request,
         EvaluationPluginSnapshot? snapshot = null) =>
         snapshot?.State is AntiSlopSnapshot state
             ? state.RuntimeClosureIdentity
-            : request.ConfigurationIdentity;
+            : "unavailable";
+
+    public string? GetExecutableIdentity(
+        GateRequest request,
+        EvaluationPluginSnapshot? snapshot) =>
+        snapshot?.State is AntiSlopSnapshot state
+            ? state.ExecutableIdentity
+            : null;
 
     public NormalizedEvidence Normalize(
         GateRequest request,
@@ -731,13 +751,15 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
     private sealed record AntiSlopSnapshot(
         IReadOnlyList<string> Inputs,
         string ConfigurationIdentity,
-        string RuntimeClosureIdentity);
+        string RuntimeClosureIdentity,
+        string ExecutableIdentity);
 
     private sealed class ClosureReadCache
     {
         private readonly Dictionary<string, byte[]> _files = new(PathComparer);
         private readonly Dictionary<string, IReadOnlyList<string>> _fileLists = new(PathComparer);
         private readonly Dictionary<string, IReadOnlyList<string>> _directoryLists = new(PathComparer);
+        private long _cachedBytes;
 
         internal async ValueTask<byte[]> ReadFileAsync(string path, CancellationToken cancellationToken)
         {
@@ -750,8 +772,9 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             await using var stream = new FileStream(
                 path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024,
                 FileOptions.Asynchronous | FileOptions.SequentialScan);
-            if (stream.Length > int.MaxValue)
-                throw new InvalidOperationException($"Anti-slop closure file is too large to snapshot: {path}");
+            if (stream.Length > int.MaxValue || stream.Length > MaximumCachedClosureBytes - _cachedBytes)
+                throw new InvalidOperationException(
+                    $"Anti-slop closure exceeds the {MaximumCachedClosureBytes}-byte snapshot memory ceiling: {path}");
             var bytes = new byte[checked((int)stream.Length)];
             var offset = 0;
             while (offset < bytes.Length)
@@ -767,6 +790,7 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
                 throw new InvalidOperationException(
                     $"Anti-slop closure file changed while it was being snapshotted: {path}");
             cancellationToken.ThrowIfCancellationRequested();
+            _cachedBytes += bytes.Length;
             _files.Add(path, bytes);
             return bytes;
         }

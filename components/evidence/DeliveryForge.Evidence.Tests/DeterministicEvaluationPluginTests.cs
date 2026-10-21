@@ -6,6 +6,24 @@ namespace DeliveryForge.Evidence.Tests;
 public sealed class DeterministicEvaluationPluginTests
 {
     [Fact]
+    public void Anti_slop_request_factory_does_not_read_runtime_closure()
+    {
+        using var repository = new TempDirectory();
+        using var output = new TempDirectory();
+        var missingBundle = System.IO.Path.Combine(repository.Path, "missing-bundle");
+        var missingNode = System.IO.Path.Combine(repository.Path, "missing-node");
+        var original = TestEvidence.GateRequest(output.Path);
+
+        var request = AntiSlopRequestFactory.Create(
+            "anti-slop", original.Policy, original.Capability, original.ExpectedRepository,
+            original.Invocation.WorkingDirectory, missingBundle, missingNode, ["app.ts"],
+            "frozen-javascript-family", TimeSpan.FromSeconds(30), output.Path);
+
+        Assert.Equal("unavailable", request.ConfigurationIdentity);
+        Assert.Equal(missingNode, request.Invocation.FileName);
+    }
+
+    [Fact]
     public void Reviewed_installed_anti_slop_runtime_closure_is_exact()
     {
         if (!OperatingSystem.IsLinux() ||
@@ -334,6 +352,9 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.False(result.ProductionCapable);
         Assert.Equal(fixtureCapability, result.Fixture);
         Assert.Equal(violation ? 1 : 0, result.Execution.ExitCode);
+        Assert.NotEqual("unavailable", result.ConfigurationIdentity);
+        Assert.Equal(result.Plugin.ConfigurationIdentity, result.ConfigurationIdentity);
+        Assert.Equal("<host-owned-frozen-inputs>", result.Invocation.WorkingDirectory);
         if (!violation)
             Assert.Contains("advisory", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.True(result.ArtifactHashes.TryGetValue(GateRunner.AntiSlopBindingArtifact, out var bindingHash));
@@ -573,7 +594,7 @@ public sealed class DeterministicEvaluationPluginTests
                 "oxlint", "1.78.0", "oxlint-json-v1", false, [], nodePath,
                 executableIdentity, ["lint"], invocation.WorkingDirectory),
             Adapter = EvidenceAdapterKind.External,
-            ConfigurationIdentity = AntiSlopEvaluationPlugin.ComputeConfigurationIdentity(invocation, false),
+            ConfigurationIdentity = "unavailable",
             Invocation = invocation,
             Plugin = new EvaluationPluginSelection("dmmulroy.anti-slop", true, ["src/app.ts"])
         };
@@ -601,11 +622,10 @@ public sealed class DeterministicEvaluationPluginTests
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
-        Assert.Contains(
-            missing == "node" ? "capability executable" : "closure",
-            result.Reason,
-            StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("closure", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.Null(result.Execution.ExitCode);
+        Assert.Equal("unavailable", result.Plugin.ConfigurationIdentity);
+        Assert.Equal("unavailable", result.Plugin.RuntimeClosureIdentity);
         Assert.True(File.Exists(result.ReceiptPath));
         using var receipt = System.Text.Json.JsonDocument.Parse(
             await File.ReadAllBytesAsync(result.ReceiptPath, TestContext.Current.CancellationToken));

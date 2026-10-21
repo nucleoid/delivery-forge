@@ -213,12 +213,6 @@ public sealed class GateRunner
                 CancellationToken.None).ConfigureAwait(false);
         }
 
-        if (plugin is Adapters.AntiSlopEvaluationPlugin && pluginBinding.Enabled &&
-            ValidateCapabilityBinding(request, plugin) is { } earlyCapabilityFailure)
-            return await PersistWithoutExecutionAsync(
-                request, gateDirectory, before, before, earlyCapabilityFailure,
-                pluginBinding, CancellationToken.None).ConfigureAwait(false);
-
         NormalizedEvidence? pluginValidation;
         try
         {
@@ -275,6 +269,12 @@ public sealed class GateRunner
         {
             InputSetIdentity = pluginBinding.InputSetIdentity
         };
+        request = request with { ConfigurationIdentity = pluginBinding.ConfigurationIdentity };
+        if (plugin is Adapters.AntiSlopEvaluationPlugin &&
+            ValidateCapabilityBinding(request, plugin, evidenceSnapshot) is { } snapshotCapabilityFailure)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before, snapshotCapabilityFailure,
+                pluginBinding, CancellationToken.None).ConfigureAwait(false);
 
         CommandResult execution;
         var captureBoundExceeded = false;
@@ -372,7 +372,7 @@ public sealed class GateRunner
             normalized = NormalizedEvidence.Incomplete("Repository identity could not be read after evaluation.");
         else if (sourceChanged)
             normalized = NormalizedEvidence.Error("Repository source/index/status identity changed during evaluation.");
-        else if (ValidateCapabilityBinding(request, plugin) is { } postCapabilityValidation)
+        else if (ValidateCapabilityBinding(request, plugin, evidenceSnapshot) is { } postCapabilityValidation)
             normalized = postCapabilityValidation;
         else if (postExecutionValidation is not null)
             normalized = postExecutionValidation;
@@ -518,10 +518,13 @@ public sealed class GateRunner
         var receiptPath = await new AppendOnlyContractStore(Path.Combine(gateDirectory, "receipts"))
             .WriteImmutableAsync(receiptBytes, cancellationToken).ConfigureAwait(false);
 
+        var auditInvocation = plugin.Id == "dmmulroy.anti-slop"
+            ? request.Invocation with { WorkingDirectory = "<host-owned-frozen-inputs>" }
+            : request.Invocation;
         return new GateRunResult(
             normalized.Outcome, normalized.Reason, normalized.Fixture, normalized.ProductionCapable,
-            limitations, sourceChanged, request.Invocation, execution, before, after,
-            request.Policy.PolicyIdentity, request.Capability.ExecutableIdentity ?? "unavailable", request.ConfigurationIdentity, request.Scope,
+            limitations, sourceChanged, auditInvocation, execution, before, after,
+            request.Policy.PolicyIdentity, request.Capability.ExecutableIdentity ?? "unavailable", plugin.ConfigurationIdentity, request.Scope,
             persistedArtifactHashes, receiptPath, normalized.NotApplicableRationale)
         { Plugin = plugin, TrustedReceiptProvenance = null };
     }
@@ -547,7 +550,7 @@ public sealed class GateRunner
                 request.GateId, request.Policy.PolicyIdentity, before.HeadCommit,
                 plugin.Id, plugin.Version, request.Capability.Tool, request.Capability.Version,
                 request.Capability.ExecutableIdentity ?? "sha256:" + new string('0', 64),
-                request.ConfigurationIdentity, plugin.RuntimeClosureIdentity, plugin.InputSetIdentity,
+                plugin.ConfigurationIdentity, plugin.RuntimeClosureIdentity, plugin.InputSetIdentity,
                 plugin.Enabled, PluginStatusText(plugin.Status),
                 normalized.ProductionCapable,
                 normalized.ProductionCapable ? "production" : "advisory"));
@@ -573,7 +576,7 @@ public sealed class GateRunner
             CapabilityProbeWorkingDirectory = request.Capability.ProbeWorkingDirectory,
             PolicySourceRevision = request.Policy.SourceRevision,
             PolicyContentIdentity = request.Policy.ContentIdentity,
-            request.ConfigurationIdentity
+            ConfigurationIdentity = plugin.ConfigurationIdentity
         }, ContractJson);
 
     private static void AppendAntiSlopBindingArtifact(
@@ -654,7 +657,7 @@ public sealed class GateRunner
             CapabilityProbeWorkingDirectory = request.Capability.ProbeWorkingDirectory,
             PolicySourceRevision = request.Policy.SourceRevision,
             PolicyContentIdentity = request.Policy.ContentIdentity,
-            request.ConfigurationIdentity,
+            ConfigurationIdentity = plugin.ConfigurationIdentity,
             Plugin = new
             {
                 plugin.Id,
@@ -738,7 +741,8 @@ public sealed class GateRunner
 
     private NormalizedEvidence? ValidateCapabilityBinding(
         GateRequest request,
-        IDeterministicEvaluationPlugin plugin)
+        IDeterministicEvaluationPlugin plugin,
+        EvaluationPluginSnapshot? snapshot = null)
     {
         var expectedTool = plugin.ExpectedTool;
         if (!string.Equals(expectedTool, request.Capability.Tool, StringComparison.Ordinal))
@@ -776,6 +780,15 @@ public sealed class GateRunner
                 ? StringComparison.OrdinalIgnoreCase
                 : StringComparison.Ordinal))
             return NormalizedEvidence.Error("The invocation executable is not the detected capability executable.");
+
+        var snapshottedIdentity = plugin.GetExecutableIdentity(request, snapshot);
+        if (plugin is Adapters.AntiSlopEvaluationPlugin && snapshot is null)
+            return null;
+        if (snapshottedIdentity is not null)
+            return string.Equals(snapshottedIdentity, request.Capability.ExecutableIdentity, StringComparison.Ordinal)
+                ? null
+                : NormalizedEvidence.Error(
+                    "The snapshotted executable bytes do not match the bound capability identity.");
 
         try
         {

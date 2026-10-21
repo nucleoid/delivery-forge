@@ -61,6 +61,10 @@ function run(fixture:
   | "violation-property-keyword-newline"
   | "suppression-prefix-update-regex"
   | "violation-prefix-update-regex"
+  | "suppression-no-space-from"
+  | "violation-no-space-from"
+  | "suppression-multiline-jsx-backtick"
+  | "violation-multiline-jsx-backtick"
   | "suppression-blanket-specific-enable"
   | "suppression-prefixed-alias"): {
   status: number | null;
@@ -80,7 +84,9 @@ function run(fixture:
         fixture === "suppression-template-jsx-object" ||
         fixture === "violation-template-jsx-object" ||
         fixture === "suppression-jsx-expression-container" ||
-        fixture === "violation-jsx-expression-container"
+        fixture === "violation-jsx-expression-container" ||
+        fixture === "suppression-multiline-jsx-backtick" ||
+        fixture === "violation-multiline-jsx-backtick"
           ? "tsx"
           : "ts"
       }`),
@@ -172,6 +178,8 @@ for (const [suppressedName, violationName] of [
   ["suppression-extends-regex", "violation-extends-regex"],
   ["suppression-property-keyword-newline", "violation-property-keyword-newline"],
   ["suppression-prefix-update-regex", "violation-prefix-update-regex"],
+  ["suppression-no-space-from", "violation-no-space-from"],
+  ["suppression-multiline-jsx-backtick", "violation-multiline-jsx-backtick"],
 ] as const) {
   const violationControl = run(violationName);
   assert.equal(violationControl.status, 1);
