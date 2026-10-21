@@ -1,7 +1,7 @@
 # Claude Mods + native Pi implementation preflight
 
 **Prepared:** 2026-10-21 UTC  
-**Status:** PREP ONLY — no product UI implementation, host session load, image capture, publication, or production claim
+**Status at preparation:** PREP ONLY — this document records the original readiness checkpoint. The handoff was subsequently declared frozen by the parent, and implementation continued on this same branch. See `docs/ux/cockpit-ux2/native-mods-pi.md` for the implementation and evidence outcome. No production claim is made.
 
 ## 1. Isolated branch and exact-base verification
 
@@ -211,4 +211,4 @@ Presence was read from command/package metadata only. Neither host was launched 
 4. Claude 2.1.303 advertises validate/test but no `plugin get-types`; exact installed declarations need an approved retrieval method or the implementation must pin its compatibility evidence to validator/tests plus the staged official reference.
 5. Claude Desktop and VS Code are present but their embedded/runtime mod versions were intentionally not exercised.
 
-This preflight file is the only intended branch change. It is intentionally uncommitted so the same branch/worktree can continue after an explicit design freeze.
+This was the only intended change at the preflight checkpoint. After the parent explicitly declared the design frozen, the same isolated branch/worktree continued into implementation. The historical checks and blockers above are retained rather than rewritten; the implementation evidence document records which blockers were resolved and which remain.
