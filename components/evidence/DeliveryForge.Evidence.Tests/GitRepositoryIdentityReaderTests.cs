@@ -308,6 +308,17 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Theory]
+    [InlineData("export const View = () => (\n  <p>\n    {format(\"}\")} use ` here\n  </p>\n);\n// eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = x as unknown as string[];\n// `\n")]
+    [InlineData("export const View = () => <p>{format(\"}\")} x 'y</p>; // eslint-disable-line anti-slop/no-chained-type-assertions -- '\nexport const hidden = x as unknown as string[];\n")]
+    public void Jsx_expression_string_braces_cannot_hide_directives(string source)
+    {
+        var error = Assert.Throws<EvidenceRepositoryException>(() =>
+            GitRepositoryIdentityReader.ContainsSuppressionDirective(source));
+
+        Assert.Contains("JSX text", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
     [InlineData("const of = 4; x = of / 2 // eslint-disable-line\n")]
     [InlineData("x = object.in / 2 // eslint-disable-line\n")]
     [InlineData("x = object.delete / 2 // eslint-disable-line\n")]

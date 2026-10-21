@@ -651,6 +651,14 @@ internal static class JavaScriptSuppressionScanner
             previous--;
             while (previous >= 0 && depth > 0)
             {
+                if (content[previous] is (byte)'\'' or (byte)'"')
+                {
+                    if (!TrySkipQuotedBackward(content, ref previous, content[previous]))
+                        throw Ambiguous("a JSX expression string cannot be reverse-matched safely");
+                    continue;
+                }
+                if (content[previous] == (byte)'`')
+                    throw Ambiguous("a JSX expression template cannot be reverse-matched safely");
                 if (content[previous] == (byte)'}')
                     depth++;
                 else if (content[previous] == (byte)'{')
@@ -670,6 +678,27 @@ internal static class JavaScriptSuppressionScanner
                 return true;
             if (content[next] == (byte)'{')
                 return false;
+        }
+        return false;
+    }
+
+    private static bool TrySkipQuotedBackward(ReadOnlySpan<byte> content, ref int index, byte quote)
+    {
+        for (var candidate = index - 1; candidate >= 0; candidate--)
+        {
+            if (content[candidate] is (byte)'\r' or (byte)'\n' || IsUnicodeLineTerminator(content, candidate))
+                return false;
+            if (content[candidate] != quote)
+                continue;
+
+            var backslashes = 0;
+            for (var escape = candidate - 1; escape >= 0 && content[escape] == (byte)'\\'; escape--)
+                backslashes++;
+            if ((backslashes & 1) != 0)
+                continue;
+
+            index = candidate - 1;
+            return true;
         }
         return false;
     }
