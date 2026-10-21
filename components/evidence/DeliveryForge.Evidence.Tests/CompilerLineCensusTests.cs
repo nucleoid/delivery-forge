@@ -377,9 +377,13 @@ public sealed class CompilerLineCensusTests
                 if (extraCompilerConstructor)
                     contextNode["inputs"]!.AsArray().Add(JsonSerializer.SerializeToNode(new
                     {
-                        role = "compiler-source", logicalPath = "Extra.cs", locator = "extra",
-                        length = data["extra"].Length, sha256 = InstalledToolFiles.Identity(data["extra"])[7..],
-                        generated = true, encoding = "utf-8"
+                        role = "compiler-source",
+                        logicalPath = "Extra.cs",
+                        locator = "extra",
+                        length = data["extra"].Length,
+                        sha256 = InstalledToolFiles.Identity(data["extra"])[7..],
+                        generated = true,
+                        encoding = "utf-8"
                     }));
                 contexts.Add(contextNode);
                 var build = context + "b";
