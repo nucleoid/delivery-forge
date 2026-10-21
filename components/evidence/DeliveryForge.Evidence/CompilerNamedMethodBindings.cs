@@ -12,11 +12,12 @@ namespace DeliveryForge.Evidence;
 internal static class CompilerNamedMethodBindings
 {
     internal sealed record Binding(int? MethodToken, string Disposition, IReadOnlyList<int> PdbStateMachineCarriers);
-    internal sealed class Table(Dictionary<IMethodSymbol, Binding> bindings)
+    internal sealed class Table(Dictionary<IMethodSymbol, Binding> bindings, HashSet<int> namedCarriers)
     {
         private static readonly Binding Unmapped = new(null, "not-in-source-named-member-table", []);
         internal Binding For(IMethodSymbol? method) => method is not null && bindings.TryGetValue(Normalize(method), out var binding)
             ? binding : Unmapped;
+        internal bool IsNamedCarrier(int token) => namedCarriers.Contains(token);
     }
 
     private sealed class UnsupportedSignature(string reason) : Exception(reason);
@@ -28,7 +29,8 @@ internal static class CompilerNamedMethodBindings
         Action step, Action<long, string?[]> admit)
     {
         const int maximumRows = 10000;
-        var grammar = new Grammar(metadata, step, admit);
+        var grammar = new Grammar(metadata,
+            compilation.GetTypeByMetadataName("System.Runtime.CompilerServices.IsExternalInit"), step, admit);
         var sourceMethods = new HashSet<IMethodSymbol>(SymbolEqualityComparer.Default);
         var sourceKeys = new Dictionary<IMethodSymbol, string?>(SymbolEqualityComparer.Default);
         var sourceReasons = new Dictionary<IMethodSymbol, string>(SymbolEqualityComparer.Default);
@@ -154,16 +156,29 @@ internal static class CompilerNamedMethodBindings
             var binding = new Binding(methodToken, reason, carriers);
             bindings.Add(method, binding);
         }
-        return new(bindings);
+        var namedCarriers = new HashSet<int>();
+        foreach (var binding in bindings.Values)
+        {
+            step();
+            if (binding.MethodToken is not { } methodToken) continue;
+            if (!namedCarriers.Contains(methodToken)) { admit(64, []); namedCarriers.Add(methodToken); }
+            foreach (var carrier in binding.PdbStateMachineCarriers)
+            {
+                step();
+                if (!namedCarriers.Contains(carrier)) { admit(64, []); namedCarriers.Add(carrier); }
+            }
+        }
+        return new(bindings, namedCarriers);
     }
 
-    private sealed class Grammar(MetadataReader reader, Action step,
+    private sealed class Grammar(MetadataReader reader, INamedTypeSymbol? initOnlyMarker, Action step,
         Action<long, string?[]> admit) : ISignatureTypeProvider<string, object?>
     {
         private readonly Dictionary<ITypeSymbol, string> sourceTypes = new(SymbolEqualityComparer.Default);
         private readonly Dictionary<INamedTypeSymbol, string> sourceNames = new(SymbolEqualityComparer.Default);
         private readonly Dictionary<EntityHandle, string> metadataNames = [];
         private readonly Dictionary<AssemblyReferenceHandle, string> referenceAssemblies = [];
+        private readonly Dictionary<string, string> modifierIdentities = new(StringComparer.Ordinal);
         private readonly HashSet<EntityHandle> namesInProgress = [];
         private string? ownAssembly;
 
@@ -194,7 +209,13 @@ internal static class CompilerNamedMethodBindings
         {
             step();
             if (method.IsVararg) throw new UnsupportedSignature("vararg-signature-unsupported");
-            if (!method.ReturnTypeCustomModifiers.IsEmpty || !method.RefCustomModifiers.IsEmpty)
+            var initReturn = method.IsInitOnly && method.MethodKind == MethodKind.PropertySet && method.ReturnsVoid &&
+                !method.ReturnsByRef && !method.ReturnsByRefReadonly && method.RefCustomModifiers.IsEmpty &&
+                method.ReturnTypeCustomModifiers.Length == 1 && !method.ReturnTypeCustomModifiers[0].IsOptional &&
+                initOnlyMarker is not null &&
+                SymbolEqualityComparer.Default.Equals(method.ReturnTypeCustomModifiers[0].Modifier, initOnlyMarker);
+            if (!method.RefCustomModifiers.IsEmpty ||
+                (!method.ReturnTypeCustomModifiers.IsEmpty && !initReturn) || (method.IsInitOnly && !initReturn))
                 throw new UnsupportedSignature("custom-modifier-signature-unsupported");
             admit(64L + 32L * method.Parameters.Length, []);
             var parameters = new string[method.Parameters.Length];
@@ -208,6 +229,9 @@ internal static class CompilerNamedMethodBindings
             }
             var returns = SourceType(method.ReturnType);
             if (method.ReturnsByRef || method.ReturnsByRefReadonly) returns = Key("byref", returns);
+            if (initReturn)
+                returns = Key("required-modifier", Key("modifier-identity",
+                    SourceNamedIdentity(method.ReturnTypeCustomModifiers[0].Modifier.OriginalDefinition)), returns);
             return Method(SourceNamedIdentity(method.ContainingType.OriginalDefinition), method.MetadataName,
                 method.Arity, method.IsStatic, returns, parameters);
         }
@@ -424,14 +448,41 @@ internal static class CompilerNamedMethodBindings
         public string GetGenericTypeParameter(object? context, int index) => Key("type-parameter", Number(index));
         public string GetTypeFromDefinition(MetadataReader metadata, TypeDefinitionHandle handle, byte rawTypeKind) => Named(handle, rawTypeKind);
         public string GetTypeFromReference(MetadataReader metadata, TypeReferenceHandle handle, byte rawTypeKind) => Named(handle, rawTypeKind);
-        private string Named(EntityHandle handle, byte rawTypeKind) => rawTypeKind switch
+        private string Named(EntityHandle handle, byte rawTypeKind)
         {
-            (byte)SignatureTypeKind.Class => Key("class", MetadataNamedIdentity(handle)),
-            (byte)SignatureTypeKind.ValueType => Key("valuetype", MetadataNamedIdentity(handle)),
-            _ => throw new UnsupportedSignature("unknown-named-type-signature-kind")
-        };
-        public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired) =>
-            throw new UnsupportedSignature("custom-modifier-signature-unsupported");
+            if (rawTypeKind == (byte)SignatureTypeKind.Unknown)
+            {
+                // A modifier TypeDefOrRef does not assert class/value kind.
+                // Keep its exact scoped identity in a disjoint key namespace;
+                // this key can never match an ordinary source type signature.
+                var identity = MetadataNamedIdentity(handle);
+                var modifier = Key("modifier-identity", identity);
+                if (!modifierIdentities.ContainsKey(modifier))
+                {
+                    admit(128, []);
+                    modifierIdentities.Add(modifier, identity);
+                }
+                return modifier;
+            }
+            return rawTypeKind switch
+            {
+                (byte)SignatureTypeKind.Class => Key("class", MetadataNamedIdentity(handle)),
+                (byte)SignatureTypeKind.ValueType => Key("valuetype", MetadataNamedIdentity(handle)),
+                _ => throw new UnsupportedSignature("unknown-named-type-signature-kind")
+            };
+        }
+        public string GetModifiedType(string modifier, string unmodifiedType, bool isRequired)
+        {
+            step();
+            // Singleton modreq on plain void only. A second modifier, modopt,
+            // modified byref or a different marker/scope cannot take this route.
+            if (!isRequired || initOnlyMarker is null ||
+                !modifierIdentities.TryGetValue(modifier, out var identity) ||
+                identity != SourceNamedIdentity(initOnlyMarker.OriginalDefinition) ||
+                unmodifiedType != GetPrimitiveType(PrimitiveTypeCode.Void))
+                throw new UnsupportedSignature("custom-modifier-signature-unsupported");
+            return Key("required-modifier", modifier, unmodifiedType);
+        }
         public string GetFunctionPointerType(MethodSignature<string> signature) =>
             throw new UnsupportedSignature("function-pointer-signature-unsupported");
         public string GetPinnedType(string elementType) => throw new UnsupportedSignature("pinned-method-signature-unsupported");

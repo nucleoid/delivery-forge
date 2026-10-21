@@ -23,7 +23,8 @@ internal static class CompilerSourceOrigins
     private sealed record Region(string Kind, string Path, int StartLine, int StartColumn, int EndLine, int EndColumn,
         string? DeclarationId, string SemanticDisplay, string ContainingType, bool? Static, bool IsAsync,
         bool EmptyBlock, string Obligation, CompilerNamedMethodBindings.Binding NamedMethodBinding,
-        IReadOnlyList<ConstructorRole> ConstructorGroup, IReadOnlyList<Candidate> Candidates);
+        IReadOnlyList<ConstructorRole> ConstructorGroup, IReadOnlyList<Candidate> Candidates,
+        int? ParentRegion, bool OwnYield, NestedCarrier? NestedCarrier);
 
     internal static byte[] Capture(CSharpCompilation compilation, byte[] assembly, byte[] pdb,
         Action check, CancellationToken token)
@@ -110,6 +111,7 @@ internal static class CompilerSourceOrigins
             var path = Text((compilation.Options.SourceReferenceResolver?.NormalizePath(tree.FilePath, baseFilePath: null)
                 ?? tree.FilePath).Replace('\\', '/'));
             var before = regions.Count;
+            var regionSpans = new Dictionary<SyntaxNode, int>();
             var mappingDirectives = 0;
             foreach (var trivia in root.DescendantTrivia(descendIntoTrivia: true))
             {
@@ -121,6 +123,12 @@ internal static class CompilerSourceOrigins
             {
                 Step(); if (regions.Count >= MaximumRows) throw new IOException("Semantic runtime-region membership exceeds the bounded profile.");
                 Admit(1024, kind, path, obligation);
+                int? parentRegion = null;
+                for (var ancestor = span.Parent; ancestor is not null; ancestor = ancestor.Parent)
+                {
+                    Step();
+                    if (regionSpans.TryGetValue(ancestor, out var parentIndex)) { parentRegion = parentIndex; break; }
+                }
                 var position = text.Lines.GetLinePositionSpan(span.Span);
                 var sl = position.Start.Line + 1; var sc = position.Start.Character + 1;
                 var el = position.End.Line + 1; var ec = position.End.Character + 1;
@@ -162,7 +170,11 @@ internal static class CompilerSourceOrigins
                     Text(owner?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
                     Text((owner?.ContainingType ?? owner as INamedTypeSymbol)?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
                     owner?.IsStatic, (owner as IMethodSymbol)?.IsAsync ?? false,
-                    span is BlockSyntax { Statements.Count: 0 }, obligation, NamedBinding(owner as IMethodSymbol), constructors, candidates));
+                    span is BlockSyntax { Statements.Count: 0 }, obligation, NamedBinding(owner as IMethodSymbol), constructors, candidates,
+                    parentRegion, HasOwnYield(span, Step), null));
+                Admit(128);
+                if (!regionSpans.TryAdd(span, regions.Count - 1))
+                    throw new IOException("Semantic source ownership has a duplicate runtime span.");
             }
             CompilerNamedMethodBindings.Binding NamedBinding(IMethodSymbol? method)
             {
@@ -208,7 +220,7 @@ internal static class CompilerSourceOrigins
                     case LocalFunctionStatementSyntax local:
                         var localMethod = model.GetDeclaredSymbol(local, token);
                         Attributes(localMethod);
-                        Add("local-function", (SyntaxNode?)local.Body ?? (SyntaxNode?)local.ExpressionBody?.Expression ?? local,
+                        Add(localMethod is null ? "unresolved-local-function" : "local-function", (SyntaxNode?)local.Body ?? (SyntaxNode?)local.ExpressionBody?.Expression ?? local,
                             localMethod, "NestedSemanticCarrierAndEnclosingOriginUnresolved");
                         break;
                     case AnonymousFunctionExpressionSyntax anonymous:
@@ -224,7 +236,8 @@ internal static class CompilerSourceOrigins
                             _ => anonymous
                         };
                         Attributes(anonymousMethod);
-                        Add(isExpressionTree ? "expression-tree-lambda" : "delegate-or-unresolved-lambda", anonymousBody,
+                        var isDelegate = converted?.TypeKind == TypeKind.Delegate && anonymousMethod is not null;
+                        Add(isExpressionTree ? "expression-tree-lambda" : isDelegate ? "delegate-lambda" : "unresolved-lambda-conversion", anonymousBody,
                             anonymousMethod, isExpressionTree ? "AuthoredDataRequiresOuterExecutionOrigin" : "NestedSemanticConversionAndCompleteCarrierUnresolved");
                         break;
                     case PropertyDeclarationSyntax property:
@@ -269,6 +282,7 @@ internal static class CompilerSourceOrigins
             Admit(256, path);
             sourceRows.Add(new { path, regions = regions.Count - before, mappingDirectives });
         }
+        BindNestedCarriers(regions, namedBindings, metadata, reader, Step, Admit);
         Step();
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new
         {
@@ -280,5 +294,136 @@ internal static class CompilerSourceOrigins
         });
         if (bytes.Length > MaximumBytes) throw new IOException("Semantic runtime inventory exceeds the existing artifact bound.");
         Step(); return bytes;
+    }
+
+    private sealed record NestedCarrier(int MethodToken, int? KickoffMethodToken, string Disposition);
+
+    // Called from Add with its exact owned runtime span and shared Step. Nested
+    // function syntax is a separate boundary even when it is the span's root.
+    private static bool HasOwnYield(SyntaxNode span, Action step)
+    {
+        foreach (var node in span.DescendantNodesAndSelf(descendIntoChildren: node =>
+            node is not (AnonymousFunctionExpressionSyntax or LocalFunctionStatementSyntax)))
+        {
+            step();
+            if (node is YieldStatementSyntax) return true;
+        }
+        return false;
+    }
+
+    private static void BindNestedCarriers(List<Region> regions,
+        CompilerNamedMethodBindings.Table namedBindings, MetadataReader metadata, MetadataReader pdb,
+        Action step, Action<long, string?[]> admit)
+    {
+        static bool CanBind(Region region) => region.Kind is "delegate-lambda" or "local-function";
+        static bool IsNestedBoundary(Region region) => region.Kind is "delegate-lambda" or "local-function" or
+            "expression-tree-lambda" or "unresolved-lambda-conversion" or "delegate-or-unresolved-lambda" or
+            "unresolved-local-function";
+        var descendantCandidates = new Dictionary<int, HashSet<int>>();
+        var selected = new Dictionary<int, (int Carrier, int? Kickoff)>();
+        var assignments = new Dictionary<int, int>();
+
+        // ParentRegion MUST come from exact SyntaxNode ancestry recorded by Add,
+        // not a line-span containment guess. A descendant's full candidates cannot
+        // be borrowed by its outer region even when that descendant stays unresolved.
+        for (var index = 0; index < regions.Count; index++)
+        {
+            step();
+            var region = regions[index];
+            // Unsupported children still reserve their complete candidate carriers.
+            // Eligibility to bind is deliberately narrower than source ownership.
+            if (!IsNestedBoundary(region)) continue;
+            foreach (var candidate in region.Candidates)
+            {
+                step();
+                if (!candidate.CompletePointSetContained || candidate.AllMethodPoints <= 0 ||
+                    candidate.ContainedPoints != candidate.AllMethodPoints) continue;
+                var child = index;
+                for (var parent = region.ParentRegion; parent is { } ancestor; parent = regions[ancestor].ParentRegion)
+                {
+                    step();
+                    if (ancestor < 0 || ancestor >= child)
+                        throw new IOException("Semantic source ownership has an invalid parent relation.");
+                    child = ancestor;
+                    if (!IsNestedBoundary(regions[ancestor])) continue;
+                    if (!descendantCandidates.TryGetValue(ancestor, out var tokens))
+                    {
+                        admit(128, []);
+                        descendantCandidates.Add(ancestor, tokens = []);
+                    }
+                    if (!tokens.Contains(candidate.Method))
+                    {
+                        admit(64, []);
+                        tokens.Add(candidate.Method);
+                    }
+                }
+            }
+        }
+
+        for (var index = 0; index < regions.Count; index++)
+        {
+            step();
+            var region = regions[index];
+            if (!CanBind(region) || region.OwnYield || region.ParentRegion is null) continue;
+            var supportedParent = true;
+            var previous = index;
+            for (var parent = region.ParentRegion; parent is { } ancestor; parent = regions[ancestor].ParentRegion)
+            {
+                step();
+                if (ancestor < 0 || ancestor >= previous)
+                    throw new IOException("Semantic source ownership has an invalid parent relation.");
+                previous = ancestor;
+                var outer = regions[ancestor];
+                if (outer.OwnYield || (outer.Kind is "expression-tree-lambda" or "unresolved-lambda-conversion" or
+                    "delegate-or-unresolved-lambda" or "unresolved-local-function") ||
+                    (outer.Kind is "named-method" or "accessor" or "expression-property" or "expression-indexer") &&
+                    outer.NamedMethodBinding.MethodToken is null)
+                {
+                    supportedParent = false;
+                    break;
+                }
+            }
+            if (!supportedParent) continue;
+            int? only = null;
+            var count = 0;
+            foreach (var candidate in region.Candidates)
+            {
+                step();
+                if (!candidate.CompletePointSetContained || candidate.AllMethodPoints <= 0 ||
+                    candidate.ContainedPoints != candidate.AllMethodPoints ||
+                    namedBindings.IsNamedCarrier(candidate.Method) ||
+                    descendantCandidates.TryGetValue(index, out var descendants) && descendants.Contains(candidate.Method)) continue;
+                only = candidate.Method;
+                count++;
+            }
+            // No greedy first match. Missing/overlapping/ambiguous stays unsupported.
+            if (count != 1 || only is not { } carrier) continue;
+            if ((carrier & unchecked((int)0xff000000)) != 0x06000000)
+                throw new BadImageFormatException("Nested carrier is not an exact MethodDef token.");
+            var handle = MetadataTokens.MethodDefinitionHandle(carrier & 0x00ffffff);
+            if (metadata.GetMethodDefinition(handle).RelativeVirtualAddress == 0) continue;
+            var kickoff = pdb.GetMethodDebugInformation(handle).GetStateMachineKickoffMethod();
+            // This slice supports ordinary synchronous functions and async state
+            // machines. Iterator semantics remain a separate unsupported obligation.
+            if (region.IsAsync == kickoff.IsNil) continue;
+            int? kickoffToken = kickoff.IsNil ? null : MetadataTokens.GetToken(kickoff);
+            if (kickoffToken is { } actualKickoff && namedBindings.IsNamedCarrier(actualKickoff)) continue;
+            admit(256, []);
+            selected.Add(index, (carrier, kickoffToken));
+            if (!assignments.ContainsKey(carrier)) admit(128, []);
+            assignments[carrier] = assignments.GetValueOrDefault(carrier) + 1;
+        }
+        foreach (var pair in selected)
+        {
+            step();
+            // One carrier cannot be the positive witness for two source functions.
+            if (assignments[pair.Value.Carrier] != 1) continue;
+            const string disposition = "unique-owned-complete-point-set-target59";
+            admit(256, [disposition]);
+            regions[pair.Key] = regions[pair.Key] with
+            {
+                NestedCarrier = new(pair.Value.Carrier, pair.Value.Kickoff, disposition)
+            };
+        }
     }
 }
