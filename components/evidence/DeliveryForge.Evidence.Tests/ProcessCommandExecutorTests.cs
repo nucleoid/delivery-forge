@@ -158,6 +158,9 @@ public sealed class ProcessCommandExecutorTests
         await File.WriteAllTextAsync(script, scriptText, TestContext.Current.CancellationToken);
         var invocation = request.Invocation with
         {
+            FileName = OperatingSystem.IsWindows()
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe")
+                : request.Invocation.FileName,
             Arguments = OperatingSystem.IsWindows()
                 ? ["/d", "/s", "/c", script]
                 : [script]

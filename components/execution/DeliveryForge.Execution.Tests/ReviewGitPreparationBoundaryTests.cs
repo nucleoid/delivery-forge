@@ -173,8 +173,11 @@ public sealed class ReviewGitPreparationBoundaryTests
         using var caller = CancellationTokenSource.CreateLinkedTokenSource(bound.Token);
         var host = ReviewAuthorityHost.CreateIsolatedTest();
         var started = Stopwatch.GetTimestamp();
+        // The helper has its own eight-second fail-safe. Keep five seconds for every actual
+        // negative launch so Windows process creation can reach the entry barrier before the
+        // owner lifetime expires; the one-second budget could expire inside startup itself.
         var operation = host.PrepareIsolatedTestGitEvidenceAsync(fixture.Root, fixture.GitDirectory, fixture.Helper!, 1024 * 1024,
-            TimeSpan.FromSeconds(cancelAfterEntry || mode == "pressure" ? 5 : 1), caller.Token);
+            TimeSpan.FromSeconds(5), caller.Token);
         if (cancelAfterEntry)
         {
             using var entryBound = CancellationTokenSource.CreateLinkedTokenSource(bound.Token);
