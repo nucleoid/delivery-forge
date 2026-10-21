@@ -185,7 +185,10 @@ internal static class CompilerOfficialRecipe
         Require(arguments.Length > 0 && arguments.Length == roles.Length, "argument membership");
         var limits = new Dictionary<string, int>(StringComparer.Ordinal)
         {
-            ["source"] = sources, ["reference"] = references, ["embedded-source"] = embedded, ["scalar"] = scalars.Length,
+            ["source"] = sources,
+            ["reference"] = references,
+            ["embedded-source"] = embedded,
+            ["scalar"] = scalars.Length,
             ["analyzer"] = closure.Count(r => Text(r, "role") == "analyzer"),
             ["analyzerconfig"] = closure.Count(r => Text(r, "role") == "analyzerConfig"),
             ["additionalfile"] = closure.Count(r => Text(r, "role") == "additionalFile")
@@ -206,8 +209,11 @@ internal static class CompilerOfficialRecipe
             var ordinal = seen[name]++;
             Require(name switch
             {
-                "source" => option is null, "reference" => option is "reference" or "link", "embedded-source" => option == "embed",
-                "scalar" => option is not null, _ => option == name
+                "source" => option is null,
+                "reference" => option is "reference" or "link",
+                "embedded-source" => option == "embed",
+                "scalar" => option is not null,
+                _ => option == name
             }, "typed argument name");
             if (name == "reference") Require((option == "link") == embedInterop[ordinal], "reference argument embed semantics");
             if (name == "scalar")
@@ -249,12 +255,14 @@ internal static class CompilerOfficialRecipe
             {
                 string[] choices = name switch
                 {
-                    "DebugType" => ["none", "portable", "embedded", "full", "pdbonly"], "Nullable" => ["enable", "disable", "warnings", "annotations"],
+                    "DebugType" => ["none", "portable", "embedded", "full", "pdbonly"],
+                    "Nullable" => ["enable", "disable", "warnings", "annotations"],
                     "TargetType" => ["library", "exe", "winexe", "module", "appcontainerexe", "winmdobj"],
                     "Platform" => ["AnyCPU", "AnyCPU32BitPreferred", "x86", "x64", "ARM", "ARM64", "Itanium"],
                     "ChecksumAlgorithm" => ["SHA1", "SHA256"],
                     "LangVersion" => ["default", "latest", "latestmajor", "preview", "1", "1.0", "2", "2.0", "3", "3.0", "4", "4.0", "5", "5.0", "6", "6.0",
-                        "7", "7.0", "7.1", "7.2", "7.3", "8", "8.0", "9", "9.0", "10", "10.0", "11", "11.0", "12", "12.0", "13", "13.0", "14", "14.0"], _ => []
+                        "7", "7.0", "7.1", "7.2", "7.3", "8", "8.0", "9", "9.0", "10", "10.0", "11", "11.0", "12", "12.0", "13", "13.0", "14", "14.0"],
+                    _ => []
                 };
                 Require(type == "enum" && choices.Contains(value, StringComparer.Ordinal), "enum option observation");
             }
@@ -280,7 +288,8 @@ internal static class CompilerOfficialRecipe
     private static Dictionary<string, JsonElement> Index(JsonElement[] rows, InstalledToolFiles files)
     {
         var result = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
-        foreach (var row in rows) { files.Check(); Require(result.TryAdd(Text(row, "id"), row), "duplicate manifest id"); } return result;
+        foreach (var row in rows) { files.Check(); Require(result.TryAdd(Text(row, "id"), row), "duplicate manifest id"); }
+        return result;
     }
     private static JsonElement[] Rows(JsonElement value, string name, int maximum = MaximumRows)
     {

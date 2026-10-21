@@ -143,8 +143,13 @@ public sealed class CompilerOfficialRecipeTests
             var artifacts = new JsonArray(Artifact(common, "compiler-image"), Artifact(csharp, "compiler-image"), Artifact(pe, "assembly"), Artifact(pdb, "pdb"));
             manifest = new JsonObject
             {
-                ["manifestSchemaVersion"] = "1.0", ["contexts"] = new JsonArray(new JsonObject { ["id"] = "context", ["inputs"] = new JsonArray(source, reference),
-                    ["pathPolicy"] = new JsonObject { ["reportRootMappings"] = new JsonArray(new JsonObject { ["logicalRoot"] = "Subject.cs", ["reportRoot"] = SourcePath }) } }),
+                ["manifestSchemaVersion"] = "1.0",
+                ["contexts"] = new JsonArray(new JsonObject
+                {
+                    ["id"] = "context",
+                    ["inputs"] = new JsonArray(source, reference),
+                    ["pathPolicy"] = new JsonObject { ["reportRootMappings"] = new JsonArray(new JsonObject { ["logicalRoot"] = "Subject.cs", ["reportRoot"] = SourcePath }) }
+                }),
                 ["builds"] = new JsonArray(new JsonObject { ["id"] = "build", ["contextId"] = "context", ["assemblySha256"] = pe["sha256"]!.GetValue<string>()[7..], ["pdbSha256"] = pdb["sha256"]!.GetValue<string>()[7..] }),
                 ["artifacts"] = artifacts
             };
@@ -160,17 +165,50 @@ public sealed class CompilerOfficialRecipeTests
                 images.Add(new JsonObject { ["role"] = role, ["length"] = 1, ["sha256"] = role == "compiler-common" ? common["sha256"]!.GetValue<string>()[7..] : csharp["sha256"]!.GetValue<string>()[7..] });
             recipe = new JsonObject
             {
-                ["provider"] = "completed-csc-typed-input-recipe-v1", ["disposition"] = "typed-input-data-only", ["contextId"] = "context", ["buildId"] = "build", ["baseDirectory"] = root,
+                ["provider"] = "completed-csc-typed-input-recipe-v1",
+                ["disposition"] = "typed-input-data-only",
+                ["contextId"] = "context",
+                ["buildId"] = "build",
+                ["baseDirectory"] = root,
                 ["scalarArguments"] = new JsonArray(scalar.Select(s => (JsonNode?)JsonValue.Create(s)).ToArray()),
-                ["sources"] = new JsonArray(new JsonObject { ["path"] = SourcePath, ["locator"] = source["locator"]!.DeepClone(), ["length"] = SourceBytes.Length,
-                    ["sha256"] = InstalledToolFiles.Identity(SourceBytes), ["ordinal"] = 0, ["role"] = "source", ["logicalPath"] = "Subject.cs", ["encoding"] = "utf-8", ["generated"] = false }),
-                ["references"] = new JsonArray(new JsonObject { ["path"] = Path.Combine(root, "ref.dll"), ["locator"] = reference["locator"]!.DeepClone(), ["length"] = ReferenceBytes.Length,
-                    ["sha256"] = InstalledToolFiles.Identity(ReferenceBytes), ["aliases"] = new JsonArray(), ["embedInteropTypes"] = false, ["ordinal"] = 0, ["logicalPath"] = reference["logicalPath"]!.DeepClone() }),
-                ["embeddedSourcePaths"] = new JsonArray(), ["compilerCommon"] = common.DeepClone(), ["compilerCSharp"] = csharp.DeepClone(), ["assembly"] = pe, ["pdb"] = pdb,
-                ["referenceAssembly"] = null, ["observedClosureArtifacts"] = new JsonArray(), ["taskAssociationSha256"] = new string('a', 64),
-                ["taskBinding"] = "selected-sdk-core-target", ["commandBinding"] = "selected-host-exec-csc-arguments-match", ["images"] = images,
-                ["arguments"] = argumentRows, ["argumentRoles"] = new JsonArray(Role(0, "scalar", 0, "noconfig"), Role(1, "scalar", 1, "nostdlib+"), Role(2, "source", 0, null), Role(3, "reference", 0, "reference")),
-                ["taskOptions"] = new JsonArray(), ["unsupportedAttestations"] = new JsonArray("recipe.loadedCompilerAndTaskImageNotAttested", "recipe.runtimeLoadedImageNotAttested")
+                ["sources"] = new JsonArray(new JsonObject
+                {
+                    ["path"] = SourcePath,
+                    ["locator"] = source["locator"]!.DeepClone(),
+                    ["length"] = SourceBytes.Length,
+                    ["sha256"] = InstalledToolFiles.Identity(SourceBytes),
+                    ["ordinal"] = 0,
+                    ["role"] = "source",
+                    ["logicalPath"] = "Subject.cs",
+                    ["encoding"] = "utf-8",
+                    ["generated"] = false
+                }),
+                ["references"] = new JsonArray(new JsonObject
+                {
+                    ["path"] = Path.Combine(root, "ref.dll"),
+                    ["locator"] = reference["locator"]!.DeepClone(),
+                    ["length"] = ReferenceBytes.Length,
+                    ["sha256"] = InstalledToolFiles.Identity(ReferenceBytes),
+                    ["aliases"] = new JsonArray(),
+                    ["embedInteropTypes"] = false,
+                    ["ordinal"] = 0,
+                    ["logicalPath"] = reference["logicalPath"]!.DeepClone()
+                }),
+                ["embeddedSourcePaths"] = new JsonArray(),
+                ["compilerCommon"] = common.DeepClone(),
+                ["compilerCSharp"] = csharp.DeepClone(),
+                ["assembly"] = pe,
+                ["pdb"] = pdb,
+                ["referenceAssembly"] = null,
+                ["observedClosureArtifacts"] = new JsonArray(),
+                ["taskAssociationSha256"] = new string('a', 64),
+                ["taskBinding"] = "selected-sdk-core-target",
+                ["commandBinding"] = "selected-host-exec-csc-arguments-match",
+                ["images"] = images,
+                ["arguments"] = argumentRows,
+                ["argumentRoles"] = new JsonArray(Role(0, "scalar", 0, "noconfig"), Role(1, "scalar", 1, "nostdlib+"), Role(2, "source", 0, null), Role(3, "reference", 0, "reference")),
+                ["taskOptions"] = new JsonArray(),
+                ["unsupportedAttestations"] = new JsonArray("recipe.loadedCompilerAndTaskImageNotAttested", "recipe.runtimeLoadedImageNotAttested")
             };
             RebindRecipe();
         }
@@ -187,8 +225,13 @@ public sealed class CompilerOfficialRecipeTests
         }
         private static JsonObject Artifact(JsonObject row, string kind) => new()
         {
-            ["id"] = row["artifactId"]!.DeepClone(), ["kind"] = kind, ["contextId"] = "context", ["buildId"] = "build", ["locator"] = row["locator"]!.DeepClone(),
-            ["length"] = row["length"]!.DeepClone(), ["sha256"] = row["sha256"]!.GetValue<string>()[7..]
+            ["id"] = row["artifactId"]!.DeepClone(),
+            ["kind"] = kind,
+            ["contextId"] = "context",
+            ["buildId"] = "build",
+            ["locator"] = row["locator"]!.DeepClone(),
+            ["length"] = row["length"]!.DeepClone(),
+            ["sha256"] = row["sha256"]!.GetValue<string>()[7..]
         };
         private void RebindRecipe()
         {

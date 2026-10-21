@@ -350,10 +350,16 @@ internal static class CompilerSourceOrigins
         Step();
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            provider = "target59-semantic-runtime-regions-v1", disposition = "inventory-only-no-origin-proof",
-            sourceCount = sourceRows.Count, methodCount = metadata.MethodDefinitions.Count,
-            visiblePointCount = points.Count, noVisibleIlBodyCount = noVisibleIlBodies.Count,
-            noVisibleIlBodies, sources = sourceRows, authoredHiding = hiding, regions,
+            provider = "target59-semantic-runtime-regions-v1",
+            disposition = "inventory-only-no-origin-proof",
+            sourceCount = sourceRows.Count,
+            methodCount = metadata.MethodDefinitions.Count,
+            visiblePointCount = points.Count,
+            noVisibleIlBodyCount = noVisibleIlBodies.Count,
+            noVisibleIlBodies,
+            sources = sourceRows,
+            authoredHiding = hiding,
+            regions,
             declarationAssociations = declarations,
             sourceExhaustion = new { complete = unresolved.Count == 0, unresolved = unresolved.Order(StringComparer.Ordinal), pendingInitializerCount },
             unresolved = "Every supported region has an explicit positive or unresolved association. Source exhaustion is conditional on trusted exact PE/PDB equality; pending initializer and source-form guards remain blocking. No coverage point or hit is fabricated."
@@ -394,53 +400,53 @@ internal static class CompilerSourceOrigins
             var disposition = "source.region-form-unproven";
             if (region.OwnYield) disposition = "source.iterator-unsupported";
             else switch (region.SourceForm)
-            {
-                case "authored-runtime-body":
-                case "auto-property-accessor-template":
-                    var named = region.NamedMethodBinding;
-                    if (named.MethodToken is { } token)
-                    {
-                        if (region.IsAsync && named.PdbStateMachineCarriers.Count == 1)
-                            carrier = named.PdbStateMachineCarriers[0];
-                        else if (!region.IsAsync && named.PdbStateMachineCarriers.Count == 0) carrier = token;
-                    }
-                    // An arbitrary point is insufficient: the semantic named
-                    // declaration, exact CLI token, real PDB async relation and
-                    // a point wholly in THIS owned body must all agree. Child
-                    // functions/initializer effects remain separate obligations.
-                    if (carrier is { } actual &&
-                        metadata.GetMethodDefinition(MetadataTokens.MethodDefinitionHandle(actual & 0x00ffffff)).RelativeVirtualAddress != 0)
-                        foreach (var candidate in region.Candidates)
+                {
+                    case "authored-runtime-body":
+                    case "auto-property-accessor-template":
+                        var named = region.NamedMethodBinding;
+                        if (named.MethodToken is { } token)
                         {
-                            step();
-                            if (candidate.Method == actual && candidate.ContainedPoints > 0) associated = true;
+                            if (region.IsAsync && named.PdbStateMachineCarriers.Count == 1)
+                                carrier = named.PdbStateMachineCarriers[0];
+                            else if (!region.IsAsync && named.PdbStateMachineCarriers.Count == 0) carrier = token;
                         }
-                    disposition = associated
-                        ? region.SourceForm == "authored-runtime-body" ? "semantic-named-body-own-carrier-point" : "semantic-auto-accessor-own-carrier-point"
-                        : region.SourceForm == "authored-runtime-body" ? "source.named-body-point-unproven" : "source.auto-accessor-point-unproven";
-                    break;
-                case "semantic-nonbody-declaration":
-                    associated = region.NamedMethodBinding.MethodToken is { } declaration &&
-                        metadata.GetMethodDefinition(MetadataTokens.MethodDefinitionHandle(declaration & 0x00ffffff)).RelativeVirtualAddress == 0;
-                    disposition = associated ? "semantic-abstract-or-extern-exact-rva0-declaration" : "source.declaration-nonbody-unproven";
-                    break;
-                case "nested-runtime-body":
-                    associated = region.NestedCarrier is not null;
-                    carrier = region.NestedCarrier?.MethodToken;
-                    disposition = associated ? "semantic-nested-exclusive-complete-carrier" : "source.nested-carrier-unproven";
-                    break;
-                case "initializer-pending":
-                    // These are the same Capture's private computed witnesses,
-                    // never a serialized status or caller-supplied proof boolean.
-                    associated = region.Kind is "explicit-constructor-initializer" or "primary-constructor-base"
-                        ? region.ConstructorArgumentOrigin?.Complete == true : region.InitializerOrigin?.Complete == true;
-                    if (!associated) pendingInitializers++;
-                    disposition = associated ? "semantic-applicable-constructor-source-point" : "source.initializer-pending";
-                    break;
-                case "unsupported-partial-member":
-                    disposition = "source.partial-member-unsupported";
-                    break;
-            }
+                        // An arbitrary point is insufficient: the semantic named
+                        // declaration, exact CLI token, real PDB async relation and
+                        // a point wholly in THIS owned body must all agree. Child
+                        // functions/initializer effects remain separate obligations.
+                        if (carrier is { } actual &&
+                            metadata.GetMethodDefinition(MetadataTokens.MethodDefinitionHandle(actual & 0x00ffffff)).RelativeVirtualAddress != 0)
+                            foreach (var candidate in region.Candidates)
+                            {
+                                step();
+                                if (candidate.Method == actual && candidate.ContainedPoints > 0) associated = true;
+                            }
+                        disposition = associated
+                            ? region.SourceForm == "authored-runtime-body" ? "semantic-named-body-own-carrier-point" : "semantic-auto-accessor-own-carrier-point"
+                            : region.SourceForm == "authored-runtime-body" ? "source.named-body-point-unproven" : "source.auto-accessor-point-unproven";
+                        break;
+                    case "semantic-nonbody-declaration":
+                        associated = region.NamedMethodBinding.MethodToken is { } declaration &&
+                            metadata.GetMethodDefinition(MetadataTokens.MethodDefinitionHandle(declaration & 0x00ffffff)).RelativeVirtualAddress == 0;
+                        disposition = associated ? "semantic-abstract-or-extern-exact-rva0-declaration" : "source.declaration-nonbody-unproven";
+                        break;
+                    case "nested-runtime-body":
+                        associated = region.NestedCarrier is not null;
+                        carrier = region.NestedCarrier?.MethodToken;
+                        disposition = associated ? "semantic-nested-exclusive-complete-carrier" : "source.nested-carrier-unproven";
+                        break;
+                    case "initializer-pending":
+                        // These are the same Capture's private computed witnesses,
+                        // never a serialized status or caller-supplied proof boolean.
+                        associated = region.Kind is "explicit-constructor-initializer" or "primary-constructor-base"
+                            ? region.ConstructorArgumentOrigin?.Complete == true : region.InitializerOrigin?.Complete == true;
+                        if (!associated) pendingInitializers++;
+                        disposition = associated ? "semantic-applicable-constructor-source-point" : "source.initializer-pending";
+                        break;
+                    case "unsupported-partial-member":
+                        disposition = "source.partial-member-unsupported";
+                        break;
+                }
             admit(256, [disposition]);
             regions[index] = region with { OriginAssociation = new(associated, disposition, carrier) };
             if (!associated) unsupported(disposition);

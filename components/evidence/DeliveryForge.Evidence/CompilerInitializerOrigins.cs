@@ -245,11 +245,22 @@ internal sealed class CompilerInitializerOrigins(CSharpCompilation compilation,
         {
             step();
             if (attribute.AttributeClass is
-                { MetadataName: "DebuggerHiddenAttribute" or "DebuggerStepThroughAttribute" or "DebuggerNonUserCodeAttribute",
-                    ContainingNamespace: { Name: "Diagnostics", ContainingNamespace: { Name: "System", ContainingNamespace.IsGlobalNamespace: true } } }
-                or { MetadataName: "ExcludeFromCodeCoverageAttribute",
-                    ContainingNamespace: { Name: "CodeAnalysis", ContainingNamespace: { Name: "Diagnostics",
-                        ContainingNamespace: { Name: "System", ContainingNamespace.IsGlobalNamespace: true } } } }) return true;
+            {
+                MetadataName: "DebuggerHiddenAttribute" or "DebuggerStepThroughAttribute" or "DebuggerNonUserCodeAttribute",
+                ContainingNamespace: { Name: "Diagnostics", ContainingNamespace: { Name: "System", ContainingNamespace.IsGlobalNamespace: true } }
+            }
+                or
+            {
+                MetadataName: "ExcludeFromCodeCoverageAttribute",
+                ContainingNamespace:
+                {
+                    Name: "CodeAnalysis", ContainingNamespace:
+                    {
+                        Name: "Diagnostics",
+                        ContainingNamespace: { Name: "System", ContainingNamespace.IsGlobalNamespace: true }
+                    }
+                }
+            }) return true;
         }
         return false;
     }

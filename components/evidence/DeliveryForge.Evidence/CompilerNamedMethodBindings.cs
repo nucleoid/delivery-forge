@@ -399,52 +399,52 @@ internal static class CompilerNamedMethodBindings
             if (type is IDynamicTypeSymbol) key = GetPrimitiveType(PrimitiveTypeCode.Object);
             else if (Primitive(type.SpecialType) is { } primitive) key = GetPrimitiveType(primitive);
             else switch (type)
-            {
-                case ITypeParameterSymbol parameter:
-                    if (parameter.TypeParameterKind is not (TypeParameterKind.Type or TypeParameterKind.Method))
-                        throw new UnsupportedSignature("generic-parameter-owner-signature-unsupported");
-                    var ordinal = parameter.Ordinal;
-                    if (parameter.TypeParameterKind == TypeParameterKind.Type)
-                        for (var outer = parameter.ContainingType?.ContainingType; outer is not null; outer = outer.ContainingType)
-                        { step(); ordinal = checked(ordinal + outer.Arity); }
-                    key = Key(parameter.TypeParameterKind == TypeParameterKind.Method ? "method-parameter" : "type-parameter", Number(ordinal));
-                    break;
-                case IArrayTypeSymbol array:
-                    if (!array.CustomModifiers.IsEmpty) throw new UnsupportedSignature("custom-modifier-signature-unsupported");
-                    if (!array.Sizes.IsEmpty || !array.LowerBounds.IsDefaultOrEmpty)
-                        throw new UnsupportedSignature("explicit-array-shape-signature-unsupported");
-                    key = array.IsSZArray ? Key("szarray", SourceType(array.ElementType))
-                        : Key("array", SourceType(array.ElementType), Number(array.Rank), "sizes=", "lowerbounds=");
-                    break;
-                case IPointerTypeSymbol pointer:
-                    if (!pointer.CustomModifiers.IsEmpty) throw new UnsupportedSignature("custom-modifier-signature-unsupported");
-                    key = Key("pointer", SourceType(pointer.PointedAtType));
-                    break;
-                case INamedTypeSymbol named when named.TypeKind != TypeKind.Error && !named.IsUnboundGenericType:
-                    named = named.TupleUnderlyingType ?? named;
-                    key = Key(named.IsValueType ? "valuetype" : "class", SourceNamedIdentity(named.OriginalDefinition));
-                    var arguments = new List<string>();
-                    void Arguments(INamedTypeSymbol current)
-                    {
-                        step();
-                        if (current.ContainingType is { } containing) Arguments(containing);
-                        for (var i = 0; i < current.TypeArguments.Length; i++)
+                {
+                    case ITypeParameterSymbol parameter:
+                        if (parameter.TypeParameterKind is not (TypeParameterKind.Type or TypeParameterKind.Method))
+                            throw new UnsupportedSignature("generic-parameter-owner-signature-unsupported");
+                        var ordinal = parameter.Ordinal;
+                        if (parameter.TypeParameterKind == TypeParameterKind.Type)
+                            for (var outer = parameter.ContainingType?.ContainingType; outer is not null; outer = outer.ContainingType)
+                            { step(); ordinal = checked(ordinal + outer.Arity); }
+                        key = Key(parameter.TypeParameterKind == TypeParameterKind.Method ? "method-parameter" : "type-parameter", Number(ordinal));
+                        break;
+                    case IArrayTypeSymbol array:
+                        if (!array.CustomModifiers.IsEmpty) throw new UnsupportedSignature("custom-modifier-signature-unsupported");
+                        if (!array.Sizes.IsEmpty || !array.LowerBounds.IsDefaultOrEmpty)
+                            throw new UnsupportedSignature("explicit-array-shape-signature-unsupported");
+                        key = array.IsSZArray ? Key("szarray", SourceType(array.ElementType))
+                            : Key("array", SourceType(array.ElementType), Number(array.Rank), "sizes=", "lowerbounds=");
+                        break;
+                    case IPointerTypeSymbol pointer:
+                        if (!pointer.CustomModifiers.IsEmpty) throw new UnsupportedSignature("custom-modifier-signature-unsupported");
+                        key = Key("pointer", SourceType(pointer.PointedAtType));
+                        break;
+                    case INamedTypeSymbol named when named.TypeKind != TypeKind.Error && !named.IsUnboundGenericType:
+                        named = named.TupleUnderlyingType ?? named;
+                        key = Key(named.IsValueType ? "valuetype" : "class", SourceNamedIdentity(named.OriginalDefinition));
+                        var arguments = new List<string>();
+                        void Arguments(INamedTypeSymbol current)
                         {
                             step();
-                            if (!current.GetTypeArgumentCustomModifiers(i).IsEmpty)
-                                throw new UnsupportedSignature("custom-modifier-signature-unsupported");
-                            admit(32, []); arguments.Add(SourceType(current.TypeArguments[i]));
+                            if (current.ContainingType is { } containing) Arguments(containing);
+                            for (var i = 0; i < current.TypeArguments.Length; i++)
+                            {
+                                step();
+                                if (!current.GetTypeArgumentCustomModifiers(i).IsEmpty)
+                                    throw new UnsupportedSignature("custom-modifier-signature-unsupported");
+                                admit(32, []); arguments.Add(SourceType(current.TypeArguments[i]));
+                            }
                         }
-                    }
-                    Arguments(named);
-                    if (arguments.Count != 0)
-                    {
-                        admit(64L + 32L * arguments.Count, []);
-                        key = Key("generic-instance", key, Key("arguments", arguments.ToArray()));
-                    }
-                    break;
-                default: throw new UnsupportedSignature("source-type-signature-form-unsupported");
-            }
+                        Arguments(named);
+                        if (arguments.Count != 0)
+                        {
+                            admit(64L + 32L * arguments.Count, []);
+                            key = Key("generic-instance", key, Key("arguments", arguments.ToArray()));
+                        }
+                        break;
+                    default: throw new UnsupportedSignature("source-type-signature-form-unsupported");
+                }
             admit(128, []);
             sourceTypes.Add(type, key);
             return key;
