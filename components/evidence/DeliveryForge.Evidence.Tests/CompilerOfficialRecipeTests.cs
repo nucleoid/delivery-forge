@@ -323,11 +323,13 @@ public sealed class CompilerOfficialRecipeTests
                 row["contextId"]!.GetValue<string>() == contextId && row["buildId"]!.GetValue<string>() == buildId)!.AsObject();
             var points = new[] { 4, 7, 8, 9, 10, 11, 12 }.Select(line => new XElement("SequencePoint",
                 new XAttribute("sl", line), new XAttribute("vc", 1), new XAttribute("fileid", "1")));
-            var coverage = new XElement("CoverageSession", new XElement("Modules", new XElement("Module",
-                new XElement("ModuleName", expected.ModuleIdentity), new XElement("Files", new XElement("File",
-                    new XAttribute("uid", "1"), new XAttribute("fullPath", fixtureSources[authoredIndex].Path))),
-                new XElement("Classes", new XElement("Class", new XElement("Methods", new XElement("Method",
-                    new XElement("FileRef", new XAttribute("uid", "1")), new XElement("SequencePoints", points)))))));
+            var coverageMethod = new XElement("Method", new XElement("FileRef", new XAttribute("uid", "1")),
+                new XElement("SequencePoints", points));
+            var coverageModule = new XElement("Module", new XElement("ModuleName", expected.ModuleIdentity),
+                new XElement("Files", new XElement("File", new XAttribute("uid", "1"),
+                    new XAttribute("fullPath", fixtureSources[authoredIndex].Path))),
+                new XElement("Classes", new XElement("Class", new XElement("Methods", coverageMethod))));
+            var coverage = new XElement("CoverageSession", new XElement("Modules", coverageModule));
             Descriptor(coverageArtifact, Encoding.UTF8.GetBytes(coverage.ToString(SaveOptions.DisableFormatting)), "fixture/coverage.xml", true);
             var sourceLines = source.TrimEnd('\n').Split('\n');
             var diff = Encoding.UTF8.GetBytes("+++ b/src/Example/Flag.cs\n@@ -0,0 +1," + sourceLines.Length.ToString(CultureInfo.InvariantCulture) + " @@\n" +
