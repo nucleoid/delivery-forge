@@ -34,6 +34,12 @@ function run(fixture:
   | "violation-template-regex-object"
   | "suppression-template-jsx-object"
   | "violation-template-jsx-object"
+  | "suppression-statement-regex"
+  | "violation-statement-regex"
+  | "suppression-await-regex"
+  | "violation-await-regex"
+  | "suppression-jsx-expression-container"
+  | "violation-jsx-expression-container"
   | "suppression-blanket-specific-enable"
   | "suppression-prefixed-alias"): {
   status: number | null;
@@ -51,7 +57,9 @@ function run(fixture:
       path.join(root, "fixtures", `${fixture}.${
         fixture === "suppression-jsx-slash" ||
         fixture === "suppression-template-jsx-object" ||
-        fixture === "violation-template-jsx-object"
+        fixture === "violation-template-jsx-object" ||
+        fixture === "suppression-jsx-expression-container" ||
+        fixture === "violation-jsx-expression-container"
           ? "tsx"
           : "ts"
       }`),
@@ -130,6 +138,23 @@ const templateJsxSuppressed = run("suppression-template-jsx-object");
 assert.equal(templateJsxSuppressed.status, 0);
 assert.deepEqual(templateJsxSuppressed.report.diagnostics, []);
 
+for (const [suppressedName, violationName] of [
+  ["suppression-statement-regex", "violation-statement-regex"],
+  ["suppression-await-regex", "violation-await-regex"],
+  ["suppression-jsx-expression-container", "violation-jsx-expression-container"],
+] as const) {
+  const violationControl = run(violationName);
+  assert.equal(violationControl.status, 1);
+  assert.ok(violationControl.report.diagnostics.some(
+    (diagnostic) => diagnostic.code === "anti-slop(no-chained-type-assertions)",
+  ), `${violationName}: matched control must report the protected rule`);
+
+  const suppressedAttack = run(suppressedName);
+  assert.ok(suppressedAttack.report.diagnostics.every(
+    (diagnostic) => diagnostic.code !== "anti-slop(no-chained-type-assertions)",
+  ), `${suppressedName}: pinned Oxlint must honor the exact reviewer directive`);
+}
+
 for (const bypass of [
   "suppression-line-division",
   "suppression-reserved-method",
@@ -155,4 +180,4 @@ for (const name of ["suppression-bare", "suppression-unknown"] as const) {
   assert.deepEqual(result.report.diagnostics, []);
 }
 
-console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, eleven clean suppression attacks plus matched template-regex and exact template-JSX directive controls verified");
+console.log("anti-slop fixture integration: clean PASS, violation FAIL, malformed INCOMPLETE, eleven clean suppression attacks plus matched template and exact statement-regex/await/JSX-container controls verified");
