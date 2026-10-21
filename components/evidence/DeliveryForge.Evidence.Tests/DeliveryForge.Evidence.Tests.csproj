@@ -9,6 +9,7 @@
     <PackageReference Include="xunit.v3" />
     <PackageReference Include="xunit.runner.visualstudio" />
     <ProjectReference Include="../DeliveryForge.Evidence/DeliveryForge.Evidence.csproj" />
+    <ProjectReference Include="../DeliveryForge.Evidence.AsyncFixture/DeliveryForge.Evidence.AsyncFixture.csproj" />
   </ItemGroup>
   <ItemGroup>
     <Compile Remove="Fixtures/**/*.cs" />
