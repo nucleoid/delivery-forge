@@ -22,7 +22,7 @@ test('pane switches all views and opens exact read-only evidence detail', async 
   expect(await ui.find({ type: 'Text', text: /FORGE · demo-014 · SYNTHETIC/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /INCOMPLETE/ })).toBeDefined()
   await ui.press({ key: 'view-evidence' })
-  await ui.select({ key: 'evidence-select', value: 'mutation' })
+  await ui.press({ key: 'evidence-mutation' })
   expect(await ui.find({ type: 'Text', text: /receipt-mutation-attempt-1/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /does not authorize retry or publication/ })).toBeDefined()
   await ui.press({ key: 'evidence-back' })

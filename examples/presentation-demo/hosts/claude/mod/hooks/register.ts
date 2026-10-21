@@ -66,7 +66,10 @@ export function register(on: any) {
       body = [Button({ key: 'evidence-back', label: '< Back to Evidence', onPress: async () => { await update($, detail, () => false); redraw() } }), ...vm.detail.map((value: string, i: number) => Text({ key: `detail-${i}`, bold: i === 0, children: [value] }))]
     } else if (currentView === 'evidence') {
       const options = vm.evidence.map((row: any) => ({ value: row.id, label: row.text }))
-      body = options.length ? [Select({ key: 'evidence-select', options, onSelect: async (value: string) => { const index = vm.evidence.findIndex((x: any) => x.id === value); await update($, selected, () => Math.max(0, index)); await update($, detail, () => true); redraw() } })] : [Text({ children: ['No evidence receipts in this fixture.'] })]
+      const openEvidence = async (value: string) => { const index = vm.evidence.findIndex((x: any) => x.id === value); await update($, selected, () => Math.max(0, index)); await update($, detail, () => true); redraw() }
+      body = !options.length ? [Text({ children: ['No evidence receipts in this fixture.'] })]
+        : width < 32 ? [Select({ key: 'evidence-select', value: options[safeSelected]?.value, options, onSelect: openEvidence })]
+        : options.map((option: any) => Button({ key: `evidence-${option.value}`, label: option.label, plain: true, onPress: () => openEvidence(option.value) }))
     } else body = (state[currentView] || state.overview).map((value: string, i: number) => Text({ key: `${currentView}-${i}`, children: [value] }))
     const tabs = width < 32
       ? Select({ key: 'view-select', options: COCKPIT_VIEWS.map((name) => ({ value: name, label: name[0].toUpperCase() + name.slice(1) })), onSelect: async (name: string) => { await setView($, name); redraw() } })
