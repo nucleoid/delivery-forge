@@ -274,6 +274,7 @@ public sealed class GitRepositoryIdentityReaderTests
     [InlineData("if (ready) {}\n/'/.test(input) /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = [] as unknown as string[];\n")]
     [InlineData("const view = <div>{x}'</div>; /* ' */ // eslint-disable-line anti-slop/no-chained-type-assertions\n")]
     [InlineData("await /'/.test(input) /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = [] as unknown as string[];\n")]
+    [InlineData("for (const match of /x'/.exec(input)) { // eslint-disable-next-line anti-slop/no-chained-type-assertions -- '\nconst hidden = [] as unknown as string[];\n}\n")]
     public void Statement_regex_and_jsx_boundaries_cannot_hide_directives(string source)
     {
         try
@@ -291,6 +292,8 @@ public sealed class GitRepositoryIdentityReaderTests
     [InlineData("x = object.in / 2 // eslint-disable-line\n")]
     [InlineData("x = object.delete / 2 // eslint-disable-line\n")]
     [InlineData("x = object.return / 2 // eslint-disable-line\n")]
+    [InlineData("for (of / 2; of < 3; of++) {} // eslint-disable-line\n")]
+    [InlineData("for (let value = object.of / 2; value < 3; value++) {} // eslint-disable-line\n")]
     public void Identifier_and_property_division_cannot_hide_directives(string source)
     {
         Assert.True(GitRepositoryIdentityReader.ContainsSuppressionDirective(source));

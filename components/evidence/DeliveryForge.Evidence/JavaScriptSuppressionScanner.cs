@@ -94,7 +94,9 @@ internal static class JavaScriptSuppressionScanner
         var braceDepth = 0;
         var canStartRegularExpression = true;
         var expectControlParenthesis = false;
+        var expectForParenthesis = false;
         var controlParentheses = new Stack<bool>();
+        var forParentheses = new Stack<bool>();
 
         while (index < content.Length)
         {
@@ -120,6 +122,7 @@ internal static class JavaScriptSuppressionScanner
                     throw Ambiguous("unterminated string literal");
                 canStartRegularExpression = false;
                 expectControlParenthesis = false;
+                expectForParenthesis = false;
                 continue;
             }
             if (current == (byte)'`')
@@ -130,6 +133,7 @@ internal static class JavaScriptSuppressionScanner
                     throw Ambiguous("unterminated template literal");
                 canStartRegularExpression = false;
                 expectControlParenthesis = false;
+                expectForParenthesis = false;
                 continue;
             }
             if (current == (byte)'/' && index + 1 < content.Length && content[index + 1] == (byte)'/')
@@ -171,6 +175,7 @@ internal static class JavaScriptSuppressionScanner
                     throw Ambiguous("unterminated regular-expression literal");
                 canStartRegularExpression = false;
                 expectControlParenthesis = false;
+                expectForParenthesis = false;
                 continue;
             }
             if (current == (byte)'{')
@@ -179,6 +184,7 @@ internal static class JavaScriptSuppressionScanner
                 index++;
                 canStartRegularExpression = true;
                 expectControlParenthesis = false;
+                expectForParenthesis = false;
                 continue;
             }
             if (current == (byte)'}')
@@ -195,12 +201,15 @@ internal static class JavaScriptSuppressionScanner
                 // cannot desynchronize the later comment scan.
                 canStartRegularExpression = true;
                 expectControlParenthesis = false;
+                expectForParenthesis = false;
                 continue;
             }
             if (current == (byte)'(')
             {
                 controlParentheses.Push(expectControlParenthesis);
+                forParentheses.Push(expectForParenthesis);
                 expectControlParenthesis = false;
+                expectForParenthesis = false;
                 canStartRegularExpression = true;
                 index++;
                 continue;
@@ -208,8 +217,10 @@ internal static class JavaScriptSuppressionScanner
             if (current == (byte)')')
             {
                 var control = controlParentheses.Count > 0 && controlParentheses.Pop();
+                if (forParentheses.Count > 0) forParentheses.Pop();
                 canStartRegularExpression = control;
                 expectControlParenthesis = false;
+                expectForParenthesis = false;
                 index++;
                 continue;
             }
@@ -223,9 +234,14 @@ internal static class JavaScriptSuppressionScanner
                     index++;
                 }
                 var identifier = Encoding.ASCII.GetString(content.Slice(start, index - start));
+                var contextualForOf = !keywordPosition && identifier == "of" &&
+                    forParentheses.Count > 0 && forParentheses.Peek() &&
+                    PreviousSignificantByte(content, start) != (byte)'.';
                 expectControlParenthesis = keywordPosition &&
                     identifier is "if" or "while" or "for" or "with" or "switch" or "catch";
-                canStartRegularExpression = keywordPosition && ExpressionPrefixKeywords.Contains(identifier);
+                expectForParenthesis = keywordPosition && identifier == "for";
+                canStartRegularExpression = contextualForOf ||
+                    keywordPosition && ExpressionPrefixKeywords.Contains(identifier);
                 continue;
             }
             if (current is >= (byte)'0' and <= (byte)'9')
@@ -238,6 +254,7 @@ internal static class JavaScriptSuppressionScanner
                 }
                 canStartRegularExpression = false;
                 expectControlParenthesis = false;
+                expectForParenthesis = false;
                 continue;
             }
 
@@ -246,11 +263,13 @@ internal static class JavaScriptSuppressionScanner
             {
                 index += 2;
                 expectControlParenthesis = false;
+                expectForParenthesis = false;
                 canStartRegularExpression = false;
                 continue;
             }
             index++;
             expectControlParenthesis = false;
+            expectForParenthesis = false;
             canStartRegularExpression = current switch
             {
                 (byte)']' => false,
