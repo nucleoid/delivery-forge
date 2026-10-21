@@ -10,6 +10,23 @@ namespace DeliveryForge.Contracts.Validation;
 /// </summary>
 public static class GateReceiptAuthority
 {
+    public static bool TryValidateConsumerOutcome(
+        JsonElement receipt,
+        bool enforceAuthority,
+        out string reason,
+        TrustedGatePluginRegistry? registry = null)
+    {
+        var isV2 = receipt.TryGetProperty("schemaVersion", out var schemaVersion) &&
+            schemaVersion.GetString() == "2.0.0";
+        if (!enforceAuthority && !isV2)
+        {
+            reason = string.Empty;
+            return true;
+        }
+
+        return TryValidateAuthoritativeOutcome(receipt, out reason, registry);
+    }
+
     public static bool TryValidateAuthoritativeOutcome(
         JsonElement receipt,
         out string reason,

@@ -428,6 +428,20 @@ public sealed class SchemaValidationTests
     }
 
     [Fact]
+    public void Default_validator_rejects_advisory_v2_gate_receipts()
+    {
+        var bundle = ReferenceBundle.Create();
+        bundle.Gates[0]["authorityBinding"]!["authority"] = "advisory";
+        bundle.Gates[0]["authorityBinding"]!["enabled"] = false;
+        bundle.Gates[0]["authorityBinding"]!["status"] = "DISABLED";
+        bundle.Gates[0]["authorityBinding"]!["productionCapable"] = false;
+        bundle.Relink();
+
+        AssertReferenceMessage("advisory, disabled", () =>
+            ContractReferenceValidator.Validate(bundle.Documents()));
+    }
+
+    [Fact]
     public void One_trusted_registry_covers_crap_and_allows_code_owned_external_registration()
     {
         Assert.True(TrustedGatePluginRegistry.BuiltIns.TryGet("crap", out var crap));

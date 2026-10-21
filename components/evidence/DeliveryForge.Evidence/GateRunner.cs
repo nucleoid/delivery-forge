@@ -59,7 +59,7 @@ public sealed class GateRunner
         _repository = repository;
         _trustedWorkingDirectory = Path.GetFullPath(trustedWorkingDirectory);
         _trustedProtectedBaseCommit = trustedProtectedBaseCommit;
-        _usesBuiltInExecutionRegistry = plugins is null &&
+        _usesBuiltInExecutionRegistry = (plugins is null || plugins.IsCodeOwnedBuiltInRegistry) &&
             (authorityRegistry is null || ReferenceEquals(authorityRegistry, TrustedGatePluginRegistry.BuiltIns));
         _plugins = plugins ?? DeterministicEvaluationPluginRegistry.CreateBuiltIns();
         _authorityRegistry = authorityRegistry ?? TrustedGatePluginRegistry.BuiltIns;

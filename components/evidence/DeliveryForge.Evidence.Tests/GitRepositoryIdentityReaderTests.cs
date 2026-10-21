@@ -271,6 +271,22 @@ public sealed class GitRepositoryIdentityReaderTests
     }
 
     [Theory]
+    [InlineData("if (ready) {}\n/'/.test(input) /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = [] as unknown as string[];\n")]
+    [InlineData("const view = <div>{x}'</div>; /* ' */ // eslint-disable-line anti-slop/no-chained-type-assertions\n")]
+    [InlineData("await /'/.test(input) /* ' */ // eslint-disable-next-line anti-slop/no-chained-type-assertions\nexport const hidden = [] as unknown as string[];\n")]
+    public void Statement_regex_and_jsx_boundaries_cannot_hide_directives(string source)
+    {
+        try
+        {
+            Assert.True(GitRepositoryIdentityReader.ContainsSuppressionDirective(source));
+        }
+        catch (EvidenceRepositoryException error)
+        {
+            Assert.Contains("ambiguous", error.Message, StringComparison.OrdinalIgnoreCase);
+        }
+    }
+
+    [Theory]
     [InlineData("const of = 4; x = of / 2 // eslint-disable-line\n")]
     [InlineData("x = object.in / 2 // eslint-disable-line\n")]
     [InlineData("x = object.delete / 2 // eslint-disable-line\n")]

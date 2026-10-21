@@ -434,6 +434,28 @@ public sealed class WorkflowTransitionTests
     }
 
     [Fact]
+    public void Production_transition_rejects_advisory_v2_gate_receipts()
+    {
+        var evidence = FullEvidence();
+        var advisory = MutatedFixture("gate-receipt.json", node =>
+        {
+            node["schemaVersion"] = "2.0.0";
+            node["policyIdentity"] = evidence.Policy!.Identity;
+            node["gateId"] = "build";
+            node["authorityBinding"] = JsonNode.Parse(evidence.GateReceipts![0].CanonicalBytes.Span)!["authorityBinding"]!.DeepClone();
+            node["authorityBinding"]!["authority"] = "advisory";
+            node["authorityBinding"]!["enabled"] = false;
+            node["authorityBinding"]!["status"] = "DISABLED";
+            node["authorityBinding"]!["productionCapable"] = false;
+        });
+
+        AssertMessage("advisory, disabled", () => WorkflowTransition.EnsureAllowed(
+            WorkflowState.Evaluating,
+            WorkflowState.IndependentReview,
+            evidence with { GateReceipts = [advisory, .. evidence.GateReceipts!.Skip(1)] }));
+    }
+
+    [Fact]
     public void Legacy_or_anti_slop_pass_cannot_impersonate_a_required_gate()
     {
         var evidence = FullEvidence();

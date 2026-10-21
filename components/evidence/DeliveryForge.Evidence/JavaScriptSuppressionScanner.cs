@@ -162,6 +162,9 @@ internal static class JavaScriptSuppressionScanner
             if (current == (byte)'/' && canStartRegularExpression &&
                 (index == 0 || content[index - 1] != (byte)'<'))
             {
+                if (PreviousSignificantByte(content, index) == (byte)'}')
+                    throw Ambiguous(
+                        "a slash after a closing brace can be division or a statement-level regular expression");
                 if (IsLikelyJsxText(content, index))
                     throw Ambiguous("a slash in possible JSX text cannot be classified without pinned parser evidence");
                 if (!SkipRegularExpression(content, ref index, budget))
@@ -187,7 +190,10 @@ internal static class JavaScriptSuppressionScanner
                 }
                 braceDepth = Math.Max(0, braceDepth - 1);
                 index++;
-                canStartRegularExpression = false;
+                // A closing brace may end either an object expression or a statement block.
+                // Conservatively admit a following regex so a block-level regex statement
+                // cannot desynchronize the later comment scan.
+                canStartRegularExpression = true;
                 expectControlParenthesis = false;
                 continue;
             }
@@ -540,6 +546,16 @@ internal static class JavaScriptSuppressionScanner
     private static bool IsWhitespace(byte value) =>
         value is (byte)' ' or (byte)'\t' or (byte)'\r' or (byte)'\n' or (byte)'\f' or (byte)'\v';
 
+    private static byte? PreviousSignificantByte(ReadOnlySpan<byte> content, int index)
+    {
+        for (var previous = index - 1; previous >= 0; previous--)
+        {
+            if (!IsWhitespace(content[previous]))
+                return content[previous];
+        }
+        return null;
+    }
+
     private static bool IsUnicodeLineTerminator(ReadOnlySpan<byte> content, int index) =>
         index + 2 < content.Length && content[index] == 0xe2 && content[index + 1] == 0x80 &&
         content[index + 2] is 0xa8 or 0xa9;
@@ -549,6 +565,16 @@ internal static class JavaScriptSuppressionScanner
         var previous = index - 1;
         while (previous >= 0 && IsWhitespace(content[previous]))
             previous--;
+        if (previous >= 0 && content[previous] == (byte)'}')
+        {
+            for (var next = index + 1; next < content.Length; next++)
+            {
+                if (content[next] == (byte)'<')
+                    return true;
+                if (content[next] is (byte)'\r' or (byte)'\n' or (byte)';')
+                    return false;
+            }
+        }
         while (previous >= 0 && content[previous] is not (byte)'>' and not (byte)'{' and not (byte)'}' &&
                content[previous] is not (byte)'\r' and not (byte)'\n')
             previous--;
@@ -580,10 +606,11 @@ internal static class JavaScriptSuppressionScanner
 
     private static readonly HashSet<string> ExpressionPrefixKeywords = new(StringComparer.Ordinal)
     {
-        // await/yield/of can be identifiers in supported JavaScript-family grammars. Treating
-        // a following slash as division may reject ambiguity, but cannot hide a directive.
-        "case", "delete", "do", "else", "in", "instanceof", "new", "return", "throw",
-        "typeof", "void"
+        // await/yield are expression prefixes in the module-oriented JavaScript-family inputs
+        // accepted by anti-slop. Treating their following slash as division can hide a later
+        // directive by desynchronizing quotes inside a regular expression.
+        "await", "case", "delete", "do", "else", "in", "instanceof", "new", "return", "throw",
+        "typeof", "void", "yield"
     };
 
     private sealed record DirectiveName(

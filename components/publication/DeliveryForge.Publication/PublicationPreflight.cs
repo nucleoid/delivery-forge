@@ -100,8 +100,8 @@ public static class PublicationPreflight
         return (!authority.Enforce ||
                 string.Equals(authority.ExpectedRegistryIdentity, authority.Registry.Identity,
                     StringComparison.Ordinal) &&
-                authority.Provenance?.Contains(receipt.Identity) == true &&
-                GateReceiptAuthority.TryValidateAuthoritativeOutcome(r, out _, authority.Registry)) &&
+                authority.Provenance?.Contains(receipt.Identity) == true) &&
+            GateReceiptAuthority.TryValidateConsumerOutcome(r, authority.Enforce, out _, authority.Registry) &&
             (outcome == "PASS" || outcome == "NOT_APPLICABLE" && allowedNa.Contains(gateId));
     }
 

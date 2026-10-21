@@ -30,6 +30,24 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
+    public void Rewrapped_builtin_instances_do_not_inherit_code_owned_registry_identity()
+    {
+        var builtIns = DeterministicEvaluationPluginRegistry.CreateBuiltIns();
+        var rewrapped = new DeterministicEvaluationPluginRegistry(
+        [
+            builtIns.Resolve(EvidenceAdapterKind.DotNet, null),
+            builtIns.Resolve(EvidenceAdapterKind.Crap4CSharp, null),
+            builtIns.Resolve(EvidenceAdapterKind.Mutate4CSharp, null),
+            builtIns.Resolve(
+                EvidenceAdapterKind.External,
+                new EvaluationPluginSelection("dmmulroy.anti-slop", Enabled: true))
+        ]);
+
+        Assert.True(builtIns.IsCodeOwnedBuiltInRegistry);
+        Assert.False(rewrapped.IsCodeOwnedBuiltInRegistry);
+    }
+
+    [Fact]
     public void Unknown_or_legacy_mismatched_plugin_is_rejected()
     {
         var registry = DeterministicEvaluationPluginRegistry.CreateBuiltIns();
@@ -469,6 +487,10 @@ public sealed class DeterministicEvaluationPluginTests
             ["clean.ts"],
             0);
         var malformed = plugin.NormalizeReport("not json"u8, ["broken.ts"], 1);
+        var toolErrorWithFindings = plugin.NormalizeReport(
+            "{\"diagnostics\":[{\"code\":\"anti-slop(no-runtime-typeof)\",\"severity\":\"error\",\"filename\":\"bad.ts\"}],\"number_of_files\":1,\"number_of_rules\":19}"u8,
+            ["bad.ts"],
+            2);
 
         Assert.Equal(GateOutcome.Pass, clean.Outcome);
         Assert.False(clean.ProductionCapable);
@@ -478,6 +500,50 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.Equal(GateOutcome.Fail, dotDirectory.Outcome);
         Assert.Equal(GateOutcome.Incomplete, fakeEslintShape.Outcome);
         Assert.Equal(GateOutcome.Incomplete, malformed.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, toolErrorWithFindings.Outcome);
+    }
+
+    [Fact]
+    public async Task Code_owned_builtins_with_anti_slop_configuration_retain_legacy_v1_dotnet_authority()
+    {
+        using var temp = new TempDirectory();
+        var original = TestEvidence.GateRequest(temp.Path);
+        var trx = System.IO.Path.Combine(original.Invocation.WorkingDirectory, "builtins.trx");
+        var request = original with
+        {
+            Policy = new ResolvedEvidencePolicy(
+                TestEvidence.Identity('1'), TestEvidence.Identity('2'), TestEvidence.Commit('a'),
+                PolicyAuthorityKind.ProtectedGitBase, 0m, ["test"], authorityVerified: true,
+                sourceRepositoryRoot: original.Invocation.WorkingDirectory,
+                requiredGatePluginBindings:
+                [new RequiredGatePluginBinding("test", "delivery-forge.dotnet", "1.0.0", "dotnet")]),
+            Capability = ToolCapability.FromDetection(
+                "dotnet", "10.0.401", "trx-v1", false, [],
+                original.Capability.ExecutablePath!, original.Capability.ExecutableIdentity!, ["test"],
+                original.Invocation.WorkingDirectory),
+            Plugin = new EvaluationPluginSelection(
+                "delivery-forge.dotnet", Enabled: true, Inputs: ["DeliveryForge.Tests.csproj"]),
+            Invocation = original.Invocation with
+            {
+                Arguments = [.. original.Invocation.Arguments, "--logger", $"trx;LogFileName={trx}"]
+            }
+        };
+        var execution = TestEvidence.CommandResult() with
+        {
+            StandardOutput = "Subject -> Subject.dll"
+        };
+        var runner = new GateRunner(
+            new TrxWritingCommandExecutor(execution, trx),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory,
+            TestEvidence.Commit('a'),
+            DeterministicEvaluationPluginRegistry.CreateBuiltIns());
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.True(result.Outcome == GateOutcome.Pass,
+            $"Expected PASS, received {result.Outcome}: {result.Reason}");
+        Assert.True(result.ProductionCapable);
     }
 
     [Fact]

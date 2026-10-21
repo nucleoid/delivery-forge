@@ -83,8 +83,16 @@ public interface IDeterministicEvaluationPlugin
 public sealed class DeterministicEvaluationPluginRegistry
 {
     private readonly IReadOnlyDictionary<string, IDeterministicEvaluationPlugin> _plugins;
+    internal bool IsCodeOwnedBuiltInRegistry { get; }
 
     public DeterministicEvaluationPluginRegistry(IEnumerable<IDeterministicEvaluationPlugin> plugins)
+        : this(plugins, isCodeOwnedBuiltInRegistry: false)
+    {
+    }
+
+    private DeterministicEvaluationPluginRegistry(
+        IEnumerable<IDeterministicEvaluationPlugin> plugins,
+        bool isCodeOwnedBuiltInRegistry)
     {
         ArgumentNullException.ThrowIfNull(plugins);
         var indexed = new Dictionary<string, IDeterministicEvaluationPlugin>(StringComparer.Ordinal);
@@ -97,6 +105,7 @@ public sealed class DeterministicEvaluationPluginRegistry
                 throw new EvaluationPluginException($"Duplicate deterministic evaluation plugin id '{plugin.Id}'.");
         }
         _plugins = indexed;
+        IsCodeOwnedBuiltInRegistry = isCodeOwnedBuiltInRegistry;
     }
 
     public static DeterministicEvaluationPluginRegistry CreateBuiltIns(
@@ -114,7 +123,7 @@ public sealed class DeterministicEvaluationPluginRegistry
             trustedAntiSlopBundleRoot is not null
                 ? AntiSlopEvaluationPlugin.CreateBundled(trustedAntiSlopBundleRoot, trustedNodePath!)
                 : AntiSlopEvaluationPlugin.CreateBundled()
-        ]);
+        ], isCodeOwnedBuiltInRegistry: true);
         registry.AssertMatchesAuthorityRegistry(TrustedGatePluginRegistry.BuiltIns);
         return registry;
     }

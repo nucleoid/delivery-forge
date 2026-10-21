@@ -129,9 +129,8 @@ public static class ContractReferenceValidator
                     StringComparison.Ordinal))
                 throw new ContractReferenceException(
                     "Gate authority registry identity differs from the producer-owned registry.");
-            if (gateReceiptPolicy.Enforce &&
-                !GateReceiptAuthority.TryValidateAuthoritativeOutcome(
-                    gate, out var authorityFailure, gateReceiptPolicy.Registry))
+            if (!GateReceiptAuthority.TryValidateConsumerOutcome(
+                    gate, gateReceiptPolicy.Enforce, out var authorityFailure, gateReceiptPolicy.Registry))
                 throw new ContractReferenceException(authorityFailure);
 
             supplied.Add(gateId);

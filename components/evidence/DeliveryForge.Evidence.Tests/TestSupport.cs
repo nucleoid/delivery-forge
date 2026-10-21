@@ -153,6 +153,39 @@ internal sealed class CancellingCommandExecutor : ICommandExecutor
         throw new OperationCanceledException(cancellationToken);
 }
 
+internal sealed class TrxWritingCommandExecutor(CommandResult result, string trxPath) : IBoundedGateFixtureExecutor
+{
+    public bool SupportsCreationOwnedBoundedCapture => true;
+
+    public Task<CommandResult> ExecuteAsync(
+        CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        WriteTrx();
+        return Task.FromResult(result);
+    }
+
+    public Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+        CommandInvocation invocation, TimeSpan entireBudget, int maximumBytesPerStream,
+        CancellationToken cancellationToken)
+    {
+        WriteTrx();
+        var stdout = System.Text.Encoding.UTF8.GetBytes(result.StandardOutput);
+        var stderr = System.Text.Encoding.UTF8.GetBytes(result.StandardError);
+        return Task.FromResult(new BoundedCommandCaptureResult(
+            result, stdout, stderr, false, true, true, true));
+    }
+
+    private void WriteTrx()
+    {
+        File.WriteAllText(
+            trxPath,
+            "<TestRun><ResultSummary><Counters total=\"1\" executed=\"1\" passed=\"1\" failed=\"0\" /></ResultSummary></TestRun>");
+        var bin = Path.Combine(Path.GetDirectoryName(trxPath)!, "bin");
+        Directory.CreateDirectory(bin);
+        File.WriteAllText(Path.Combine(bin, "Subject.dll"), "fresh fixture assembly");
+    }
+}
+
 internal sealed class BlockingCommandExecutor(CommandResult result) : ICommandExecutor
 {
     private readonly TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);

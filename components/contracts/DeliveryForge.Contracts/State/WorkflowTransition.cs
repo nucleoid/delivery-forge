@@ -325,9 +325,8 @@ public static class WorkflowTransition
             throw new InvalidWorkflowTransitionException(
                 "Gate authority registry identity differs from the producer-owned registry.");
         }
-        if (gatePolicy.Enforce &&
-            !GateReceiptAuthority.TryValidateAuthoritativeOutcome(
-                root, out var authorityFailure, gatePolicy.Registry))
+        if (!GateReceiptAuthority.TryValidateConsumerOutcome(
+                root, gatePolicy.Enforce, out var authorityFailure, gatePolicy.Registry))
         {
             document.Dispose();
             throw new InvalidWorkflowTransitionException(authorityFailure);

@@ -286,6 +286,9 @@ public sealed class AntiSlopEvaluationPlugin : IDeterministicEvaluationPlugin
             if (reportData.AnalyzedFileCount != analyzedInputs.Count || reportData.RuleCount != allowedRules.Count)
                 return NormalizedEvidence.Incomplete(
                     "Oxlint report does not prove configured analysis of the complete frozen input set.");
+            if (processExitCode is not (0 or 1))
+                return NormalizedEvidence.Incomplete(
+                    "Oxlint batch execution ended with a tool error before complete findings could be established.");
             var findings = reportData.Findings;
             if (findings.Any(finding => finding.IsParserOrToolDiagnostic))
                 return NormalizedEvidence.Incomplete("Oxlint reported a parser, configuration, or tool diagnostic.");
