@@ -65,8 +65,10 @@ internal static partial class ChangedLineCoverage
                     throw Refuse("This line profile cannot determine captured source encoding.");
                 var text = Decode(raw);
                 var lines = PhysicalLines(text, files);
-                if (!documents.TryAdd(logical, new(path, repositoryPath, lines, logical, Text(input, "sha256"), text, generated))) throw Refuse("Duplicate logical source path.");
+                if (!documents.TryAdd(logical, new(path, repositoryPath, lines, logical, Text(input, "sha256"), text, generated)
+                    { CompilerPhysicalRole = path })) throw Refuse("Duplicate logical source path.");
             }
+            if (requireCompilerCensus) BindCompilerPhysicalRoles(context, repository, documents, files);
         }
         var executable = new Dictionary<string, Dictionary<string, bool>>(comparer);
         var coveredContexts = new HashSet<string>(StringComparer.Ordinal);
@@ -111,7 +113,7 @@ internal static partial class ChangedLineCoverage
                 var inventory = CompilerLineCensus.Inspect(ReadBuildArtifact("assembly", "assemblySha256"),
                     ReadBuildArtifact("pdb", "pdbSha256"), new(Text(build, "moduleIdentity"), Text(build, "mvid"), Text(build, "debugIdentity")),
                     context.Value.Values.Select(source => new CompilerLineCensus.Document(source.LogicalPath, source.RepositoryPath,
-                        source.PhysicalPath, source.Sha256, source.Text, source.Generated)).ToArray(), files);
+                        source.CompilerPhysicalRole, source.Sha256, source.Text, source.Generated)).ToArray(), files);
                 if (!inventory.Complete) { censusComplete = false; censusReason ??= inventory.Reason; }
                 else completeContexts.Add(context.Key);
                 foreach (var row in inventory.ProviderLines)
@@ -294,7 +296,12 @@ internal static partial class ChangedLineCoverage
     }
 
     private sealed record Source(string? PhysicalPath, string? RepositoryPath, int Lines, string LogicalPath,
-        string Sha256, string Text, bool Generated);
+        string Sha256, string Text, bool Generated)
+    {
+        // Compiler document identity only. Never used for current-file reads or
+        // report File matching; those retain the authored PhysicalPath profile.
+        internal string? CompilerPhysicalRole { get; init; }
+    }
     internal static Dictionary<string, HashSet<int>> ReadHunks(byte[] diff)
     {
         if (diff.Length > ProducerJson.MaximumBytes) throw Refuse("Complete source diff exceeds capture profile.");
