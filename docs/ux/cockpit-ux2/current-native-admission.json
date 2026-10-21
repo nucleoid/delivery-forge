@@ -1,46 +1,48 @@
 {
-  "schema": 1,
-  "recordedAtUtcDate": "2026-10-21",
-  "implementationSourceSha": "90b0110be22f95e9273f50b3b4729e24b7c01535",
+  "schema": 2,
+  "recordedAtUtc": "2026-10-21T07:12:27.9044245Z",
+  "implementationSourceSha": "ea8606917de64b340c11db63e6cfa46368f4f562",
   "baseSha": "0c8b6b8e2418e4a9333fb49c9be4881feb9fccf0",
   "fixtureMode": "synthetic only",
   "authority": "zero",
   "tests": {
-    "command": "NO_MODEL=1 FIXTURE=1 npm test",
-    "passed": 98,
-    "failed": 0,
-    "skipped": 0
+    "package": { "command": "NO_MODEL=1 FIXTURE=1 npm test", "passed": 103, "failed": 0, "skipped": 0 },
+    "laptopFocused": { "passed": 24, "failed": 0 },
+    "claudeStrictValidator": "PASS",
+    "claudeOfficialPluginTests": { "passed": 3, "failed": 0 }
   },
   "claude": {
-    "observedVersionBeforeAccessRevocation": "2.1.306",
-    "currentSourceValidator": "NOT_RERUN_ACCESS_REVOKED",
-    "currentSourceOfficialTests": "NOT_RERUN_ACCESS_REVOKED",
-    "currentSourceCaptures": [],
-    "priorCaptureLedger": "assets/native-mods-pi-d2de7f2/capture-ledger.json"
+    "version": "2.1.306",
+    "launch": "session-local plugin directory; unique fresh session; no-argument /forge-cockpit-demo command; native controls only",
+    "modelUsage": "zero tokens in accepted session",
+    "captures": [
+      "assets/native-mods-pi-ea86069/claude-failed-overview-top.png",
+      "assets/native-mods-pi-ea86069/claude-failed-evidence-detail.png",
+      "assets/native-mods-pi-ea86069/claude-failed-usage-models.png",
+      "assets/native-mods-pi-ea86069/claude-failed-usage-provenance.png",
+      "assets/native-mods-pi-ea86069/claude-execute-usage.png",
+      "assets/native-mods-pi-ea86069/claude-repair-usage.png"
+    ]
   },
   "pi": {
-    "expectedVersion": "1.3.0",
-    "installedCandidates": [
-      "Node 22.14.0: no Pi package",
-      "Node 22.19.0: @earendil-works/pi-coding-agent@0.80.7",
-      "separate user npm prefix: @mariozechner/pi-coding-agent@0.70.2"
+    "version": "1.3.0",
+    "launch": "explicit managed launcher; process-local task-owned agent directory; offline; no extensions except the owned extension; no context files; no session",
+    "captures": [
+      "assets/native-mods-pi-ea86069/pi-failed-overview.png",
+      "assets/native-mods-pi-ea86069/pi-failed-evidence.png",
+      "assets/native-mods-pi-ea86069/pi-failed-usage-top.png",
+      "assets/native-mods-pi-ea86069/pi-failed-usage-detail.png",
+      "assets/native-mods-pi-ea86069/pi-execute-usage.png",
+      "assets/native-mods-pi-ea86069/pi-repair-overview.png"
     ],
-    "expectedRuntimeInstalled": false,
-    "isolatedHelp": {
-      "runtime": "@earendil-works/pi-coding-agent@0.80.7",
-      "result": "PASS",
-      "elapsedMilliseconds": 3098,
-      "stdoutBytes": 9125,
-      "stderrBytes": 0,
-      "isolation": "process-local offline mode; task-owned agent/session directories; no extensions, context files, or session"
-    },
-    "currentSourceCaptures": [],
-    "pixelParity": "NOT_ACCEPTED_ACCESS_REVOKED"
+    "parity": "PASS: same synthetic facts and scenario states; richer native keyboard/search/selection/list-detail/scroll behavior retained"
   },
   "privacy": {
+    "capturesPixelInspected": true,
     "publicHostPaths": false,
-    "publicDeviceOrProcessIdentifiers": false,
-    "privatePreflightMovedOutsideRepository": true,
+    "publicAccountIdentifiers": false,
+    "unrelatedAppChromeOrToast": false,
+    "privatePreflightOutsideRepository": true,
     "historyRewritePerformed": false
   },
   "productionClaim": false

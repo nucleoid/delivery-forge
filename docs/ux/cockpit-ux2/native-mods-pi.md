@@ -1,72 +1,84 @@
 # Native Claude Mod and Pi extension evidence
 
-**Branch:** `ux/claude-mods-pi-native-20261021`  
-**Approved base:** `0c8b6b8e2418e4a9333fb49c9be4881feb9fccf0` (`origin/ux/ux2-cockpit-prototypes`)  
-**Current implementation source:** `90b0110be22f95e9273f50b3b4729e24b7c01535`
-**Prior proof-of-load capture source:** `d2de7f2b0a814a5edc5037d381bed285c6fcc4cb`
-**Fixture:** synthetic failed-gate scenario `demo-014`, snapshot 4  
+**Branch:** `ux/claude-mods-pi-native-20261021`
+**Approved base:** `0c8b6b8e2418e4a9333fb49c9be4881feb9fccf0` (`origin/ux/ux2-cockpit-prototypes`)
+**Capture source:** `ea8606917de64b340c11db63e6cfa46368f4f562`
+**Fixtures:** synthetic failed-gate, execute, and repair scenarios
 **Authority:** zero; no controller, telemetry, approval, dispatch, or production adapter was connected
 
 ## Result
 
-The shared projection, Claude Mod, and Pi extension implement the frozen Overview, Evidence, Usage, and Activity contract. Automated parity is **PASS**: both host adapters consume the same generated synthetic projection, and the suite verifies view facts, native interaction state, retained selection, filtering, responsive list/detail behavior, scrolling, Unicode display widths, theme-token semantics, and in-panel fixture cycling.
+The shared projection, Claude Mod, and Pi extension implement the frozen Overview, Evidence, Usage, and Activity contract. The corrected implementation passes all regression cases from the two implementation reviews: strict width/height bounds, zero-result filtering without stale detail, complete per-model cost identities at 80 columns, non-fabricated ledger identity, correct observed/priced/provisional counts, cache provenance, Unicode/paste search, retained selection, lifecycle reset, and explicit invalid-selection handling.
 
-At the current source, Claude requests a 30-row / 88-column owned pane and renders a responsive native element tree with a fixture `Select`, real view/evidence controls, theme-safe semantic text, grouped summary/identity/readiness/usage/provenance/activity cards, per-model token/cache/cost rows, ledger reconciliation, synthetic pricing sources, and durable request/attempt identities. Pi retains its stronger keyboard/search/list-detail behavior and adds host-theme hierarchy plus `n`/`p` fixture replay inside the custom component.
+Claude presents a responsive owned pane with a native fixture selector, semantic hierarchy/cards, Evidence controls, per-model Usage, ledger/pricing/request provenance, source freshness, and recovery state. Pi renders the same facts and scenarios while retaining the richer native keyboard/search/selection/list-detail/scroll experience and in-panel `n`/`p` fixture cycling.
 
-Native acceptance is **PARTIAL / BLOCKED**. The three Claude images in the existing ledger are real, reviewed proof-of-load from the earlier `d2de7f2…` source; they are intentionally preserved but are **not current-head visual evidence** for the richer tree. Current-head Claude and Pi capture was prevented when laptop access was explicitly revoked during the follow-up. No old image is relabelled as current proof.
+Native acceptance is **READY FOR PARENT REVIEW**. Twelve current-source captures cover failed-gate Overview/Evidence/Usage, per-model and provenance detail, execute provisional usage, and repair recovery on both hosts. Every image was inspected as pixels and checked for cropping/privacy.
 
 ## Verification
 
-- Current source package suite: **98 passed, 0 failed, 0 skipped** with `NO_MODEL=1 FIXTURE=1`.
-- Claude strict validator passed on installed Claude Code 2.1.306 for the earlier admitted tree. It has **not** been rerun against `90b0110…` because laptop access was revoked before current-source staging.
-- Official `claude plugin test` passed 3 tests for the earlier admitted tree. Current source expands those tests with fixture-select, pricing-source, and request-identity assertions, but the installed official runner has **not** rerun them yet.
-- Static source-effect boundary: only command registration, local state/store access, pane open/close/resolve/invalidate, and declared hooks. No model, tool, process, network, filesystem, permission, or authority calls.
-- Fixture artifact parity: generated plugin fixture bytes match the authoritative shared projection.
+- Package suite: **103 passed, 0 failed, 0 skipped** with `NO_MODEL=1 FIXTURE=1`.
+- Laptop focused source tests: **24 passed, 0 failed**.
+- Claude Code **2.1.306** strict validator: **PASS**, zero errors/warnings.
+- Official Claude plugin tests: **3 passed, 0 failed**.
+- Managed Pi **1.3.0**: version command **PASS** and native extension exercise **PASS** through the explicit managed launcher under process-local isolation.
+- Static source-effect boundary: command registration, local state/store access, owned pane UI, and declared hooks only. No model, tool, process, network, filesystem, permission, or authority calls.
+- Generated plugin fixture parity matches the authoritative shared projection; line endings are normalized cross-platform.
 - Legacy Codex/companion behavior remains outside this change.
 
-## Claude native capture procedure
+## Native procedures
 
-The worktree was cloned beneath a uniquely scoped `<task-owned-prefix>` on the laptop.
-The Mod was loaded session-locally. A pre-existing unrelated terminal and all other user windows were preserved; exact host paths and window/process identifiers are retained only in the private task artifact.
+### Claude
 
-The three prior frames came from a fresh fixture-only Claude session showing zero tokens. The pane was focused using the host's normal keyboard chord and switched with the Mod's native keys. All files are 1430x210 crops from a 1483x762 terminal window. The crop metadata is retained in the prior ledger. Cropping retained the complete owned pane while excluding terminal footer content.
+The Mod was loaded session-locally in a fresh uniquely named session. Only the no-argument `/forge-cockpit-demo` command was used; all fixture/view/detail/scroll changes used native pane controls. The accepted session displayed zero tokens throughout. Unsupported command arguments remain documented as unsafe because the host may route them to a model prompt; they were not used.
 
-Each frame was inspected as pixels, not merely hashed:
+Claude captures are 1040x430 crops beginning at source screen coordinate `(207,333)`. Cropping retains the complete relevant owned-pane region while excluding terminal/account/path chrome and the unrelated notification area.
 
-- `claude-overview.png`: Overview tab, INCOMPLETE gate/blocker, plan/head/tree facts are visible; no clipping or false-green state.
-- `claude-usage.png`: Usage tab, known subtotal, PARTIAL label, and provisional/not-a-bill wording are visible; no clipping.
-- `claude-activity.png`: Activity tab and chronological synthetic rows are visible; no clipping.
-- No crop exposes a local path, account identifier, authentication data, or private user content.
+### Pi
 
-Full hashes, timestamps, dimensions, crop coordinates, and review outcomes are in `assets/native-mods-pi-d2de7f2/capture-ledger.json`.
+Pi was invoked through the explicit managed 1.3.0 launcher with a process-local task-owned agent directory, offline mode, no context files, no session, and only the owned extension. Interaction used `/forge-demo` plus native keys: view selection, `j`/`k`, scrolling, and `n`/`p` fixture cycling. No provider/model prompt was sent.
 
-These captures predate the richer layout, fixture selector, grouped cards, pricing/request provenance, Pi theme treatment, and in-panel replay. Evidence view/detail behavior is proven by the earlier official host tests and current source-side tests, not by this capture set. No current-head Evidence, recovery, or paired-host screenshot is claimed.
+Pi captures are 1483x570 crops beginning at source screen coordinate `(127,228)`. Cropping retains the owned component while excluding package and task paths.
 
-## Pi runtime reconciliation
+## Capture coverage
 
-The bounded existing-installation search found only Node 22.14.0 and 22.19.0 under the active NVM root; the previously recorded Node 22.17.0 directory is absent. Node 22.14.0 has no Pi package. Node 22.19.0 contains `@earendil-works/pi-coding-agent@0.80.7`; a separate user npm prefix contains `@mariozechner/pi-coding-agent@0.70.2`. No installed Pi 1.3.0 package exists in the inspected roots.
+Claude:
 
-The exact 0.80.7 Node/CLI path is viable when isolated correctly: with process-local offline mode, task-owned agent/session directories, and explicit no-extension/no-context/no-session flags, `--help` exited normally in about 3.1 seconds with 9,125 stdout bytes and no stderr. Source inspection explains why ordinary `--help` can still touch startup machinery: this build creates settings/runtime services and resource loaders before printing help. The earlier blank launch is therefore rejected as an environment-isolation failure, not described as a permanent binary hang. A current native session was not launched after this finding because computer access was revoked; no install, upgrade, NVM switch, PATH mutation, auth read, or global repair was attempted.
+- failed-gate Overview top and readiness state;
+- failed-gate Evidence selection/detail;
+- failed-gate Usage model rows;
+- failed-gate Usage request/pricing/cache provenance after native scrolling;
+- execute Usage with provisional valuation;
+- repair Usage recovery state.
+
+Pi:
+
+- failed-gate Overview;
+- failed-gate Evidence with keyboard-selected detail;
+- failed-gate Usage model rows;
+- failed-gate Usage request/pricing/cache detail after keyboard navigation;
+- execute Usage after native fixture cycling;
+- repair Overview recovery state after native fixture cycling.
+
+The exact timestamps, dimensions, crop coordinates, interactions, and SHA-256 hashes are recorded in [`assets/native-mods-pi-ea86069/capture-ledger.json`](assets/native-mods-pi-ea86069/capture-ledger.json). No current image exposes a local path, account identifier, credential, unrelated toast, or unrelated application chrome. Earlier proof-of-load captures remain in history and are not relabelled as current evidence.
 
 ## Incidents and limitations
 
-1. Claude updated itself from 2.1.303 to 2.1.306 during the native launch without an explicit upgrade command. The captures and validator/test evidence are pinned to the observed 2.1.306 runtime.
-2. An initial launch used the wrong directory and produced an unknown command; it was closed and rejected as evidence.
-3. In the first correctly loaded session, typing `/forge-cockpit-demo view usage` unexpectedly fell through into a model turn rather than routing as a command with arguments. It was aborted promptly with Escape. Consequently there is no claim that the entire laptop exercise was model-free. The three accepted captures came from a separate fresh session opened with the no-argument command and controlled through native pane keys while the host displayed zero tokens.
-4. Pi's installed package/version disagrees with the frozen 1.3.0 target. The exact 0.80.7 metadata path now passes under task-owned isolation, but current native rendering remains unexercised because laptop access was revoked before the admitted launch.
-5. Claude Desktop and VS Code were detected but not launched or tested.
-6. This is synthetic UX evidence only. It proves neither production integration nor real usage/cost/approval/dispatch authority.
+1. Earlier work recorded Claude self-updating from 2.1.303 to 2.1.306; current validation and captures are pinned to observed 2.1.306.
+2. Earlier rejected Claude launches opened the wrong directory or a persisted unrelated session. They were closed without accepted interaction and are not evidence.
+3. An earlier argument-form Claude command fell through into a model turn and was aborted. The accepted current session is separate, uses only the verified no-argument command plus native UI, and shows zero tokens.
+4. Earlier Pi inspection found stale 0.80.7/0.70.2 installations. Current evidence uses the explicitly managed and independently version-verified Pi 1.3.0 launcher; no global PATH/NVM/plugin/auth setting was changed.
+5. Claude Desktop and VS Code were not exercised.
+6. This is synthetic UX evidence only. It does not prove production integration, real cost, approval, dispatch, or telemetry authority.
 
 ## Privacy repair
 
-The earlier public commit accidentally included a preflight file and report text containing local host paths, a paired-device identifier, and window/process identifiers. The current tree removes that preflight and stores it only under the task-owned private artifacts area; this report uses placeholders. No credential or secret was present. The old bytes remain in ordinary Git history because this branch is not force-rewritten; reviewers should assess the current sanitized tree and the explicit incident record.
+An earlier public commit contained a preflight file and report text with local host paths and device/process identifiers. The current tree removes that preflight and stores it only in private task artifacts; this report uses no private identifiers. No credential or secret was present. History was not force-rewritten.
 
 ## Acceptance statement
 
 - Shared facts and implementation contract parity: **PASS**.
-- Claude CLI native rendering for Overview, Usage, and Activity: **PASS only for the prior `d2de7f2…` proof-of-load source; current `90b0110…` pixels pending**.
-- Claude Evidence interaction: **PASS by official host test; no native capture**.
-- Pi source/type and automated interaction parity: **PASS**, including current theme tokens and native fixture cycling.
-- Pi native runtime and paired-pixel parity: **BLOCKED / NOT ACCEPTED** pending restored computer access and an explicit decision whether installed 0.80.7 is an acceptable native evidence target despite the frozen 1.3.0 version expectation.
-- Desktop/VS Code Mod compatibility: **UNTESTED**.
-
+- Claude current-source native rendering and interaction: **PASS; ready for parent pixel review**.
+- Pi 1.3.0 current-source native rendering and interaction: **PASS; ready for parent pixel review**.
+- Paired scenario/fact parity: **PASS**, with Pi preserving at least Claude's view coverage and adding richer native keyboard/search/list-detail controls.
+- Production claims: **NONE**.
+- Desktop/VS Code compatibility: **UNTESTED**.

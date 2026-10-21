@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "sourceSha": "ea8606917de64b340c11db63e6cfa46368f4f562",
+  "baseSha": "0c8b6b8e2418e4a9333fb49c9be4881feb9fccf0",
+  "fixtureAuthority": "synthetic; zero controller, telemetry, approval, dispatch, or production authority",
+  "runtimes": { "claude": "2.1.306", "pi": "1.3.0" },
+  "crops": {
+    "claude": { "sourceOrigin": { "x": 207, "y": 333 }, "width": 1040, "height": 430, "reason": "retain owned pane; exclude terminal/account/path chrome and unrelated notification area" },
+    "pi": { "sourceOrigin": { "x": 127, "y": 228 }, "width": 1483, "height": 570, "reason": "retain owned component; exclude package and task paths" }
+  },
+  "captures": [
+    { "file": "claude-failed-overview-top.png", "host": "claude", "scenario": "failed-gate", "view": "overview", "action": "no-argument command; native fixture selector; Overview tab; top scroll position", "timestampUtc": "2026-10-21T07:08:12.8468001Z", "width": 1040, "height": 430, "sha256": "bac7b90d96e8db23b64673996fe562faaeaacf4a4a719dde3759c67ff1208f86" },
+    { "file": "claude-failed-evidence-detail.png", "host": "claude", "scenario": "failed-gate", "view": "evidence", "action": "native Evidence tab; evidence selection/detail control", "timestampUtc": "2026-10-21T07:10:19.9894411Z", "width": 1040, "height": 430, "sha256": "e1ed5ca1f7fd140a8b1405bed5efa83669e5a88a9527c37db6d04e4caef70dbb" },
+    { "file": "claude-failed-usage-models.png", "host": "claude", "scenario": "failed-gate", "view": "usage", "action": "native Usage tab; model rows in view", "timestampUtc": "2026-10-21T07:10:56.4716578Z", "width": 1040, "height": 430, "sha256": "598a2d040d61d19b75d44fafab437109b7f066c48e01eb25a51981f8bf826bbf" },
+    { "file": "claude-failed-usage-provenance.png", "host": "claude", "scenario": "failed-gate", "view": "usage", "action": "native PageDown; request/pricing/cache provenance in view", "timestampUtc": "2026-10-21T07:11:25.1308625Z", "width": 1040, "height": 430, "sha256": "c802d86aff5e3307a455641dab441331850bd052683bbe3179b83a36dee6a9fe" },
+    { "file": "claude-execute-usage.png", "host": "claude", "scenario": "execute", "view": "usage", "action": "native fixture selector changed to execute; Usage tab", "timestampUtc": "2026-10-21T07:11:57.4555412Z", "width": 1040, "height": 430, "sha256": "bdd335c0c059255896ac1038219957ec509f5863db2fc557f5b4bca983d15e4c" },
+    { "file": "claude-repair-usage.png", "host": "claude", "scenario": "repair", "view": "usage", "action": "native fixture selector changed to repair; Usage tab", "timestampUtc": "2026-10-21T07:12:27.9044245Z", "width": 1040, "height": 430, "sha256": "fe57e14ac46c8b7d8817da6f1a3846b5cf159d32cbc0c82b9dde2661540881aa" },
+    { "file": "pi-failed-overview.png", "host": "pi", "scenario": "failed-gate", "view": "overview", "action": "/forge-demo; native Overview key", "timestampUtc": "2026-10-21T07:03:10.1803175Z", "width": 1483, "height": 570, "sha256": "88ad0fd69c029000f8afe6aea05b1dbc0e95b7b5942afd54d4ebd0291ceb027a" },
+    { "file": "pi-failed-evidence.png", "host": "pi", "scenario": "failed-gate", "view": "evidence", "action": "native Evidence key; keyboard selection/detail", "timestampUtc": "2026-10-21T07:03:47.4737297Z", "width": 1483, "height": 570, "sha256": "86fc1bdfa8f88d42936dbceeae562a8b725e5297130d05021f36cd12d0f1f2ee" },
+    { "file": "pi-failed-usage-top.png", "host": "pi", "scenario": "failed-gate", "view": "usage", "action": "native Usage key; top model rows", "timestampUtc": "2026-10-21T07:04:14.3514907Z", "width": 1483, "height": 570, "sha256": "e6fee2f94bdd6227c397ff5b57e7cc5e07dffff20801b0cfdb5ef46ed3f2232a" },
+    { "file": "pi-failed-usage-detail.png", "host": "pi", "scenario": "failed-gate", "view": "usage", "action": "native keyboard scroll/selection; request/pricing/cache detail", "timestampUtc": "2026-10-21T07:04:50.8882186Z", "width": 1483, "height": 570, "sha256": "58c8305a61e4c75a908946ee8f24ecc411d7bf1b67ab80d84d2d4b78b902aba8" },
+    { "file": "pi-execute-usage.png", "host": "pi", "scenario": "execute", "view": "usage", "action": "native n fixture cycle; Usage key", "timestampUtc": "2026-10-21T07:05:27.0599488Z", "width": 1483, "height": 570, "sha256": "57a914263f04ad6e89d556a7472a7a5f17502134d48f07796cd558b7f6b38cdf" },
+    { "file": "pi-repair-overview.png", "host": "pi", "scenario": "repair", "view": "overview", "action": "native n fixture cycle; Overview key; recovery state", "timestampUtc": "2026-10-21T07:05:52.4813816Z", "width": 1483, "height": 570, "sha256": "9e50889b3218d0541067901e72d11676245d8a20922bf82d6729db103cd09495" }
+  ],
+  "pixelReview": {
+    "result": "PASS_FOR_PARENT_REVIEW",
+    "facts": "failed-gate Overview/Evidence/Usage, per-model usage, request/pricing/cache provenance, execute provisional usage, and repair recovery are visibly represented across both hosts",
+    "privacy": "no local path, account identity, credential, unrelated toast, or unrelated application chrome is visible",
+    "limitations": "captures are synthetic UX evidence; parent retains independent final pixel review"
+  }
+}
