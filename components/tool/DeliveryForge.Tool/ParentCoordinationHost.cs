@@ -99,6 +99,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
                 host.reducer = await task.WaitAsync(life.Remaining).ConfigureAwait(false); life.Check();
                 // Discovery has anchored the actual evidence interval. Bootstrap
                 // may exist, but no lifecycle/lease/worker is admitted yet.
+                life.Restrict(wire.GetOriginalEvidenceWholeLimit(life.OriginalStarted, life.WholeLimit));
                 wire.RequireOriginalEvidenceCoverage(life.OriginalStarted, life.WholeLimit); life.Check();
                 return host;
             }
@@ -109,8 +110,8 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
 
     // Restrict the existing original, never refresh evidence or create another
     // lifetime/clock. Sample monotonic time BEFORE UTC so rounding or the sampling
-    // interval cannot extend the admitted proof window. Discovery still requires
-    // its actual anchored evidence to cover this same restricted original.
+    // interval cannot extend the admitted proof window. Discovery narrows this
+    // same original again to its fixed anchor; it never renews either clock.
     internal static void RestrictOriginalToPinnedEvidence(ToolLifetime life, ContinuumDeploymentEvidence observed)
     {
         life.Check();

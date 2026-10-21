@@ -151,6 +151,11 @@ public sealed class ExecutionCoordinator : IDisposable
 
     internal void DisposeOriginalWriter(string runId, WriterLease writer)
     {
+        // A retained unknown first close cannot be retried or re-notified by
+        // a later disposition attempt on this exact coordinator/lease pair.
+        lock (UnsettledWriterDispositions)
+            if (UnsettledWriterDispositions.Any(row => ReferenceEquals(row.Owner, this) && ReferenceEquals(row.Lease, writer)))
+                throw new WorktreeBoundaryException("Actual writer first disposition remains retained; no retry authority.");
         try
         {
             writer.Dispose();
@@ -163,12 +168,20 @@ public sealed class ExecutionCoordinator : IDisposable
         {
             // The lease's first attempt is sticky. Keep the actual owner even if
             // the coordinator is disposed; never retry an unknown first close.
-            lock (UnsettledWriterDispositions) UnsettledWriterDispositions.Add((this, writer));
+            bool firstRetained;
+            lock (UnsettledWriterDispositions)
+            {
+                firstRetained = !UnsettledWriterDispositions.Any(row => ReferenceEquals(row.Owner, this) && ReferenceEquals(row.Lease, writer));
+                if (firstRetained) UnsettledWriterDispositions.Add((this, writer));
+            }
             var failures = new List<Exception> { failure };
-            try { if (original is DeliveryForge.Evidence.IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown(); }
-            catch (Exception observation) { failures.Add(observation); }
-            try { _coordinationAdmission?.RetainUncertain(runId, "Actual writer first disposition did not return."); }
-            catch (Exception observation) { failures.Add(observation); }
+            if (firstRetained)
+            {
+                try { if (original is DeliveryForge.Evidence.IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown(); }
+                catch (Exception observation) { failures.Add(observation); }
+                try { _coordinationAdmission?.RetainUncertain(runId, "Actual writer first disposition did not return."); }
+                catch (Exception observation) { failures.Add(observation); }
+            }
             if (failures.Count > 1) throw new AggregateException("Writer first disposition and independent uncertainty observations failed.", failures);
             throw;
         }

@@ -36,6 +36,11 @@ public sealed class OriginalWriterDispositionTests
         Assert.Equal(1, original.UnknownObservations); Assert.Equal(1, parent.UnknownObservations);
         Assert.Throws<CoordinationUncertainException>(() => parent.CheckCurrent("owned"));
         Assert.False(lease.FirstCloseReturned); Assert.Equal(1, stream.CloseAttempts);
+        // Even failed first-notice observers are not retried by later calls.
+        for (var attempt = 0; attempt < 8; attempt++)
+            Assert.Throws<WorktreeBoundaryException>(() => coordinator.DisposeOriginalWriter("owned", lease));
+        Assert.Equal(1, original.UnknownObservations); Assert.Equal(1, parent.UnknownObservations);
+        Assert.Equal(1, stream.CloseAttempts);
         lease.Dispose(); Assert.Equal(1, stream.CloseAttempts);
     }
 
@@ -147,9 +152,10 @@ public sealed class OriginalWriterDispositionTests
         Assert.Throws<IOException>(() => coordinator.DisposeOriginalWriter("owned", lease));
         Assert.True(original.Unknown); Assert.Equal(1, parent.UnknownObservations); Assert.Equal(1, stream.CloseAttempts);
         Assert.Equal(WriterNamespaceIdentityOutcome.Unknown, lease.ObserveCurrentNamespaceIdentity().Outcome);
-        Assert.Throws<WorktreeBoundaryException>(() => coordinator.DisposeOriginalWriter("owned", lease));
+        for (var attempt = 0; attempt < 16; attempt++)
+            Assert.Throws<WorktreeBoundaryException>(() => coordinator.DisposeOriginalWriter("owned", lease));
         Assert.False(lease.FirstCloseReturned); Assert.Equal(1, stream.CloseAttempts);
-        Assert.Equal(2, original.UnknownObservations); Assert.Equal(2, parent.UnknownObservations);
+        Assert.Equal(1, original.UnknownObservations); Assert.Equal(1, parent.UnknownObservations);
         Assert.Throws<CoordinationUncertainException>(() => parent.CheckCurrent("owned"));
         lease.Dispose(); Assert.Equal(1, stream.CloseAttempts); // Sticky lease never repeats the first close.
     }

@@ -299,8 +299,11 @@ public sealed partial class ProductionReviewSourceOwner
         }
         catch (Exception failure) { failure.Data["RetainedProductionReviewScratch"] = path; throw; }
     }
-    // Rejection-only preflight on this actual owner. No path is read or deleted,
-    // and the eventual callback still checks every effect under its own claim.
+    // Pre-claim lifecycle validation, not a promise of retryable WORK. Its
+    // actual admitted synchronous WORK refusal may revoke parent WORK while
+    // leaving disposition unclaimed for an existing valid cleanup path.
+    // Cleanup checks the SAME original cleanup endpoint before the claim;
+    // any eventual entered callback failure remains sticky and is not retried.
     internal void CheckViewDisposition(bool cleanup)
     {
         if (cleanup)

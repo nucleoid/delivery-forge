@@ -18,7 +18,7 @@ public sealed class PatchScratchRetentionTests
         Directory.CreateDirectory(root);
         var primary = new IOException("Scripted owned Git failure.");
         var cleanupFailure = new IOException("Scripted scratch retirement failure.");
-        var calls = 0; var disposed = 0; var paths = new List<string>();
+        var calls = 0; var disposed = 0; var dispositionChecks = 0; var paths = new List<string>();
         Task<GitProcessResult> Git(string gitDirectory, IReadOnlyList<string> args, CancellationToken token,
             byte[]? input, IReadOnlyDictionary<string, string>? environment)
         {
@@ -36,11 +36,14 @@ public sealed class PatchScratchRetentionTests
         var context = new ControlledGitEvidenceContext(root, root, root, Path.Combine(root, "unused-git"), "DATA", 1024,
             "DATA", "DATA", "DATA", ReviewAuthorityRealm.Production, [], new object(), dispose: () => disposed++,
             ownedGit: Git, mayCleanOwnedFiles: () => scenario != "cleanup-denied",
-            deleteOwnedScratch: path => { if (scenario == "cleanup-failure") throw cleanupFailure; if (File.Exists(path)) File.Delete(path); });
+            deleteOwnedScratch: path => { if (scenario == "cleanup-failure") throw cleanupFailure; if (File.Exists(path)) File.Delete(path); },
+            // Explicit fixture-owned disposition preflight, not a production owner/receipt.
+            checkDisposition: cleanup => { Assert.True(cleanup); dispositionChecks++; });
         var task = GitPatchIdentity.VerifyPatchReconstructsBothDirectionsAsync(context, [], "base", "head", "base-tree", "head-tree", TestContext.Current.CancellationToken);
         if (scenario == "success")
         {
             await task; Assert.Empty(context.RetainedScratchPaths); context.Dispose(); Assert.Equal(1, disposed);
+            Assert.Equal(1, dispositionChecks); Assert.True(context.DispositionReturned);
             Assert.All(paths, path => Assert.False(File.Exists(path)));
         }
         else
@@ -52,6 +55,7 @@ public sealed class PatchScratchRetentionTests
             Assert.All(context.RetainedScratchPaths, path => Assert.Equal(root, Path.GetDirectoryName(path)));
             Assert.NotNull(error.Data["RetainedProductionReviewScratch"]);
             context.Dispose(); Assert.Equal(0, disposed); Assert.All(paths, path => Assert.True(File.Exists(path)));
+            Assert.Equal(0, dispositionChecks); Assert.False(context.DispositionReturned);
         }
     }
 }

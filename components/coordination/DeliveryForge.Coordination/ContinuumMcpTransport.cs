@@ -113,7 +113,7 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
 
     // A restriction on the SAME original interval, never a freshness issuer or
     // a fresh cleanup clock. Caller has already required the production facet.
-    public void RequireOriginalEvidenceCoverage(long originalStarted, TimeSpan originalWholeLimit)
+    public TimeSpan GetOriginalEvidenceWholeLimit(long originalStarted, TimeSpan originalWholeLimit)
     {
         if (originalStarted <= 0 || originalStarted > Stopwatch.GetTimestamp() ||
             originalWholeLimit <= TimeSpan.Zero || originalWholeLimit > TimeSpan.FromSeconds(1200))
@@ -122,11 +122,20 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
         {
             if (_invalid || _disposed || _session is null || _capabilities is null || _evidence is null || _evidenceObservedAt == 0)
                 throw new CoordinationUnavailableException("Actual anchored deployment evidence is unavailable before lease admission.");
-            var originalRemaining = originalWholeLimit - Stopwatch.GetElapsedTime(originalStarted);
-            var evidenceRemaining = _evidenceRemaining - Stopwatch.GetElapsedTime(_evidenceObservedAt);
-            if (originalRemaining <= TimeSpan.Zero || evidenceRemaining < originalRemaining)
+            // Both limits have the SAME original monotonic origin. Return the
+            // fixed endpoint, not remaining time that a later handoff can extend.
+            var endpoint = Stopwatch.GetElapsedTime(originalStarted, _evidenceObservedAt) + _evidenceRemaining;
+            var elapsed = Stopwatch.GetElapsedTime(originalStarted);
+            if (originalWholeLimit <= elapsed || endpoint <= elapsed)
                 throw new CoordinationUnavailableException("Pinned deployment evidence cannot cover the SAME original remaining whole interval; no lease or worker may start.");
+            return endpoint < originalWholeLimit ? endpoint : originalWholeLimit;
         }
+    }
+
+    public void RequireOriginalEvidenceCoverage(long originalStarted, TimeSpan originalWholeLimit)
+    {
+        if (GetOriginalEvidenceWholeLimit(originalStarted, originalWholeLimit) < originalWholeLimit)
+            throw new CoordinationUnavailableException("Pinned deployment evidence cannot cover the SAME original remaining whole interval; no lease or worker may start.");
     }
 
     public async Task<CoordinationCapabilities> DetectCapabilitiesAsync(CancellationToken cancellationToken = default)
@@ -152,10 +161,12 @@ public sealed class ContinuumMcpTransport : ICoordinationTransport, IAsyncDispos
             lock (_state)
             {
                 _expectedCredentialIdentity = Convert.FromHexString(evidence.CredentialSha256);
+                // Sample monotonic time first: the UTC read cannot move the
+                // admitted endpoint later by the time between the two samples.
+                _evidenceObservedAt = Stopwatch.GetTimestamp();
                 var now = DateTimeOffset.UtcNow;
                 _evidenceRemaining = TimeSpan.FromTicks(Math.Min((evidence.ValidUntil - now).Ticks,
                     (TimeSpan.FromMinutes(20) - (now - evidence.VerifiedAt)).Ticks));
-                _evidenceObservedAt = Stopwatch.GetTimestamp();
             }
             var initialization = await RpcAsync("initialize", new
             {

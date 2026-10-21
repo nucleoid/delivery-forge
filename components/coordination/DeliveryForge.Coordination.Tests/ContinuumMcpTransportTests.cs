@@ -283,6 +283,39 @@ public sealed class ContinuumMcpTransportTests
     }
 
     [Fact]
+    public async Task Fixed_evidence_endpoint_survives_handoff_and_exact_boundary_checks_without_resampling()
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        await using var sample = new Sample();
+        await sample.Transport.DetectCapabilitiesAsync(TestContext.Current.CancellationToken);
+        var requests = sample.Handler.Requests;
+        var clipped = sample.Transport.GetOriginalEvidenceWholeLimit(started, TimeSpan.FromMinutes(20));
+        Assert.True(clipped > TimeSpan.Zero && clipped < TimeSpan.FromMinutes(11));
+        await Task.Delay(20, TestContext.Current.CancellationToken);
+        for (var index = 0; index < 100; index++)
+        {
+            Assert.Equal(clipped, sample.Transport.GetOriginalEvidenceWholeLimit(started, TimeSpan.FromMinutes(20)));
+            sample.Transport.RequireOriginalEvidenceCoverage(started, clipped);
+            await Task.Yield();
+        }
+        Assert.Throws<CoordinationUnavailableException>(() => sample.Transport.RequireOriginalEvidenceCoverage(started, clipped + TimeSpan.FromTicks(1)));
+        Assert.Equal(requests, sample.Handler.Requests); Assert.Equal(0, sample.Handler.Acquisitions);
+        Assert.False(sample.Transport.ProductionCurrent); // Marked HTTP contract fixture, never authority.
+    }
+
+    [Fact]
+    public async Task Anchored_limit_never_expands_a_shorter_original_and_missing_discovery_is_not_a_limit()
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        await using var sample = new Sample();
+        Assert.Throws<CoordinationUnavailableException>(() => sample.Transport.GetOriginalEvidenceWholeLimit(started, TimeSpan.FromSeconds(30)));
+        await sample.Transport.DetectCapabilitiesAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(TimeSpan.FromSeconds(30), sample.Transport.GetOriginalEvidenceWholeLimit(started, TimeSpan.FromSeconds(30)));
+        sample.Transport.RequireOriginalEvidenceCoverage(started, TimeSpan.FromSeconds(30));
+        Assert.Equal(0, sample.Handler.Acquisitions);
+    }
+
+    [Fact]
     public async Task Renew_invocation_uses_same_reserved_row_from_pending_to_actual_return()
     {
         using var entered = new ManualResetEventSlim(); using var release = new ManualResetEventSlim();
