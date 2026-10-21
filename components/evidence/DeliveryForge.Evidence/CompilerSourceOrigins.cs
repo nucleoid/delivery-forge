@@ -15,6 +15,7 @@ internal static class CompilerSourceOrigins
 {
     private const int MaximumRows = 10000;
     private const int MaximumSteps = 1_000_000;
+    private const long MaximumBytes = 128 * 1024 * 1024;
     private sealed record Point(int Method, string Path, int StartLine, int StartColumn, int EndLine, int EndColumn);
     private sealed record Candidate(int Method, int ContainedPoints, int AllMethodPoints, bool CompletePointSetContained);
     private sealed record ConstructorRole(string? DeclarationId, string Display, bool Implicit, bool DelegatesToThis);
@@ -26,15 +27,29 @@ internal static class CompilerSourceOrigins
         Action check, CancellationToken token)
     {
         var steps = 0;
+        long admittedBytes = 2048;
         void Step()
         {
             check(); token.ThrowIfCancellationRequested();
             if (++steps > MaximumSteps) throw new IOException("Semantic origin inventory exceeds the existing finite work profile.");
         }
+        // Charge before retaining rows or allocating their arrays. Eight bytes per
+        // UTF-16 unit covers worst-case JSON escaping, with conservative row space.
+        // Repeated serialized identities are charged even when strings are shared.
+        void Admit(long rowBytes, params string?[] identities)
+        {
+            Step();
+            foreach (var identity in identities)
+                rowBytes = checked(rowBytes + 32L + 8L * (identity?.Length ?? 0));
+            admittedBytes = checked(admittedBytes + rowBytes);
+            if (admittedBytes > MaximumBytes)
+                throw new IOException("Semantic runtime inventory exceeds the existing artifact bound.");
+        }
         string Text(string value)
         {
             Step();
             if (value.Length > 16384) throw new IOException("Semantic origin identity exceeds the existing path/identity profile.");
+            Admit(32, value);
             return value;
         }
         using var pe = new PEReader(new MemoryStream(assembly, writable: false));
@@ -44,6 +59,7 @@ internal static class CompilerSourceOrigins
         if (metadata.MethodDefinitions.Count > MaximumRows || reader.Documents.Count > MaximumRows)
             throw new IOException("Semantic origin inventory exceeds the bounded method/document profile.");
         var points = new List<Point>();
+        var documentPaths = new Dictionary<DocumentHandle, string>();
         var noVisibleIlBodies = new List<int>();
         foreach (var handle in metadata.MethodDefinitions)
         {
@@ -56,12 +72,21 @@ internal static class CompilerSourceOrigins
                 Step(); if (point.IsHidden) continue;
                 var document = point.Document.IsNil ? debug.Document : point.Document;
                 if (document.IsNil) throw new IOException("Visible semantic carrier has no PDB document.");
-                var path = Text(reader.GetString(reader.GetDocument(document).Name).Replace('\\', '/'));
+                if (!documentPaths.TryGetValue(document, out var path))
+                {
+                    path = Text(reader.GetString(reader.GetDocument(document).Name).Replace('\\', '/'));
+                    Admit(128);
+                    documentPaths.Add(document, path);
+                }
+                Admit(256);
                 points.Add(new(methodToken, path, point.StartLine, point.StartColumn, point.EndLine, point.EndColumn));
                 found = true;
             }
             if (!found && metadata.GetMethodDefinition(handle).RelativeVirtualAddress != 0)
+            {
+                Admit(32);
                 noVisibleIlBodies.Add(methodToken);
+            }
         }
         var byPath = points.GroupBy(point => point.Path, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
@@ -90,6 +115,7 @@ internal static class CompilerSourceOrigins
             void Add(string kind, SyntaxNode span, ISymbol? owner, string obligation, bool constructorGroup = false)
             {
                 Step(); if (regions.Count >= MaximumRows) throw new IOException("Semantic runtime-region membership exceeds the bounded profile.");
+                Admit(1024, kind, path, obligation);
                 var position = text.Lines.GetLinePositionSpan(span.Span);
                 var sl = position.Start.Line + 1; var sc = position.Start.Character + 1;
                 var el = position.End.Line + 1; var ec = position.End.Character + 1;
@@ -100,8 +126,12 @@ internal static class CompilerSourceOrigins
                         Step();
                         if ((point.StartLine > sl || point.StartLine == sl && point.StartColumn >= sc) &&
                             (point.EndLine < el || point.EndLine == el && point.EndColumn <= ec))
+                        {
+                            if (!counts.ContainsKey(point.Method)) Admit(128);
                             counts[point.Method] = counts.GetValueOrDefault(point.Method) + 1;
+                        }
                     }
+                Admit(256L * counts.Count);
                 var candidates = counts.OrderBy(pair => pair.Key)
                     .Select(pair => new Candidate(pair.Key, pair.Value, perMethod[pair.Key], pair.Value == perMethod[pair.Key])).ToArray();
                 var constructors = new List<ConstructorRole>();
@@ -110,6 +140,7 @@ internal static class CompilerSourceOrigins
                     {
                         Step();
                         if (constructors.Count >= MaximumRows) throw new IOException("Constructor group exceeds the bounded method profile.");
+                        Admit(128);
                         var delegates = false;
                         foreach (var reference in constructor.DeclaringSyntaxReferences)
                         {
@@ -138,6 +169,7 @@ internal static class CompilerSourceOrigins
                     if (name is not ("System.Diagnostics.DebuggerHiddenAttribute" or "System.Diagnostics.DebuggerStepThroughAttribute"
                         or "System.Diagnostics.DebuggerNonUserCodeAttribute" or "System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverageAttribute")) continue;
                     if (hiding.Count >= MaximumRows) throw new IOException("Authored hiding inventory exceeds the bounded profile.");
+                    Admit(512, path, name);
                     hiding.Add(new { path, name, start = syntax.Span.Start, length = syntax.Span.Length });
                 }
             }
@@ -222,6 +254,7 @@ internal static class CompilerSourceOrigins
                         break;
                 }
             }
+            Admit(256, path);
             sourceRows.Add(new { path, regions = regions.Count - before, mappingDirectives });
         }
         Step();
@@ -233,7 +266,7 @@ internal static class CompilerSourceOrigins
             noVisibleIlBodies, sources = sourceRows, authoredHiding = hiding, regions,
             unresolved = "Metadata signatures, full semantic ownership and constructor groups are not joined. Candidate spans never authorize an exemption."
         });
-        if (bytes.Length > 128 * 1024 * 1024) throw new IOException("Semantic runtime inventory exceeds the existing artifact bound.");
+        if (bytes.Length > MaximumBytes) throw new IOException("Semantic runtime inventory exceeds the existing artifact bound.");
         Step(); return bytes;
     }
 }
