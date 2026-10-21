@@ -193,7 +193,7 @@ internal sealed class InstalledToolInvocation(
             if (InstalledToolFiles.Identity(approvedRaw) != profile.Data.ConfigurationSha256) throw new EvidenceWriteException("Approved raw policy changed.");
             CrapPolicyBinding.RequireSame(approvedRaw, actualPolicy);
             if (changedDiff is null) throw new EvidenceWriteException("The original current diff was not retained.");
-            _lines = ChangedLineCoverage.Read(changedDiff, body, invocation.WorkingDirectory,
+            _lines = ChangedLineCoverage.ReadCompilerBound(changedDiff, body, invocation.WorkingDirectory,
                 locator => { InstalledToolProfile.Relative(locator); return files.Read(Path.Combine(_bundleRoot, locator), 128 * 1024 * 1024); }, files);
         }
     }
@@ -327,13 +327,11 @@ internal sealed class InstalledToolInvocation(
             else if (_lines.Outcome == GateOutcome.Incomplete)
                 result = new(_lines.Outcome, _lines.Reason + " Covered=" + _lines.CoveredChangedLines + "/" + _lines.ChangedExecutableLines,
                     profile.Fixture, false, [.. result.Limitations, "No baseline/exemption or publication authority is inferred."]);
+            else if (!_lines.CompilerCensusComplete)
+                result = NormalizedEvidence.Incomplete("Protected changed-LINE evidence lacks a complete actual compiler/PDB line inventory.", profile.Fixture);
             else
-                // Reported points prove observations, not an exhaustive eligible-line
-                // denominator. No current producer contract supplies that independently
-                // bound compiler/PDB census. Preserve callable scoring, but fail closed
-                // at this existing protected installed-line boundary until it exists.
-                result = NormalizedEvidence.Incomplete("Protected changed-LINE coverage requires a complete compiler/PDB eligible-line census bound to the actual source/module/debug identities; reported-point coverage alone cannot establish it. Observed covered=" + _lines.CoveredChangedLines + "/" + _lines.ChangedExecutableLines, profile.Fixture)
-                    with { Limitations = [.. result.Limitations, "Observed line ratio is DATA only; complete executable-line census is unavailable."] };
+                result = new(_lines.Outcome, _lines.Reason + " Covered=" + _lines.CoveredChangedLines + "/" + _lines.ChangedExecutableLines,
+                    profile.Fixture, false, [.. result.Limitations, "No baseline/exemption or publication authority is inferred."]);
         }
         return result with { ProducerVerified = !profile.Fixture && result.Outcome != GateOutcome.Error };
     }

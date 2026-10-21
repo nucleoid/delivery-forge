@@ -13,10 +13,16 @@ internal static partial class ChangedLineCoverage
 {
     private const int MaximumArtifactBytes = 128 * 1024 * 1024; // Existing operative complete artifact-file bound; JSON reports remain8MiB.
     internal sealed record Result(int ChangedExecutableLines, int CoveredChangedLines, decimal? Percent,
-        GateOutcome Outcome, string Reason, string DiffSha256, int UnmeasuredChangedLines = 0);
+        GateOutcome Outcome, string Reason, string DiffSha256, int UnmeasuredChangedLines = 0, bool CompilerCensusComplete = false);
 
     internal static Result Read(byte[] diff, JsonElement manifest, string repository,
-        Func<string, byte[]> readArtifact, InstalledToolFiles files)
+        Func<string, byte[]> readArtifact, InstalledToolFiles files) => ReadCore(diff, manifest, repository, readArtifact, files, false);
+
+    internal static Result ReadCompilerBound(byte[] diff, JsonElement manifest, string repository,
+        Func<string, byte[]> readArtifact, InstalledToolFiles files) => ReadCore(diff, manifest, repository, readArtifact, files, true);
+
+    private static Result ReadCore(byte[] diff, JsonElement manifest, string repository,
+        Func<string, byte[]> readArtifact, InstalledToolFiles files, bool requireCompilerCensus)
     {
         files.Check();
         var changes = ReadHunks(diff);
@@ -34,7 +40,7 @@ internal static partial class ChangedLineCoverage
             {
                 files.Check();
                 if (Text(input, "role") != "source") continue;
-                var logical = Text(input, "logicalPath");
+                var logical = Text(input, "logicalPath"); InstalledToolProfile.Relative(logical);
                 var locator = Text(input, "locator");
                 InstalledToolProfile.Relative(locator);
                 var raw = readArtifact(locator);
@@ -59,7 +65,7 @@ internal static partial class ChangedLineCoverage
                     throw Refuse("This line profile cannot determine captured source encoding.");
                 var text = Decode(raw);
                 var lines = PhysicalLines(text, files);
-                if (!documents.TryAdd(logical, new(path, repositoryPath, lines))) throw Refuse("Duplicate logical source path.");
+                if (!documents.TryAdd(logical, new(path, repositoryPath, lines, logical, Text(input, "sha256"), text, generated))) throw Refuse("Duplicate logical source path.");
             }
         }
         var executable = new Dictionary<string, Dictionary<string, bool>>(comparer);
@@ -67,8 +73,51 @@ internal static partial class ChangedLineCoverage
         var reportedDocuments = new Dictionary<string, HashSet<string>>(StringComparer.Ordinal);
         var builds = Index(Array(manifest, "builds"), files);
         var executions = Index(Array(manifest, "executions"), files);
+        var artifacts = Array(manifest, "artifacts").ToArray();
+        if (artifacts.Length > 1_000_000) throw Refuse("Complete artifact membership exceeds the existing point ceiling.");
+        var required = new Dictionary<string, HashSet<string>>(comparer);
+        var censusComplete = requireCompilerCensus;
+        string? censusReason = null;
+        if (requireCompilerCensus)
+        {
+            foreach (var context in sources)
+            {
+                files.Check();
+                if (!context.Value.Values.Any(source => !source.Generated && source.RepositoryPath is { } path && changes.ContainsKey(path))) continue;
+                var selected = builds.Values.Where(build => Text(build, "contextId") == context.Key).Take(2).ToArray();
+                if (selected.Length != 1) throw Refuse("Changed compiler context lacks one exact actual build.");
+                var build = selected[0]; var buildId = Text(build, "id");
+                byte[] ReadBuildArtifact(string role, string hashField)
+                {
+                    files.Check();
+                    var rows = artifacts.Where(row => Text(row, "kind") == role &&
+                        OptionalText(row, "contextId") == context.Key && OptionalText(row, "buildId") == buildId).Take(2).ToArray();
+                    if (rows.Length != 1) throw Refuse("Compiler context lacks unique actual assembly/PDB artifact roles.");
+                    var row = rows[0]; var locator = Text(row, "locator"); InstalledToolProfile.Relative(locator);
+                    var bytes = readArtifact(locator);
+                    if (bytes.Length > MaximumArtifactBytes || bytes.LongLength != Integer(row, "length") ||
+                        Text(row, "sha256") != Text(build, hashField) || InstalledToolFiles.Identity(bytes) != "sha256:" + Text(row, "sha256"))
+                        throw Refuse("Actual compiler artifact length/hash differs from the exact manifest build.");
+                    files.Check(); return bytes;
+                }
+                var inventory = CompilerLineCensus.Inspect(ReadBuildArtifact("assembly", "assemblySha256"),
+                    ReadBuildArtifact("pdb", "pdbSha256"), new(Text(build, "moduleIdentity"), Text(build, "mvid"), Text(build, "debugIdentity")),
+                    context.Value.Values.Select(source => new CompilerLineCensus.Document(source.LogicalPath, source.RepositoryPath,
+                        source.PhysicalPath, source.Sha256, source.Text, source.Generated)).ToArray(), files);
+                if (!inventory.Complete) { censusComplete = false; censusReason ??= inventory.Reason; }
+                foreach (var point in inventory.Points)
+                {
+                    files.Check();
+                    var source = context.Value[point.LogicalPath];
+                    if (source.Generated || source.RepositoryPath is not { } path || !changes.TryGetValue(path, out var changed) || !changed.Contains(point.StartLine)) continue;
+                    var key = path + ":" + point.StartLine.ToString(CultureInfo.InvariantCulture);
+                    if (!required.TryGetValue(key, out var membership)) required.Add(key, membership = new(StringComparer.Ordinal));
+                    membership.Add(context.Key);
+                }
+            }
+        }
         var reports = 0; var pointCount = 0;
-        foreach (var artifact in Array(manifest, "artifacts"))
+        foreach (var artifact in artifacts)
         {
             files.Check();
             if (Text(artifact, "kind") != "coverage") continue;
@@ -179,17 +228,40 @@ internal static partial class ChangedLineCoverage
                         unmeasured.Add(source.RepositoryPath!);
         }
         files.Check();
-        var count = executable.Count; var hit = executable.Values.Count(contextsForLine => contextsForLine.Values.All(v => v));
+        var missing = new HashSet<string>(comparer);
+        foreach (var path in unmeasured)
+            foreach (var line in changes[path]) missing.Add(path + ":" + line.ToString(CultureInfo.InvariantCulture));
+        if (requireCompilerCensus)
+        {
+            foreach (var row in executable)
+                foreach (var context in row.Value.Keys)
+                    if (censusComplete && (!required.TryGetValue(row.Key, out var membership) || !membership.Contains(context)))
+                        throw Refuse("A reported changed line is outside the independently captured compiler-line inventory.");
+            foreach (var row in required)
+            {
+                files.Check();
+                foreach (var context in row.Value)
+                    if (!executable.TryGetValue(row.Key, out var observations) || !observations.ContainsKey(context)) missing.Add(row.Key);
+            }
+        }
+        var count = requireCompilerCensus ? required.Count : executable.Count;
+        var hit = requireCompilerCensus
+            ? required.Count(row => executable.TryGetValue(row.Key, out var observations) &&
+                row.Value.All(context => observations.TryGetValue(context, out var covered) && covered))
+            : executable.Values.Count(contextsForLine => contextsForLine.Values.All(v => v));
         decimal? percent = count == 0 ? null : 100m * hit / count;
-        if (unmeasured.Count != 0)
+        if (missing.Count != 0 || requireCompilerCensus && !censusComplete)
             return new(count, hit, percent, GateOutcome.Incomplete,
-                "Changed authored documents are absent from an actual context's line reports; changed lines remain unmeasured, not excluded or presumed nonexecutable.",
-                InstalledToolFiles.Identity(diff), unmeasured.Sum(path => changes[path].Count));
+                censusReason ?? "Changed compiler lines or authored documents are absent from an actual context's line reports; measurements remain unmeasured, not excluded or presumed nonexecutable.",
+                InstalledToolFiles.Identity(diff), missing.Count, censusComplete);
         return new(count, hit, percent, count == 0 ? GateOutcome.Incomplete : percent >= 80m ? GateOutcome.Pass : GateOutcome.Fail,
-            count == 0 ? "No measurable changed executable lines; no exemption or N/A is inferred." : "Actual changed executable LINE coverage (distinct lines; all observed contexts).", InstalledToolFiles.Identity(diff));
+            count == 0 ? "No measurable changed executable lines; no exemption or N/A is inferred." :
+                requireCompilerCensus ? "Actual changed LINE coverage with a complete, single-line compiler/PDB inventory and measurements in every required context." :
+                "Observed reported-line ratio only; no complete compiler census is claimed.", InstalledToolFiles.Identity(diff), 0, censusComplete);
     }
 
-    private sealed record Source(string? PhysicalPath, string? RepositoryPath, int Lines);
+    private sealed record Source(string? PhysicalPath, string? RepositoryPath, int Lines, string LogicalPath,
+        string Sha256, string Text, bool Generated);
     internal static Dictionary<string, HashSet<int>> ReadHunks(byte[] diff)
     {
         if (diff.Length > ProducerJson.MaximumBytes) throw Refuse("Complete source diff exceeds capture profile.");
