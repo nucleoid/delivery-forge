@@ -24,7 +24,7 @@ public sealed class CompilerInitializerOriginsTests
         Assert.NotNull(result.FieldToken);
         Assert.Equal(3, result.Constructors.Count);
         Assert.Equal(2, result.Constructors.Count(route => route.Point is not null));
-        var delegated = Assert.Single(result.Constructors.Where(route => route.DelegatesToToken is not null));
+        var delegated = Assert.Single(result.Constructors, route => route.DelegatesToToken is not null);
         Assert.Contains(result.Constructors, route => route.ConstructorToken == delegated.DelegatesToToken &&
             route.Point is not null && route.ConstructorToken == delegated.TerminalToken);
     }
@@ -37,9 +37,9 @@ public sealed class CompilerInitializerOriginsTests
         using var fixture = new Fixture(source);
         var result = fixture.Read();
         Assert.Equal(Attributed, result.Disposition);
-        Assert.Single(result.Constructors.Where(route => route.Point is not null));
-        var copy = Assert.Single(result.Constructors.Where(route =>
-            route.Disposition == "semantic-record-class-copy-skips-initializers"));
+        Assert.Single(result.Constructors, route => route.Point is not null);
+        var copy = Assert.Single(result.Constructors, route =>
+            route.Disposition == "semantic-record-class-copy-skips-initializers");
         Assert.Null(copy.Point);
         Assert.NotNull(copy.ConstructorToken);
         Assert.Equal(copy.ConstructorToken, copy.TerminalToken);
@@ -97,8 +97,8 @@ public sealed class CompilerInitializerOriginsTests
         using var fixture = new Fixture("public class C { public int Value = 7; }");
         using var json = System.Text.Json.JsonDocument.Parse(CompilerSourceOrigins.Capture(fixture.Compilation,
             fixture.Pe, fixture.Pdb, fixture.Check, TestContext.Current.CancellationToken));
-        var region = Assert.Single(json.RootElement.GetProperty("regions").EnumerateArray()
-            .Where(row => row.GetProperty("Kind").GetString() == "instance-field-initializer"));
+        var region = Assert.Single(json.RootElement.GetProperty("regions").EnumerateArray(),
+            row => row.GetProperty("Kind").GetString() == "instance-field-initializer");
         Assert.Equal(Attributed, region.GetProperty("InitializerOrigin").GetProperty("Disposition").GetString());
         Assert.Equal("inventory-only-no-origin-proof", json.RootElement.GetProperty("disposition").GetString());
     }

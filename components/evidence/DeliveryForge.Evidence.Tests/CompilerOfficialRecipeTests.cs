@@ -56,8 +56,8 @@ public sealed class CompilerOfficialRecipeTests
             Assert.True(result.Equal, result.Reason);
             Assert.Contains("body-origin remains unproven", result.Reason, StringComparison.Ordinal);
             Assert.True(result.HasProvenSourceOrigin);
-            var build = Assert.Single(manifest.RootElement.GetProperty("builds").EnumerateArray()
-                .Where(row => row.GetProperty("id").GetString() == selected.GetProperty("buildId").GetString()));
+            var build = Assert.Single(manifest.RootElement.GetProperty("builds").EnumerateArray(),
+                row => row.GetProperty("id").GetString() == selected.GetProperty("buildId").GetString());
             var expected = new CompilerLineCensus.Build(build.GetProperty("moduleIdentity").GetString()!,
                 build.GetProperty("mvid").GetString()!, build.GetProperty("debugIdentity").GetString()!);
             var census = CompilerLineCensus.Inspect(value.Assembly, value.Pdb, expected, value.Documents, files, result);
