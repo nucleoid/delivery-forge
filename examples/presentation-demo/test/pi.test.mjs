@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import forgeDemo,{createCockpitComponent,createDetailComponent,createUsageComponent,restoreFromActiveBranch} from '../hosts/pi/forge-demo-extension.js';
 import { getScenario } from '../src/fixtures.mjs';
+import { displayWidth } from '../src/safety.mjs';
 
 function harness(mode='tui',branch=[]){
   const handlers={},commands={},calls=[],entries=[];
@@ -39,6 +40,23 @@ test('Pi cockpit uses actual terminal height and wide list/detail composition',(
   const keys={matches:()=>false};
   for(const rows of [24,30]){const c=createCockpitComponent(getScenario('failed-gate').snapshot,{tui:{terminal:{rows,columns:120},requestRender(){}},keybindings:keys,done(){},initialView:'evidence'});const out=c.render(120);assert.ok(out.length<=rows-4);assert.match(out.join('\n'),/│/);assert.match(out.join('\n'),/receipt-build/);}
 });
+
+test('Pi cockpit strictly honors tiny width and height bounds',()=>{
+  for(const [width,rows] of [[10,8],[1,1]]){const c=createCockpitComponent(getScenario('failed-gate').snapshot,{tui:{terminal:{rows,columns:width},requestRender(){}},keybindings:{matches:()=>false},done(){}});const out=c.render(width);assert.ok(out.length<=Math.max(1,rows-5));assert.ok(out.every(line=>displayWidth(line)<=width));}
+});
+
+test('Pi Evidence search never leaks stale detail and supports paste Unicode and retained-filter activation',()=>{
+  const keys={matches:(d,k)=>({'\r':'tui.select.confirm','\x1b':'tui.select.cancel'}[d]===k)};
+  const c=createCockpitComponent(getScenario('failed-gate').snapshot,{tui:{terminal:{rows:30,columns:120},requestRender(){}},keybindings:keys,done(){},initialView:'evidence'});
+  c.handleInput('/');c.handleInput('zzzznomatch');let out=c.render(120).join('\n');assert.match(out,/No matching evidence/);assert.match(out,/No evidence matches/);assert.doesNotMatch(out,/✓ PASS · Build|receipt-build/);c.handleInput('\x1b');
+  c.handleInput('/');c.handleInput('🧪tests');assert.match(c.render(120).join('\n'),/No matching evidence/);c.handleInput('\x1b');c.handleInput('/');c.handleInput('tests');assert.match(c.render(120).join('\n'),/>.*Tests/);c.handleInput('\r');assert.match(c.render(120).join('\n'),/>.*Tests/);c.handleInput('\r');assert.match(c.render(80).join('\n'),/receipt-tests-b45e/);
+});
+
+test('Pi Usage wraps complete prices and full request identities at 80 columns',()=>{
+  const c=createCockpitComponent(getScenario('failed-gate').snapshot,{tui:{terminal:{rows:80,columns:80},requestRender(){}},keybindings:{matches:()=>false},done(){},initialView:'usage'});const text=c.render(80).join('\n');assert.match(text,/0\.031700/);assert.match(text,/request-coordinator-d/);assert.match(text,/Ledger identity unavailable/);assert.doesNotMatch(text,/demo-ledger-/);
+});
+
+test('Pi branch switch clears the prior owned interaction before repainting',()=>{const h=harness();h.handlers.session_start({},h.ctx);const prior=h.calls.filter(x=>x[0]==='widget'&&x[2]===undefined).length;h.handlers.session_start({},h.ctx);assert.ok(h.calls.filter(x=>x[0]==='widget'&&x[2]===undefined).length>prior);});
 
 test('Pi cockpit uses host theme tokens and cycles fixtures without leaving the native component',()=>{
   const scenarios=[getScenario('failed-gate'),getScenario('repair')];let cursor=0;

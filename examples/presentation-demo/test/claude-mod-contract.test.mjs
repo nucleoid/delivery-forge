@@ -23,7 +23,7 @@ test('Claude mod call surface excludes authority, model, prompt, process, networ
 
 test('Claude mod exposes four native views and fail-closed no-argument terminal grammar',()=>{
   for(const name of ['overview','evidence','usage','activity'])assert.match(source,new RegExp(`['\"]${name}['\"]`));
-  assert.match(source,/Arguments are not accepted in the terminal prompt/);assert.match(source,/slice\(0, 160\)/);
+  assert.match(source,/Arguments are not accepted in the terminal prompt/);assert.doesNotMatch(source,/commandText[^\n]*slice/);
   assert.match(source,/rows: 30, columns: 88/);assert.match(source,/key: 'fixture-select'/);assert.match(source,/READ ONLY · synthetic fixture/);
 });
 

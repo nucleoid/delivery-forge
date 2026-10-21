@@ -12,8 +12,8 @@ const detail = atom({ plugin: 'forge-cockpit-demo', key: 'detail' }, false)
 const notice = atom({ plugin: 'forge-cockpit-demo', key: 'notice' }, '')
 
 const validView = (value: unknown) => COCKPIT_VIEWS.includes(String(value)) ? String(value) : 'overview'
-const findState = (name: unknown) => states.find((x) => x.name === name) || states.find((x) => x.name === 'failed-gate') || states[0]
-const commandText = (e: any) => String(e?.args ?? e?.argument ?? e?.text ?? '').replace(/^\/?forge-cockpit-demo\s*/, '').trim().slice(0, 160)
+const findState = (name: unknown) => states.find((x) => x.name === name)
+const commandText = (e: any) => String(e?.args ?? e?.argument ?? e?.text ?? '').replace(/^\/?forge-cockpit-demo(?:\s+|$)/, '').trim()
 const scenarioLabel = (name: string) => name.split('-').map((part) => part[0].toUpperCase() + part.slice(1)).join(' ')
 const paneOptions = { id: PANE, title: 'Forge · synthetic', focus: true, closeOnEscape: true, rows: 30, columns: 88 } as const
 const outcomeColor = (value: string) => /FAIL|ERROR/.test(value) ? 'red' : /INCOMPLETE|UNKNOWN|STALE|UNPRICED|PARTIAL/.test(value) ? 'yellow' : /PASS|CURRENT|COMPLETE/.test(value) ? 'green' : undefined
@@ -30,7 +30,7 @@ async function loadPreference($: any) {
     const saved = await $.store.get(PREF)
     await update($, view, () => validView(saved?.view))
     await update($, notice, () => '')
-  } catch { await update($, notice, () => 'Preference store unavailable; using Overview.') }
+  } catch { await update($, view, () => 'overview'); await update($, detail, () => false); await update($, notice, () => 'Preference store unavailable; using Overview.') }
 }
 
 export function register(on: any) {
@@ -56,7 +56,7 @@ export function register(on: any) {
     if (e.requestId !== PANE) return next(e)
     const { Box, Text, Button, Select } = $.ui.resolve(e)
     const currentView = await read($, view), currentScenario = await read($, scenario), currentSelected = await read($, selected), showDetail = await read($, detail), message = await read($, notice)
-    const state = findState(currentScenario), safeSelected = Math.max(0, Math.min(state.evidence.length - 1, currentSelected)), vm = { ...state, selected: safeSelected, detail: state.details[safeSelected] || ['No evidence selected.'] }
+    const state = findState(currentScenario)
     const width = Number(e?.props?.bodyColumns) || 72
     const bodyRows = Number(e?.props?.scroll?.bodyRows) || 12
     const compact = width < 40
@@ -64,13 +64,6 @@ export function register(on: any) {
     const chooseView = (name: string, label: string, hotkey: string) => Button({ key: `view-${name}`, label, hotkey, plain: true, dimColor: currentView !== name, onPress: async () => { await setView($, name); redraw() } })
     const text = (key: string, value: string, props: any = {}) => Text({ key, wrap: 'wrap', ...props, children: [value] })
     const card = (key: string, title: string, children: any[]) => Box({ key, flexDirection: 'column', borderStyle: 'round', paddingX: 1, marginTop: 1, children: [text(`${key}-title`, title.toUpperCase(), { color: 'cyan', weight: 'semibold' }), ...children] })
-    const header = card('summary', 'Forge cockpit', [
-      Box({ key: 'identity-row', flexDirection: compact ? 'column' : 'row', columnGap: 2, children: [text('run', vm.header[0], { weight: 'bold' }), text('source-badge', 'SYNTHETIC · READ ONLY', { color: 'yellow', weight: 'semibold' })] }),
-      text('phase', vm.header[1], { color: 'magenta', weight: 'semibold' }),
-      text('outcome', vm.header[2], { color: outcomeColor(vm.header[2]), weight: 'bold' }),
-      text('next', vm.header[3], { weight: 'semibold' }),
-      ...(bodyRows >= 15 ? [text('source', vm.header[4], { dimColor: true })] : []),
-    ])
     const chooseScenario = async (name: string) => {
       const found = states.find((candidate) => candidate.name === name)
       if (!found) { await update($, notice, () => 'Unknown bundled fixture. No state changed.'); redraw(); return }
@@ -80,6 +73,15 @@ export function register(on: any) {
       await update($, notice, () => '')
       redraw()
     }
+    if (!state) return Box({ flexDirection: 'column', rowGap: 1, children: [card('invalid-selection', 'Invalid fixture selection', [text('invalid-selection-message', `The stored fixture “${String(currentScenario).slice(0, 80)}” is unavailable. Choose a bundled fixture; no fallback data was substituted.`, { color: 'yellow', weight: 'semibold' })]), Select({ key: 'fixture-select', label: 'Fixture', options: states.map((item) => ({ value: item.name, label: scenarioLabel(item.name) })), onSelect: chooseScenario }), text('safety-footer', 'READ ONLY · synthetic fixture · no execution, approval, telemetry, or publication controls', { dimColor: true })] })
+    const safeSelected = Math.max(0, Math.min(state.evidence.length - 1, currentSelected)), vm = { ...state, selected: safeSelected, detail: state.details[safeSelected] || ['No evidence selected.'] }
+    const header = card('summary', 'Forge cockpit', [
+      Box({ key: 'identity-row', flexDirection: compact ? 'column' : 'row', columnGap: 2, children: [text('run', vm.header[0], { weight: 'bold' }), text('source-badge', 'SYNTHETIC · READ ONLY', { color: 'yellow', weight: 'semibold' })] }),
+      text('phase', vm.header[1], { color: 'magenta', weight: 'semibold' }),
+      text('outcome', vm.header[2], { color: outcomeColor(vm.header[2]), weight: 'bold' }),
+      text('next', vm.header[3], { weight: 'semibold' }),
+      text('source', vm.header[4], { color: /STALE|UNKNOWN|GAP|ERROR/.test(vm.header[4]) ? 'yellow' : undefined, dimColor: !/STALE|UNKNOWN|GAP|ERROR/.test(vm.header[4]) }),
+    ])
     const fixtureControl = Select({ key: 'fixture-select', label: 'Fixture', value: state.name, options: states.map((item) => ({ value: item.name, label: scenarioLabel(item.name) })), onSelect: chooseScenario })
     let body: any[] = []
     if (currentView === 'evidence' && showDetail) {
@@ -95,9 +97,9 @@ export function register(on: any) {
         : compact ? [Select({ key: 'evidence-select', label: 'Receipt', value: options[safeSelected]?.value, options, onSelect: openEvidence })]
         : options.map((option: any, index: number) => Button({ key: `evidence-${option.value}`, label: option.label, plain: true, dimColor: index !== safeSelected, onPress: () => openEvidence(option.value) })))]
     } else if (currentView === 'overview') {
-      const identity = state.overview.slice(0, 4)
-      const delivery = state.overview.slice(4, 9)
-      const integrations = state.overview.slice(9, -1)
+      const identity = state.overview.filter((value: string) => /^(plan|head|tree|policy|requirements):/.test(value))
+      const delivery = state.overview.filter((value: string) => /^(aggregate|reason|blocker|review|publication|cleanup|attempt):/.test(value))
+      const integrations = state.overview.filter((value: string) => !identity.includes(value) && !delivery.includes(value) && !value.startsWith('No execution controls'))
       body = [
         card('delivery', 'Decision and delivery', delivery.map((value: string, i: number) => text(`delivery-${i}`, value, { color: outcomeColor(value), weight: i < 2 ? 'semibold' : 'regular' }))),
         card('identity', 'Bound identity', identity.map((value: string, i: number) => text(`identity-${i}`, value, { dimColor: i > 0 }))),
