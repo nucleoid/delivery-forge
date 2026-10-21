@@ -1,8 +1,8 @@
 namespace DeliveryForge.Evidence.CensusFixture;
 
-// Deliberately all-static, ordinary single-line authored bodies. No remapping,
-// generated-body exemption or runtime invocation is needed to inspect this build.
-public static class Subject
+// Deliberately an ordinary class with a genuine compiler-emitted implicit constructor in
+// addition to these single-line authored bodies. No remapping or invocation.
+public class Subject
 {
     public static int First(int value) => value + 11; // CENSUS_FIRST
 

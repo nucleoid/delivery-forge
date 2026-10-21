@@ -15,7 +15,7 @@ namespace DeliveryForge.Evidence.Tests;
 public sealed class CompilerLineCensusTests
 {
     [Fact]
-    public void Genuine_all_static_fixture_has_complete_source_bound_points_including_excluded_method()
+    public void Genuine_ordinary_class_has_complete_source_bound_points_including_excluded_method()
     {
         using var fixture = new Fixture();
         var inventory = fixture.Inventory();
