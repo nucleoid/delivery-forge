@@ -2,7 +2,9 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using DeliveryForge.Contracts.Models;
 using DeliveryForge.Contracts.Serialization;
+using DeliveryForge.Contracts.State;
 using DeliveryForge.Contracts.Validation;
 
 namespace DeliveryForge.Contracts.Tests;
@@ -223,14 +225,35 @@ public sealed class SchemaValidationTests
     }
 
     [Fact]
-    public void Patch_controlled_gate_files_cannot_mint_authority_without_host_store_provenance()
+    public void Explicit_future_v2_authority_rejects_gate_files_without_host_store_provenance()
     {
         var bundle = ReferenceBundle.Create();
 
         var error = Assert.Throws<ContractReferenceException>(() =>
-            ContractReferenceValidator.Validate(bundle.Documents()));
+            ValidateReferences(bundle.Documents(), includeProvenance: false));
 
         Assert.Contains("host-owned append-only store provenance", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Explicit_future_v2_authority_requires_the_pinned_registry_identity()
+    {
+        var bundle = ReferenceBundle.Create();
+
+        var error = Assert.Throws<ContractReferenceException>(() => ValidateReferences(
+            bundle.Documents(),
+            expectedRegistryIdentity: "sha256:" + new string('0', 64)));
+
+        Assert.Contains("registry identity", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Public_validator_exposes_no_caller_authority_activation_parameters()
+    {
+        var validate = typeof(ContractReferenceValidator).GetMethods()
+            .Single(method => method.Name == nameof(ContractReferenceValidator.Validate));
+
+        Assert.Single(validate.GetParameters());
     }
 
     [Fact]
@@ -331,12 +354,12 @@ public sealed class SchemaValidationTests
     }
 
     [Fact]
-    public void Manifest_gates_must_have_policy_satisfying_authoritative_outcomes()
+    public void Manifest_gates_must_have_policy_satisfying_outcomes()
     {
         var failing = ReferenceBundle.Create();
         failing.Gates[0]["outcome"] = "FAIL";
         failing.Relink();
-        AssertReferenceMessage("not a policy-satisfying authoritative outcome", () =>
+        AssertReferenceMessage("not a policy-satisfying outcome", () =>
             ValidateReferences(failing.Documents()));
 
         var wrongPolicy = ReferenceBundle.Create();
@@ -345,12 +368,37 @@ public sealed class SchemaValidationTests
         SetIdentity(alternatePolicy);
         wrongPolicy.Gates[0]["policyIdentity"] = alternatePolicy["identity"]!.GetValue<string>();
         wrongPolicy.Relink();
-        AssertReferenceMessage("not a policy-satisfying authoritative outcome", () =>
+        AssertReferenceMessage("not a policy-satisfying outcome", () =>
             ValidateReferences(wrongPolicy.Documents(alternatePolicy)));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Default_validator_preserves_canonical_v1_manifest_and_replay_acceptance(bool notApplicable)
+    {
+        var legacy = ReferenceBundle.Create();
+        if (notApplicable)
+        {
+            legacy.Policy["allowedNotApplicable"] = new JsonArray("build");
+            SetIdentity(legacy.Policy);
+            foreach (var gate in legacy.Gates)
+                gate["policyIdentity"] = legacy.Policy["identity"]!.GetValue<string>();
+            legacy.Gates[0]["outcome"] = "NOT_APPLICABLE";
+            legacy.Gates[0]["notApplicableRationale"] = "Not required by the protected policy on this host";
+        }
+        foreach (var gate in legacy.Gates)
+        {
+            gate.Remove("authorityBinding");
+            gate["schemaVersion"] = "1.0.0";
+        }
+        legacy.Relink();
+
+        ContractReferenceValidator.Validate(legacy.Documents());
+    }
+
     [Fact]
-    public void Manifest_and_replay_reject_legacy_or_mixed_version_gate_authority()
+    public void Explicit_future_v2_authority_rejects_legacy_or_impersonated_receipts()
     {
         var legacy = ReferenceBundle.Create();
         legacy.Gates[0].Remove("authorityBinding");
@@ -369,20 +417,14 @@ public sealed class SchemaValidationTests
     }
 
     [Fact]
-    public void Historical_v1_and_authoritative_v2_gate_receipts_are_jointly_inspectable()
+    public void Default_validator_accepts_mixed_v1_and_v2_manifest_and_replay_evidence()
     {
         var bundle = ReferenceBundle.Create();
-        var legacy = bundle.Gates[0].DeepClone().AsObject();
-        legacy.Remove("authorityBinding");
-        legacy["schemaVersion"] = "1.0.0";
-        SetIdentity(legacy);
+        bundle.Gates[0].Remove("authorityBinding");
+        bundle.Gates[0]["schemaVersion"] = "1.0.0";
+        bundle.Relink();
 
-        ValidateReferences(
-        [
-            Bytes(bundle.Policy),
-            Bytes(legacy),
-            Bytes(bundle.Gates[1])
-        ]);
+        ContractReferenceValidator.Validate(bundle.Documents());
     }
 
     [Fact]
@@ -689,7 +731,10 @@ public sealed class SchemaValidationTests
         Assert.Contains(expected, error.Message, StringComparison.Ordinal);
     }
 
-    private static void ValidateReferences(IEnumerable<ReadOnlyMemory<byte>> documents)
+    private static void ValidateReferences(
+        IEnumerable<ReadOnlyMemory<byte>> documents,
+        bool includeProvenance = true,
+        string? expectedRegistryIdentity = null)
     {
         var materialized = documents.ToArray();
         var store = new HostOwnedReceiptStore(Path.Combine(
@@ -706,7 +751,13 @@ public sealed class SchemaValidationTests
                 // The validator under test owns the canonical error for malformed input.
             }
         }
-        ContractReferenceValidator.Validate(materialized, gateReceiptProvenance: store.Provenance);
+        var policy = GateReceiptConsumerPolicy.ForIsolatedTest(new TransitionEvidence(
+            AuthorizationCeiling.Plan,
+            GateAuthorityRegistry: TrustedGatePluginRegistry.BuiltIns,
+            GateReceiptProvenance: includeProvenance ? store.Provenance : null,
+            EnforceAuthoritativeGateReceipts: true,
+            GateAuthorityRegistryIdentity: expectedRegistryIdentity ?? TrustedGatePluginRegistry.BuiltIns.Identity));
+        ContractReferenceValidator.ValidateForIsolatedTest(materialized, policy);
     }
 
     private static void SetIdentity(JsonObject node)

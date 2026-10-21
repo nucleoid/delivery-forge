@@ -1,13 +1,21 @@
 using System.Text.Json;
+using DeliveryForge.Contracts.State;
 
 namespace DeliveryForge.Contracts.Validation;
 
 public static class ContractReferenceValidator
 {
-    public static void Validate(
+    public static void Validate(IEnumerable<ReadOnlyMemory<byte>> documents) =>
+        ValidateCore(documents, GateReceiptConsumerPolicy.Disabled);
+
+    internal static void ValidateForIsolatedTest(
         IEnumerable<ReadOnlyMemory<byte>> documents,
-        TrustedGatePluginRegistry? gateAuthorityRegistry = null,
-        TrustedReceiptProvenance? gateReceiptProvenance = null)
+        GateReceiptConsumerPolicy gateReceiptPolicy) =>
+        ValidateCore(documents, gateReceiptPolicy ?? throw new ArgumentNullException(nameof(gateReceiptPolicy)));
+
+    private static void ValidateCore(
+        IEnumerable<ReadOnlyMemory<byte>> documents,
+        GateReceiptConsumerPolicy gateReceiptPolicy)
     {
         var parsed = new List<(ValidatedContract Contract, JsonDocument Document)>();
 
@@ -43,7 +51,7 @@ public static class ContractReferenceValidator
                             root.GetProperty("baseCommit").GetString(),
                             root.GetProperty("headCommit").GetString(),
                             root.GetProperty("treeId").GetString());
-                        ValidateRunManifest(root, identities, gateAuthorityRegistry, gateReceiptProvenance);
+                        ValidateRunManifest(root, identities, gateReceiptPolicy);
                         break;
                     case "checkpoint":
                         RequireReferences(
@@ -80,8 +88,7 @@ public static class ContractReferenceValidator
     private static void ValidateRunManifest(
         JsonElement manifest,
         IReadOnlyDictionary<string, (ValidatedContract Contract, JsonDocument Document)> identities,
-        TrustedGatePluginRegistry? gateAuthorityRegistry,
-        TrustedReceiptProvenance? gateReceiptProvenance)
+        GateReceiptConsumerPolicy gateReceiptPolicy)
     {
         var plan = identities[manifest.GetProperty("planIdentity").GetString()!].Document.RootElement;
         var policy = identities[manifest.GetProperty("policyIdentity").GetString()!].Document.RootElement;
@@ -113,10 +120,18 @@ public static class ContractReferenceValidator
             if (gate.GetProperty("policyIdentity").GetString() != manifest.GetProperty("policyIdentity").GetString() ||
                 outcome != "PASS" && (outcome != "NOT_APPLICABLE" || !allowedNotApplicable.Contains(gateId)))
             {
-                throw new ContractReferenceException("run-manifest gate receipt is not a policy-satisfying authoritative outcome under its immutable policy.");
+                throw new ContractReferenceException("run-manifest gate receipt is not a policy-satisfying outcome under its immutable policy.");
             }
-            if (!GateReceiptAuthority.TryValidateAuthoritativeOutcome(
-                    gate, out var authorityFailure, gateAuthorityRegistry))
+            if (gateReceiptPolicy.Enforce &&
+                !string.Equals(
+                    gateReceiptPolicy.ExpectedRegistryIdentity,
+                    gateReceiptPolicy.Registry.Identity,
+                    StringComparison.Ordinal))
+                throw new ContractReferenceException(
+                    "Gate authority registry identity differs from the producer-owned registry.");
+            if (gateReceiptPolicy.Enforce &&
+                !GateReceiptAuthority.TryValidateAuthoritativeOutcome(
+                    gate, out var authorityFailure, gateReceiptPolicy.Registry))
                 throw new ContractReferenceException(authorityFailure);
 
             supplied.Add(gateId);
@@ -127,7 +142,8 @@ public static class ContractReferenceValidator
         {
             throw new ContractReferenceException("run-manifest does not include every gate required by its immutable policy.");
         }
-        if (suppliedIdentities.Any(identity => gateReceiptProvenance?.Contains(identity) != true))
+        if (gateReceiptPolicy.Enforce &&
+            suppliedIdentities.Any(identity => gateReceiptPolicy.Provenance?.Contains(identity) != true))
             throw new ContractReferenceException(
                 "run-manifest gate receipt lacks host-owned append-only store provenance.");
     }
