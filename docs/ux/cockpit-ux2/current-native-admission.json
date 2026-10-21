@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "recordedAtUtcDate": "2026-10-21",
+  "implementationSourceSha": "90b0110be22f95e9273f50b3b4729e24b7c01535",
+  "baseSha": "0c8b6b8e2418e4a9333fb49c9be4881feb9fccf0",
+  "fixtureMode": "synthetic only",
+  "authority": "zero",
+  "tests": {
+    "command": "NO_MODEL=1 FIXTURE=1 npm test",
+    "passed": 98,
+    "failed": 0,
+    "skipped": 0
+  },
+  "claude": {
+    "observedVersionBeforeAccessRevocation": "2.1.306",
+    "currentSourceValidator": "NOT_RERUN_ACCESS_REVOKED",
+    "currentSourceOfficialTests": "NOT_RERUN_ACCESS_REVOKED",
+    "currentSourceCaptures": [],
+    "priorCaptureLedger": "assets/native-mods-pi-d2de7f2/capture-ledger.json"
+  },
+  "pi": {
+    "expectedVersion": "1.3.0",
+    "installedCandidates": [
+      "Node 22.14.0: no Pi package",
+      "Node 22.19.0: @earendil-works/pi-coding-agent@0.80.7",
+      "separate user npm prefix: @mariozechner/pi-coding-agent@0.70.2"
+    ],
+    "expectedRuntimeInstalled": false,
+    "isolatedHelp": {
+      "runtime": "@earendil-works/pi-coding-agent@0.80.7",
+      "result": "PASS",
+      "elapsedMilliseconds": 3098,
+      "stdoutBytes": 9125,
+      "stderrBytes": 0,
+      "isolation": "process-local offline mode; task-owned agent/session directories; no extensions, context files, or session"
+    },
+    "currentSourceCaptures": [],
+    "pixelParity": "NOT_ACCEPTED_ACCESS_REVOKED"
+  },
+  "privacy": {
+    "publicHostPaths": false,
+    "publicDeviceOrProcessIdentifiers": false,
+    "privatePreflightMovedOutsideRepository": true,
+    "historyRewritePerformed": false
+  },
+  "productionClaim": false
+}
