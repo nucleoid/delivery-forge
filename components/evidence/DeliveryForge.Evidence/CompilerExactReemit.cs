@@ -19,7 +19,7 @@ internal static class CompilerExactReemit
     // the producer/consumer recipe decoder BEFORE calling this comparison slice.
     internal sealed record Request(string BaseDirectory, string[] ScalarArguments,
         Input[] Sources, Reference[] References, string[] EmbeddedSourcePaths);
-    internal sealed record Comparison(bool Equal, string Reason, byte[] EmittedPe, byte[] EmittedPdb);
+    internal sealed record Comparison(bool Equal, string Reason, byte[] EmittedPe, byte[] EmittedPdb, byte[] OriginInventory);
     private const int MaximumArtifactBytes = 128 * 1024 * 1024;
     private const int MaximumRows = 10000;
     // Exact already-selected SDK 10.0.401 compiler pair, not a caller-supplied hash.
@@ -72,7 +72,7 @@ internal static class CompilerExactReemit
             catch (TargetInvocationException error) when (error.InnerException is not null)
             { ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
             files.Check();
-            if (result is not byte[][] { Length: 2 } emitted)
+            if (result is not byte[][] { Length: 3 } emitted || emitted[2].Length > MaximumArtifactBytes)
                 throw new IOException("Exact compiler comparison returned an unsupported result shape.");
             var equal = emitted[0].AsSpan().SequenceEqual(actualPe) && emitted[1].AsSpan().SequenceEqual(actualPdb);
             files.Check();
@@ -83,7 +83,7 @@ internal static class CompilerExactReemit
             }
             var details = $" Actual PE: {Identity(actualPe)}; emitted PE: {Identity(emitted[0])}; actual PDB: {Identity(actualPdb)}; emitted PDB: {Identity(emitted[1])}.";
             return new(equal, (equal ? "Complete PE and portable PDB byte equality only; authored body-origin remains unproven."
-                : "Exact target-compiler PE/PDB bytes differ; general source origin remains unsupported.") + details, emitted[0], emitted[1]);
+                : "Exact target-compiler PE/PDB bytes differ; general source origin remains unsupported.") + details, emitted[0], emitted[1], emitted[2]);
         }
         finally { island.Unload(); } // Unload requests collection; no immediate-unload claim.
     }

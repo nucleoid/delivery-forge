@@ -77,7 +77,9 @@ internal static class CompilerExactReemitEntry
                 embeddedTexts: embedded, metadataPEStream: parsed.OutputRefFilePath is null ? null : refAssembly, cancellationToken: token);
             check(); token.ThrowIfCancellationRequested();
             if (!result.Success) throw DiagnosticFailure("The exact input compilation did not emit successfully.", result.Diagnostics, check, token);
-            return [pe.ToArray(), pdb.ToArray()];
+            var emittedPe = pe.ToArray(); var emittedPdb = pdb.ToArray();
+            var origins = CompilerSourceOrigins.Capture(compilation, emittedPe, emittedPdb, check, token);
+            return [emittedPe, emittedPdb, origins];
         }
         finally { foreach (var image in owned) image.Dispose(); }
     }

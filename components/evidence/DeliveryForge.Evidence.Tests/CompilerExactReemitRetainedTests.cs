@@ -82,6 +82,12 @@ public sealed class CompilerExactReemitRetainedTests
                 TestContext.Current.AddAttachment("reemitted-DeliveryForge.Execution.pdb", result.EmittedPdb, "application/octet-stream");
                 files.Check();
             }
+            TestContext.Current.AddAttachment("DeliveryForge.Execution-semantic-runtime-regions.json", result.OriginInventory, "application/json");
+            using var origins = ProducerJson.Read(result.OriginInventory);
+            Assert.Equal("inventory-only-no-origin-proof", origins.RootElement.GetProperty("disposition").GetString());
+            Assert.Equal(27, origins.RootElement.GetProperty("sourceCount").GetInt32());
+            Assert.Equal(679, origins.RootElement.GetProperty("noVisibleIlBodyCount").GetInt32());
+            Assert.NotEmpty(origins.RootElement.GetProperty("regions").EnumerateArray().ToArray());
             Assert.True(result.Equal, result.Reason);
             Assert.Contains("body-origin remains unproven", result.Reason, StringComparison.Ordinal);
             // This is a read-only local compilation of retained bytes and exact
