@@ -52,6 +52,37 @@ public sealed class CompilerLineCensusTests
     }
 
     [Fact]
+    public void Genuine_compiler_source_role_preserves_exact_declaration_bytes_and_complete_compiler_census()
+    {
+        using var fixture = new Fixture();
+        var result = fixture.Read(includeDeclarations: true, declarationCompilerSource: true);
+        Assert.True(result.CompilerCensusComplete, result.Reason); Assert.Equal(GateOutcome.Pass, result.Outcome);
+        Assert.Equal(3, result.ChangedExecutableLines); Assert.Equal(3, result.CoveredChangedLines);
+        Assert.Equal(100m, result.Percent); Assert.Equal(0, result.UnmeasuredChangedLines);
+    }
+
+    [Fact]
+    public void Additional_captured_compiler_source_cannot_hide_an_explicit_constructor_from_consumer_proof()
+    {
+        using var fixture = new Fixture();
+        Assert.True(fixture.Read(declarationCompilerSource: true).CompilerCensusComplete);
+        // Adversarial captured DATA only: genuine PE/PDB/authored sources stay exact.
+        // The extra compiler source is NOT a compiler receipt or an issuer.
+        var result = fixture.Read(declarationCompilerSource: true, extraCompilerConstructor: true);
+        Assert.False(result.CompilerCensusComplete); Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("no usable nonhidden", result.Reason, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Compiler_source_role_hash_drift_refuses_at_actual_captured_byte_join()
+    {
+        using var fixture = new Fixture();
+        var error = Assert.Throws<EvidenceWriteException>(() => fixture.Read(
+            declarationCompilerSource: true, compilerSourceHashDrift: true));
+        Assert.Contains("Captured source bytes differ", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Genuine_declaration_only_change_has_no_missing_compiled_measurement_and_no_automatic_exemption()
     {
         using var fixture = new Fixture();
@@ -312,32 +343,45 @@ public sealed class CompilerLineCensusTests
             => CompilerLineCensus.Inspect(Pe, Pdb, Build, [document ?? Document, DeclarationDocument], Files);
         internal ChangedLineCoverage.Result Read(int? omitLine = null, int? zeroLine = null, bool omitFile = false,
             bool secondContext = false, string? fault = null, bool omitReport = false, bool commentOnly = false,
-            bool includeDeclarations = false, bool declarationsOnly = false, bool rawReports = false)
+            bool includeDeclarations = false, bool declarationsOnly = false, bool rawReports = false,
+            bool declarationCompilerSource = false, bool extraCompilerConstructor = false, bool compilerSourceHashDrift = false)
         {
             var rawSource = fault == "checksum" ? Source.Concat(" "u8.ToArray()).ToArray() : Source;
             // Only the checksum-negative uses a separate logical copy. Physical source
             // bytes remain untouched; direct metadata inspection reaches that boundary.
             if (fault == "checksum")
                 return ReadChecksumNegative();
+            var capturedDeclaration = DeclarationSource.ToArray();
+            if (compilerSourceHashDrift) capturedDeclaration[0] ^= 1; // Same extent, different actual SHA-256.
             var data = new Dictionary<string, byte[]>(StringComparer.Ordinal)
             {
                 ["source"] = rawSource,
-                ["declaration"] = DeclarationSource,
+                ["declaration"] = capturedDeclaration,
                 ["pe"] = Pe,
                 ["pdb"] = fault == "malformed-pdb" ? [0xff] : Pdb
             };
+            if (extraCompilerConstructor)
+                data.Add("extra", Encoding.UTF8.GetBytes("namespace DeliveryForge.Evidence.CensusFixture; public class Subject { public Subject() {} }"));
             var contexts = new JsonArray(); var builds = new JsonArray(); var executions = new JsonArray(); var artifacts = new JsonArray();
             foreach (var context in secondContext ? new[] { "c", "c2" } : new[] { "c" })
             {
-                contexts.Add(JsonSerializer.SerializeToNode(new
+                var contextNode = JsonSerializer.SerializeToNode(new
                 {
                     id = context,
                     project = ProjectRole + "/DeliveryForge.Evidence.CensusFixture.csproj",
                     inputs = new[] { new { role = "source", logicalPath = "Subject.cs", repositoryPath = ProjectRole + "/Subject.cs", locator = "source",
                         length = Source.Length, sha256 = InstalledToolFiles.Identity(Source)[7..], generated = false, encoding = "utf-8" },
-                        new { role = "source", logicalPath = "Declarations.cs", repositoryPath = ProjectRole + "/Declarations.cs", locator = "declaration",
+                        new { role = declarationCompilerSource ? "compiler-source" : "source", logicalPath = "Declarations.cs", repositoryPath = ProjectRole + "/Declarations.cs", locator = "declaration",
                         length = DeclarationSource.Length, sha256 = InstalledToolFiles.Identity(DeclarationSource)[7..], generated = false, encoding = "utf-8" } }
-                }));
+                })!;
+                if (extraCompilerConstructor)
+                    contextNode["inputs"]!.AsArray().Add(JsonSerializer.SerializeToNode(new
+                    {
+                        role = "compiler-source", logicalPath = "Extra.cs", locator = "extra",
+                        length = data["extra"].Length, sha256 = InstalledToolFiles.Identity(data["extra"])[7..],
+                        generated = true, encoding = "utf-8"
+                    }));
+                contexts.Add(contextNode);
                 var build = context + "b";
                 builds.Add(JsonSerializer.SerializeToNode(new
                 {
