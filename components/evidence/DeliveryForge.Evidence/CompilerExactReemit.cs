@@ -8,7 +8,7 @@ using System.Text;
 
 namespace DeliveryForge.Evidence;
 
-// Unwired private DATA comparison. Equality is NOT an authored-body-origin proof,
+// Private exact-compiler reconstruction and comparison. Equality alone is NOT an authored-body-origin proof,
 // census completeness, producer receipt, execution authority or permission to load
 // arbitrary compiler/analyzer code from a manifest.
 internal static class CompilerExactReemit
