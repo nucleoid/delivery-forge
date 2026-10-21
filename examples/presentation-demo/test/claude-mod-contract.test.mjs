@@ -29,8 +29,8 @@ test('Claude mod exposes four native views and fail-closed no-argument terminal 
 
 test('Claude generated fixture artifact exactly matches the authoritative projector',async()=>{
   const generated=fs.readFileSync(path.join(mod,'generated/fixtures.ts'),'utf8');
-  const before=generated;
+  const before=generated.replace(/\r\n/g,'\n');
   const {spawnSync}=await import('node:child_process');
   const result=spawnSync(process.execPath,[path.join(root,'scripts/build-claude-mod-fixtures.mjs')],{encoding:'utf8'});
-  assert.equal(result.status,0,result.stderr);assert.equal(fs.readFileSync(path.join(mod,'generated/fixtures.ts'),'utf8'),before);
+  assert.equal(result.status,0,result.stderr);assert.equal(fs.readFileSync(path.join(mod,'generated/fixtures.ts'),'utf8').replace(/\r\n/g,'\n'),before);
 });
