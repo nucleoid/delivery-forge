@@ -24,7 +24,14 @@ internal static class CompilerSourceOrigins
         string? DeclarationId, string SemanticDisplay, string ContainingType, bool? Static, bool IsAsync,
         bool EmptyBlock, string Obligation, CompilerNamedMethodBindings.Binding NamedMethodBinding,
         IReadOnlyList<ConstructorRole> ConstructorGroup, IReadOnlyList<Candidate> Candidates,
-        int? ParentRegion, bool OwnYield, NestedCarrier? NestedCarrier);
+        int? ParentRegion, bool OwnYield, NestedCarrier? NestedCarrier,
+        string SourceForm, RegionAssociation? OriginAssociation)
+    {
+        public CompilerInitializerOrigins.Attribution? InitializerOrigin { get; init; }
+        public CompilerInitializerOrigins.ConstructorArguments? ConstructorArgumentOrigin { get; init; }
+    }
+    private sealed record RegionAssociation(bool Associated, string Disposition, int? CarrierMethodToken);
+    private sealed record DeclarationAssociation(string Kind, string Path, int Start, bool Associated, string Disposition);
 
     internal static byte[] Capture(CSharpCompilation compilation, byte[] assembly, byte[] pdb,
         Action check, CancellationToken token)
@@ -94,12 +101,22 @@ internal static class CompilerSourceOrigins
                 noVisibleIlBodies.Add(methodToken);
             }
         }
+        var initializerOrigins = new CompilerInitializerOrigins(compilation, metadata, reader, documentPaths,
+            namedBindings, Step, Admit, token);
         var byPath = points.GroupBy(point => point.Path, StringComparer.Ordinal)
             .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
         var perMethod = points.GroupBy(point => point.Method).ToDictionary(group => group.Key, group => group.Count());
         var regions = new List<Region>();
         var hiding = new List<object>();
         var sourceRows = new List<object>();
+        var declarations = new List<DeclarationAssociation>();
+        var unresolved = new HashSet<string>(StringComparer.Ordinal);
+        void Unsupported(string code)
+        {
+            Step();
+            if (unresolved.Contains(code)) return;
+            Admit(128, code); unresolved.Add(code);
+        }
         var expressionType = compilation.GetTypeByMetadataName("System.Linq.Expressions.Expression`1");
         foreach (var tree in compilation.SyntaxTrees)
         {
@@ -117,7 +134,8 @@ internal static class CompilerSourceOrigins
             {
                 Step();
                 if (trivia.RawKind is (int)SyntaxKind.LineDirectiveTrivia or (int)SyntaxKind.LineSpanDirectiveTrivia
-                    or (int)SyntaxKind.PragmaChecksumDirectiveTrivia) mappingDirectives++;
+                    or (int)SyntaxKind.PragmaChecksumDirectiveTrivia)
+                { mappingDirectives++; Unsupported("source.line-remapping-unsupported"); }
             }
             void Add(string kind, SyntaxNode span, ISymbol? owner, string obligation, bool constructorGroup = false)
             {
@@ -165,13 +183,19 @@ internal static class CompilerSourceOrigins
                             Text(constructor.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat)), constructor.IsImplicitlyDeclared, delegates,
                             NamedBinding(constructor)));
                     }
+                CompilerInitializerOrigins.Attribution? initializer = null;
+                if (constructorGroup && (owner is IFieldSymbol or IPropertySymbol))
+                    initializer = initializerOrigins.Capture(span, owner, path);
+                var arguments = kind is "explicit-constructor-initializer" or "primary-constructor-base"
+                    ? initializerOrigins.CaptureArguments(span, path) : null;
                 regions.Add(new(kind, path, sl, sc, el, ec,
                     owner?.GetDocumentationCommentId() is { } id ? Text(id) : null,
                     Text(owner?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
                     Text((owner?.ContainingType ?? owner as INamedTypeSymbol)?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
                     owner?.IsStatic, (owner as IMethodSymbol)?.IsAsync ?? false,
                     span is BlockSyntax { Statements.Count: 0 }, obligation, NamedBinding(owner as IMethodSymbol), constructors, candidates,
-                    parentRegion, HasOwnYield(span, Step), null));
+                    parentRegion, HasOwnYield(span, Step), null, SourceForm(kind, span, owner), null)
+                { InitializerOrigin = initializer, ConstructorArgumentOrigin = arguments });
                 Admit(128);
                 if (!regionSpans.TryAdd(span, regions.Count - 1))
                     throw new IOException("Semantic source ownership has a duplicate runtime span.");
@@ -182,44 +206,62 @@ internal static class CompilerSourceOrigins
                 Admit(256L + 32L * binding.PdbStateMachineCarriers.Count, binding.Disposition);
                 return binding;
             }
-            void Attributes(ISymbol? symbol)
+            void Attribute(AttributeSyntax syntax)
             {
-                if (symbol is null) return;
-                foreach (var attribute in symbol.GetAttributes())
-                {
-                    Step();
-                    if (attribute.ApplicationSyntaxReference is not { } syntax || syntax.SyntaxTree != tree) continue;
-                    var name = attribute.AttributeClass?.ToDisplayString();
-                    if (name is not ("System.Diagnostics.DebuggerHiddenAttribute" or "System.Diagnostics.DebuggerStepThroughAttribute"
-                        or "System.Diagnostics.DebuggerNonUserCodeAttribute" or "System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverageAttribute")) continue;
-                    if (hiding.Count >= MaximumRows) throw new IOException("Authored hiding inventory exceeds the bounded profile.");
-                    Admit(512, path, name);
-                    hiding.Add(new { path, name, start = syntax.Span.Start, length = syntax.Span.Length });
-                }
+                Step();
+                // Bind the actual constructor on EVERY source AttributeSyntax.
+                // This includes aliases, all attribute targets, record parameters
+                // and captured generated trees; compiler-inserted metadata has no
+                // source syntax and cannot take this source-authored route.
+                if (model.GetSymbolInfo(syntax, token).Symbol is not IMethodSymbol constructor) return;
+                var name = constructor.ContainingType.ToDisplayString();
+                if (name is not ("System.Diagnostics.DebuggerHiddenAttribute" or "System.Diagnostics.DebuggerStepThroughAttribute"
+                    or "System.Diagnostics.DebuggerNonUserCodeAttribute" or "System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverageAttribute")) return;
+                if (hiding.Count >= MaximumRows) throw new IOException("Authored hiding inventory exceeds the bounded profile.");
+                Admit(512, path, name);
+                hiding.Add(new { path, name, start = syntax.Span.Start, length = syntax.Span.Length });
+                Unsupported("source.authored-hiding-unsupported");
             }
-            Attributes(compilation.Assembly);
+            void Declaration(string kind, SyntaxNode syntax, bool associated, string disposition)
+            {
+                Step();
+                if (declarations.Count >= MaximumRows) throw new IOException("Source declaration semantics exceed the bounded profile.");
+                Admit(512, kind, path, disposition);
+                declarations.Add(new(kind, path, syntax.Span.Start, associated, disposition));
+                if (!associated) Unsupported(disposition);
+            }
             foreach (var node in root.DescendantNodesAndSelf())
             {
                 Step();
+                // Partial type declarations remain supported. Partial executable
+                // member families need a separate positive implementation join.
+                var partialMember = node switch
+                {
+                    BaseMethodDeclarationSyntax member => member.Modifiers.Any(SyntaxKind.PartialKeyword),
+                    BasePropertyDeclarationSyntax member => member.Modifiers.Any(SyntaxKind.PartialKeyword),
+                    EventFieldDeclarationSyntax member => member.Modifiers.Any(SyntaxKind.PartialKeyword),
+                    _ => false
+                };
+                if (partialMember) Unsupported("source.partial-member-unsupported");
                 switch (node)
                 {
+                    case AttributeSyntax attribute: Attribute(attribute); break;
+                    case QueryExpressionSyntax: Unsupported("source.query-unsupported"); break;
+                    case YieldStatementSyntax: Unsupported("source.iterator-unsupported"); break;
                     case BaseMethodDeclarationSyntax declaration:
                         var method = model.GetDeclaredSymbol(declaration, token) as IMethodSymbol;
-                        Attributes(method);
                         var body = (SyntaxNode?)declaration.Body ?? declaration.ExpressionBody?.Expression;
                         Add("named-method", body ?? declaration, method, body is null
                             ? "DeclarationOnly_NoAuthoredBody_ImplicitEffectsNotDischarged" : "NamedMetadataSignatureAndRuntimeCarrierUnresolved");
                         break;
                     case AccessorDeclarationSyntax accessor:
                         var accessMethod = model.GetDeclaredSymbol(accessor, token) as IMethodSymbol;
-                        Attributes(accessMethod);
                         var accessBody = (SyntaxNode?)accessor.Body ?? accessor.ExpressionBody?.Expression;
                         Add("accessor", accessBody ?? accessor, accessMethod, accessBody is null
                             ? "DeclarationOnly_AutoAccessorOriginUnresolved" : "NamedMetadataSignatureAndRuntimeCarrierUnresolved");
                         break;
                     case LocalFunctionStatementSyntax local:
                         var localMethod = model.GetDeclaredSymbol(local, token);
-                        Attributes(localMethod);
                         Add(localMethod is null ? "unresolved-local-function" : "local-function", (SyntaxNode?)local.Body ?? (SyntaxNode?)local.ExpressionBody?.Expression ?? local,
                             localMethod, "NestedSemanticCarrierAndEnclosingOriginUnresolved");
                         break;
@@ -235,14 +277,14 @@ internal static class CompilerSourceOrigins
                             AnonymousMethodExpressionSyntax anonymousMethodSyntax => anonymousMethodSyntax.Block,
                             _ => anonymous
                         };
-                        Attributes(anonymousMethod);
                         var isDelegate = converted?.TypeKind == TypeKind.Delegate && anonymousMethod is not null;
+                        if (isExpressionTree) Unsupported("source.expression-tree-unsupported");
+                        else if (!isDelegate) Unsupported("source.lambda-conversion-unresolved");
                         Add(isExpressionTree ? "expression-tree-lambda" : isDelegate ? "delegate-lambda" : "unresolved-lambda-conversion", anonymousBody,
                             anonymousMethod, isExpressionTree ? "AuthoredDataRequiresOuterExecutionOrigin" : "NestedSemanticConversionAndCompleteCarrierUnresolved");
                         break;
                     case PropertyDeclarationSyntax property:
                         var propertySymbol = model.GetDeclaredSymbol(property, token);
-                        Attributes(propertySymbol);
                         if (property.ExpressionBody is { } propertyBody)
                             Add("expression-property", propertyBody.Expression, propertySymbol?.GetMethod, "NamedMetadataSignatureAndRuntimeCarrierUnresolved");
                         if (property.Initializer is { } propertyInitializer)
@@ -250,13 +292,20 @@ internal static class CompilerSourceOrigins
                         break;
                     case IndexerDeclarationSyntax indexer:
                         var indexerSymbol = model.GetDeclaredSymbol(indexer, token);
-                        Attributes(indexerSymbol);
                         if (indexer.ExpressionBody is { } indexerBody)
                             Add("expression-indexer", indexerBody.Expression, indexerSymbol?.GetMethod, "NamedMetadataSignatureAndRuntimeCarrierUnresolved");
                         break;
                     case VariableDeclaratorSyntax variable when variable.Parent?.Parent is BaseFieldDeclarationSyntax:
                         var field = model.GetDeclaredSymbol(variable, token);
-                        Attributes(field);
+                        if (variable.Parent?.Parent is EventFieldDeclarationSyntax)
+                        {
+                            var eventSymbol = field as IEventSymbol;
+                            var add = eventSymbol?.AddMethod is { } addMethod ? namedBindings.For(addMethod).MethodToken : null;
+                            var remove = eventSymbol?.RemoveMethod is { } removeMethod ? namedBindings.For(removeMethod).MethodToken : null;
+                            Declaration("event-field-compiler-template", variable, eventSymbol is not null && add is not null && remove is not null,
+                                eventSymbol is not null && add is not null && remove is not null
+                                    ? "event-field-exact-accessor-symbols-initializer-separate" : "source.event-field-binding-unproven");
+                        }
                         if (variable.Initializer is { } initializer && field is not IFieldSymbol { IsConst: true })
                             Add(field?.IsStatic == true ? "static-field-initializer" : "instance-field-initializer",
                                 initializer.Value, field, "AllApplicableConstructorGroupsUnresolved", constructorGroup: true);
@@ -272,7 +321,21 @@ internal static class CompilerSourceOrigins
                             "PrimaryConstructorAndBaseArgumentEffectsUnresolved", constructorGroup: true);
                         break;
                     case BaseTypeDeclarationSyntax type:
-                        Attributes(model.GetDeclaredSymbol(type, token));
+                        if (model.GetDeclaredSymbol(type, token) is not INamedTypeSymbol)
+                            Unsupported("source.type-declaration-binding-unproven");
+                        break;
+                    case ParameterSyntax parameter when parameter.Parent?.Parent is TypeDeclarationSyntax primaryDeclaration &&
+                        ReferenceEquals(primaryDeclaration.ParameterList, parameter.Parent):
+                        var primaryParameter = model.GetDeclaredSymbol(parameter, token) as IParameterSymbol;
+                        var primaryConstructor = primaryParameter?.ContainingSymbol as IMethodSymbol;
+                        var primaryBinding = primaryConstructor is not null ? namedBindings.For(primaryConstructor).MethodToken : null;
+                        var primaryAssociated = primaryParameter is not null && primaryConstructor is { MethodKind: MethodKind.Constructor } &&
+                            primaryBinding is not null &&
+                            metadata.GetMethodDefinition(MetadataTokens.MethodDefinitionHandle(primaryBinding.Value & 0x00ffffff)).RelativeVirtualAddress != 0 &&
+                            SymbolEqualityComparer.Default.Equals(primaryConstructor.ContainingType,
+                                model.GetDeclaredSymbol(primaryDeclaration, token));
+                        Declaration("primary-parameter-compiler-template", parameter, primaryAssociated,
+                            primaryAssociated ? "primary-parameter-exact-constructor-symbol-initializers-base-separate" : "source.primary-parameter-binding-unproven");
                         break;
                     case GlobalStatementSyntax global:
                         Add("global-statement", global.Statement, compilation.GetEntryPoint(token), "TopLevelRuntimeOriginUnresolved");
@@ -283,6 +346,7 @@ internal static class CompilerSourceOrigins
             sourceRows.Add(new { path, regions = regions.Count - before, mappingDirectives });
         }
         BindNestedCarriers(regions, namedBindings, metadata, reader, Step, Admit);
+        var pendingInitializerCount = CloseAuthoredRegions(regions, metadata, Unsupported, Step, Admit);
         Step();
         var bytes = JsonSerializer.SerializeToUtf8Bytes(new
         {
@@ -290,10 +354,98 @@ internal static class CompilerSourceOrigins
             sourceCount = sourceRows.Count, methodCount = metadata.MethodDefinitions.Count,
             visiblePointCount = points.Count, noVisibleIlBodyCount = noVisibleIlBodies.Count,
             noVisibleIlBodies, sources = sourceRows, authoredHiding = hiding, regions,
-            unresolved = "Named bindings are unique exact CLI signatures or explicit unresolved results. Nested semantic ownership and constructor execution obligations remain unresolved. Candidate spans and named bindings never authorize an exemption."
+            declarationAssociations = declarations,
+            sourceExhaustion = new { complete = unresolved.Count == 0, unresolved = unresolved.Order(StringComparer.Ordinal), pendingInitializerCount },
+            unresolved = "Every supported region has an explicit positive or unresolved association. Source exhaustion is conditional on trusted exact PE/PDB equality; pending initializer and source-form guards remain blocking. No coverage point or hit is fabricated."
         });
         if (bytes.Length > MaximumBytes) throw new IOException("Semantic runtime inventory exceeds the existing artifact bound.");
         Step(); return bytes;
+    }
+
+    private static string SourceForm(string kind, SyntaxNode span, ISymbol? owner)
+    {
+        if (kind is "static-field-initializer" or "instance-field-initializer" or "property-initializer" or
+            "explicit-constructor-initializer" or "primary-constructor-base") return "initializer-pending";
+        if (kind is "delegate-lambda" or "local-function") return "nested-runtime-body";
+        if (kind is not ("named-method" or "accessor" or "expression-property" or "expression-indexer") ||
+            owner is not IMethodSymbol method) return "unsupported-source-form";
+        if (method.IsPartialDefinition || method.PartialDefinitionPart is not null || method.PartialImplementationPart is not null)
+            return "unsupported-partial-member";
+        if (span is BlockSyntax or ExpressionSyntax) return "authored-runtime-body";
+        if (method.IsAbstract || method.IsExtern) return "semantic-nonbody-declaration";
+        if (span is AccessorDeclarationSyntax accessor && !accessor.SemicolonToken.IsMissing &&
+            accessor.Parent?.Parent is PropertyDeclarationSyntax property && property.AccessorList is { } accessors &&
+            method.AssociatedSymbol is IPropertySymbol &&
+            accessors.Accessors.All(item => item.Body is null && item.ExpressionBody is null && !item.SemicolonToken.IsMissing))
+            return "auto-property-accessor-template";
+        return "unsupported-source-form";
+    }
+
+    private static int CloseAuthoredRegions(List<Region> regions, MetadataReader metadata, Action<string> unsupported,
+        Action step, Action<long, string?[]> admit)
+    {
+        var pendingInitializers = 0;
+        for (var index = 0; index < regions.Count; index++)
+        {
+            step();
+            var region = regions[index];
+            var associated = false;
+            int? carrier = null;
+            var disposition = "source.region-form-unproven";
+            if (region.OwnYield) disposition = "source.iterator-unsupported";
+            else switch (region.SourceForm)
+            {
+                case "authored-runtime-body":
+                case "auto-property-accessor-template":
+                    var named = region.NamedMethodBinding;
+                    if (named.MethodToken is { } token)
+                    {
+                        if (region.IsAsync && named.PdbStateMachineCarriers.Count == 1)
+                            carrier = named.PdbStateMachineCarriers[0];
+                        else if (!region.IsAsync && named.PdbStateMachineCarriers.Count == 0) carrier = token;
+                    }
+                    // An arbitrary point is insufficient: the semantic named
+                    // declaration, exact CLI token, real PDB async relation and
+                    // a point wholly in THIS owned body must all agree. Child
+                    // functions/initializer effects remain separate obligations.
+                    if (carrier is { } actual &&
+                        metadata.GetMethodDefinition(MetadataTokens.MethodDefinitionHandle(actual & 0x00ffffff)).RelativeVirtualAddress != 0)
+                        foreach (var candidate in region.Candidates)
+                        {
+                            step();
+                            if (candidate.Method == actual && candidate.ContainedPoints > 0) associated = true;
+                        }
+                    disposition = associated
+                        ? region.SourceForm == "authored-runtime-body" ? "semantic-named-body-own-carrier-point" : "semantic-auto-accessor-own-carrier-point"
+                        : region.SourceForm == "authored-runtime-body" ? "source.named-body-point-unproven" : "source.auto-accessor-point-unproven";
+                    break;
+                case "semantic-nonbody-declaration":
+                    associated = region.NamedMethodBinding.MethodToken is { } declaration &&
+                        metadata.GetMethodDefinition(MetadataTokens.MethodDefinitionHandle(declaration & 0x00ffffff)).RelativeVirtualAddress == 0;
+                    disposition = associated ? "semantic-abstract-or-extern-exact-rva0-declaration" : "source.declaration-nonbody-unproven";
+                    break;
+                case "nested-runtime-body":
+                    associated = region.NestedCarrier is not null;
+                    carrier = region.NestedCarrier?.MethodToken;
+                    disposition = associated ? "semantic-nested-exclusive-complete-carrier" : "source.nested-carrier-unproven";
+                    break;
+                case "initializer-pending":
+                    // These are the same Capture's private computed witnesses,
+                    // never a serialized status or caller-supplied proof boolean.
+                    associated = region.Kind is "explicit-constructor-initializer" or "primary-constructor-base"
+                        ? region.ConstructorArgumentOrigin?.Complete == true : region.InitializerOrigin?.Complete == true;
+                    if (!associated) pendingInitializers++;
+                    disposition = associated ? "semantic-applicable-constructor-source-point" : "source.initializer-pending";
+                    break;
+                case "unsupported-partial-member":
+                    disposition = "source.partial-member-unsupported";
+                    break;
+            }
+            admit(256, [disposition]);
+            regions[index] = region with { OriginAssociation = new(associated, disposition, carrier) };
+            if (!associated) unsupported(disposition);
+        }
+        return pendingInitializers;
     }
 
     private sealed record NestedCarrier(int MethodToken, int? KickoffMethodToken, string Disposition);

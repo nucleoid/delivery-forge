@@ -4,6 +4,7 @@ using System.Reflection.PortableExecutable;
 using System.Runtime.ExceptionServices;
 using System.Runtime.Loader;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace DeliveryForge.Evidence;
 
@@ -19,7 +20,65 @@ internal static class CompilerExactReemit
     // the producer/consumer recipe decoder BEFORE calling this comparison slice.
     internal sealed record Request(string BaseDirectory, string[] ScalarArguments,
         Input[] Sources, Reference[] References, string[] EmbeddedSourcePaths);
-    internal sealed record Comparison(bool Equal, string Reason, byte[] EmittedPe, byte[] EmittedPdb, byte[] OriginInventory);
+    // Only the actual reconstruction factory can create this result. A caller's
+    // JSON boolean cannot authorize residual compiler bodies. Source association
+    // is useful only together with equality of the complete actual PE and PDB.
+    internal sealed class Comparison
+    {
+        private readonly string actualPeHash, actualPdbHash;
+        private readonly Dictionary<string, SourceIdentity> sourceCorpus;
+        internal bool Equal { get; }
+        internal string Reason { get; }
+        internal byte[] EmittedPe { get; }
+        internal byte[] EmittedPdb { get; }
+        internal byte[] OriginInventory { get; }
+        internal bool HasProvenSourceOrigin { get; }
+        private Comparison(CoreResult result)
+        {
+            Equal = result.Equal; Reason = result.Reason;
+            EmittedPe = result.EmittedPe; EmittedPdb = result.EmittedPdb; OriginInventory = result.OriginInventory;
+            actualPeHash = result.ActualPeHash; actualPdbHash = result.ActualPdbHash;
+            sourceCorpus = result.Sources.ToDictionary(source => source.Path, StringComparer.Ordinal);
+            using var inventory = ProducerJson.Read(result.OriginInventory);
+            HasProvenSourceOrigin = Equal && inventory.RootElement.GetProperty("sourceCount").GetInt32() == sourceCorpus.Count &&
+                inventory.RootElement.TryGetProperty("sourceExhaustion", out var closure) &&
+                closure.GetProperty("complete").GetBoolean() && closure.GetProperty("pendingInitializerCount").GetInt32() == 0 &&
+                closure.GetProperty("unresolved").GetArrayLength() == 0;
+        }
+        internal static Comparison Run(Request request, byte[] common, byte[] csharp,
+            byte[] actualPe, byte[] actualPdb, InstalledToolFiles files)
+            => new(CompareCore(request, common, csharp, actualPe, actualPdb, files));
+        internal bool ProvesSourceOrigin(byte[] actualPe, byte[] actualPdb,
+            IReadOnlyList<CompilerLineCensus.Document> documents, InstalledToolFiles files)
+        {
+            files.Check();
+            if (!HasProvenSourceOrigin || documents.Count != sourceCorpus.Count) return false;
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var utf8 = new UTF8Encoding(false, true);
+            foreach (var document in documents)
+            {
+                files.Check();
+                if (document.PhysicalPath is not { } path || !seen.Add(path) ||
+                    !sourceCorpus.TryGetValue(path, out var source) || document.Sha256 != source.Sha256)
+                    return false;
+                try
+                {
+                    if (document.Text.Length > source.Length) return false;
+                    var length = utf8.GetByteCount(document.Text); files.Check();
+                    if (length != source.Length) return false;
+                    var digest = Convert.ToHexStringLower(SHA256.HashData(utf8.GetBytes(document.Text))); files.Check();
+                    if (digest != source.Sha256) return false;
+                }
+                catch (EncoderFallbackException) { return false; }
+            }
+            var matches = Convert.ToHexStringLower(SHA256.HashData(actualPe)) == actualPeHash &&
+                Convert.ToHexStringLower(SHA256.HashData(actualPdb)) == actualPdbHash;
+            files.Check(); return matches;
+        }
+    }
+    private sealed record SourceIdentity(string Path, int Length, string Sha256);
+    private sealed record CoreResult(bool Equal, string Reason, byte[] EmittedPe, byte[] EmittedPdb,
+        byte[] OriginInventory, string ActualPeHash, string ActualPdbHash, IReadOnlyList<SourceIdentity> Sources);
     private const int MaximumArtifactBytes = 128 * 1024 * 1024;
     private const int MaximumRows = 10000;
     // Exact already-selected SDK 10.0.401 compiler pair, not a caller-supplied hash.
@@ -27,6 +86,10 @@ internal static class CompilerExactReemit
     private const string CSharpHash = "12b0428203faae6555858d2ff856cef7450d2764cf00c57e7516587a04885870";
 
     internal static Comparison Compare(Request request, byte[] common, byte[] csharp,
+        byte[] actualPe, byte[] actualPdb, InstalledToolFiles files)
+        => Comparison.Run(request, common, csharp, actualPe, actualPdb, files);
+
+    private static CoreResult CompareCore(Request request, byte[] common, byte[] csharp,
         byte[] actualPe, byte[] actualPdb, InstalledToolFiles files)
     {
         files.Check();
@@ -82,8 +145,14 @@ internal static class CompilerExactReemit
                 return $"{bytes.LongLength} bytes sha256:{digest}";
             }
             var details = $" Actual PE: {Identity(actualPe)}; emitted PE: {Identity(emitted[0])}; actual PDB: {Identity(actualPdb)}; emitted PDB: {Identity(emitted[1])}.";
-            return new(equal, (equal ? "Complete PE and portable PDB byte equality only; authored body-origin remains unproven."
-                : "Exact target-compiler PE/PDB bytes differ; general source origin remains unsupported.") + details, emitted[0], emitted[1], emitted[2]);
+            return new(equal, (equal ? "Complete PE and portable PDB byte equality; authored body-origin remains unproven by equality alone."
+                : "Exact target-compiler PE/PDB bytes differ; general source origin remains unsupported.") + details,
+                emitted[0], emitted[1], emitted[2], Convert.ToHexStringLower(SHA256.HashData(actualPe)),
+                Convert.ToHexStringLower(SHA256.HashData(actualPdb)), request.Sources.Select(source =>
+                {
+                    files.Check();
+                    return new SourceIdentity(source.Path, source.Bytes.Length, Convert.ToHexStringLower(SHA256.HashData(source.Bytes)));
+                }).ToArray());
         }
         finally { island.Unload(); } // Unload requests collection; no immediate-unload claim.
     }

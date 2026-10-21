@@ -27,11 +27,17 @@ internal static class CompilerLineCensus
     }
 
     internal static Inventory Inspect(byte[] assembly, byte[] pdb, Build expected,
-        IReadOnlyList<Document> documents, InstalledToolFiles files)
+        IReadOnlyList<Document> documents, InstalledToolFiles files, CompilerExactReemit.Comparison? sourceOrigins = null)
     {
         files.Check();
         if (assembly.Length > 128 * 1024 * 1024 || pdb.Length > 128 * 1024 * 1024 || documents.Count > MaximumRows)
             throw Refuse("Compiler census exceeds the existing bounded artifact/point profile.");
+        // Documents retain the caller's already checked logical/repository roles.
+        // This proof binds code origin to the entire physical source corpus; it
+        // grants no new logical path mapping or repository-file read permission.
+        var exactSourceOrigin = sourceOrigins is not null && sourceOrigins.ProvesSourceOrigin(assembly, pdb, documents, files);
+        if (sourceOrigins is not null && !exactSourceOrigin)
+            throw Refuse("Source-origin reconstruction does not prove this exact complete PE/PDB pair.");
         if (documents.Any(document => HasMappingDirective(document.Text, files)))
             return new(false, "Source-authored line/checksum remapping is unsupported by the complete compiler-line profile.", [], ["Source-authored line/checksum remapping is unsupported."]);
         try
@@ -117,9 +123,9 @@ internal static class CompilerLineCensus
             var points = new List<Point>(); var totalPoints = 0;
             var projection = new CompilerLineProjection(documents, files);
             if (projection.Reason is { } projectionReason) Unsupported(projectionReason);
-            var implicitConstructors = new CompilerImplicitConstructor(documents, files);
-            var asyncScaffolds = new CompilerAsyncScaffold(documents, mapped, metadata, reader, pe, files);
-            if (HidesAuthoredCode(metadata, metadata.CustomAttributes, asyncScaffolds, files))
+            var implicitConstructors = exactSourceOrigin ? null : new CompilerImplicitConstructor(documents, files);
+            var asyncScaffolds = exactSourceOrigin ? null : new CompilerAsyncScaffold(documents, mapped, metadata, reader, pe, files);
+            if (!exactSourceOrigin && HidesAuthoredCode(metadata, metadata.CustomAttributes, asyncScaffolds!, files))
                 Unsupported("Debugger-hiding metadata is unsupported by the complete compiler-line profile.");
             foreach (var typeHandle in metadata.TypeDefinitions)
             {
@@ -158,9 +164,12 @@ internal static class CompilerLineCensus
                         if (!projection.Add(captured)) Unsupported(projection.Reason!);
                     }
                     // RVA=0 declares no executable method body (abstract/import/runtime).
-                    // An opaque IL body cannot be presumed compiler-generated or exempt.
-                    if (method.RelativeVirtualAddress != 0 && visible == 0 &&
-                        !implicitConstructors.Proves(methodHandle, metadata, pe) && !asyncScaffolds.Proves(methodHandle))
+                    // A zero-point body alone proves nothing. The optional private
+                    // reconstruction result must positively exhaust every authored
+                    // runtime region and match this complete PE/PDB before residual
+                    // compiler lowering can be classified. H/E points stay intact.
+                    if (!exactSourceOrigin && method.RelativeVirtualAddress != 0 && visible == 0 &&
+                        !implicitConstructors!.Proves(methodHandle, metadata, pe) && !asyncScaffolds!.Proves(methodHandle))
                         Unsupported("An executable compiler body has no usable nonhidden source points; authored completeness is unproven.");
                 }
             }

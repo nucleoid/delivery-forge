@@ -12,12 +12,16 @@ namespace DeliveryForge.Evidence;
 internal static class CompilerNamedMethodBindings
 {
     internal sealed record Binding(int? MethodToken, string Disposition, IReadOnlyList<int> PdbStateMachineCarriers);
-    internal sealed class Table(Dictionary<IMethodSymbol, Binding> bindings, HashSet<int> namedCarriers)
+    internal sealed record FieldBinding(int? FieldToken, string Disposition);
+    internal sealed class Table(Dictionary<IMethodSymbol, Binding> bindings, HashSet<int> namedCarriers,
+        Func<IFieldSymbol, FieldBinding> fieldBinding, Func<IMethodSymbol, Binding> constructorTarget)
     {
         private static readonly Binding Unmapped = new(null, "not-in-source-named-member-table", []);
         internal Binding For(IMethodSymbol? method) => method is not null && bindings.TryGetValue(Normalize(method), out var binding)
             ? binding : Unmapped;
         internal bool IsNamedCarrier(int token) => namedCarriers.Contains(token);
+        internal FieldBinding ForField(IFieldSymbol field) => fieldBinding(field.OriginalDefinition);
+        internal Binding ConstructorTarget(IMethodSymbol method) => constructorTarget(method);
     }
 
     private sealed class UnsupportedSignature(string reason) : Exception(reason);
@@ -168,7 +172,104 @@ internal static class CompilerNamedMethodBindings
                 if (!namedCarriers.Contains(carrier)) { admit(64, []); namedCarriers.Add(carrier); }
             }
         }
-        return new(bindings, namedCarriers);
+        var fields = new Dictionary<IFieldSymbol, FieldBinding>(SymbolEqualityComparer.Default);
+        var emittedFields = new Dictionary<FieldDefinitionHandle, string?>();
+        FieldBinding Field(IFieldSymbol field)
+        {
+            step();
+            if (fields.TryGetValue(field, out var previous)) return previous;
+            if (fields.Count >= maximumRows || metadata.FieldDefinitions.Count > maximumRows)
+                throw new IOException("Initializer field membership exceeds the existing bounded profile.");
+            int? found = null;
+            var count = 0;
+            var reason = "no-exact-emitted-field-signature";
+            try
+            {
+                var key = grammar.SourceField(field);
+                foreach (var handle in metadata.FieldDefinitions)
+                {
+                    step();
+                    var row = metadata.GetFieldDefinition(handle);
+                    if (!metadata.StringComparer.Equals(row.Name, field.MetadataName) ||
+                        ((row.Attributes & FieldAttributes.Static) != 0) != field.IsStatic) continue;
+                    if (!emittedFields.TryGetValue(handle, out var emitted))
+                    {
+                        try { emitted = grammar.MetadataField(handle); }
+                        catch (UnsupportedSignature) { emitted = null; }
+                        admit(128, []); emittedFields.Add(handle, emitted);
+                    }
+                    if (key != emitted) continue;
+                    found = MetadataTokens.GetToken(handle); count++;
+                }
+                reason = count switch
+                {
+                    1 => "unique-exact-cli-field-signature",
+                    > 1 => "ambiguous-emitted-field-signature",
+                    _ => reason
+                };
+            }
+            catch (UnsupportedSignature unsupported) { reason = unsupported.Message; }
+            admit(256, [reason]);
+            var result = new FieldBinding(count == 1 ? found : null, reason);
+            fields.Add(field, result);
+            return result;
+        }
+        Dictionary<string, List<int>>? constructorReferences = null;
+        var targets = new Dictionary<IMethodSymbol, Binding>(SymbolEqualityComparer.Default);
+        Binding ConstructorTarget(IMethodSymbol method)
+        {
+            step();
+            if (method.MethodKind != MethodKind.Constructor || method.IsStatic)
+            {
+                admit(256, ["not-instance-constructor-target"]);
+                return new(null, "not-instance-constructor-target", []);
+            }
+            // A constructed external declaring type requires TypeSpec association,
+            // which is deliberately outside this first exact-reference slice.
+            if (!SymbolEqualityComparer.Default.Equals(method.ContainingType, method.ContainingType.OriginalDefinition))
+            {
+                admit(256, ["constructed-constructor-target-unsupported"]);
+                return new(null, "constructed-constructor-target-unsupported", []);
+            }
+            method = Normalize(method);
+            if (bindings.TryGetValue(method, out var own)) return own;
+            if (targets.TryGetValue(method, out var previous)) return previous;
+            if (targets.Count >= maximumRows || metadata.MemberReferences.Count > maximumRows)
+                throw new IOException("Constructor target membership exceeds the existing bounded profile.");
+            int? selected = null;
+            var reason = "no-exact-emitted-constructor-reference";
+            try
+            {
+                if (constructorReferences is null)
+                {
+                    admit(128, []); constructorReferences = new(StringComparer.Ordinal);
+                    foreach (var handle in metadata.MemberReferences)
+                    {
+                        step();
+                        var member = metadata.GetMemberReference(handle);
+                        if (member.GetKind() != MemberReferenceKind.Method || !metadata.StringComparer.Equals(member.Name, ".ctor")) continue;
+                        string key;
+                        try { key = grammar.MetadataConstructorReference(handle); }
+                        catch (UnsupportedSignature) { continue; }
+                        if (!constructorReferences.TryGetValue(key, out var matches))
+                        {
+                            admit(128, []); constructorReferences.Add(key, matches = []);
+                        }
+                        admit(32, []); matches.Add(MetadataTokens.GetToken(handle));
+                    }
+                }
+                if (constructorReferences.TryGetValue(grammar.SourceMethod(method), out var selectedMatches))
+                {
+                    reason = selectedMatches.Count == 1 ? "unique-exact-constructor-reference" : "ambiguous-constructor-reference";
+                    if (selectedMatches.Count == 1) selected = selectedMatches[0];
+                }
+            }
+            catch (UnsupportedSignature unsupported) { reason = unsupported.Message; }
+            admit(256, [reason]);
+            var result = new Binding(selected, reason, []);
+            targets.Add(method, result); return result;
+        }
+        return new(bindings, namedCarriers, Field, ConstructorTarget);
     }
 
     private sealed class Grammar(MetadataReader reader, INamedTypeSymbol? initOnlyMarker, Action step,
@@ -204,6 +305,39 @@ internal static class CompilerNamedMethodBindings
         }
 
         private static string Number(int value) => value.ToString(CultureInfo.InvariantCulture);
+
+        internal string SourceField(IFieldSymbol field)
+        {
+            step();
+            if (field.IsConst || field.RefKind != RefKind.None || !field.CustomModifiers.IsEmpty || !field.RefCustomModifiers.IsEmpty)
+                throw new UnsupportedSignature("initializer-field-modifiers-unsupported");
+            return Key("field", SourceNamedIdentity(field.ContainingType.OriginalDefinition), field.MetadataName,
+                field.IsStatic ? "static" : "instance", SourceType(field.Type));
+        }
+
+        internal string MetadataField(FieldDefinitionHandle handle)
+        {
+            step();
+            var field = reader.GetFieldDefinition(handle);
+            return Key("field", MetadataNamedIdentity(field.GetDeclaringType()), reader.GetString(field.Name),
+                (field.Attributes & FieldAttributes.Static) != 0 ? "static" : "instance", field.DecodeSignature(this, null));
+        }
+
+        internal string MetadataConstructorReference(MemberReferenceHandle handle)
+        {
+            step();
+            var member = reader.GetMemberReference(handle);
+            var signature = member.DecodeMethodSignature(this, genericContext: null);
+            if (!reader.StringComparer.Equals(member.Name, ".ctor") || !signature.Header.IsInstance || signature.Header.HasExplicitThis ||
+                signature.Header.CallingConvention != SignatureCallingConvention.Default || signature.GenericParameterCount != 0 ||
+                signature.RequiredParameterCount != signature.ParameterTypes.Length ||
+                signature.ReturnType != GetPrimitiveType(PrimitiveTypeCode.Void))
+                throw new UnsupportedSignature("constructor-reference-signature-unsupported");
+            admit(64L + 32L * signature.ParameterTypes.Length, []);
+            return Method(MetadataNamedIdentity(member.Parent), ".ctor", 0, false,
+                signature.ReturnType, signature.ParameterTypes.ToArray());
+        }
+
 
         internal string SourceMethod(IMethodSymbol method)
         {
