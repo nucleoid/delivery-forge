@@ -23,9 +23,8 @@ Native acceptance is **PARTIAL / BLOCKED**. Claude Code rendered the synthetic f
 
 ## Claude native capture procedure
 
-The worktree was cloned to the uniquely scoped laptop temp directory
-`C:\Users\mstat\AppData\Local\Temp\delivery-forge-claude-mods-pi-native-20261021-6a38df5`.
-The Mod was loaded session-locally. The unrelated DappNode Windows Terminal (PID 161400, handle 61605360) and other user windows were preserved.
+The worktree was cloned beneath a uniquely scoped `<task-owned-prefix>` on the laptop.
+The Mod was loaded session-locally. A pre-existing unrelated terminal and all other user windows were preserved; exact host paths and window/process identifiers are retained only in the private task artifact.
 
 The three accepted frames came from a fresh fixture-only Claude session showing zero tokens. The pane was focused using the host's normal keyboard chord and switched with the Mod's native keys. All files are 1430x210 crops from a 1483x762 terminal window. The absolute crop was x=239, y=457, width=1430, height=210; relative to the window it was x=16, y=233. Cropping retained the complete pane while excluding terminal footer content.
 
@@ -48,6 +47,10 @@ These captures predate the follow-up commit that made Evidence controls visibly 
 4. Pi's active package/version disagrees with the frozen target and its isolated offline launch hangs. There are no Pi-native screenshots and no native-pixel parity claim.
 5. Claude Desktop and VS Code were detected but not launched or tested.
 6. This is synthetic UX evidence only. It proves neither production integration nor real usage/cost/approval/dispatch authority.
+
+## Privacy repair
+
+The earlier public commit accidentally included a preflight file and report text containing local host paths, a paired-device identifier, and window/process identifiers. The current tree removes that preflight and stores it only under the task-owned private artifacts area; this report uses placeholders. No credential or secret was present. The old bytes remain in ordinary Git history because this branch is not force-rewritten; reviewers should assess the current sanitized tree and the explicit incident record.
 
 ## Acceptance statement
 

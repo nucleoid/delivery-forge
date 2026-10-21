@@ -9,4 +9,6 @@ claude --plugin-dir <this-directory>
 /forge-cockpit-demo
 ```
 
-Arguments are bounded enums: `open`, `view overview|evidence|usage|activity`, `scenario <bundled-name>`, `reset`, `close`, and `help`.
+The terminal command is deliberately **no-argument only**. Choose the bundled fixture and the Overview, Evidence, Usage, or Activity view with the pane's native `Select` and `Button` controls. The pane requests 30 rows and 88 columns; the host and user-resized layout remain authoritative, and the tree reflows below 40 body columns.
+
+Do not type `/forge-cockpit-demo ...` with trailing arguments. Claude Code 2.1.306 did not reliably route that grammar as an immediate command in a real terminal and may treat the entire line as prompt text. If an argument-bearing event does reach this Mod, it fails closed without opening or changing the fixture. The official test kit proves the handler behavior, but is not evidence that every terminal build routes unsupported grammar safely.

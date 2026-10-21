@@ -18,13 +18,13 @@ test('Claude mod package is session-local, typed, and owns one pane and command'
 test('Claude mod call surface excludes authority, model, prompt, process, network, and filesystem APIs',()=>{
   for(const forbidden of ['$.model.','$.tool.','$.agent.','$.process.','$.fs.','$.http.','$.prompt.','$.permission.','child_process','fetch('])assert.doesNotMatch(source,new RegExp(forbidden.replace(/[.$()]/g,'\\$&')));
   const calls=[...source.matchAll(/\$\.([a-z]+)\.([a-zA-Z]+)\s*\(/g)].map((m)=>`${m[1]}.${m[2]}`);
-  assert.deepEqual([...new Set(calls)].sort(),['command.register','store.get','store.set','ui.close','ui.invalidate','ui.open','ui.resolve']);
+  assert.deepEqual([...new Set(calls)].sort(),['command.register','store.get','store.set','ui.invalidate','ui.open','ui.resolve']);
 });
 
-test('Claude mod exposes all four views and bounded synthetic fixture commands',()=>{
+test('Claude mod exposes four native views and fail-closed no-argument terminal grammar',()=>{
   for(const name of ['overview','evidence','usage','activity'])assert.match(source,new RegExp(`['\"]${name}['\"]`));
-  for(const command of ['open','view','scenario','reset','close','help'])assert.match(source,new RegExp(`['\"]${command}['\"]`));
-  assert.match(source,/Read-only synthetic fixture/);assert.match(source,/slice\(0, 160\)/);
+  assert.match(source,/Arguments are not accepted in the terminal prompt/);assert.match(source,/slice\(0, 160\)/);
+  assert.match(source,/rows: 30, columns: 88/);assert.match(source,/key: 'fixture-select'/);assert.match(source,/READ ONLY · synthetic fixture/);
 });
 
 test('Claude generated fixture artifact exactly matches the authoritative projector',async()=>{

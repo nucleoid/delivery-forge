@@ -20,6 +20,10 @@ export const GENERATED_FIXTURES = [
       "review: NOT ISSUED",
       "publication: NOT REQUESTED",
       "cleanup: not-requested",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [],
@@ -55,6 +59,10 @@ export const GENERATED_FIXTURES = [
       "review: NOT ISSUED",
       "publication: NOT REQUESTED",
       "cleanup: not-requested",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [],
@@ -91,6 +99,10 @@ export const GENERATED_FIXTURES = [
       "review: NOT ISSUED",
       "publication: NOT REQUESTED",
       "cleanup: not-requested",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [],
@@ -102,7 +114,11 @@ export const GENERATED_FIXTURES = [
       "demo.openai.writer · input 10000 · output 1200 · cache read 6000 / write 1000 · ~USD 0.021700",
       "Ledger demo-ledger-demo-01 · run demo-014",
       "Accounted requests 1 · unknown 0 · reconciliation complete",
-      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge"
+      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge",
+      "Pricing provenance",
+      "demo.openai.writer · synthetic.writer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/writer-v1",
+      "Request provenance",
+      "request-writer-a · attempt attemptA · provider-partial · demo.openai.writer · synthetic.writer.v1"
     ],
     "activity": [
       "NEWEST · #3 · 2026-10-19T10:02:00.000Z · fixture · EXECUTE · INCOMPLETE",
@@ -129,6 +145,10 @@ export const GENERATED_FIXTURES = [
       "review: NOT ISSUED",
       "publication: NOT REQUESTED",
       "cleanup: not-requested",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [
@@ -249,7 +269,15 @@ export const GENERATED_FIXTURES = [
       "unresolved · input 700 · output 100 · cache read 0 / write 0 · UNPRICED",
       "Ledger demo-ledger-demo-01 · run demo-014",
       "Accounted requests 3 · unknown 1 · reconciliation pending",
-      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge"
+      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge",
+      "Pricing provenance",
+      "demo.openai.writer · synthetic.writer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/writer-v1",
+      "demo.anthropic.reviewer · synthetic.reviewer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/reviewer-v1",
+      "Request provenance",
+      "request-writer-a · attempt attemptA · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-reviewer-b · attempt attemptB · provider-final · demo.anthropic.reviewer · synthetic.reviewer.v1",
+      "request-writer-c · attempt retryC · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-coordinator-d · attempt attemptD · provider-final · demo.unresolved.coordinator · UNPRICED"
     ],
     "activity": [
       "NEWEST · #4 · 2026-10-19T10:03:00.000Z · fixture · EVALUATE · INCOMPLETE",
@@ -277,6 +305,10 @@ export const GENERATED_FIXTURES = [
       "review: NOT ISSUED",
       "publication: NOT REQUESTED",
       "cleanup: not-requested",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [],
@@ -290,7 +322,15 @@ export const GENERATED_FIXTURES = [
       "unresolved · input 700 · output 100 · cache read 0 / write 0 · UNPRICED",
       "Ledger demo-ledger-demo-01 · run demo-014",
       "Accounted requests 3 · unknown 1 · reconciliation pending",
-      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge"
+      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge",
+      "Pricing provenance",
+      "demo.openai.writer · synthetic.writer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/writer-v1",
+      "demo.anthropic.reviewer · synthetic.reviewer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/reviewer-v1",
+      "Request provenance",
+      "request-writer-a · attempt attemptA · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-reviewer-b · attempt attemptB · provider-final · demo.anthropic.reviewer · synthetic.reviewer.v1",
+      "request-writer-c · attempt retryC · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-coordinator-d · attempt attemptD · provider-final · demo.unresolved.coordinator · UNPRICED"
     ],
     "activity": [
       "NEWEST · #5 · 2026-10-19T10:04:00.000Z · fixture · REPAIR · INCOMPLETE",
@@ -319,6 +359,10 @@ export const GENERATED_FIXTURES = [
       "review: PASS / independence accepted",
       "publication: NOT REQUESTED",
       "cleanup: not-requested",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [
@@ -439,7 +483,15 @@ export const GENERATED_FIXTURES = [
       "unresolved · input 700 · output 100 · cache read 0 / write 0 · UNPRICED",
       "Ledger demo-ledger-demo-01 · run demo-014",
       "Accounted requests 3 · unknown 1 · reconciliation pending",
-      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge"
+      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge",
+      "Pricing provenance",
+      "demo.openai.writer · synthetic.writer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/writer-v1",
+      "demo.anthropic.reviewer · synthetic.reviewer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/reviewer-v1",
+      "Request provenance",
+      "request-writer-a · attempt attemptA · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-reviewer-b · attempt attemptB · provider-final · demo.anthropic.reviewer · synthetic.reviewer.v1",
+      "request-writer-c · attempt retryC · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-coordinator-d · attempt attemptD · provider-final · demo.unresolved.coordinator · UNPRICED"
     ],
     "activity": [
       "NEWEST · #6 · 2026-10-19T10:05:00.000Z · fixture · REVIEW · PASS",
@@ -469,6 +521,10 @@ export const GENERATED_FIXTURES = [
       "review: PASS / independence accepted",
       "publication: NOT REQUESTED",
       "cleanup: not-requested",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [
@@ -589,7 +645,15 @@ export const GENERATED_FIXTURES = [
       "unresolved · input 700 · output 100 · cache read 0 / write 0 · UNPRICED",
       "Ledger demo-ledger-demo-01 · run demo-014",
       "Accounted requests 3 · unknown 1 · reconciliation pending",
-      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge"
+      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge",
+      "Pricing provenance",
+      "demo.openai.writer · synthetic.writer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/writer-v1",
+      "demo.anthropic.reviewer · synthetic.reviewer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/reviewer-v1",
+      "Request provenance",
+      "request-writer-a · attempt attemptA · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-reviewer-b · attempt attemptB · provider-final · demo.anthropic.reviewer · synthetic.reviewer.v1",
+      "request-writer-c · attempt retryC · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-coordinator-d · attempt attemptD · provider-final · demo.unresolved.coordinator · UNPRICED"
     ],
     "activity": [
       "NEWEST · #7 · 2026-10-19T10:06:00.000Z · fixture · PR · PASS",
@@ -620,6 +684,10 @@ export const GENERATED_FIXTURES = [
       "review: PASS / independence accepted",
       "publication: publish-pr / confirmed",
       "cleanup: not-requested",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [
@@ -740,7 +808,15 @@ export const GENERATED_FIXTURES = [
       "unresolved · input 700 · output 100 · cache read 0 / write 0 · UNPRICED",
       "Ledger demo-ledger-demo-01 · run demo-014",
       "Accounted requests 3 · unknown 1 · reconciliation pending",
-      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge"
+      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge",
+      "Pricing provenance",
+      "demo.openai.writer · synthetic.writer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/writer-v1",
+      "demo.anthropic.reviewer · synthetic.reviewer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/reviewer-v1",
+      "Request provenance",
+      "request-writer-a · attempt attemptA · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-reviewer-b · attempt attemptB · provider-final · demo.anthropic.reviewer · synthetic.reviewer.v1",
+      "request-writer-c · attempt retryC · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-coordinator-d · attempt attemptD · provider-final · demo.unresolved.coordinator · UNPRICED"
     ],
     "activity": [
       "NEWEST · #8 · 2026-10-19T10:07:00.000Z · fixture · PR · PASS",
@@ -772,6 +848,10 @@ export const GENERATED_FIXTURES = [
       "review: PASS / independence accepted",
       "publication: publish-pr / confirmed",
       "cleanup: pending",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [
@@ -892,7 +972,15 @@ export const GENERATED_FIXTURES = [
       "unresolved · input 700 · output 100 · cache read 0 / write 0 · UNPRICED",
       "Ledger demo-ledger-demo-01 · run demo-014",
       "Accounted requests 3 · unknown 1 · reconciliation pending",
-      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge"
+      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge",
+      "Pricing provenance",
+      "demo.openai.writer · synthetic.writer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/writer-v1",
+      "demo.anthropic.reviewer · synthetic.reviewer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/reviewer-v1",
+      "Request provenance",
+      "request-writer-a · attempt attemptA · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-reviewer-b · attempt attemptB · provider-final · demo.anthropic.reviewer · synthetic.reviewer.v1",
+      "request-writer-c · attempt retryC · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-coordinator-d · attempt attemptD · provider-final · demo.unresolved.coordinator · UNPRICED"
     ],
     "activity": [
       "NEWEST · #9 · 2026-10-19T10:08:00.000Z · fixture · EXECUTE · PASS",
@@ -925,6 +1013,10 @@ export const GENERATED_FIXTURES = [
       "review: PASS / independence accepted",
       "publication: publish-pr / confirmed",
       "cleanup: complete",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [
@@ -1045,7 +1137,15 @@ export const GENERATED_FIXTURES = [
       "unresolved · input 700 · output 100 · cache read 0 / write 0 · UNPRICED",
       "Ledger demo-ledger-demo-01 · run demo-014",
       "Accounted requests 3 · unknown 1 · reconciliation pending",
-      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge"
+      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge",
+      "Pricing provenance",
+      "demo.openai.writer · synthetic.writer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/writer-v1",
+      "demo.anthropic.reviewer · synthetic.reviewer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/reviewer-v1",
+      "Request provenance",
+      "request-writer-a · attempt attemptA · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-reviewer-b · attempt attemptB · provider-final · demo.anthropic.reviewer · synthetic.reviewer.v1",
+      "request-writer-c · attempt retryC · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-coordinator-d · attempt attemptD · provider-final · demo.unresolved.coordinator · UNPRICED"
     ],
     "activity": [
       "NEWEST · #10 · 2026-10-19T10:09:00.000Z · fixture · EXECUTE · PASS",
@@ -1079,6 +1179,10 @@ export const GENERATED_FIXTURES = [
       "review: PASS / independence accepted",
       "publication: publish-pr / confirmed",
       "cleanup: unknown",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [
@@ -1199,7 +1303,15 @@ export const GENERATED_FIXTURES = [
       "unresolved · input 700 · output 100 · cache read 0 / write 0 · UNPRICED",
       "Ledger demo-ledger-demo-01 · run demo-014",
       "Accounted requests 3 · unknown 1 · reconciliation pending",
-      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge"
+      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge",
+      "Pricing provenance",
+      "demo.openai.writer · synthetic.writer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/writer-v1",
+      "demo.anthropic.reviewer · synthetic.reviewer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/reviewer-v1",
+      "Request provenance",
+      "request-writer-a · attempt attemptA · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-reviewer-b · attempt attemptB · provider-final · demo.anthropic.reviewer · synthetic.reviewer.v1",
+      "request-writer-c · attempt retryC · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-coordinator-d · attempt attemptD · provider-final · demo.unresolved.coordinator · UNPRICED"
     ],
     "activity": [
       "NEWEST · #11 · 2026-10-19T10:10:00.000Z · fixture · EXECUTE · INCOMPLETE",
@@ -1234,6 +1346,10 @@ export const GENERATED_FIXTURES = [
       "review: PASS / independence accepted",
       "publication: publish-pr / confirmed",
       "cleanup: unknown",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [
@@ -1354,7 +1470,15 @@ export const GENERATED_FIXTURES = [
       "unresolved · input 700 · output 100 · cache read 0 / write 0 · UNPRICED",
       "Ledger demo-ledger-demo-01 · run demo-014",
       "Accounted requests 3 · unknown 1 · reconciliation pending",
-      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge"
+      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge",
+      "Pricing provenance",
+      "demo.openai.writer · synthetic.writer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/writer-v1",
+      "demo.anthropic.reviewer · synthetic.reviewer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/reviewer-v1",
+      "Request provenance",
+      "request-writer-a · attempt attemptA · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-reviewer-b · attempt attemptB · provider-final · demo.anthropic.reviewer · synthetic.reviewer.v1",
+      "request-writer-c · attempt retryC · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-coordinator-d · attempt attemptD · provider-final · demo.unresolved.coordinator · UNPRICED"
     ],
     "activity": [
       "NEWEST · #12 · 2026-10-19T10:11:00.000Z · fixture · REVIEW · INCOMPLETE",
@@ -1390,6 +1514,10 @@ export const GENERATED_FIXTURES = [
       "review: PASS / independence accepted",
       "publication: publish-pr / confirmed",
       "cleanup: unknown",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [
@@ -1489,7 +1617,15 @@ export const GENERATED_FIXTURES = [
       "unresolved · input 700 · output 100 · cache read 0 / write 0 · UNPRICED",
       "Ledger demo-ledger-demo-01 · run demo-014",
       "Accounted requests 3 · unknown 1 · reconciliation pending",
-      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge"
+      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge",
+      "Pricing provenance",
+      "demo.openai.writer · synthetic.writer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/writer-v1",
+      "demo.anthropic.reviewer · synthetic.reviewer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/reviewer-v1",
+      "Request provenance",
+      "request-writer-a · attempt attemptA · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-reviewer-b · attempt attemptB · provider-final · demo.anthropic.reviewer · synthetic.reviewer.v1",
+      "request-writer-c · attempt retryC · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-coordinator-d · attempt attemptD · provider-final · demo.unresolved.coordinator · UNPRICED"
     ],
     "activity": [
       "NEWEST · #13 · 2026-10-19T10:12:00.000Z · fixture · REVIEW · INCOMPLETE",
@@ -1525,6 +1661,10 @@ export const GENERATED_FIXTURES = [
       "review: PASS / independence accepted",
       "publication: publish-pr / confirmed",
       "cleanup: unknown",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [
@@ -1582,7 +1722,15 @@ export const GENERATED_FIXTURES = [
       "unresolved · input 700 · output 100 · cache read 0 / write 0 · UNPRICED",
       "Ledger demo-ledger-demo-01 · run demo-014",
       "Accounted requests 3 · unknown 1 · reconciliation pending",
-      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge"
+      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge",
+      "Pricing provenance",
+      "demo.openai.writer · synthetic.writer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/writer-v1",
+      "demo.anthropic.reviewer · synthetic.reviewer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/reviewer-v1",
+      "Request provenance",
+      "request-writer-a · attempt attemptA · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-reviewer-b · attempt attemptB · provider-final · demo.anthropic.reviewer · synthetic.reviewer.v1",
+      "request-writer-c · attempt retryC · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-coordinator-d · attempt attemptD · provider-final · demo.unresolved.coordinator · UNPRICED"
     ],
     "activity": [
       "NEWEST · #14 · 2026-10-19T10:13:00.000Z · fixture · EVALUATE · FAIL",
@@ -1618,6 +1766,10 @@ export const GENERATED_FIXTURES = [
       "review: PASS / independence accepted",
       "publication: publish-pr / confirmed",
       "cleanup: unknown",
+      "Engram: unavailable · not connected",
+      "Continuum memory: unavailable · not connected",
+      "Continuum coordination: unavailable · not connected",
+      "Switchyard: unverified · not measured",
       "No execution controls · fixture inspection only"
     ],
     "evidence": [
@@ -1675,7 +1827,15 @@ export const GENERATED_FIXTURES = [
       "unresolved · input 700 · output 100 · cache read 0 / write 0 · UNPRICED",
       "Ledger demo-ledger-demo-01 · run demo-014",
       "Accounted requests 3 · unknown 1 · reconciliation pending",
-      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge"
+      "SYNTHETIC TOKENS + SYNTHETIC RATES; not an invoice, subscription bill, or actual charge",
+      "Pricing provenance",
+      "demo.openai.writer · synthetic.writer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/writer-v1",
+      "demo.anthropic.reviewer · synthetic.reviewer.v1 · as of 2026-10-19T10:00:00.000Z · fixture://rates/reviewer-v1",
+      "Request provenance",
+      "request-writer-a · attempt attemptA · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-reviewer-b · attempt attemptB · provider-final · demo.anthropic.reviewer · synthetic.reviewer.v1",
+      "request-writer-c · attempt retryC · provider-final · demo.openai.writer · synthetic.writer.v1",
+      "request-coordinator-d · attempt attemptD · provider-final · demo.unresolved.coordinator · UNPRICED"
     ],
     "activity": [
       "NEWEST · #15 · 2026-10-19T10:14:00.000Z · fixture · EVALUATE · ERROR",
