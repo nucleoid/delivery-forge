@@ -1218,6 +1218,37 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
+    public void Advisory_example_rejects_unknown_options_instead_of_silently_skipping_evaluation()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => AdvisoryAntiSlopExample.ParseOptions(
+        [
+            "--repository", "/repository",
+            "--base", TestEvidence.Commit('a'),
+            "--bundle", "/bundle",
+            "--node", "/node",
+            "--output", "/output",
+            "--inpt", "src/app.ts"
+        ]));
+
+        Assert.Contains("Unknown option '--inpt'", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Advisory_example_requires_at_least_one_candidate_input()
+    {
+        var exception = Assert.Throws<ArgumentException>(() => AdvisoryAntiSlopExample.ParseOptions(
+        [
+            "--repository", "/repository",
+            "--base", TestEvidence.Commit('a'),
+            "--bundle", "/bundle",
+            "--node", "/node",
+            "--output", "/output"
+        ]));
+
+        Assert.Contains("At least one --input", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Canonical_v1_envelope_remains_legacy_shaped_while_result_exposes_plugin_raw_outcome()
     {
         using var temp = new TempDirectory();

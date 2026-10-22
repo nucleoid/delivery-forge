@@ -9,6 +9,23 @@ namespace DeliveryForge.Evidence;
 /// </summary>
 public static class AdvisoryAntiSlopExample
 {
+    private static readonly HashSet<string> FlagOptions = new(StringComparer.Ordinal)
+    {
+        "--effect",
+        "--disabled"
+    };
+
+    private static readonly HashSet<string> ValueOptions = new(StringComparer.Ordinal)
+    {
+        "--repository",
+        "--base",
+        "--bundle",
+        "--node",
+        "--output",
+        "--input",
+        "--ignore"
+    };
+
     public static async Task<int> Main(string[] args)
     {
         if (args.Length == 0 || args.Contains("--help", StringComparer.Ordinal))
@@ -28,38 +45,18 @@ public static class AdvisoryAntiSlopExample
             return 0;
         }
 
-        var values = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-        var flags = new HashSet<string>(StringComparer.Ordinal);
-        for (var index = 0; index < args.Length; index++)
+        AdvisoryAntiSlopOptions options;
+        try
         {
-            var argument = args[index];
-            if (argument is "--effect" or "--disabled")
-            {
-                flags.Add(argument);
-                continue;
-            }
-            if (!argument.StartsWith("--", StringComparison.Ordinal) || index + 1 == args.Length)
-                throw new ArgumentException($"Expected --name value, received '{argument}'.");
-            if (!values.TryGetValue(argument, out var collected))
-                values[argument] = collected = [];
-            collected.Add(args[++index]);
+            options = ParseOptions(args);
+        }
+        catch (ArgumentException exception)
+        {
+            Console.Error.WriteLine($"Invalid arguments: {exception.Message}");
+            return 64;
         }
 
-        string One(string name) => values.TryGetValue(name, out var items) && items.Count == 1
-            ? items[0]
-            : throw new ArgumentException($"Exactly one {name} value is required.");
-        IReadOnlyList<string> Many(string name) => values.TryGetValue(name, out var items) ? items : [];
-
-        var report = await AdvisoryAntiSlopComposition.RunAsync(new AdvisoryAntiSlopOptions(
-            One("--repository"),
-            One("--base"),
-            One("--bundle"),
-            One("--node"),
-            One("--output"),
-            Many("--input"),
-            new HashSet<string>(Many("--ignore"), StringComparer.Ordinal),
-            Enabled: !flags.Contains("--disabled"),
-            EnableEffectRules: flags.Contains("--effect"))).ConfigureAwait(false);
+        var report = await AdvisoryAntiSlopComposition.RunAsync(options).ConfigureAwait(false);
 
         Console.WriteLine(JsonSerializer.Serialize(new
         {
@@ -83,5 +80,48 @@ public static class AdvisoryAntiSlopExample
 
         return report.Executions.Any(execution =>
             execution.Result?.Outcome is GateOutcome.Fail or GateOutcome.Error or GateOutcome.Incomplete) ? 2 : 0;
+    }
+
+    internal static AdvisoryAntiSlopOptions ParseOptions(IReadOnlyList<string> args)
+    {
+        var values = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        var flags = new HashSet<string>(StringComparer.Ordinal);
+        for (var index = 0; index < args.Count; index++)
+        {
+            var argument = args[index];
+            if (FlagOptions.Contains(argument))
+            {
+                if (!flags.Add(argument))
+                    throw new ArgumentException($"Option '{argument}' may be specified only once.");
+                continue;
+            }
+            if (!ValueOptions.Contains(argument))
+                throw new ArgumentException($"Unknown option '{argument}'.");
+            if (index + 1 == args.Count || args[index + 1].StartsWith("--", StringComparison.Ordinal))
+                throw new ArgumentException($"Expected --name value, received '{argument}'.");
+            if (!values.TryGetValue(argument, out var collected))
+                values[argument] = collected = [];
+            collected.Add(args[++index]);
+        }
+
+        string One(string name) => values.TryGetValue(name, out var items) && items.Count == 1
+            ? items[0]
+            : throw new ArgumentException($"Exactly one {name} value is required.");
+        IReadOnlyList<string> Many(string name) => values.TryGetValue(name, out var items) ? items : [];
+
+        var inputs = Many("--input");
+        if (inputs.Count == 0)
+            throw new ArgumentException("At least one --input value is required.");
+
+        return new AdvisoryAntiSlopOptions(
+            One("--repository"),
+            One("--base"),
+            One("--bundle"),
+            One("--node"),
+            One("--output"),
+            inputs,
+            new HashSet<string>(Many("--ignore"), StringComparer.Ordinal),
+            Enabled: !flags.Contains("--disabled"),
+            EnableEffectRules: flags.Contains("--effect"));
     }
 }
