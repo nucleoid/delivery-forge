@@ -120,7 +120,9 @@ internal static partial class ChangedLineCoverage
                 var documents = context.Value.Values.Select(source => new CompilerLineCensus.Document(source.LogicalPath, source.RepositoryPath,
                     source.CompilerPhysicalRole, source.Sha256, source.Text, source.Generated)).ToArray();
                 var inventory = CompilerLineCensus.Inspect(assembly, pdb, expected, documents, files);
-                if (!inventory.Complete && artifacts.Any(row => Text(row, "kind") == "compiler-invocation-recipe" &&
+                // Optional reconstruction cannot improve an already incomplete
+                // whole census. Mandatory source, module and report checks still run.
+                if (censusComplete && !inventory.Complete && artifacts.Any(row => Text(row, "kind") == "compiler-invocation-recipe" &&
                     OptionalText(row, "contextId") == context.Key && OptionalText(row, "buildId") == buildId))
                 {
                     // Existing source reads and exact repository/physical roles

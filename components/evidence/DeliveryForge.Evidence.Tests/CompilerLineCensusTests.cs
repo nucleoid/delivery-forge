@@ -67,6 +67,36 @@ public sealed class CompilerLineCensusTests
     }
 
     [Fact]
+    public void Changed_generated_source_skips_unneeded_recipe_but_keeps_actual_module_refusals()
+    {
+        using var fixture = new Fixture();
+        Assert.Same(fixture.UnusedRecipeRead, Assert.Throws<IOException>(() => fixture.Read(
+            extraCompilerConstructor: true, unreadRecipeContext: "c")));
+        Assert.Equal(1, fixture.OptionalRecipeReads); fixture.OptionalRecipeReads = 0;
+        var result = fixture.Read(includeDeclarations: true, generatedDeclaration: true,
+            extraCompilerConstructor: true, unreadRecipeContext: "c");
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome); Assert.False(result.CompilerCensusComplete);
+        Assert.Contains("marked generated", result.Reason, StringComparison.Ordinal);
+        Assert.Equal(0, fixture.OptionalRecipeReads);
+        var error = Assert.Throws<EvidenceWriteException>(() => fixture.Read(fault: "mvid",
+            includeDeclarations: true, generatedDeclaration: true, extraCompilerConstructor: true, unreadRecipeContext: "c"));
+        Assert.Contains("module/MVID", error.Message, StringComparison.Ordinal);
+        Assert.Equal(0, fixture.OptionalRecipeReads);
+    }
+
+    [Fact]
+    public void Earlier_incomplete_context_skips_later_optional_recipe_without_claiming_completeness()
+    {
+        using var fixture = new Fixture();
+        Assert.Same(fixture.UnusedRecipeRead, Assert.Throws<IOException>(() => fixture.Read(secondContext: true,
+            extraCompilerConstructor: true, extraCompilerConstructorContext: "c2", unreadRecipeContext: "c2")));
+        Assert.Equal(1, fixture.OptionalRecipeReads); fixture.OptionalRecipeReads = 0;
+        var result = fixture.Read(secondContext: true, extraCompilerConstructor: true, unreadRecipeContext: "c2");
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome); Assert.False(result.CompilerCensusComplete);
+        Assert.Equal(0, fixture.OptionalRecipeReads);
+    }
+
+    [Fact]
     public void Genuine_declaration_only_input_does_not_add_unmeasured_lines_to_a_fully_covered_compiler_change()
     {
         using var fixture = new Fixture();
@@ -334,6 +364,8 @@ public sealed class CompilerLineCensusTests
     {
         private const string ProjectRole = "components/evidence/DeliveryForge.Evidence.CensusFixture";
         internal readonly InstalledToolFiles Files;
+        internal readonly IOException UnusedRecipeRead = new("Unneeded optional recipe was read.");
+        internal int OptionalRecipeReads;
         internal readonly string Repository, SourcePath, DeclarationPath;
         internal readonly byte[] Source, DeclarationSource, Pe, Pdb;
         internal readonly CompilerLineCensus.Build Build;
@@ -370,7 +402,7 @@ public sealed class CompilerLineCensusTests
             bool includeDeclarations = false, bool declarationsOnly = false, bool rawReports = false,
             bool declarationCompilerSource = false, bool extraCompilerConstructor = false, bool compilerSourceHashDrift = false,
             bool generatedChangedContext = false, string generatedChangedRole = "source", bool generatedChangedSourceDrift = false,
-            bool generatedDeclaration = false)
+            bool generatedDeclaration = false, string? unreadRecipeContext = null, string? extraCompilerConstructorContext = null)
         {
             var rawSource = fault == "checksum" ? Source.Concat(" "u8.ToArray()).ToArray() : Source;
             // Only the checksum-negative uses a separate logical copy. Physical source
@@ -405,7 +437,7 @@ public sealed class CompilerLineCensusTests
                         new { role = declarationCompilerSource ? "compiler-source" : "source", logicalPath = "Declarations.cs", repositoryPath = ProjectRole + "/Declarations.cs", locator = "declaration",
                         length = DeclarationSource.Length, sha256 = InstalledToolFiles.Identity(DeclarationSource)[7..], generated = generatedDeclaration, encoding = "utf-8" } }
                 })!;
-                if (extraCompilerConstructor)
+                if (extraCompilerConstructor && (extraCompilerConstructorContext is null || extraCompilerConstructorContext == context))
                     contextNode["inputs"]!.AsArray().Add(JsonSerializer.SerializeToNode(new
                     {
                         role = "compiler-source",
@@ -428,6 +460,12 @@ public sealed class CompilerLineCensusTests
                     assemblySha256 = fault == "assembly-hash" ? new string('0', 64) : InstalledToolFiles.Identity(Pe)[7..],
                     pdbSha256 = InstalledToolFiles.Identity(data["pdb"])[7..]
                 }));
+                if (context == unreadRecipeContext)
+                    artifacts.Add(JsonSerializer.SerializeToNode(new
+                    {
+                        id = context + "recipe", kind = "compiler-invocation-recipe", contextId = context, buildId = build,
+                        locator = "unread-optional-recipe", length = 2, sha256 = InstalledToolFiles.Identity("{}"u8.ToArray())[7..]
+                    }));
                 foreach (var role in new[] { "assembly", "pdb" })
                 {
                     var locator = role == "assembly" ? "pe" : "pdb";
@@ -471,7 +509,7 @@ public sealed class CompilerLineCensusTests
                     sha256 = InstalledToolFiles.Identity(data[locatorCoverage])[7..]
                 }));
             }
-            var node = new JsonObject { ["contexts"] = contexts, ["builds"] = builds, ["executions"] = executions, ["artifacts"] = artifacts };
+            var node = new JsonObject { ["manifestSchemaVersion"] = "1.0", ["contexts"] = contexts, ["builds"] = builds, ["executions"] = executions, ["artifacts"] = artifacts };
             using var manifest = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(node));
             var sourceLines = Encoding.UTF8.GetString(Source).TrimEnd('\n').Split('\n');
             var diff = Encoding.UTF8.GetBytes("+++ b/" + ProjectRole + "/Subject.cs\n@@ -0,0 +1," + sourceLines.Length + " @@\n" +
@@ -488,9 +526,14 @@ public sealed class CompilerLineCensusTests
                     string.Join("\n", lines.Select(line => "+" + line)) + "\n");
                 diff = declarationsOnly ? declarationDiff : diff.Concat(declarationDiff).ToArray();
             }
+            byte[] ReadArtifact(string locator)
+            {
+                if (locator == "unread-optional-recipe") { OptionalRecipeReads++; throw UnusedRecipeRead; }
+                return data[locator];
+            }
             return rawReports
-                ? ChangedLineCoverage.Read(diff, manifest.RootElement, Repository, path => data[path], Files)
-                : ChangedLineCoverage.ReadCompilerBound(diff, manifest.RootElement, Repository, path => data[path], Files);
+                ? ChangedLineCoverage.Read(diff, manifest.RootElement, Repository, ReadArtifact, Files)
+                : ChangedLineCoverage.ReadCompilerBound(diff, manifest.RootElement, Repository, ReadArtifact, Files);
         }
         private ChangedLineCoverage.Result ReadChecksumNegative()
         {
