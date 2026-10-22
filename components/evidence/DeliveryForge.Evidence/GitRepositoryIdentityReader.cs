@@ -18,6 +18,7 @@ public sealed class GitRepositoryIdentityReader(
     internal const int MaximumBatchPayloadBytes = 16 * 1024 * 1024;
     private readonly string _repositoryRoot = Path.GetFullPath(repositoryRoot);
     internal int ObjectBatchInvocationCount { get; private set; }
+    internal GitStatusCommandDiagnostics? LastIdentityStatusDiagnostics { get; private set; }
     internal bool SupportsCreationOwnedBoundedRead =>
         executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true };
 
@@ -35,6 +36,7 @@ public sealed class GitRepositoryIdentityReader(
         DateTimeOffset? deadline,
         CancellationToken cancellationToken)
     {
+        LastIdentityStatusDiagnostics = null;
         if (!Path.IsPathFullyQualified(_repositoryRoot) ||
             !IsGitObject(protectedBaseCommit))
             throw new EvidenceRepositoryException("Repository root and a full protected base commit are required.");
@@ -51,7 +53,8 @@ public sealed class GitRepositoryIdentityReader(
             ["merge-base", "--is-ancestor", baseId, headId], cancellationToken, deadline).ConfigureAwait(false);
         var tree = await GitAsync(["rev-parse", "HEAD^{tree}"], cancellationToken, deadline).ConfigureAwait(false);
         var status = await GitAsync(
-            ["status", "--porcelain=v1", "--untracked-files=all"], cancellationToken, deadline).ConfigureAwait(false);
+            ["status", "--porcelain=v1", "--untracked-files=all"], cancellationToken, deadline,
+            captureIdentityStatusDiagnostics: true).ConfigureAwait(false);
         var treeId = tree.StandardOutput.Trim();
         if (!IsGitObject(treeId))
             throw new EvidenceRepositoryException("Git returned a malformed head or tree identity.");
@@ -667,9 +670,11 @@ public sealed class GitRepositoryIdentityReader(
     private async Task<CommandResult> GitAsync(
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken,
-        DateTimeOffset? deadline = null)
+        DateTimeOffset? deadline = null,
+        bool captureIdentityStatusDiagnostics = false)
     {
-        var result = await ExecuteGitAsync(arguments, cancellationToken, deadline).ConfigureAwait(false);
+        var result = await ExecuteGitAsync(
+            arguments, cancellationToken, deadline, captureIdentityStatusDiagnostics).ConfigureAwait(false);
         if (result.TimedOut || result.Cancelled || result.ExitCode != 0)
             throw new EvidenceRepositoryException(
                 $"Git identity command failed: git {string.Join(" ", arguments)}");
@@ -690,7 +695,8 @@ public sealed class GitRepositoryIdentityReader(
     private async Task<CommandResult> ExecuteGitAsync(
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken,
-        DateTimeOffset? deadline = null)
+        DateTimeOffset? deadline = null,
+        bool captureIdentityStatusDiagnostics = false)
     {
         cancellationToken.ThrowIfCancellationRequested();
         var budget = deadline is null
@@ -707,6 +713,8 @@ public sealed class GitRepositoryIdentityReader(
         {
             var capture = await owned.ExecuteBoundedCaptureAsync(
                 invocation, budget, MaximumGitListingBytes, cancellationToken).ConfigureAwait(false);
+            if (captureIdentityStatusDiagnostics)
+                LastIdentityStatusDiagnostics = GitStatusCommandDiagnostics.From(invocation, capture);
             if (capture.CaptureBoundExceeded)
                 throw new EvidenceRepositoryException("Frozen Git evidence exceeded the bounded capture limit.");
             return capture.Command;
@@ -715,11 +723,16 @@ public sealed class GitRepositoryIdentityReader(
         {
             var capture = await fixture.ExecuteBoundedCaptureAsync(
                 invocation, budget, MaximumGitListingBytes, cancellationToken).ConfigureAwait(false);
+            if (captureIdentityStatusDiagnostics)
+                LastIdentityStatusDiagnostics = GitStatusCommandDiagnostics.From(invocation, capture);
             if (capture.CaptureBoundExceeded)
                 throw new EvidenceRepositoryException("Frozen Git evidence exceeded the bounded capture limit.");
             return capture.Command;
         }
-        return await executor.ExecuteAsync(invocation, budget, cancellationToken).ConfigureAwait(false);
+        var result = await executor.ExecuteAsync(invocation, budget, cancellationToken).ConfigureAwait(false);
+        if (captureIdentityStatusDiagnostics)
+            LastIdentityStatusDiagnostics = GitStatusCommandDiagnostics.From(invocation, result);
+        return result;
     }
 
     private static bool IsGitObject(string value) =>
@@ -821,6 +834,103 @@ public sealed class GitRepositoryIdentityReader(
     private static StringComparer PathComparer => OperatingSystem.IsWindows()
         ? StringComparer.OrdinalIgnoreCase
         : StringComparer.Ordinal;
+}
+
+internal sealed record GitStatusCommandDiagnostics(
+    string FileName,
+    IReadOnlyList<string> Arguments,
+    string WorkingDirectory,
+    IReadOnlyDictionary<string, string> Environment,
+    bool InheritEnvironment,
+    int MaximumCaptureBytesPerStream,
+    bool CreationOwnedBoundedCapture,
+    bool? CaptureBoundExceeded,
+    bool? RootExitObserved,
+    bool? StandardOutputDrainCompleted,
+    bool? StandardErrorDrainCompleted,
+    int StandardOutputByteCount,
+    int StandardErrorByteCount,
+    string StandardOutputPrefixHex,
+    string StandardErrorPrefixHex,
+    string StandardOutputSha256,
+    string StandardErrorSha256,
+    int? ExitCode,
+    bool TimedOut,
+    bool Cancelled,
+    bool OwnedProcessQuiescent,
+    DateTimeOffset StartedAt,
+    DateTimeOffset CompletedAt,
+    CommandLifecycleDiagnostics? LifecycleDiagnostics)
+{
+    private const int MaximumDiagnosticPrefixBytes = 4096;
+
+    internal static GitStatusCommandDiagnostics From(
+        CommandInvocation invocation,
+        BoundedCommandCaptureResult capture) =>
+        Create(
+            invocation,
+            capture.Command,
+            capture.StandardOutputBytes,
+            capture.StandardErrorBytes,
+            true,
+            capture.CaptureBoundExceeded,
+            capture.RootExitObserved,
+            capture.StandardOutputDrainCompleted,
+            capture.StandardErrorDrainCompleted);
+
+    internal static GitStatusCommandDiagnostics From(
+        CommandInvocation invocation,
+        CommandResult command) =>
+        Create(
+            invocation,
+            command,
+            Encoding.UTF8.GetBytes(command.StandardOutput),
+            Encoding.UTF8.GetBytes(command.StandardError),
+            false,
+            null,
+            null,
+            null,
+            null);
+
+    private static GitStatusCommandDiagnostics Create(
+        CommandInvocation invocation,
+        CommandResult command,
+        byte[] standardOutput,
+        byte[] standardError,
+        bool creationOwnedBoundedCapture,
+        bool? captureBoundExceeded,
+        bool? rootExitObserved,
+        bool? standardOutputDrainCompleted,
+        bool? standardErrorDrainCompleted) =>
+        new(
+            invocation.FileName,
+            invocation.Arguments.ToArray(),
+            invocation.WorkingDirectory,
+            new Dictionary<string, string>(invocation.Environment ?? new Dictionary<string, string>(),
+                StringComparer.Ordinal),
+            invocation.InheritEnvironment,
+            GitRepositoryIdentityReader.MaximumGitListingBytes,
+            creationOwnedBoundedCapture,
+            captureBoundExceeded,
+            rootExitObserved,
+            standardOutputDrainCompleted,
+            standardErrorDrainCompleted,
+            standardOutput.Length,
+            standardError.Length,
+            PrefixHex(standardOutput),
+            PrefixHex(standardError),
+            Convert.ToHexStringLower(SHA256.HashData(standardOutput)),
+            Convert.ToHexStringLower(SHA256.HashData(standardError)),
+            command.ExitCode,
+            command.TimedOut,
+            command.Cancelled,
+            command.OwnedProcessQuiescent,
+            command.StartedAt,
+            command.CompletedAt,
+            command.LifecycleDiagnostics);
+
+    private static string PrefixHex(byte[] value) =>
+        Convert.ToHexStringLower(value.AsSpan(0, Math.Min(value.Length, MaximumDiagnosticPrefixBytes)));
 }
 
 internal sealed record TreeEntry(string Mode, string Path, string ObjectId);

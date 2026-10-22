@@ -440,6 +440,33 @@ public sealed class GitRepositoryIdentityReaderTests
         Assert.Equal(TestEvidence.Repository(), identity);
     }
 
+    [Fact]
+    public async Task Identity_diagnostics_describe_the_actual_status_command_result()
+    {
+        var reader = new GitRepositoryIdentityReader(
+            new QueueCommandExecutor(
+                Result(TestEvidence.Commit('b') + Environment.NewLine),
+                Result(TestEvidence.Commit('a') + Environment.NewLine),
+                Result(string.Empty),
+                Result(TestEvidence.Commit('c') + Environment.NewLine),
+                Result("\0")),
+            System.IO.Path.GetTempPath(),
+            TestEvidence.Commit('a'));
+
+        var identity = await reader.ReadAsync(TestContext.Current.CancellationToken);
+
+        Assert.False(identity.IsClean);
+        var diagnostics = Assert.IsType<GitStatusCommandDiagnostics>(reader.LastIdentityStatusDiagnostics);
+        Assert.Equal(["status", "--porcelain=v1", "--untracked-files=all"], diagnostics.Arguments);
+        Assert.False(diagnostics.InheritEnvironment);
+        Assert.Equal("00", diagnostics.StandardOutputPrefixHex);
+        Assert.Equal(1, diagnostics.StandardOutputByteCount);
+        Assert.Equal(0, diagnostics.ExitCode);
+        Assert.False(diagnostics.TimedOut);
+        Assert.False(diagnostics.Cancelled);
+        Assert.True(diagnostics.OwnedProcessQuiescent);
+    }
+
     [Theory]
     [InlineData("filter.evil.clean", "touch-should-never-run")]
     [InlineData("include.path", "/tmp/patch-controlled-git-include")]

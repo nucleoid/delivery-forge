@@ -106,17 +106,20 @@ public sealed class RealDotNetFixtureTests
         var assembly = System.IO.Path.Combine(
             greenRepository, "Subject", "bin", "Release", "net10.0", "Subject.dll");
         Assert.False(File.Exists(assembly));
+        GitStatusCommandDiagnostics? gateStatusDiagnostics = null;
         var greenResult = await RunGateAsync(
             executor, capability, greenRepository, evidence.Path, protectedBase, "green-gate",
             ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={greenTrx}"],
-            preGate.Identity);
-        ArchiveFixtureEvidence(evidence.Path, greenResult, repositoryDiagnostics);
+            preGate.Identity,
+            diagnostics => gateStatusDiagnostics = diagnostics);
+        ArchiveFixtureEvidence(evidence.Path, greenResult, repositoryDiagnostics, gateStatusDiagnostics);
         Assert.True(greenResult.Execution.ExitCode == 0,
             $"GREEN process did not complete successfully: exit={greenResult.Execution.ExitCode}; " +
             $"timeout={greenResult.Execution.TimedOut}; cancelled={greenResult.Execution.Cancelled}; " +
             $"quiescent={greenResult.Execution.OwnedProcessQuiescent}; reason={greenResult.Reason}; " +
             $"native={greenResult.Execution.LifecycleDiagnostics?.NativeFailure}\n" +
-            FormatRepositoryDiagnostics(repositoryDiagnostics, preGate.Identity, greenResult.Before) + "\n" +
+            FormatRepositoryDiagnostics(
+                repositoryDiagnostics, preGate.Identity, greenResult.Before, gateStatusDiagnostics) + "\n" +
             greenResult.Execution.StandardOutput + "\n" + greenResult.Execution.StandardError);
         Assert.True(File.Exists(assembly));
         Assert.Equal((1, 1, 1, 0), ReadCounts(greenTrx));
@@ -147,7 +150,8 @@ public sealed class RealDotNetFixtureTests
         string protectedBase,
         string outputName,
         IReadOnlyList<string> arguments,
-        RepositoryIdentity? expectedRepository = null)
+        RepositoryIdentity? expectedRepository = null,
+        Action<GitStatusCommandDiagnostics?>? captureStatusDiagnostics = null)
     {
         var reader = new GitRepositoryIdentityReader(executor, repository, protectedBase);
         var identity = expectedRepository ?? await reader.ReadAsync(TestContext.Current.CancellationToken);
@@ -166,7 +170,7 @@ public sealed class RealDotNetFixtureTests
             ["MSBUILDDISABLENODEREUSE"] = "1",
             ["UseSharedCompilation"] = "false"
         };
-        return await new GateRunner(
+        var result = await new GateRunner(
             executor, reader, repository, protectedBase,
             plugins: null, authorityRegistry: null,
             hostOwnedClaimRoot: System.IO.Path.Combine(outputRoot, ".claims", outputName)).RunAsync(
@@ -176,12 +180,15 @@ public sealed class RealDotNetFixtureTests
                 new CommandInvocation(capability.ExecutablePath!, boundedArguments, repository, environment),
                 "fixture", TimeSpan.FromSeconds(90), System.IO.Path.Combine(outputRoot, outputName)),
             TestContext.Current.CancellationToken);
+        captureStatusDiagnostics?.Invoke(reader.LastIdentityStatusDiagnostics);
+        return result;
     }
 
     private static void ArchiveFixtureEvidence(
         string evidenceRoot,
         GateRunResult result,
-        RepositoryDiagnosticBundle? repositoryDiagnostics = null)
+        RepositoryDiagnosticBundle? repositoryDiagnostics = null,
+        GitStatusCommandDiagnostics? gateStatusDiagnostics = null)
     {
         var destination = Environment.GetEnvironmentVariable("DELIVERY_FORGE_TEST_ARTIFACTS");
         if (string.IsNullOrWhiteSpace(destination)) return;
@@ -197,7 +204,8 @@ public sealed class RealDotNetFixtureTests
                 result.Execution,
                 result.Before,
                 result.After,
-                repositoryDiagnostics
+                repositoryDiagnostics,
+                gateStatusDiagnostics
             }));
         var files = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
         foreach (var source in Directory.EnumerateFiles(evidenceRoot, "*", files))
@@ -227,8 +235,8 @@ public sealed class RealDotNetFixtureTests
             ]);
         // Keep the hardened identity read last. Diagnostic Git commands must not run
         // between the expected snapshot and GateRunner's independent observed read.
-        var identity = await new GitRepositoryIdentityReader(executor, repository, protectedBase)
-            .ReadAsync(TestContext.Current.CancellationToken);
+        var identityReader = new GitRepositoryIdentityReader(executor, repository, protectedBase);
+        var identity = await identityReader.ReadAsync(TestContext.Current.CancellationToken);
         return new RepositoryDiagnosticSnapshot(
             label,
             Environment.CurrentDirectory,
@@ -239,6 +247,7 @@ public sealed class RealDotNetFixtureTests
             topLevel.StandardOutput,
             topLevel.StandardError,
             identity,
+            identityReader.LastIdentityStatusDiagnostics,
             porcelain.ExitCode,
             porcelain.StandardOutput,
             porcelain.StandardError,
@@ -250,11 +259,13 @@ public sealed class RealDotNetFixtureTests
     private static string FormatRepositoryDiagnostics(
         RepositoryDiagnosticBundle diagnostics,
         RepositoryIdentity expected,
-        RepositoryIdentity observed) =>
+        RepositoryIdentity observed,
+        GitStatusCommandDiagnostics? gateStatusDiagnostics) =>
         "Repository identity diagnostics: " + System.Text.Json.JsonSerializer.Serialize(new
         {
             ExpectedRepositoryIdentity = expected,
             ObservedRepositoryIdentity = observed,
+            GateStatusCommand = gateStatusDiagnostics,
             Snapshots = diagnostics
         });
 
@@ -394,6 +405,7 @@ public sealed class RealDotNetFixtureTests
         string GitTopLevelStandardOutput,
         string GitTopLevelStandardError,
         RepositoryIdentity Identity,
+        GitStatusCommandDiagnostics? IdentityStatusCommand,
         int? PorcelainExitCode,
         string PorcelainStandardOutput,
         string PorcelainStandardError,
