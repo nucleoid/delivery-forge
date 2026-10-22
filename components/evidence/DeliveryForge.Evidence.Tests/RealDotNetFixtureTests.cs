@@ -18,6 +18,8 @@ public sealed class RealDotNetFixtureTests
             System.IO.Path.Combine(temp.Path, "global.json"));
         await File.WriteAllTextAsync(System.IO.Path.Combine(temp.Path, ".gitignore"),
             "**/bin/\n**/obj/\n*.trx\n", TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(System.IO.Path.Combine(temp.Path, ".gitattributes"),
+            "* text eol=lf\n", TestContext.Current.CancellationToken);
         var subject = System.IO.Path.Combine(temp.Path, "Subject", "Calculator.cs");
         var red = await File.ReadAllTextAsync(
             System.IO.Path.Combine(temp.Path, "Subject", "Calculator.red.cs.txt"),
@@ -140,6 +142,78 @@ public sealed class RealDotNetFixtureTests
         Assert.Equal((1, 1, 1, 0), ReadCounts(warmTrx));
         Assert.Equal(GateOutcome.Incomplete, warmResult.Outcome);
         Assert.Contains("compiler", warmResult.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Canonical_line_ending_policy_keeps_hardened_identity_clean_after_autocrlf_checkout()
+    {
+        using var sourceOwner = new TempDirectory();
+        using var noPolicyOwner = new TempDirectory();
+        using var policyOwner = new TempDirectory();
+        var executor = new ProcessCommandExecutor();
+        var source = System.IO.Path.Combine(sourceOwner.Path, "source");
+        Directory.CreateDirectory(source);
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(source, "sample.txt"),
+            "alpha\nbeta\n",
+            TestContext.Current.CancellationToken);
+        await GitAsync(executor, source, ["init"]);
+        await GitAsync(executor, source, ["config", "user.name", "Delivery Forge Fixture"]);
+        await GitAsync(executor, source, ["config", "user.email", "fixture@delivery-forge.invalid"]);
+        await GitAsync(executor, source, ["add", "."]);
+        await GitAsync(executor, source, ["commit", "-m", "fixture without line ending policy"]);
+        var noPolicyHead = (await GitAsync(executor, source, ["rev-parse", "HEAD"]))
+            .StandardOutput.Trim();
+
+        var noPolicyClone = System.IO.Path.Combine(noPolicyOwner.Path, "repository");
+        await GitAsync(
+            executor,
+            noPolicyOwner.Path,
+            ["-c", "core.autocrlf=true", "clone", "--no-local", "--no-hardlinks", "--", source, noPolicyClone]);
+        var ordinaryNoPolicyStatus = await GitAsync(
+            executor,
+            noPolicyClone,
+            ["-c", "core.autocrlf=true", "status", "--porcelain=v1", "--untracked-files=all"]);
+        Assert.True(string.IsNullOrEmpty(ordinaryNoPolicyStatus.StandardOutput));
+        var noPolicyIdentity = await new GitRepositoryIdentityReader(executor, noPolicyClone, noPolicyHead)
+            .ReadAsync(TestContext.Current.CancellationToken);
+        Assert.False(noPolicyIdentity.IsClean);
+        var noPolicyIndex = (await GitAsync(executor, noPolicyClone, ["rev-parse", "HEAD:sample.txt"]))
+            .StandardOutput.Trim();
+        var noPolicyRaw = (await GitAsync(executor, noPolicyClone, ["hash-object", "--no-filters", "sample.txt"]))
+            .StandardOutput.Trim();
+        var noPolicyFiltered = (await GitAsync(
+                executor, noPolicyClone, ["-c", "core.autocrlf=true", "hash-object", "sample.txt"]))
+            .StandardOutput.Trim();
+        Assert.NotEqual(noPolicyIndex, noPolicyRaw);
+        Assert.Equal(noPolicyIndex, noPolicyFiltered);
+
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(source, ".gitattributes"),
+            "* text eol=lf\n",
+            TestContext.Current.CancellationToken);
+        await GitAsync(executor, source, ["add", ".gitattributes"]);
+        await GitAsync(executor, source, ["commit", "-m", "canonicalize fixture line endings"]);
+        var policyHead = (await GitAsync(executor, source, ["rev-parse", "HEAD"]))
+            .StandardOutput.Trim();
+
+        var policyClone = System.IO.Path.Combine(policyOwner.Path, "repository");
+        await GitAsync(
+            executor,
+            policyOwner.Path,
+            ["-c", "core.autocrlf=true", "clone", "--no-local", "--no-hardlinks", "--", source, policyClone]);
+        var eol = await GitAsync(executor, policyClone, ["ls-files", "--eol", "sample.txt"]);
+        Assert.Contains("i/lf", eol.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("w/lf", eol.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("attr/text eol=lf", eol.StandardOutput, StringComparison.Ordinal);
+        var policyIdentity = await new GitRepositoryIdentityReader(executor, policyClone, policyHead)
+            .ReadAsync(TestContext.Current.CancellationToken);
+        Assert.True(policyIdentity.IsClean);
+        var policyIndex = (await GitAsync(executor, policyClone, ["rev-parse", "HEAD:sample.txt"]))
+            .StandardOutput.Trim();
+        var policyRaw = (await GitAsync(executor, policyClone, ["hash-object", "--no-filters", "sample.txt"]))
+            .StandardOutput.Trim();
+        Assert.Equal(policyIndex, policyRaw);
     }
 
     private static async Task<GateRunResult> RunGateAsync(
