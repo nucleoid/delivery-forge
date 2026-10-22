@@ -463,8 +463,13 @@ public sealed class CompilerLineCensusTests
                 if (context == unreadRecipeContext)
                     artifacts.Add(JsonSerializer.SerializeToNode(new
                     {
-                        id = context + "recipe", kind = "compiler-invocation-recipe", contextId = context, buildId = build,
-                        locator = "unread-optional-recipe", length = 2, sha256 = InstalledToolFiles.Identity("{}"u8.ToArray())[7..]
+                        id = context + "recipe",
+                        kind = "compiler-invocation-recipe",
+                        contextId = context,
+                        buildId = build,
+                        locator = "unread-optional-recipe",
+                        length = 2,
+                        sha256 = InstalledToolFiles.Identity("{}"u8.ToArray())[7..]
                     }));
                 foreach (var role in new[] { "assembly", "pdb" })
                 {
