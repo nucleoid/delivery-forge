@@ -369,43 +369,43 @@ public sealed class CompilerOfficialRecipeTests
             }
             else
             {
-            // Coherent adversarial recipe DATA: valid /target:exe is outside
-            // this reconstruction profile. It grants no original producer claim.
-            var unsupportedManifest = manifest.DeepClone();
-            var unsupportedRecipe = JsonNode.Parse(data["fixture/recipe.json"])!.AsObject();
-            var targetRole = Assert.Single(unsupportedRecipe["argumentRoles"]!.AsArray(), row =>
-                row!["role"]!.GetValue<string>() == "scalar" && row["name"]!.GetValue<string>() == "target")!;
-            var targetInput = targetRole["inputOrdinal"]!.GetValue<int>();
-            Assert.Equal("/target:library", unsupportedRecipe["scalarArguments"]![targetInput]!.GetValue<string>());
-            const string unsupportedTarget = "/target:exe";
-            unsupportedRecipe["scalarArguments"]![targetInput] = unsupportedTarget;
-            var targetArgument = unsupportedRecipe["arguments"]![targetRole["ordinal"]!.GetValue<int>()]!;
-            targetArgument["utf8Length"] = Encoding.UTF8.GetByteCount(unsupportedTarget);
-            targetArgument["sha256"] = InstalledToolFiles.Identity(Encoding.UTF8.GetBytes(unsupportedTarget))[7..];
-            foreach (var option in unsupportedRecipe["taskOptions"]!.AsArray())
-                if (option!["name"]!.GetValue<string>() == "TargetType") option["value"] = "exe";
-            unsupportedRecipe["taskAssociationSha256"] = InstalledToolFiles.Identity(
-                JsonSerializer.SerializeToUtf8Bytes(unsupportedRecipe["arguments"]))[7..];
-            var unsupportedBytes = JsonSerializer.SerializeToUtf8Bytes(unsupportedRecipe);
-            const string unsupportedLocator = "fixture/unsupported-recipe.json";
-            var unsupportedArtifact = Assert.Single(unsupportedManifest["artifacts"]!.AsArray(), row =>
-                row!["id"]!.GetValue<string>() == recipeArtifact["id"]!.GetValue<string>())!;
-            unsupportedArtifact["locator"] = unsupportedLocator; unsupportedArtifact["length"] = unsupportedBytes.Length;
-            unsupportedArtifact["sha256"] = InstalledToolFiles.Identity(unsupportedBytes)[7..];
-            using (var parsed = ProducerJson.Read(JsonSerializer.SerializeToUtf8Bytes(unsupportedManifest)))
-            {
-                var reduction = ChangedLineCoverage.ReadCompilerBound(diff, parsed.RootElement, fixtureRoot,
-                    locator => locator == unsupportedLocator ? unsupportedBytes : ReadFixture(locator), files);
-                Assert.False(reduction.CompilerCensusComplete); Assert.Equal(GateOutcome.Incomplete, reduction.Outcome);
-                Assert.Contains("Optional compiler recipe unsupported:", reduction.Reason, StringComparison.Ordinal);
-            }
-            // An actual input-read failure remains its original ERROR; the
-            // optional-profile catch cannot turn arbitrary I/O into INCOMPLETE.
-            var originalReadFailure = new IOException("Original compiler image read failed.");
-            using (var parsed = ProducerJson.Read(JsonSerializer.SerializeToUtf8Bytes(manifest)))
-                Assert.Same(originalReadFailure, Assert.Throws<IOException>(() => ChangedLineCoverage.ReadCompilerBound(
-                    diff, parsed.RootElement, fixtureRoot,
-                    locator => compilerLocators.Contains(locator) ? throw originalReadFailure : ReadFixture(locator), files)));
+                // Coherent adversarial recipe DATA: valid /target:exe is outside
+                // this reconstruction profile. It grants no original producer claim.
+                var unsupportedManifest = manifest.DeepClone();
+                var unsupportedRecipe = JsonNode.Parse(data["fixture/recipe.json"])!.AsObject();
+                var targetRole = Assert.Single(unsupportedRecipe["argumentRoles"]!.AsArray(), row =>
+                    row!["role"]!.GetValue<string>() == "scalar" && row["name"]!.GetValue<string>() == "target")!;
+                var targetInput = targetRole["inputOrdinal"]!.GetValue<int>();
+                Assert.Equal("/target:library", unsupportedRecipe["scalarArguments"]![targetInput]!.GetValue<string>());
+                const string unsupportedTarget = "/target:exe";
+                unsupportedRecipe["scalarArguments"]![targetInput] = unsupportedTarget;
+                var targetArgument = unsupportedRecipe["arguments"]![targetRole["ordinal"]!.GetValue<int>()]!;
+                targetArgument["utf8Length"] = Encoding.UTF8.GetByteCount(unsupportedTarget);
+                targetArgument["sha256"] = InstalledToolFiles.Identity(Encoding.UTF8.GetBytes(unsupportedTarget))[7..];
+                foreach (var option in unsupportedRecipe["taskOptions"]!.AsArray())
+                    if (option!["name"]!.GetValue<string>() == "TargetType") option["value"] = "exe";
+                unsupportedRecipe["taskAssociationSha256"] = InstalledToolFiles.Identity(
+                    JsonSerializer.SerializeToUtf8Bytes(unsupportedRecipe["arguments"]))[7..];
+                var unsupportedBytes = JsonSerializer.SerializeToUtf8Bytes(unsupportedRecipe);
+                const string unsupportedLocator = "fixture/unsupported-recipe.json";
+                var unsupportedArtifact = Assert.Single(unsupportedManifest["artifacts"]!.AsArray(), row =>
+                    row!["id"]!.GetValue<string>() == recipeArtifact["id"]!.GetValue<string>())!;
+                unsupportedArtifact["locator"] = unsupportedLocator; unsupportedArtifact["length"] = unsupportedBytes.Length;
+                unsupportedArtifact["sha256"] = InstalledToolFiles.Identity(unsupportedBytes)[7..];
+                using (var parsed = ProducerJson.Read(JsonSerializer.SerializeToUtf8Bytes(unsupportedManifest)))
+                {
+                    var reduction = ChangedLineCoverage.ReadCompilerBound(diff, parsed.RootElement, fixtureRoot,
+                        locator => locator == unsupportedLocator ? unsupportedBytes : ReadFixture(locator), files);
+                    Assert.False(reduction.CompilerCensusComplete); Assert.Equal(GateOutcome.Incomplete, reduction.Outcome);
+                    Assert.Contains("Optional compiler recipe unsupported:", reduction.Reason, StringComparison.Ordinal);
+                }
+                // An actual input-read failure remains its original ERROR; the
+                // optional-profile catch cannot turn arbitrary I/O into INCOMPLETE.
+                var originalReadFailure = new IOException("Original compiler image read failed.");
+                using (var parsed = ProducerJson.Read(JsonSerializer.SerializeToUtf8Bytes(manifest)))
+                    Assert.Same(originalReadFailure, Assert.Throws<IOException>(() => ChangedLineCoverage.ReadCompilerBound(
+                        diff, parsed.RootElement, fixtureRoot,
+                        locator => compilerLocators.Contains(locator) ? throw originalReadFailure : ReadFixture(locator), files)));
             }
             // Same exact source/module/visit DATA, now without the optional recipe.
             // A complete result here would mean the positive did not need fallback.
