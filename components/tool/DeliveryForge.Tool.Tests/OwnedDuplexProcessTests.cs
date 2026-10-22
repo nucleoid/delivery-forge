@@ -153,20 +153,37 @@ public sealed class OwnedDuplexProcessTests
         Assert.False(File.Exists(Path.Combine(run.DirectoryPath, run.Nonce + "-child-returned")));
         var repository = Path.Combine(run.DirectoryPath, "post-retirement-git"); run.Original.Check(); Directory.CreateDirectory(repository); run.Original.Check();
         var executor = ActualOrdinaryCapture.Select(run.Original);
-        async Task Git(params string[] arguments)
+        async Task<string> Git(params string[] arguments)
         {
             run.Original.Check(); var disabled = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
             var env = ActualOrdinaryCapture.ResourceEnvironment(); env["GIT_CONFIG_NOSYSTEM"] = "1"; env["GIT_CONFIG_GLOBAL"] = disabled; env["GIT_CONFIG_SYSTEM"] = disabled; env["GIT_NO_REPLACE_OBJECTS"] = "1"; env["GIT_TERMINAL_PROMPT"] = "0";
             var argv = new[] { "--no-replace-objects", "-c", "core.hooksPath=" + disabled, "-c", "core.fsmonitor=false", "-c", "user.name=DuplexFixture", "-c", "user.email=fixture@example.invalid" }.Concat(arguments).ToArray();
             var actual = await executor.ExecuteBoundedCaptureAsync(new(gitImage, argv, repository, env), run.Original.Remaining, 65536, run.Original.Token, new OwnedWorkPhaseBudget(run.Original));
             ActualOrdinaryCapture.Require(actual); Assert.Equal(0, actual.Command.ExitCode); Assert.False(actual.Command.TimedOut || actual.Command.Cancelled); run.Original.Check();
+            return Encoding.UTF8.GetString(actual.StandardOutputBytes).Trim();
         }
         await Git("init", "-q", "-b", "main");
         BoundedFiles.WriteNew(Path.Combine(repository, "tracked.txt"), Encoding.UTF8.GetBytes("post-retirement " + run.Nonce + "\n"), run.Original);
         await Git("add", "--", "tracked.txt"); await Git("commit", "-q", "-m", "actual post-retirement fixture");
-        var manager = new WorktreeManager(gitImage, executor, run.Original);
-        var observed = await manager.ObserveAsync(repository, run.Original.Token); run.Original.Check();
-        Assert.True(observed.IsClean); Assert.True(manager.ActualOwnedGitInvocations > 0);
+        var baseCommit = await Git("rev-parse", "HEAD");
+        var worker = Path.Combine(run.DirectoryPath, "post-retirement-worker");
+        var current = true;
+        var parent = new ParentEffectAdmission(new object(),
+            id => Volatile.Read(ref current) && id == run.Nonce && ParentCoordinationHost.OriginalCanAdmitEffects(run.Original),
+            _ => Volatile.Write(ref current, false));
+        var manager = new WorktreeManager(gitImage, executor, run.Original).WithParentAdmission(parent, run.Nonce);
+        // Bind an actual fresh linked worktree to this SAME original parent;
+        // existing repository metadata cannot be adopted as provisioning proof.
+        await manager.PrepareAsync(repository, worker, baseCommit, run.Original.Token);
+        var binding = manager.RequireOriginalBinding(worker);
+        Assert.Equal(Path.GetFullPath(worker), binding.Worktree);
+        Assert.True(File.Exists(Path.Combine(worker, ".git")));
+        var beforeObserve = manager.ActualOwnedGitInvocations;
+        var observed = await manager.ObserveAsync(worker, run.Original.Token); run.Original.Check();
+        Assert.Equal(baseCommit, observed.HeadCommit); Assert.True(observed.IsClean);
+        Assert.True(manager.ActualOwnedGitInvocations > beforeObserve);
+        Assert.InRange(parent.EnteredCount, 1, 1023); Assert.True(parent.AllKnownSettled);
+        Assert.False(run.Original.HasExplicitUnknown);
         Assert.Equal(originalStarted, run.Original.OriginalStarted); Assert.Equal(whole, run.Original.WholeLimit); Assert.Equal(work, run.Original.WorkLimit);
         run.Preserve(closed);
     }

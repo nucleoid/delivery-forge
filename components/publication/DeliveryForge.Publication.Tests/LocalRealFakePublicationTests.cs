@@ -46,7 +46,26 @@ public sealed class LocalRealFakePublicationTests
         var original = new Budget { Expired = refusal == "expired-original" }; var journal = new Journal();
         var evidence = fixture.Transition;
         if (refusal == "missing-gates") evidence = evidence with { GateReceipts = [] };
-        if (refusal == "failed-gate") evidence = evidence with { GateReceipts = [fixture.Gate("build", "FAIL"), fixture.Gate("test", "PASS")] };
+        if (refusal == "failed-gate")
+        {
+            // First show that this exact passing tuple gets past gate validation
+            // and reaches the later production review-realm barrier, without effects.
+            var passingError = await Assert.ThrowsAsync<InvalidWorkflowTransitionException>(() => LocalRealFakePublication.ExecuteAsync(
+                "run-" + new string('a', 32), "unit-revision", evidence, fixture.Receiver,
+                original, parent, () => Task.CompletedTask, journal));
+            Assert.Contains("authority realm", passingError.Message);
+            Assert.Equal(0, journal.Calls); Assert.Equal(0, parent.EffectCalls);
+
+            var passing = fixture.Gates[0];
+            var node = System.Text.Json.Nodes.JsonNode.Parse(passing.CanonicalBytes.Span)!.AsObject();
+            node["outcome"] = "FAIL"; node["exitCode"] = 1;
+            var failing = PublicationFixture.Contract(node.ToJsonString());
+            node["outcome"] = "PASS"; node["exitCode"] = 0;
+            // Exact canonical roundtrip proves no policy/gate/revision/authority
+            // field was substituted along with the disallowed outcome.
+            Assert.Equal(passing.Identity, PublicationFixture.Contract(node.ToJsonString()).Identity);
+            evidence = evidence with { GateReceipts = [failing, .. fixture.Gates.Skip(1)] };
+        }
         var receiver = refusal == "foreign-test-receiver" ? PublicationFixture.NewRoot().Receiver : fixture.Receiver;
         var error = await Assert.ThrowsAnyAsync<Exception>(() => LocalRealFakePublication.ExecuteAsync("run-" + new string('a', 32), "unit-revision",
             evidence, receiver, original, parent, () => Task.CompletedTask, journal));
@@ -55,7 +74,7 @@ public sealed class LocalRealFakePublicationTests
         else
         {
             Assert.IsType<InvalidWorkflowTransitionException>(error);
-            Assert.Contains(refusal switch { "missing-gates" => "every evidence-policy gate", "failed-gate" => "outcome PASS", _ => "authority realm" }, error.Message);
+            Assert.Contains(refusal switch { "missing-gates" => "every evidence-policy gate", "failed-gate" => "allowed outcome", _ => "authority realm" }, error.Message);
         }
         Assert.Equal(0, journal.Calls); Assert.Equal(0, parent.EffectCalls);
         // These are refusal controls. No production reviewer, native process,
