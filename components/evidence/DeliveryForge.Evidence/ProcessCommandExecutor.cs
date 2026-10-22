@@ -21,6 +21,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Linux owner selection on another platform.");
         actualOriginal.CheckWork(); _selectedLinuxScope = linuxScope; _selectedLinuxOriginal = actualOriginal;
     }
+    internal bool SupportsCreationOwnedBoundedCapture => _creationOwnedWindows;
 
     public ProcessCommandExecutor()
         : this(
@@ -68,9 +69,9 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         }
         if (!_creationOwnedWindows)
             throw new InvalidOperationException("Injected executor delegates cannot establish creation-owned byte capture.");
-        if (entireBudget <= TimeSpan.Zero || entireBudget > TimeSpan.FromMinutes(15))
+        if (entireBudget <= TimeSpan.Zero || entireBudget > TimeSpan.FromHours(1))
             throw new ArgumentOutOfRangeException(nameof(entireBudget));
-        if (maximumBytesPerStream <= 0 || maximumBytesPerStream > 16 * 1024 * 1024)
+        if (maximumBytesPerStream <= 0 || maximumBytesPerStream > 128 * 1024 * 1024)
             throw new ArgumentOutOfRangeException(nameof(maximumBytesPerStream));
         if (enclosing is not null && (enclosing.OriginalStarted <= 0 || enclosing.OriginalStarted > Stopwatch.GetTimestamp() ||
             enclosing.WholeLimit <= TimeSpan.Zero || enclosing.WholeLimit > TimeSpan.FromMinutes(20) ||
@@ -137,8 +138,9 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         if (_selectedLinuxScope is not null)
             return (await ExecuteBoundedCaptureAsync(invocation, timeout, 8 * 1024 * 1024, cancellationToken,
                 _selectedLinuxOriginal, _selectedLinuxScope).ConfigureAwait(false)).Command;
-        if (_creationOwnedWindows && OperatingSystem.IsWindows())
-            return await WindowsCommandLifetime.ExecuteAsync(invocation, timeout, cancellationToken).ConfigureAwait(false);
+        if (_creationOwnedWindows && (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()))
+            return (await ExecuteBoundedCaptureAsync(
+                invocation, timeout, 64 * 1024 * 1024, cancellationToken).ConfigureAwait(false)).Command;
         var startInfo = new ProcessStartInfo
         {
             FileName = invocation.FileName,
@@ -169,7 +171,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
                 null, string.Empty, $"Process start failed: {exception.Message}",
                 false, false, startedAt, DateTimeOffset.UtcNow);
         }
-        process.StandardInput.Close();
+        var inputTask = WriteStandardInputAsync(process.StandardInput, invocation.StandardInput);
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
 
@@ -209,7 +211,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         var drainCompleted = true;
         try
         {
-            await _waitForDrain(Task.WhenAll(stdoutTask, stderrTask), _waitTimeout).ConfigureAwait(false);
+            await _waitForDrain(Task.WhenAll(stdoutTask, stderrTask, inputTask), _waitTimeout).ConfigureAwait(false);
             stdout = await stdoutTask.ConfigureAwait(false);
             stderr = await stderrTask.ConfigureAwait(false);
         }
@@ -228,7 +230,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             cancelled,
             startedAt,
             DateTimeOffset.UtcNow,
-            drainCompleted && processExited &&
+            drainCompleted && inputTask.Status == TaskStatus.RanToCompletion && processExited &&
             (!timedOut && !cancelled || killSucceeded && exitWaitCompleted))
         {
             LifecycleDiagnostics = new(killAttempted, killAttempted && killSucceeded, killExceptionType, killExceptionDetail,
@@ -236,6 +238,26 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
                 (int)Math.Clamp(_waitTimeout.TotalMilliseconds, 0, int.MaxValue),
                 ObserveStream(stdoutTask), ObserveStream(stderrTask))
         };
+    }
+
+    internal static async Task WriteStandardInputAsync(StreamWriter writer, string? input)
+    {
+        Exception? primary = null;
+        try
+        {
+            if (input is not null)
+                await writer.WriteAsync(input.AsMemory(), CancellationToken.None).ConfigureAwait(false);
+            await writer.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception failure) { primary = failure; }
+        try { writer.Close(); }
+        catch (Exception firstClose)
+        {
+            if (primary is not null)
+                throw new AggregateException("Actual stdin write/flush and first writer close both failed.", primary, firstClose);
+            throw;
+        }
+        if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
     }
 
     private bool TryKillTree(Process process, out bool attempted, out string? exceptionType,

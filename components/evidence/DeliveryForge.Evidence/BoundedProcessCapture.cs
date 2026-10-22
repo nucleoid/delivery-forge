@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace DeliveryForge.Evidence;
@@ -19,7 +20,7 @@ internal static partial class BoundedProcessCapture
         var retention = new BoundedCaptureRetention();
         retention.Add(process); retention.Add(stdout); retention.Add(stderr);
         var restrictive = new RestrictiveCaptureBudget(started, budget, work, enclosing, retention);
-        Task? output = null, error = null;
+        Task? input = null, output = null, error = null;
         StreamWriter? originalInput = null;
         StreamReader? originalOutput = null, originalError = null;
         var created = false; var rootExited = false; var known = true;
@@ -29,7 +30,10 @@ internal static partial class BoundedProcessCapture
         var stage = "prepare-command"; string? failureStage = null;
         try
         {
-            var info = new ProcessStartInfo(invocation.FileName)
+            const string setsid = "/usr/bin/setsid";
+            if (!File.Exists(setsid))
+                throw new PlatformNotSupportedException("Linux creation-owned process groups require /usr/bin/setsid.");
+            var info = new ProcessStartInfo(setsid)
             {
                 WorkingDirectory = invocation.WorkingDirectory,
                 UseShellExecute = false,
@@ -39,6 +43,8 @@ internal static partial class BoundedProcessCapture
                 CreateNoWindow = true
             };
             CommandEnvironment.Complete(info, invocation);
+            info.ArgumentList.Add("--");
+            info.ArgumentList.Add(invocation.FileName);
             foreach (var argument in invocation.Arguments) info.ArgumentList.Add(argument);
             foreach (var pair in invocation.Environment ?? new Dictionary<string, string>()) info.Environment[pair.Key] = pair.Value;
             if (caller.IsCancellationRequested || !restrictive.WorkAvailable)
@@ -53,13 +59,15 @@ internal static partial class BoundedProcessCapture
                 originalInput = process.StandardInput; retention.Add(originalInput);
                 originalOutput = process.StandardOutput; retention.Add(originalOutput);
                 originalError = process.StandardError; retention.Add(originalError);
-                stage = "close-original-stdin";
-                originalInput.Close();
                 stage = "enroll-original-byte-drains";
                 output = BoundedCaptureStream.Observe(stdout.DrainAsync(originalOutput.BaseStream));
                 retention.Add(output);
                 error = BoundedCaptureStream.Observe(stderr.DrainAsync(originalError.BaseStream));
                 retention.Add(error);
+                stage = "write-original-stdin";
+                input = BoundedCaptureStream.Observe(
+                    ProcessCommandExecutor.WriteStandardInputAsync(originalInput, invocation.StandardInput));
+                retention.Add(input);
                 stage = "observe-original-root-and-drains";
                 while (true)
                 {
@@ -67,8 +75,9 @@ internal static partial class BoundedProcessCapture
                     if (stdout.Exceeded || stderr.Exceeded) break;
                     if (!restrictive.WorkAvailable) { timedOut = true; break; }
                     rootExited = process.HasExited;
-                    if (output.IsFaulted || error.IsFaulted) { known = false; failure = "Owned pipe drain failed."; break; }
-                    if (rootExited && BoundedCaptureStream.Eof(output) && BoundedCaptureStream.Eof(error)) break;
+                    if (input.IsFaulted || output.IsFaulted || error.IsFaulted)
+                    { known = false; failure = "Owned stdin write or pipe drain failed."; break; }
+                    if (rootExited && input.Status == TaskStatus.RanToCompletion && BoundedCaptureStream.Eof(output) && BoundedCaptureStream.Eof(error)) break;
                     await Task.Delay(5).ConfigureAwait(false);
                 }
             }
@@ -87,7 +96,13 @@ internal static partial class BoundedProcessCapture
                 rootExited = process.HasExited;
                 if (!rootExited && restrictive.CleanupAvailable)
                 {
-                    killAttempted = true; process.Kill(entireProcessTree: true); killSucceeded = true;
+                    killAttempted = true;
+                    killSucceeded = KillOwnedProcessGroup(process.Id, out var killFailure);
+                    if (!killSucceeded)
+                    {
+                        known = false;
+                        failure ??= killFailure;
+                    }
                 }
                 else if (!BoundedCaptureStream.Eof(output) || !BoundedCaptureStream.Eof(error))
                 { known = false; failure ??= "Exited Linux root with unresolved inherited pipes; descendant settlement unavailable."; }
@@ -102,9 +117,21 @@ internal static partial class BoundedProcessCapture
             catch (Exception exception) when (exception is Win32Exception or IOException or InvalidOperationException)
             { known = false; killType = exception.GetType().FullName; failure ??= Bounded(exception); retention.Add(exception); }
         }
+        if (input is not null && restrictive.CleanupAvailable)
+        {
+            try
+            {
+                var originalWait = input.WaitAsync(restrictive.CleanupRemaining, CancellationToken.None);
+                retention.Add(originalWait); _ = BoundedCaptureStream.Observe(originalWait);
+                await originalWait.ConfigureAwait(false);
+            }
+            catch (Exception inputFailure)
+            { retention.Add(inputFailure); restrictive.BeginFailureCleanup(); known = false; failure ??= Bounded(inputFailure); }
+        }
         var outputStatus = output?.Status; var errorStatus = error?.Status;
         var outEof = outputStatus == TaskStatus.RanToCompletion; var errEof = errorStatus == TaskStatus.RanToCompletion;
-        var quiescent = created && known && rootExited && outEof && errEof && (!killAttempted || killSucceeded) &&
+        var inputComplete = input?.Status == TaskStatus.RanToCompletion;
+        var quiescent = created && known && rootExited && inputComplete && outEof && errEof && (!killAttempted || killSucceeded) &&
             restrictive.CleanupAvailable;
         int? exit = rootExited && restrictive.CleanupAvailable ? process.ExitCode : null;
         var outBytes = stdout.Snapshot(); var errBytes = stderr.Snapshot();
@@ -155,4 +182,19 @@ internal static partial class BoundedProcessCapture
         var text = exception.GetType().Name + ": " + exception.Message;
         return text.Length > 1024 ? text[..1024] : text;
     }
+
+    private static bool KillOwnedProcessGroup(int rootProcessId, out string? failure)
+    {
+        failure = null;
+        if (kill(-rootProcessId, 9) == 0)
+            return true;
+        var error = Marshal.GetLastPInvokeError();
+        if (error == 3) // ESRCH: the group became empty before the signal.
+            return true;
+        failure = $"kill-owned-process-group failed with errno {error}.";
+        return false;
+    }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int kill(int processId, int signal);
 }

@@ -1,9 +1,76 @@
 namespace DeliveryForge.Evidence.Tests;
 
+using DeliveryForge.Contracts.Validation;
 using System.Reflection;
+using System.Diagnostics;
+using System.Text.Json;
 
 public sealed class GateRunnerTests
 {
+    [Fact]
+    public async Task Default_writer_preserves_v1_for_readers_first_rollout()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path);
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            TestEvidence.WorkingDirectory(temp.Path),
+            TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(
+            request with { Plugin = new EvaluationPluginSelection("delivery-forge.dotnet", false) },
+            TestContext.Current.CancellationToken);
+
+        using var receipt = JsonDocument.Parse(await File.ReadAllBytesAsync(
+            result.ReceiptPath, TestContext.Current.CancellationToken));
+        Assert.Equal("1.0.0", receipt.RootElement.GetProperty("schemaVersion").GetString());
+    }
+
+    [Fact]
+    public void Runner_has_no_v2_signing_or_boolean_authority_surface()
+    {
+        var parameters = typeof(GateRunner).GetConstructors(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance)
+            .SelectMany(constructor => constructor.GetParameters())
+            .ToArray();
+        Assert.DoesNotContain(parameters, parameter => parameter.ParameterType == typeof(HostOwnedReceiptStore));
+        Assert.DoesNotContain(parameters, parameter => parameter.ParameterType == typeof(bool));
+    }
+
+    [Fact]
+    public void Authoritative_host_stays_disabled_without_a_real_privileged_boundary()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path) with
+        {
+            Plugin = new EvaluationPluginSelection("delivery-forge.dotnet", Enabled: false)
+        };
+        var error = Assert.Throws<NotSupportedException>(() => new AuthoritativeEvaluationHost(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory,
+            TestEvidence.Commit('a')));
+
+        Assert.Contains("separate-principal", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Authoritative_host_has_no_boolean_attestation_surface()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path);
+
+        var error = Assert.Throws<NotSupportedException>(() => new AuthoritativeEvaluationHost(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory,
+            TestEvidence.Commit('a')));
+
+        Assert.DoesNotContain(typeof(AuthoritativeEvaluationHost).Assembly.GetTypes(),
+            type => type.Name.Contains("Attestation", StringComparison.Ordinal));
+        Assert.Contains("disabled", error.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public void Supported_capability_has_no_public_minting_or_record_copy_surface()
     {
@@ -101,6 +168,203 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
+    public async Task Readers_first_rollout_switch_writes_canonical_v1_without_v2_authority()
+    {
+        using var temp = new TempDirectory();
+        var runner = new GateRunner(
+            new StubCommandExecutor(TestEvidence.CommandResult()),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
+            TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(
+            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
+
+        using var receipt = JsonDocument.Parse(await File.ReadAllBytesAsync(
+            result.ReceiptPath, TestContext.Current.CancellationToken));
+        Assert.Equal("1.0.0", receipt.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.False(receipt.RootElement.TryGetProperty("authorityBinding", out _));
+    }
+
+    [Fact]
+    public async Task Identity_deadline_persists_incomplete_and_releases_claim_for_retry()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path) with { Timeout = TimeSpan.FromMilliseconds(25) };
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new CancellingRepositoryIdentityReader(),
+            TestEvidence.WorkingDirectory(temp.Path), TestEvidence.Commit('a'));
+
+        var first = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+        var retry = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, first.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, retry.Outcome);
+        Assert.True(File.Exists(first.ReceiptPath));
+        Assert.True(File.Exists(retry.ReceiptPath));
+        Assert.Contains(".attempt-", retry.ReceiptPath, StringComparison.Ordinal);
+        Assert.False(File.Exists(System.IO.Path.Combine(temp.Path, request.GateId + ".claim")));
+    }
+
+    [Fact]
+    public async Task Disabled_attempt_does_not_block_later_immutable_pass_in_same_output_scope()
+    {
+        using var temp = new TempDirectory();
+        var identity = TestEvidence.Repository();
+        var request = TestEvidence.GateRequest(temp.Path);
+        var runner = new GateRunner(
+            new StubCommandExecutor(TestEvidence.CommandResult()),
+            new SequenceRepositoryIdentityReader(identity, identity, identity),
+            request.Invocation.WorkingDirectory, TestEvidence.Commit('a'));
+
+        var disabled = await runner.RunAsync(
+            request with { Plugin = new EvaluationPluginSelection("delivery-forge.dotnet", Enabled: false) },
+            TestContext.Current.CancellationToken);
+        var retry = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, disabled.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, retry.Outcome);
+        Assert.DoesNotContain("published", retry.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.NotEqual(System.IO.Path.GetDirectoryName(disabled.ReceiptPath),
+            System.IO.Path.GetDirectoryName(retry.ReceiptPath));
+        Assert.Contains(".attempt-", retry.ReceiptPath, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Host_owned_claim_excludes_same_gate_across_distinct_output_directories()
+    {
+        using var temp = new TempDirectory();
+        var identity = TestEvidence.Repository();
+        var firstRequest = TestEvidence.GateRequest(temp.Path);
+        var secondRequest = firstRequest with
+        {
+            OutputDirectory = System.IO.Path.Combine(temp.Path, "second-output")
+        };
+        var claimRoot = System.IO.Path.Combine(temp.Path, "host-claims");
+        var blocking = new BlockingCommandExecutor(TestEvidence.CommandResult());
+        var firstRunner = new GateRunner(blocking,
+            new SequenceRepositoryIdentityReader(identity, identity),
+            firstRequest.Invocation.WorkingDirectory, TestEvidence.Commit('a'),
+            plugins: null, authorityRegistry: null,
+            hostOwnedClaimRoot: claimRoot);
+        var secondRunner = new GateRunner(new StubCommandExecutor(TestEvidence.CommandResult()),
+            new SequenceRepositoryIdentityReader(identity, identity),
+            firstRequest.Invocation.WorkingDirectory, TestEvidence.Commit('a'),
+            plugins: null, authorityRegistry: null,
+            hostOwnedClaimRoot: claimRoot);
+
+        var firstTask = firstRunner.RunAsync(firstRequest, TestContext.Current.CancellationToken);
+        await blocking.Entered.WaitAsync(TestContext.Current.CancellationToken);
+        var excluded = await secondRunner.RunAsync(secondRequest, TestContext.Current.CancellationToken);
+        blocking.Release();
+        var first = await firstTask;
+
+        Assert.Equal(GateOutcome.Incomplete, excluded.Outcome);
+        Assert.True(
+            excluded.Reason.Contains("live process", StringComparison.OrdinalIgnoreCase) ||
+            excluded.Reason.Contains("ownership is ambiguous", StringComparison.OrdinalIgnoreCase),
+            $"Unexpected truthful claim exclusion reason: {excluded.Reason}");
+        Assert.Equal(GateOutcome.Incomplete, first.Outcome);
+    }
+
+    [Fact]
+    public async Task Killed_execution_owner_persists_interruption_and_allows_immutable_retry()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path) with
+        {
+            Plugin = new EvaluationPluginSelection("delivery-forge.dotnet", Enabled: false)
+        };
+        using var child = Process.Start(new ProcessStartInfo
+        {
+            FileName = OperatingSystem.IsWindows() ? Environment.GetEnvironmentVariable("ComSpec")! : "/bin/sh",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            ArgumentList =
+            {
+                OperatingSystem.IsWindows() ? "/d" : "-c",
+                OperatingSystem.IsWindows() ? "/s" : "sleep 1",
+                OperatingSystem.IsWindows() ? "/c" : string.Empty,
+                OperatingSystem.IsWindows() ? "ping -n 30 127.0.0.1 >NUL" : "sleep 30"
+            }
+        }) ?? throw new InvalidOperationException("Child claim fixture did not start.");
+        var claimPath = System.IO.Path.Combine(temp.Path, request.GateId + ".claim");
+        await File.WriteAllBytesAsync(
+            claimPath, GateClaimLease.CreatePayloadForProcess(child.Id), TestContext.Current.CancellationToken);
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory, TestEvidence.Commit('a'));
+
+        var live = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+        Assert.Equal(GateOutcome.Incomplete, live.Outcome);
+        Assert.Contains("live process", live.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(claimPath));
+
+        var interruptedAttempt = System.IO.Path.Combine(
+            temp.Path, request.GateId + ".attempt-killed-fixture");
+        Directory.CreateDirectory(interruptedAttempt);
+        child.Kill(entireProcessTree: true);
+        await child.WaitForExitAsync(TestContext.Current.CancellationToken);
+        var recovered = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+        Assert.Equal(GateOutcome.Incomplete, recovered.Outcome);
+        Assert.Contains("interrupted", recovered.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(recovered.ReceiptPath));
+        Assert.True(Directory.Exists(interruptedAttempt));
+        Assert.False(File.Exists(claimPath));
+
+        var retry = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+        Assert.Equal(GateOutcome.Incomplete, retry.Outcome);
+        Assert.Contains("disabled", retry.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.True(File.Exists(retry.ReceiptPath));
+    }
+
+    [Fact]
+    public async Task Oversized_unlocked_claim_is_recovered_without_weakening_live_exclusion()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path);
+        var claimPath = System.IO.Path.Combine(temp.Path, request.GateId + ".claim");
+        await File.WriteAllBytesAsync(
+            claimPath, new byte[GateClaimLease.MaximumClaimBytes + 1], TestContext.Current.CancellationToken);
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory, TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("Recovered a stale gate claim", result.Reason, StringComparison.OrdinalIgnoreCase);
+        var interrupted = Assert.Single(Directory.GetFiles(temp.Path, "test.claim.interrupted-*"));
+        Assert.Equal(GateClaimLease.MaximumClaimBytes + 1, new FileInfo(interrupted).Length);
+        Assert.True(File.Exists(result.ReceiptPath));
+    }
+
+    [Fact]
+    public async Task Abandoned_unpublished_claim_is_boundedly_scavenged_without_touching_fresh_pending_claim()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path);
+        var claimPath = System.IO.Path.Combine(temp.Path, request.GateId + ".claim");
+        var abandoned = claimPath + ".pending-abandoned";
+        var fresh = claimPath + ".pending-fresh";
+        await File.WriteAllTextAsync(abandoned, "partial", TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(fresh, "concurrent", TestContext.Current.CancellationToken);
+        File.SetLastWriteTimeUtc(abandoned, DateTime.UtcNow.AddHours(-1));
+        var runner = new GateRunner(
+            new QueueCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory, TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.False(File.Exists(abandoned));
+        Assert.True(File.Exists(fresh));
+    }
+
+    [Fact]
     public async Task Source_drift_is_error_and_append_only_output_is_not_overwritten()
     {
         using var temp = new TempDirectory();
@@ -114,8 +378,10 @@ public sealed class GateRunnerTests
 
         Assert.Equal(GateOutcome.Error, result.Outcome);
         Assert.True(result.SourceChanged);
-        await Assert.ThrowsAsync<EvidenceWriteException>(() => runner.RunAsync(
-            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken));
+        var retry = await runner.RunAsync(
+            TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
+        Assert.Equal(GateOutcome.Error, retry.Outcome);
+        Assert.Contains(".attempt-", retry.ReceiptPath, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -134,7 +400,7 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
-    public async Task Missing_executable_is_recorded_as_error_receipt()
+    public async Task Missing_executable_is_recorded_as_incomplete_prerequisite_receipt()
     {
         using var temp = new TempDirectory();
         var request = TestEvidence.GateRequest(temp.Path);
@@ -144,7 +410,7 @@ public sealed class GateRunnerTests
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.True(File.Exists(result.ReceiptPath));
     }
 
@@ -167,7 +433,7 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
-    public async Task Executor_thrown_cancellation_is_nonquiescent_error()
+    public async Task Executor_thrown_cancellation_is_nonquiescent_incomplete()
     {
         using var temp = new TempDirectory();
         var runner = new GateRunner(
@@ -178,14 +444,14 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.False(result.Execution.OwnedProcessQuiescent);
         Assert.Contains("quiescent", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.True(File.Exists(result.ReceiptPath));
     }
 
     [Fact]
-    public async Task Repository_preflight_failure_is_recorded_as_error_receipt()
+    public async Task Repository_preflight_failure_is_recorded_as_incomplete_receipt()
     {
         using var temp = new TempDirectory();
         var runner = new GateRunner(
@@ -195,13 +461,13 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.True(File.Exists(result.ReceiptPath));
         Assert.Contains("could not be read", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
-    public async Task Unexpected_executor_failure_is_recorded_as_error_receipt()
+    public async Task Unexpected_executor_failure_is_recorded_as_incomplete_receipt()
     {
         using var temp = new TempDirectory();
         var runner = new GateRunner(
@@ -211,13 +477,13 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.True(File.Exists(result.ReceiptPath));
         Assert.Null(result.Execution.ExitCode);
     }
 
     [Fact]
-    public async Task Repository_postflight_failure_is_recorded_as_error_receipt()
+    public async Task Repository_postflight_failure_is_recorded_as_incomplete_receipt()
     {
         using var temp = new TempDirectory();
         var runner = new GateRunner(
@@ -227,7 +493,7 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.True(result.SourceChanged);
         Assert.True(File.Exists(result.ReceiptPath));
         Assert.Contains("after evaluation", result.Reason, StringComparison.OrdinalIgnoreCase);
@@ -297,7 +563,7 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
         Assert.Equal(GateOutcome.Error, result.Outcome);
-        Assert.Contains("executable bytes changed", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("bound capability identity", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.True(File.Exists(result.ReceiptPath));
     }
 
@@ -332,7 +598,7 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
-    public async Task Preexisting_gate_directory_gets_a_separate_error_receipt_without_execution()
+    public async Task Preexisting_legacy_gate_directory_cannot_block_a_nonce_attempt()
     {
         using var temp = new TempDirectory();
         var request = TestEvidence.GateRequest(temp.Path);
@@ -344,14 +610,14 @@ public sealed class GateRunnerTests
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
-        Assert.Contains("existed", result.Reason, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("claim-error", result.ReceiptPath, StringComparison.Ordinal);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("could not be read", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(".attempt-", result.ReceiptPath, StringComparison.Ordinal);
         Assert.True(File.Exists(result.ReceiptPath));
     }
 
     [Fact]
-    public async Task Nonquiescent_owned_process_is_recorded_as_error()
+    public async Task Nonquiescent_owned_process_is_recorded_as_incomplete()
     {
         using var temp = new TempDirectory();
         var execution = TestEvidence.CommandResult() with
@@ -367,7 +633,7 @@ public sealed class GateRunnerTests
         var result = await runner.RunAsync(
             TestEvidence.GateRequest(temp.Path), TestContext.Current.CancellationToken);
 
-        Assert.Equal(GateOutcome.Error, result.Outcome);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
         Assert.Contains("quiescent", result.Reason, StringComparison.OrdinalIgnoreCase);
         Assert.True(File.Exists(result.ReceiptPath));
     }

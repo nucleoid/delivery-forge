@@ -31,7 +31,13 @@ public sealed record PublicationRunDefinition(
     ValidatedContract? CiReceipt,
     ValidatedContract? ReviewReceipt,
     ValidatedContract? HostedReviewReceipt,
-    ReviewTransitionReceiver Receiver);
+    ReviewTransitionReceiver Receiver)
+{
+    public TrustedGatePluginRegistry GateAuthorityRegistry { get; init; } = TrustedGatePluginRegistry.BuiltIns;
+    public TrustedReceiptProvenance? GateReceiptProvenance { get; init; }
+    public bool EnforceAuthoritativeGateReceipts { get; init; }
+    public string? GateAuthorityRegistryIdentity { get; init; }
+}
 
 /// <summary>Opaque parent-issued authority; serialized documents cannot construct one.</summary>
 public sealed class PublicationRun

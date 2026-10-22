@@ -83,9 +83,12 @@ public sealed class RealDotNetScenarioTests(RealDotNetScenarioFixture fixture)
         Assert.Equal(gateId, receipt.RootElement.GetProperty("gateId").GetString());
         var receiptDirectory = Path.GetDirectoryName(Path.GetFullPath(gate.ReceiptPath))!;
         Assert.Equal("receipts", Path.GetFileName(receiptDirectory));
-        // GateRunner publishes artifacts in the gate directory and append-only receipts in its receipts child.
+        // GateRunner publishes each immutable attempt under a nonce directory and append-only
+        // receipts in that attempt's receipts child.
         var artifactDirectory = Directory.GetParent(receiptDirectory)!.FullName;
-        Assert.Equal(Path.Combine(Path.GetDirectoryName(Path.GetFullPath(phase.ProvenancePath))!, gateId), artifactDirectory);
+        var expectedPrefix = Path.Combine(
+            Path.GetDirectoryName(Path.GetFullPath(phase.ProvenancePath))!, gateId + ".attempt-");
+        Assert.StartsWith(expectedPrefix, artifactDirectory, StringComparison.Ordinal);
         foreach (var file in new[] { "stdout.txt", "stderr.txt", "evidence.trx" })
         {
             Assert.Equal(gate.ArtifactHashes[file], receipt.RootElement.GetProperty("artifactHashes").GetProperty(file).GetString());

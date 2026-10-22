@@ -202,6 +202,6 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
                 probe.Tool, probe.DocumentedFormatVersion, probe.Fixture, reason),
             versionInvocation, versionResult, helpInvocation, helpResult);
 
-    [GeneratedRegex(@"(?m)^\s*(?:[A-Za-z][A-Za-z0-9.-]*\s+)?([0-9]+\.[0-9]+(?:\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)?)\s*$", RegexOptions.CultureInvariant)]
+    [GeneratedRegex(@"(?m)^\s*(?:[A-Za-z][A-Za-z0-9.-]*:?\s+)?([0-9]+\.[0-9]+(?:\.[0-9]+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)?)\s*$", RegexOptions.CultureInvariant)]
     private static partial Regex VersionPattern();
 }

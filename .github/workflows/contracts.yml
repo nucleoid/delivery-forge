@@ -47,6 +47,11 @@ jobs:
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.401
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24.21.0
+          cache: npm
+          cache-dependency-path: components/evidence/anti-slop/package-lock.json
       - run: dotnet restore DeliveryForge.slnx --locked-mode
       - name: Restore locked source-only actual .NET fixture dependencies
         shell: pwsh
@@ -72,6 +77,15 @@ jobs:
           $fixtureCache = if ($env:NUGET_PACKAGES) { $env:NUGET_PACKAGES } else { Join-Path ([Environment]::GetFolderPath('UserProfile')) '.nuget/packages' }
           dotnet restore (Join-Path $fixtureRoot 'Subject.Tests/Subject.Tests.csproj') --locked-mode --packages $fixtureCache --disable-parallel --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install exact locked anti-slop fixture prerequisites
+        working-directory: components/evidence/anti-slop
+        run: npm ci --no-audit --no-fund
+      - name: Run pinned Oxlint 1.78.0 fixture suite
+        working-directory: components/evidence/anti-slop
+        run: |
+          npm run test:fixtures
+          npm run test:batch
+          node test-batches.mjs
       - name: Build actual owned lifecycle helper and bind fixture inputs
         shell: pwsh
         run: |

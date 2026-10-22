@@ -72,7 +72,7 @@ public sealed class ScenarioRunner(OwnedScenarioRun run)
         }
         else if (name == "recovery.interrupted-command")
         {
-            var execution = await run.ExecuteBoundedChildCommandAsync(TimeSpan.FromMilliseconds(200), deadline.Token);
+            var execution = await run.ExecuteBoundedChildCommandAsync(TimeSpan.FromSeconds(1), deadline.Token);
             var record = await run.Store.AppendAsync(run.RunId, "scenario-command", new
             {
                 fixture = true,

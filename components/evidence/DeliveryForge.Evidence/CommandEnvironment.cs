@@ -5,6 +5,7 @@ internal static class CommandEnvironment
 {
     internal static void Complete(ProcessStartInfo start, CommandInvocation invocation)
     {
+        if (!invocation.InheritEnvironment) start.Environment.Clear();
         if (!invocation.EnvironmentIsComplete) return;
         var values = invocation.Environment ?? throw new ArgumentException("Complete environment snapshot required.");
         if (values.Count > 512) throw new ArgumentException("Complete environment exceeds512 entries before copy.");

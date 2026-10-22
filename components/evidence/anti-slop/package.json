@@ -1,0 +1,22 @@
+{
+  "name": "delivery-forge-anti-slop-runtime",
+  "private": true,
+  "version": "0.1.2",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@oxlint/plugins": "1.78.0",
+    "oxlint": "1.78.0"
+  },
+  "devDependencies": {
+    "tsx": "4.23.12",
+    "typescript": "7.0.2"
+  },
+  "scripts": {
+    "test:fixtures": "tsx test-fixtures.ts",
+    "test:batch": "node run-oxlint-batches.mjs --oxlint ./node_modules/oxlint/bin/oxlint --config ./oxlint.config.ts --inputs ./fixtures/inputs.json",
+    "test:batch-effect": "node run-oxlint-batches.mjs --oxlint ./node_modules/oxlint/bin/oxlint --config ./oxlint.effect.config.ts --inputs ./fixtures/inputs.json"
+  }
+}

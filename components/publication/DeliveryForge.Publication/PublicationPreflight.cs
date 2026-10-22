@@ -29,7 +29,7 @@ public static class PublicationPreflight
             return Denied(PublicationDenial.Ownership, "Ownership is expired, unavailable or uncertain.");
         if (!local.IsClean || !SamePatch(local.Patch, definition.Patch))
             return Denied(PublicationDenial.LocalIdentity, "Clean exact base/head/tree/patch/plan/artifact/command identity is required.");
-        if (!GatesAllowed(definition, request.Mode == PublicationMode.Merge))
+        if (!GatesAllowed(host, definition, request.Mode == PublicationMode.Merge))
             return Denied(PublicationDenial.PolicyGate, "Exact protected policy gates or CI are incomplete, mismatched or disallowed.");
         var review = ReviewAllowed(host, run, request.Mode);
         if (!review.Allowed) return review;
@@ -66,7 +66,7 @@ public static class PublicationPreflight
         }
     }
 
-    private static bool GatesAllowed(PublicationRunDefinition d, bool merge)
+    private static bool GatesAllowed(PublicationAuthorityHost host, PublicationRunDefinition d, bool merge)
     {
         if (d.Policy.SchemaName != "evidence-policy") return false;
         using var policy = JsonDocument.Parse(d.Policy.CanonicalBytes);
@@ -78,13 +78,14 @@ public static class PublicationPreflight
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var receipt in d.GateReceipts)
         {
-            if (!GateAllowed(receipt, d, allowedNa, out var gateId) || !seen.Add(gateId)) return false;
+            if (!GateAllowed(host, receipt, d, allowedNa, out var gateId) || !seen.Add(gateId)) return false;
         }
         if (!root.GetProperty("requiredGates").EnumerateArray().All(x => seen.Contains(x.GetString()!))) return false;
-        return !merge || d.CiReceipt is not null && GateAllowed(d.CiReceipt, d, allowedNa, out var ci) && ci == "ci";
+        return !merge || d.CiReceipt is not null && GateAllowed(host, d.CiReceipt, d, allowedNa, out var ci) && ci == "ci";
     }
 
-    private static bool GateAllowed(ValidatedContract receipt, PublicationRunDefinition d, HashSet<string?> allowedNa, out string gateId)
+    private static bool GateAllowed(PublicationAuthorityHost host, ValidatedContract receipt, PublicationRunDefinition d,
+        HashSet<string?> allowedNa, out string gateId)
     {
         gateId = "";
         if (receipt.SchemaName != "gate-receipt") return false;
@@ -95,8 +96,13 @@ public static class PublicationPreflight
             r.GetProperty("headCommit").GetString() != d.Patch.HeadCommit || r.GetProperty("treeId").GetString() != d.Patch.HeadTree ||
             r.GetProperty("sourceChanged").GetBoolean()) return false;
         var outcome = r.GetProperty("outcome").GetString();
-        return outcome == "PASS" || outcome == "NOT_APPLICABLE" && allowedNa.Contains(gateId) &&
-            r.TryGetProperty("notApplicableRationale", out var rationale) && !string.IsNullOrWhiteSpace(rationale.GetString());
+        var authority = host.GateReceiptPolicy;
+        return (!authority.Enforce ||
+                string.Equals(authority.ExpectedRegistryIdentity, authority.Registry.Identity,
+                    StringComparison.Ordinal) &&
+                authority.Provenance?.Contains(receipt.Identity) == true) &&
+            GateReceiptAuthority.TryValidateConsumerOutcome(r, authority.Enforce, out _, authority.Registry) &&
+            (outcome == "PASS" || outcome == "NOT_APPLICABLE" && allowedNa.Contains(gateId));
     }
 
     internal static bool SamePatch(PatchIdentity a, PatchIdentity b) => a.BaseCommit == b.BaseCommit && a.HeadCommit == b.HeadCommit &&

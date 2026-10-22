@@ -35,6 +35,21 @@ public sealed record GateReceiptContract(
     IReadOnlyList<string> Limitations, string? NotApplicableRationale)
     : ContractDocument(SchemaVersion, Kind, Identity);
 
+public sealed record GateAuthorityBindingContract(
+    string GateId, string PolicyIdentity, string HeadCommit,
+    string PluginId, string PluginVersion, string Tool, string ToolVersion,
+    string ToolIdentity, string ConfigurationIdentity, string RuntimeClosureIdentity, string InputSetIdentity,
+    bool Enabled, string Status, bool ProductionCapable, string Authority);
+
+public sealed record AuthoritativeGateReceiptContract(
+    string SchemaVersion, string Kind, string Identity, string GateId, string PolicyIdentity,
+    string BaseCommit, string HeadCommit, string TreeId, string Command, DateTimeOffset StartedAt,
+    DateTimeOffset CompletedAt, int? ExitCode, string Outcome, string Reason,
+    IReadOnlyDictionary<string, string> ArtifactHashes, bool SourceChanged,
+    IReadOnlyList<string> Limitations, string? NotApplicableRationale,
+    GateAuthorityBindingContract AuthorityBinding)
+    : ContractDocument(SchemaVersion, Kind, Identity);
+
 public sealed record ReviewReceiptContract(
     string SchemaVersion, string Kind, string Identity, string BaseCommit, string HeadCommit,
     string TreeId, string PatchSha256, string ReviewerFamily, string Outcome, int FindingCount,
