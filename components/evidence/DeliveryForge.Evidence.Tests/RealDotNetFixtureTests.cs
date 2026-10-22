@@ -92,7 +92,15 @@ public sealed class RealDotNetFixtureTests
         Assert.True(string.IsNullOrEmpty(cleanStatus.StandardOutput),
             $"Fresh GREEN clone is not clean:{Environment.NewLine}{cleanStatus.StandardOutput}");
 
+        var beforeCapability = await CaptureRepositoryDiagnosticAsync(
+            executor, greenRepository, protectedBase, "before-capability-probe");
         capability = await DetectDotNetAsync(executor, dotnet, greenRepository);
+        var afterCapability = await CaptureRepositoryDiagnosticAsync(
+            executor, greenRepository, protectedBase, "after-capability-probe");
+        var preGate = await CaptureRepositoryDiagnosticAsync(
+            executor, greenRepository, protectedBase, "pre-gate");
+        var repositoryDiagnostics = new RepositoryDiagnosticBundle(
+            beforeCapability, afterCapability, preGate);
         project = System.IO.Path.Combine(greenRepository, "Subject.Tests", "Subject.Tests.csproj");
         var greenTrx = System.IO.Path.Combine(greenRepository, "green.trx");
         var assembly = System.IO.Path.Combine(
@@ -100,13 +108,15 @@ public sealed class RealDotNetFixtureTests
         Assert.False(File.Exists(assembly));
         var greenResult = await RunGateAsync(
             executor, capability, greenRepository, evidence.Path, protectedBase, "green-gate",
-            ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={greenTrx}"]);
-        ArchiveFixtureEvidence(evidence.Path, greenResult);
+            ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={greenTrx}"],
+            preGate.Identity);
+        ArchiveFixtureEvidence(evidence.Path, greenResult, repositoryDiagnostics);
         Assert.True(greenResult.Execution.ExitCode == 0,
             $"GREEN process did not complete successfully: exit={greenResult.Execution.ExitCode}; " +
             $"timeout={greenResult.Execution.TimedOut}; cancelled={greenResult.Execution.Cancelled}; " +
             $"quiescent={greenResult.Execution.OwnedProcessQuiescent}; reason={greenResult.Reason}; " +
             $"native={greenResult.Execution.LifecycleDiagnostics?.NativeFailure}\n" +
+            FormatRepositoryDiagnostics(repositoryDiagnostics, preGate.Identity, greenResult.Before) + "\n" +
             greenResult.Execution.StandardOutput + "\n" + greenResult.Execution.StandardError);
         Assert.True(File.Exists(assembly));
         Assert.Equal((1, 1, 1, 0), ReadCounts(greenTrx));
@@ -136,10 +146,11 @@ public sealed class RealDotNetFixtureTests
         string outputRoot,
         string protectedBase,
         string outputName,
-        IReadOnlyList<string> arguments)
+        IReadOnlyList<string> arguments,
+        RepositoryIdentity? expectedRepository = null)
     {
         var reader = new GitRepositoryIdentityReader(executor, repository, protectedBase);
-        var identity = await reader.ReadAsync(TestContext.Current.CancellationToken);
+        var identity = expectedRepository ?? await reader.ReadAsync(TestContext.Current.CancellationToken);
         var policy = new ResolvedEvidencePolicy(
             TestEvidence.Identity('1'), TestEvidence.Identity('2'), protectedBase,
             PolicyAuthorityKind.ProtectedGitBase, 0m, ["test"], authorityVerified: true,
@@ -167,7 +178,10 @@ public sealed class RealDotNetFixtureTests
             TestContext.Current.CancellationToken);
     }
 
-    private static void ArchiveFixtureEvidence(string evidenceRoot, GateRunResult result)
+    private static void ArchiveFixtureEvidence(
+        string evidenceRoot,
+        GateRunResult result,
+        RepositoryDiagnosticBundle? repositoryDiagnostics = null)
     {
         var destination = Environment.GetEnvironmentVariable("DELIVERY_FORGE_TEST_ARTIFACTS");
         if (string.IsNullOrWhiteSpace(destination)) return;
@@ -176,7 +190,15 @@ public sealed class RealDotNetFixtureTests
         var ownedLeaf = Path.Combine(destination, "real-dotnet", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(ownedLeaf);
         File.WriteAllText(Path.Combine(ownedLeaf, "observed-result.json"),
-            System.Text.Json.JsonSerializer.Serialize(new { result.Outcome, result.Reason, result.Execution }));
+            System.Text.Json.JsonSerializer.Serialize(new
+            {
+                result.Outcome,
+                result.Reason,
+                result.Execution,
+                result.Before,
+                result.After,
+                repositoryDiagnostics
+            }));
         var files = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
         foreach (var source in Directory.EnumerateFiles(evidenceRoot, "*", files))
         {
@@ -185,6 +207,54 @@ public sealed class RealDotNetFixtureTests
             File.Copy(source, target, overwrite: false);
         }
     }
+
+    private static async Task<RepositoryDiagnosticSnapshot> CaptureRepositoryDiagnosticAsync(
+        ProcessCommandExecutor executor,
+        string repository,
+        string protectedBase,
+        string label)
+    {
+        var identity = await new GitRepositoryIdentityReader(executor, repository, protectedBase)
+            .ReadAsync(TestContext.Current.CancellationToken);
+        var porcelain = await RunAsync(
+            executor, "git", repository, ["status", "--porcelain=v1", "--untracked-files=all"]);
+        var topLevel = await RunAsync(executor, "git", repository, ["rev-parse", "--show-toplevel"]);
+        var config = await RunAsync(
+            executor,
+            "git",
+            repository,
+            [
+                "config", "--show-origin", "--get-regexp",
+                "^(core\\.(autocrlf|eol|safecrlf|ignorecase|filemode)|status\\.showUntrackedFiles)$"
+            ]);
+        return new RepositoryDiagnosticSnapshot(
+            label,
+            Environment.CurrentDirectory,
+            repository,
+            Path.GetFullPath(repository),
+            new DirectoryInfo(repository).FullName,
+            topLevel.ExitCode,
+            topLevel.StandardOutput,
+            topLevel.StandardError,
+            identity,
+            porcelain.ExitCode,
+            porcelain.StandardOutput,
+            porcelain.StandardError,
+            config.ExitCode,
+            config.StandardOutput,
+            config.StandardError);
+    }
+
+    private static string FormatRepositoryDiagnostics(
+        RepositoryDiagnosticBundle diagnostics,
+        RepositoryIdentity expected,
+        RepositoryIdentity observed) =>
+        "Repository identity diagnostics: " + System.Text.Json.JsonSerializer.Serialize(new
+        {
+            ExpectedRepositoryIdentity = expected,
+            ObservedRepositoryIdentity = observed,
+            Snapshots = diagnostics
+        });
 
     private static async Task<CommandResult> GitAsync(
         ProcessCommandExecutor executor, string directory, IReadOnlyList<string> arguments)
@@ -287,4 +357,26 @@ public sealed class RealDotNetFixtureTests
             if (Directory.Exists(directory))
                 Directory.Delete(directory, true);
     }
+
+    private sealed record RepositoryDiagnosticBundle(
+        RepositoryDiagnosticSnapshot BeforeCapabilityProbe,
+        RepositoryDiagnosticSnapshot AfterCapabilityProbe,
+        RepositoryDiagnosticSnapshot PreGate);
+
+    private sealed record RepositoryDiagnosticSnapshot(
+        string Label,
+        string ProcessCurrentDirectory,
+        string RepositoryArgument,
+        string FullRepositoryPath,
+        string DirectoryInfoFullName,
+        int? GitTopLevelExitCode,
+        string GitTopLevelStandardOutput,
+        string GitTopLevelStandardError,
+        RepositoryIdentity Identity,
+        int? PorcelainExitCode,
+        string PorcelainStandardOutput,
+        string PorcelainStandardError,
+        int? RelevantConfigExitCode,
+        string RelevantConfigStandardOutput,
+        string RelevantConfigStandardError);
 }
