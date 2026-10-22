@@ -158,8 +158,10 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
         ProcessLaunch launch;
         if (OperatingSystem.IsWindows())
         {
-            var executable = FindWindowsPowerShell();
-            launch = new(executable, ["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30"]);
+            var executable = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "PING.EXE");
+            if (!File.Exists(executable))
+                throw new FileNotFoundException("Bounded native fixture ping host is unavailable.", executable);
+            launch = new(executable, ["-n", "30", "127.0.0.1"]);
         }
         else if (OperatingSystem.IsLinux())
         {
@@ -365,13 +367,4 @@ public sealed class OwnedScenarioRun : IAsyncDisposable
         .Split(Path.PathSeparator).Where(Path.IsPathFullyQualified).Select(path => Path.Combine(path, name)).FirstOrDefault(File.Exists)
         ?? throw new FileNotFoundException("Required explicit/absolute owned fixture executable is unavailable: " + name);
 
-    private static string FindWindowsPowerShell()
-    {
-        try { return FindExecutable("pwsh.exe"); }
-        catch (FileNotFoundException)
-        {
-            var candidate = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
-            return File.Exists(candidate) ? candidate : throw new FileNotFoundException("Bounded native fixture PowerShell host is unavailable.");
-        }
-    }
 }

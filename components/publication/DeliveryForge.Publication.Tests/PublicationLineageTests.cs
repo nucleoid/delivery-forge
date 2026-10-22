@@ -1,4 +1,6 @@
 using DeliveryForge.Contracts.Models;
+using DeliveryForge.Contracts.State;
+using DeliveryForge.Contracts.Validation;
 
 namespace DeliveryForge.Publication.Tests;
 
@@ -10,7 +12,9 @@ public sealed class PublicationLineageTests
         var prior = new PublicationFixture();
         var oldRun = prior.Authority.IssueRun(prior.Definition(AuthorizationCeiling.Implement));
         var next = PublicationFixture.NewRoot();
-        var host = PublicationAuthorityHost.CreateReconciledFixture(prior.Authority, oldRun, next.ReviewHost);
+        var host = PublicationAuthorityHost.CreateReconciledFixture(prior.Authority, oldRun, next.ReviewHost,
+            GateReceiptConsumerPolicy.CreateIsolatedFixture(
+                TrustedGatePluginRegistry.BuiltIns, next.GateReceiptProvenance));
         var revision = host.IssueReconciledRevision(oldRun, next.Definition(AuthorizationCeiling.Pr) with
         {
             PriorRevisionIdentity = oldRun.Definition.RevisionIdentity
@@ -54,7 +58,9 @@ public sealed class PublicationLineageTests
         var prior = new PublicationFixture();
         var oldRun = prior.Authority.IssueRun(prior.Definition(AuthorizationCeiling.Implement));
         var next = PublicationFixture.NewRoot();
-        var host = PublicationAuthorityHost.CreateReconciledFixture(prior.Authority, oldRun, next.ReviewHost);
+        var host = PublicationAuthorityHost.CreateReconciledFixture(prior.Authority, oldRun, next.ReviewHost,
+            GateReceiptConsumerPolicy.CreateIsolatedFixture(
+                TrustedGatePluginRegistry.BuiltIns, next.GateReceiptProvenance));
         var definition = next.Definition(AuthorizationCeiling.Pr) with
         {
             PriorRevisionIdentity = oldRun.Definition.RevisionIdentity,

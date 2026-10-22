@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using DeliveryForge.Contracts.Models;
+using DeliveryForge.Contracts.State;
 using DeliveryForge.Execution.Host;
 
 namespace DeliveryForge.Publication;
@@ -14,20 +15,25 @@ public sealed class PublicationAuthorityHost
     private readonly PublicationRun? permittedPredecessor;
 
     private PublicationAuthorityHost(ReviewAuthorityHost reviewHost,
+        GateReceiptConsumerPolicy? gateReceiptPolicy = null,
         PublicationAuthorityHost? predecessorHost = null, PublicationRun? permittedPredecessor = null)
     {
         ReviewHost = reviewHost;
+        GateReceiptPolicy = gateReceiptPolicy ?? GateReceiptConsumerPolicy.Disabled;
         this.predecessorHost = predecessorHost;
         this.permittedPredecessor = permittedPredecessor;
     }
 
     internal ReviewAuthorityHost ReviewHost { get; }
+    internal GateReceiptConsumerPolicy GateReceiptPolicy { get; }
 
-    public static PublicationAuthorityHost CreateIsolatedFixture(ReviewAuthorityHost reviewHost) =>
-        new(reviewHost ?? throw new ArgumentNullException(nameof(reviewHost)));
+    public static PublicationAuthorityHost CreateIsolatedFixture(
+        ReviewAuthorityHost reviewHost, GateReceiptConsumerPolicy? gateReceiptPolicy = null) =>
+        new(reviewHost ?? throw new ArgumentNullException(nameof(reviewHost)), gateReceiptPolicy);
 
     public static PublicationAuthorityHost CreateReconciledFixture(
-        PublicationAuthorityHost priorHost, PublicationRun registeredPrior, ReviewAuthorityHost newReviewHost)
+        PublicationAuthorityHost priorHost, PublicationRun registeredPrior, ReviewAuthorityHost newReviewHost,
+        GateReceiptConsumerPolicy? gateReceiptPolicy = null)
     {
         ArgumentNullException.ThrowIfNull(priorHost);
         ArgumentNullException.ThrowIfNull(registeredPrior);
@@ -35,7 +41,7 @@ public sealed class PublicationAuthorityHost
         if (!priorHost.Owns(registeredPrior))
             throw new InvalidOperationException("An actual registered predecessor from this exact parent issuer is required.");
         newReviewHost.EnsureContractFixturePredecessorScope(priorHost.ReviewHost);
-        return new(newReviewHost, priorHost, registeredPrior);
+        return new(newReviewHost, gateReceiptPolicy ?? priorHost.GateReceiptPolicy, priorHost, registeredPrior);
     }
 
     public static PublicationAuthorityHost CreateProduction() => throw new PublicationUnavailableException(

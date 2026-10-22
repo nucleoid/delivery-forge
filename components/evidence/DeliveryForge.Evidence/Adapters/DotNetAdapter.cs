@@ -42,6 +42,11 @@ public sealed class DotNetAdapter
         if (omitted.Length > 0)
             return NormalizedEvidence.Incomplete($"Required test projects were omitted: {string.Join(", ", omitted)}.");
 
-        return NormalizedEvidence.Pass("Pinned .NET SDK build/test evidence is complete.");
+        return new NormalizedEvidence(
+            GateOutcome.Pass,
+            "Pinned .NET SDK build/test evidence is complete.",
+            Fixture: false,
+            ProductionCapable: true,
+            Limitations: []);
     }
 }

@@ -225,17 +225,21 @@ internal static class QualityInterruptionOrchestrator
                 var dllCopy = Path.Combine(phaseRoot, "actual-Subject.dll");
                 var dll = Path.Combine(repo, "Subject", "bin", "Release", "net10.0", "Subject.dll"); RequireOwnedPlain(runtime, dll);
                 await WriteNew(dllCopy, await File.ReadAllBytesAsync(dll, cancellationToken), cancellationToken);
-                var reclaimDenied = false; var reclaimCommands = 0; string? reclaimOutcome = null;
+                GateRunResult? immutableRetry = null; var retryCommands = 0;
                 var receiptBeforeActivity = OwnedQualityInterruptionRuntime.Hash(receiptBytes);
                 if (late is not null)
                 {
                     RequireOwnedPlain(runtime, trx);
                     await File.WriteAllBytesAsync(trx, await File.ReadAllBytesAsync(lateArchive!, cancellationToken), cancellationToken);
                     var sdkCommands = runtime.SdkCommands;
-                    try { await new GateRunner(runtime, realReader, repo, protectedBase).RunAsync(request, cancellationToken); }
-                    catch (EvidenceWriteException exception) { reclaimDenied = true; reclaimOutcome = "ClaimRejected"; await SaveText(phaseRoot, "actual-claim-refusal.txt", exception.ToString(), cancellationToken); }
-                    reclaimCommands = runtime.SdkCommands - sdkCommands;
-                    if (!reclaimDenied || reclaimCommands != 0) throw new InvalidOperationException("Sealed output claim allowed reuse or another SDK command.");
+                    immutableRetry = await new GateRunner(runtime, realReader, repo, protectedBase)
+                        .RunAsync(request, cancellationToken);
+                    retryCommands = runtime.SdkCommands - sdkCommands;
+                    if (immutableRetry.Outcome is GateOutcome.Pass or GateOutcome.NotApplicable || retryCommands != 1 ||
+                        string.Equals(immutableRetry.ReceiptPath, gate.ReceiptPath, StringComparison.Ordinal) ||
+                        !immutableRetry.ReceiptPath.Contains(".attempt-", StringComparison.Ordinal) ||
+                        !File.Exists(immutableRetry.ReceiptPath))
+                        throw new InvalidOperationException("Released claim did not produce one distinct fail-closed immutable retry.");
                     if (!File.ReadAllBytes(gate.ReceiptPath).SequenceEqual(receiptBytes)) throw new IOException("Late activity changed the immutable returned receipt.");
                 }
                 var proof = new
@@ -305,9 +309,12 @@ internal static class QualityInterruptionOrchestrator
                     capturedArtifactHashesAfterLate = hashesAfterLate,
                     receiptSha256BeforeLateActivity = receiptBeforeActivity,
                     receiptSha256AfterLateActivity = OwnedQualityInterruptionRuntime.HashFile(gate.ReceiptPath),
-                    outputReclaimDenied = reclaimDenied,
-                    outputReclaimSdkCommandCount = reclaimCommands,
-                    outputReclaimOutcome = reclaimOutcome,
+                    immutableRetryPermitted = immutableRetry is not null,
+                    immutableRetrySdkCommandCount = retryCommands,
+                    immutableRetryOutcome = immutableRetry?.Outcome.ToString(),
+                    immutableRetryReceiptPath = immutableRetry?.ReceiptPath,
+                    immutableRetryReceiptDistinct = immutableRetry is not null &&
+                        !string.Equals(immutableRetry.ReceiptPath, gate.ReceiptPath, StringComparison.Ordinal),
                     lateReportAttributedToPrimary = false,
                     limitation = "Actual compiled test/native SDK only. Distinct sequential late execution is not primary-process late completion; no model-worker or production certification."
                 };

@@ -6,72 +6,137 @@ using System.Text.Json.Nodes;
 using DeliveryForge.Contracts.Models;
 using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Contracts.State;
+using DeliveryForge.Contracts.Validation;
 
 namespace DeliveryForge.Evidence;
 
 public sealed class GateRunner
 {
+    internal const string AntiSlopBindingArtifact = "anti-slop-binding.json";
+    internal const int AntiSlopMaximumCapturedBytesPerStream = 1024 * 1024;
+    internal const int ExistingGateMaximumCapturedBytesPerStream = 64 * 1024 * 1024;
     private readonly ICommandExecutor _executor;
     private readonly IRepositoryIdentityReader _repository;
     private readonly string _trustedWorkingDirectory;
     private readonly string _trustedProtectedBaseCommit;
+    private readonly DeterministicEvaluationPluginRegistry _plugins;
+    private readonly TrustedGatePluginRegistry _authorityRegistry;
+    private readonly bool _usesBuiltInExecutionRegistry;
+    private readonly string? _hostOwnedClaimRoot;
 
     public GateRunner(
         ICommandExecutor executor,
         IRepositoryIdentityReader repository,
         string trustedWorkingDirectory,
-        string trustedProtectedBaseCommit)
+        string trustedProtectedBaseCommit,
+        DeterministicEvaluationPluginRegistry? plugins = null)
+        : this(executor, repository, trustedWorkingDirectory, trustedProtectedBaseCommit,
+            plugins, TrustedGatePluginRegistry.BuiltIns, null)
+    {
+    }
+
+    public GateRunner(
+        ICommandExecutor executor,
+        IRepositoryIdentityReader repository,
+        string trustedWorkingDirectory,
+        string trustedProtectedBaseCommit,
+        TrustedEvaluationPluginRegistry registry)
+        : this(executor, repository, trustedWorkingDirectory, trustedProtectedBaseCommit,
+            (registry ?? throw new ArgumentNullException(nameof(registry))).Plugins,
+            registry.Authority, null)
+    {
+    }
+
+    internal GateRunner(
+        ICommandExecutor executor,
+        IRepositoryIdentityReader repository,
+        string trustedWorkingDirectory,
+        string trustedProtectedBaseCommit,
+        DeterministicEvaluationPluginRegistry? plugins,
+        TrustedGatePluginRegistry? authorityRegistry,
+        string? hostOwnedClaimRoot)
     {
         _executor = executor;
         _repository = repository;
         _trustedWorkingDirectory = Path.GetFullPath(trustedWorkingDirectory);
         _trustedProtectedBaseCommit = trustedProtectedBaseCommit;
+        _usesBuiltInExecutionRegistry = (plugins is null || plugins.IsCodeOwnedBuiltInRegistry) &&
+            (authorityRegistry is null || ReferenceEquals(authorityRegistry, TrustedGatePluginRegistry.BuiltIns));
+        _plugins = plugins ?? DeterministicEvaluationPluginRegistry.CreateBuiltIns();
+        _authorityRegistry = authorityRegistry ?? TrustedGatePluginRegistry.BuiltIns;
+        _plugins.AssertMatchesAuthorityRegistry(_authorityRegistry);
+        _hostOwnedClaimRoot = hostOwnedClaimRoot is null ? null : Path.GetFullPath(hostOwnedClaimRoot);
     }
     private static readonly JsonSerializerOptions ContractJson = CreateContractJson();
 
     public async Task<GateRunResult> RunAsync(GateRequest request, CancellationToken cancellationToken = default)
     {
         ValidateRequest(request);
+        var deadline = DateTimeOffset.UtcNow + request.Timeout;
+        var plugin = _plugins.Resolve(request.Adapter, request.Plugin);
+        var pluginBinding = DeterministicEvaluationPluginRegistry.Bind(
+            request, plugin,
+            request.Plugin?.Enabled == false ? EvaluationPluginStatus.Disabled : EvaluationPluginStatus.Selected);
         Directory.CreateDirectory(request.OutputDirectory);
-        var claimPath = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId) + ".claim");
-        var gateDirectory = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
-        var gateDirectoryPreexisted = Directory.Exists(gateDirectory);
+        var claimRoot = _hostOwnedClaimRoot ?? request.OutputDirectory;
+        Directory.CreateDirectory(claimRoot);
+        var claimScope = _hostOwnedClaimRoot is null
+            ? SafeSegment(request.GateId)
+            : Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+                _trustedWorkingDirectory + "\0" + _trustedProtectedBaseCommit + "\0" + request.GateId)));
+        var claimPath = Path.Combine(claimRoot, claimScope + ".claim");
+        var gateDirectoryPrefix = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
+        // Every execution owns a fresh immutable attempt directory. A killed process may leave
+        // that directory incomplete, but can never reserve the canonical gate name forever.
+        var gateDirectory = gateDirectoryPrefix + ".attempt-" + Guid.NewGuid().ToString("N");
+        GateClaimAcquisition claim;
         try
         {
-            await using var claim = new FileStream(
-                claimPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 1, FileOptions.WriteThrough);
-            claim.Flush(true);
+            claim = GateClaimLease.Acquire(claimPath);
         }
-        catch (IOException exception)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or EvidenceWriteException)
         {
-            throw new EvidenceWriteException($"Gate claim already exists or cannot be created: {exception.Message}");
+            claim = new(null, $"Gate claim could not be established: {exception.Message}", null);
         }
-        if (gateDirectoryPreexisted)
-        {
-            var failureDirectory = gateDirectory + ".claim-error-" + Guid.NewGuid().ToString("N");
+        if (claim.Lease is null)
             return await PersistWithoutExecutionAsync(
-                request, failureDirectory, request.ExpectedRepository, request.ExpectedRepository,
-                NormalizedEvidence.Error("Gate artifact directory existed before the atomic claim."),
-                CancellationToken.None).ConfigureAwait(false);
-        }
-
-        var capabilityFailure = ValidateCapabilityBinding(request);
-        if (capabilityFailure is not null)
+                request, gateDirectoryPrefix + ".claim-incomplete-" + Guid.NewGuid().ToString("N"),
+                request.ExpectedRepository, request.ExpectedRepository,
+                NormalizedEvidence.Incomplete(claim.UnavailableReason ?? "Gate claim is unavailable."),
+                pluginBinding, CancellationToken.None).ConfigureAwait(false);
+        await using var claimLease = claim.Lease;
+        if (claim.InterruptedClaimPath is not null)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectoryPrefix + ".interrupted-" + Guid.NewGuid().ToString("N"),
+                request.ExpectedRepository, request.ExpectedRepository,
+                NormalizedEvidence.Incomplete(
+                    "Recovered a stale gate claim from an interrupted owner; retry is permitted after this durable receipt."),
+                pluginBinding, CancellationToken.None).ConfigureAwait(false);
+        if (plugin is not Adapters.AntiSlopEvaluationPlugin && pluginBinding.Enabled &&
+            ValidateCapabilityBinding(request, plugin) is { } nonScopeCapabilityFailure)
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, request.ExpectedRepository, request.ExpectedRepository,
-                capabilityFailure,
-                CancellationToken.None).ConfigureAwait(false);
+                nonScopeCapabilityFailure, pluginBinding, CancellationToken.None).ConfigureAwait(false);
 
         RepositoryIdentity before;
         try
         {
-            before = await _repository.ReadAsync(CancellationToken.None).ConfigureAwait(false);
+            before = await ReadRepositoryAsync(Remaining(deadline), cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception)
+        {
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, request.ExpectedRepository, request.ExpectedRepository,
+                NormalizedEvidence.Incomplete(
+                    $"Repository identity read was cancelled or exceeded the gate deadline: {exception.Message}"),
+                pluginBinding, CancellationToken.None).ConfigureAwait(false);
         }
         catch (Exception exception)
         {
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, request.ExpectedRepository, request.ExpectedRepository,
-                NormalizedEvidence.Error($"Repository identity could not be read: {exception.Message}"),
+                NormalizedEvidence.Incomplete($"Repository identity could not be read: {exception.Message}"),
+                pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
         }
         if (!before.IsClean || before != request.ExpectedRepository)
@@ -79,8 +144,17 @@ public sealed class GateRunner
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, before, before,
                 NormalizedEvidence.Error("Repository identity is not the expected clean committed base/head/tree."),
+                pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
         }
+        if (!pluginBinding.Enabled)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before,
+                NormalizedEvidence.Incomplete(
+                    "The selected deterministic evaluation plugin is disabled; no tool outcome exists and the gate is unsatisfied."),
+                pluginBinding,
+                CancellationToken.None).ConfigureAwait(false);
+
         if (request.Policy.AuthorityVerified &&
             (!string.Equals(request.Policy.SourceRevision, before.BaseCommit, StringComparison.Ordinal) ||
              !string.Equals(request.Policy.SourceRevision, _trustedProtectedBaseCommit, StringComparison.Ordinal) ||
@@ -91,29 +165,150 @@ public sealed class GateRunner
                 request, gateDirectory, before, before,
                 NormalizedEvidence.Error(
                     "Protected policy authority is not bound to this gate's frozen repository base and root."),
+                pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
         }
 
+        var requiredGateBindingFailure = ValidateRequiredGateBinding(request, plugin);
+        if (requiredGateBindingFailure is not null)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before, requiredGateBindingFailure, pluginBinding,
+                CancellationToken.None).ConfigureAwait(false);
 
-        Directory.CreateDirectory(gateDirectory);
-        EvidenceExecutionSnapshot evidenceSnapshot;
+        AutomaticScopeValidation scopeValidation;
         try
         {
-            evidenceSnapshot = EvidenceAdapterDispatcher.CaptureBefore(request);
+            scopeValidation = await ValidateAutomaticScopeAsync(
+                request, plugin, before, Remaining(deadline), cancellationToken).ConfigureAwait(false);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        catch (OperationCanceledException exception)
         {
             return await PersistWithoutExecutionAsync(
                 request, gateDirectory, before, before,
-                NormalizedEvidence.Error($"Evidence inputs could not be snapshotted: {exception.Message}"),
+                NormalizedEvidence.Incomplete(
+                    $"Anti-slop scope derivation was cancelled or exceeded the gate deadline: {exception.Message}"),
+                pluginBinding, CancellationToken.None).ConfigureAwait(false);
+        }
+        if (scopeValidation.InputSetIdentity is not null)
+            pluginBinding = pluginBinding with { InputSetIdentity = scopeValidation.InputSetIdentity };
+        if (scopeValidation.MaterializedRoot is not null)
+            request = request with
+            {
+                Invocation = request.Invocation with { WorkingDirectory = scopeValidation.MaterializedRoot }
+            };
+        using var materializationLease = new FrozenMaterializationLease(scopeValidation.MaterializedRoot);
+        if (scopeValidation.Failure is not null)
+        {
+            if (scopeValidation.Failure.Outcome == GateOutcome.NotApplicable)
+            {
+                pluginBinding = pluginBinding with { Status = EvaluationPluginStatus.NotApplicable };
+                var authorityFailure = ValidateAuthoritativeNoExecution(request, plugin);
+                if (authorityFailure is not null)
+                    return await PersistWithoutExecutionAsync(
+                        request, gateDirectory, before, before, authorityFailure, pluginBinding,
+                        CancellationToken.None).ConfigureAwait(false);
+            }
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before, scopeValidation.Failure, pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
         }
 
-        CommandResult execution;
+        NormalizedEvidence? pluginValidation;
         try
         {
-            execution = await _executor.ExecuteAsync(request.Invocation, request.Timeout, cancellationToken)
+            _ = Remaining(deadline);
+            pluginValidation = plugin.ValidateBeforeExecution(request);
+            _ = Remaining(deadline);
+        }
+        catch (OperationCanceledException exception)
+        {
+            pluginValidation = NormalizedEvidence.Incomplete(
+                $"Plugin validation exceeded the finite gate deadline: {exception.Message}");
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            pluginValidation = NormalizedEvidence.Incomplete(
+                $"Plugin configuration or inputs could not be read: {exception.Message}");
+        }
+        if (pluginValidation is not null)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before, pluginValidation, pluginBinding,
+                CancellationToken.None).ConfigureAwait(false);
+
+        Directory.CreateDirectory(gateDirectory);
+        EvaluationPluginSnapshot evidenceSnapshot;
+        try
+        {
+            using var snapshotDeadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            snapshotDeadline.CancelAfter(Remaining(deadline));
+            evidenceSnapshot = await plugin.CaptureBeforeAsync(request, snapshotDeadline.Token)
                 .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException exception)
+        {
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before,
+                NormalizedEvidence.Incomplete(
+                    $"Evidence snapshot exceeded the finite gate deadline: {exception.Message}"),
+                pluginBinding, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or
+                                           ArgumentException or NotSupportedException or JsonException)
+        {
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before,
+                plugin is Adapters.AntiSlopEvaluationPlugin
+                    ? NormalizedEvidence.Incomplete(
+                        $"Anti-slop configuration or runtime closure became unavailable before execution: {exception.Message}")
+                    : NormalizedEvidence.Error($"Evidence inputs could not be snapshotted: {exception.Message}"),
+                pluginBinding,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        pluginBinding = DeterministicEvaluationPluginRegistry.Bind(
+            request, plugin, EvaluationPluginStatus.Selected, snapshot: evidenceSnapshot) with
+        {
+            InputSetIdentity = pluginBinding.InputSetIdentity
+        };
+        request = request with { ConfigurationIdentity = pluginBinding.ConfigurationIdentity };
+        if (plugin is Adapters.AntiSlopEvaluationPlugin &&
+            ValidateCapabilityBinding(request, plugin, evidenceSnapshot) is { } snapshotCapabilityFailure)
+            return await PersistWithoutExecutionAsync(
+                request, gateDirectory, before, before, snapshotCapabilityFailure,
+                pluginBinding, CancellationToken.None).ConfigureAwait(false);
+
+        CommandResult execution;
+        var captureBoundExceeded = false;
+        try
+        {
+            if (_executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } ownedExecutor)
+            {
+                var captureLimit = plugin is Adapters.AntiSlopEvaluationPlugin
+                    ? AntiSlopMaximumCapturedBytesPerStream
+                    : ExistingGateMaximumCapturedBytesPerStream;
+                var capture = await ownedExecutor.ExecuteBoundedCaptureAsync(
+                    request.Invocation, Remaining(deadline), captureLimit, cancellationToken)
+                    .ConfigureAwait(false);
+                execution = capture.Command;
+                captureBoundExceeded = capture.CaptureBoundExceeded;
+            }
+            else if (_executor is IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true } fixtureExecutor)
+            {
+                var captureLimit = plugin is Adapters.AntiSlopEvaluationPlugin
+                    ? AntiSlopMaximumCapturedBytesPerStream
+                    : ExistingGateMaximumCapturedBytesPerStream;
+                var capture = await fixtureExecutor.ExecuteBoundedCaptureAsync(
+                    request.Invocation, Remaining(deadline), captureLimit, cancellationToken)
+                    .ConfigureAwait(false);
+                execution = capture.Command;
+                captureBoundExceeded = capture.CaptureBoundExceeded;
+            }
+            else
+            {
+                // Compatibility for deterministic in-memory/fixture executors. Actual gate tools
+                // use the creation-owned ProcessCommandExecutor path above.
+                execution = await _executor.ExecuteAsync(request.Invocation, Remaining(deadline), cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException)
         {
@@ -133,7 +328,7 @@ public sealed class GateRunner
         string? artifactBindingError = null;
         try
         {
-            EvidenceAdapterDispatcher.AppendBoundArtifacts(
+            plugin.AppendBoundArtifacts(
                 request, evidenceSnapshot, gateDirectory, artifactHashes);
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
@@ -144,7 +339,8 @@ public sealed class GateRunner
         var identityReadFailed = false;
         try
         {
-            after = await _repository.ReadAsync(CancellationToken.None).ConfigureAwait(false);
+            using var finalReadDeadline = new CancellationTokenSource(Remaining(deadline));
+            after = await _repository.ReadAsync(finalReadDeadline.Token).ConfigureAwait(false);
         }
         catch
         {
@@ -156,9 +352,11 @@ public sealed class GateRunner
         NormalizedEvidence normalized;
         try
         {
+            _ = Remaining(deadline);
             normalized = artifactBindingError is null
-                ? EvidenceAdapterDispatcher.Normalize(request, execution, evidenceSnapshot)
-                : NormalizedEvidence.Error($"Bound evidence artifact could not be persisted: {artifactBindingError}");
+                ? plugin.Normalize(request, execution, evidenceSnapshot)
+                : NormalizedEvidence.Incomplete($"Bound evidence artifact could not be persisted: {artifactBindingError}");
+            _ = Remaining(deadline);
         }
         catch (OperationCanceledException)
         {
@@ -168,52 +366,124 @@ public sealed class GateRunner
         {
             normalized = NormalizedEvidence.Error($"Evidence normalizer failed: {exception.Message}");
         }
+        var pluginRawOutcome = normalized.Outcome;
+        var postExecutionValidation = plugin.ValidateAfterExecution(request, evidenceSnapshot);
         if (identityReadFailed)
-            normalized = NormalizedEvidence.Error("Repository identity could not be read after evaluation.");
+            normalized = NormalizedEvidence.Incomplete("Repository identity could not be read after evaluation.");
         else if (sourceChanged)
             normalized = NormalizedEvidence.Error("Repository source/index/status identity changed during evaluation.");
-        else if (ValidateCapabilityBinding(request) is not null)
-            normalized = NormalizedEvidence.Error("The bound executable bytes changed during gate execution.");
+        else if (ValidateCapabilityBinding(request, plugin, evidenceSnapshot) is { } postCapabilityValidation)
+            normalized = postCapabilityValidation;
+        else if (postExecutionValidation is not null)
+            normalized = postExecutionValidation;
         else if (!execution.OwnedProcessQuiescent)
-            normalized = NormalizedEvidence.Error("Owned tool process did not become quiescent after interruption.");
+            normalized = NormalizedEvidence.Incomplete(
+                plugin is Adapters.AntiSlopEvaluationPlugin
+                    ? "Anti-slop process failed to start or settle; no complete tool evidence exists."
+                    : "Owned tool process did not become quiescent after interruption.");
+        else if (captureBoundExceeded)
+            normalized = NormalizedEvidence.Incomplete(
+                "Tool output exceeded its deterministic per-plugin per-stream capture limit; no truncated output can authorize PASS.");
         else if (execution.TimedOut)
             normalized = NormalizedEvidence.Incomplete("Tool timed out before complete evidence was produced.");
         else if (execution.Cancelled)
             normalized = NormalizedEvidence.Incomplete("Tool execution was cancelled before complete evidence was produced.");
         else if (execution.ExitCode is null)
-            normalized = NormalizedEvidence.Error("Tool process did not start or did not reach a valid exit.");
+            normalized = NormalizedEvidence.Incomplete("Tool process did not start or did not reach a valid exit.");
         else if (normalized.Outcome == GateOutcome.Pass && execution.ExitCode != 0)
             normalized = NormalizedEvidence.Error("PASS evidence requires an observed zero process exit.");
         else if (normalized.Outcome == GateOutcome.Pass &&
                  (!request.Policy.AuthorityVerified ||
                   !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
+                  request.Capability.Fixture ||
+                  !HasTrustedLegacyV1Authority(request, plugin) ||
                   !normalized.ProductionCapable))
             normalized = NormalizedEvidence.Incomplete(
-                "Tool PASS is advisory because protected policy/gate authority or certified producer evidence is absent.");
+                "Tool PASS is advisory because the protected policy, required built-in legacy-v1 gate binding, non-fixture capability, or production-capable evidence is absent.");
+        else if (normalized.Outcome == GateOutcome.NotApplicable &&
+                 (string.IsNullOrWhiteSpace(normalized.NotApplicableRationale) ||
+                  !request.Policy.AllowedNotApplicable.Contains(request.GateId) ||
+                  !request.Policy.AuthorityVerified ||
+                  !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
+                  request.Capability.Fixture ||
+                  !HasTrustedLegacyV1Authority(request, plugin) ||
+                  !normalized.ProductionCapable))
+            normalized = NormalizedEvidence.Incomplete(
+                "Tool NOT_APPLICABLE is advisory unless policy permits it and rationale, protected binding, non-fixture capability, and certified producer evidence are complete.");
 
+        if (scopeValidation.MaterializedRoot is not null && scopeValidation.MaterializedObjectIds is not null)
+        {
+            try
+            {
+                GitRepositoryIdentityReader.VerifyMaterializedInputs(
+                    scopeValidation.MaterializedRoot, scopeValidation.MaterializedObjectIds, cancellationToken, deadline);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or
+                                               EvidenceRepositoryException or OperationCanceledException)
+            {
+                normalized = NormalizedEvidence.Incomplete(
+                    $"Frozen anti-slop inputs changed or became unverifiable during Oxlint execution: {exception.Message}");
+            }
+        }
+
+        if (request.Capability.Fixture || !HasTrustedLegacyV1Authority(request, plugin))
+            normalized = normalized with
+            {
+                Fixture = normalized.Fixture || request.Capability.Fixture,
+                ProductionCapable = false
+            };
+
+        var executedPlugin = DeterministicEvaluationPluginRegistry.Bind(
+            request, plugin,
+            pluginRawOutcome == GateOutcome.NotApplicable
+                ? EvaluationPluginStatus.NotApplicable
+                : EvaluationPluginStatus.Executed,
+            OutcomeText(pluginRawOutcome),
+            evidenceSnapshot);
+        if (scopeValidation.InputSetIdentity is not null)
+            executedPlugin = executedPlugin with { InputSetIdentity = scopeValidation.InputSetIdentity };
+        var publishedDirectory = PublishAttemptDirectory(gateDirectory, out var publicationFailure);
+        if (publicationFailure is not null && normalized.Outcome is GateOutcome.Pass or GateOutcome.NotApplicable)
+            normalized = NormalizedEvidence.Incomplete(publicationFailure);
         return await PersistAsync(
-            request, gateDirectory, before, after, execution, artifactHashes, normalized, sourceChanged, CancellationToken.None)
+            request, publishedDirectory, before, after, execution, artifactHashes, normalized, sourceChanged,
+            executedPlugin, CancellationToken.None)
             .ConfigureAwait(false);
     }
 
-    private static async Task<GateRunResult> PersistWithoutExecutionAsync(
+    private async Task<GateRunResult> PersistWithoutExecutionAsync(
         GateRequest request,
         string gateDirectory,
         RepositoryIdentity before,
         RepositoryIdentity after,
         NormalizedEvidence normalized,
+        EvaluationPluginReceiptMetadata plugin,
         CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(gateDirectory);
         var now = DateTimeOffset.UtcNow;
         var execution = new CommandResult(null, string.Empty, string.Empty, false, false, now, now);
         var hashes = await WriteArtifactsAsync(gateDirectory, execution, cancellationToken).ConfigureAwait(false);
+        gateDirectory = PublishAttemptDirectory(gateDirectory, out var publicationFailure);
+        if (publicationFailure is not null && normalized.Outcome is GateOutcome.Pass or GateOutcome.NotApplicable)
+            normalized = NormalizedEvidence.Incomplete(publicationFailure);
         return await PersistAsync(
-            request, gateDirectory, before, after, execution, hashes, normalized, true, cancellationToken)
+            request, gateDirectory, before, after, execution, hashes, normalized,
+            before != after || !before.IsClean || !after.IsClean,
+            plugin, cancellationToken)
             .ConfigureAwait(false);
     }
 
-    private static async Task<GateRunResult> PersistAsync(
+    private static string PublishAttemptDirectory(string attemptDirectory, out string? failure)
+    {
+        // The nonce directory is itself the immutable publication unit. There is deliberately no
+        // canonical gate directory: an interrupted or completed attempt can never reserve the
+        // logical gate/output scope and prevent a later authoritative retry.
+        failure = null;
+        return attemptDirectory;
+    }
+
+    private async Task<GateRunResult> PersistAsync(
         GateRequest request,
         string gateDirectory,
         RepositoryIdentity before,
@@ -222,48 +492,188 @@ public sealed class GateRunner
         IReadOnlyDictionary<string, string> artifactHashes,
         NormalizedEvidence normalized,
         bool sourceChanged,
+        EvaluationPluginReceiptMetadata plugin,
         CancellationToken cancellationToken)
     {
+        var persistedArtifactHashes = new Dictionary<string, string>(artifactHashes, StringComparer.Ordinal);
+        if (plugin.Id == "dmmulroy.anti-slop")
+            AppendAntiSlopBindingArtifact(
+                gateDirectory, request, before, normalized, plugin, persistedArtifactHashes);
         var limitations = normalized.Limitations
             .Where(value => !string.IsNullOrWhiteSpace(value))
             .Distinct(StringComparer.Ordinal).ToArray();
-        var provisional = new GateReceiptContract(
-            "1.0.0", "gate-receipt", $"sha256:{new string('0', 64)}",
-            request.GateId, request.Policy.PolicyIdentity,
-            before.BaseCommit, before.HeadCommit, before.TreeId,
-            JsonSerializer.Serialize(new
-            {
-                request.Invocation.FileName,
-                request.Invocation.Arguments,
-                request.Invocation.WorkingDirectory,
-                Environment = request.Invocation.Environment ?? new Dictionary<string, string>(),
-                request.Scope,
-                request.Capability.ExecutableIdentity,
-                CapabilityTool = request.Capability.Tool,
-                CapabilityVersion = request.Capability.Version,
-                CapabilityFormat = request.Capability.FormatVersion,
-                CapabilityExecutable = request.Capability.ExecutablePath,
-                CapabilityFixture = request.Capability.Fixture,
-                CapabilityProbeWorkingDirectory = request.Capability.ProbeWorkingDirectory,
-                PolicySourceRevision = request.Policy.SourceRevision,
-                PolicyContentIdentity = request.Policy.ContentIdentity,
-                request.ConfigurationIdentity
-            }, ContractJson),
-            execution.StartedAt, execution.CompletedAt, execution.ExitCode,
-            OutcomeText(normalized.Outcome), normalized.Reason, artifactHashes,
-            sourceChanged, limitations, normalized.NotApplicableRationale);
+        var provisional = BuildFutureV2Receipt(
+            request, before, execution, persistedArtifactHashes, normalized, sourceChanged, limitations, plugin);
 
-        var provisionalBytes = SerializeReceipt(provisional);
-        var receipt = provisional with { Identity = CanonicalJson.ComputeIdentity(provisionalBytes) };
-        var receiptBytes = SerializeReceipt(receipt);
+        var legacy = new GateReceiptContract(
+            "1.0.0", provisional.Kind, provisional.Identity, provisional.GateId,
+            provisional.PolicyIdentity, provisional.BaseCommit, provisional.HeadCommit,
+            provisional.TreeId, BuildLegacyV1CommandEnvelope(request, plugin),
+            provisional.StartedAt, provisional.CompletedAt,
+            provisional.ExitCode, provisional.Outcome, provisional.Reason, provisional.ArtifactHashes,
+            provisional.SourceChanged, provisional.Limitations, provisional.NotApplicableRationale);
+        var provisionalBytes = SerializeReceipt(legacy);
+        legacy = legacy with { Identity = CanonicalJson.ComputeIdentity(provisionalBytes) };
+        var receiptBytes = SerializeReceipt(legacy);
         var receiptPath = await new AppendOnlyContractStore(Path.Combine(gateDirectory, "receipts"))
             .WriteImmutableAsync(receiptBytes, cancellationToken).ConfigureAwait(false);
 
+        var auditInvocation = plugin.Id == "dmmulroy.anti-slop"
+            ? request.Invocation with { WorkingDirectory = "<host-owned-frozen-inputs>" }
+            : request.Invocation;
         return new GateRunResult(
             normalized.Outcome, normalized.Reason, normalized.Fixture, normalized.ProductionCapable,
-            limitations, sourceChanged, request.Invocation, execution, before, after,
-            request.Policy.PolicyIdentity, request.Capability.ExecutableIdentity ?? "unavailable", request.ConfigurationIdentity, request.Scope,
-            artifactHashes, receiptPath, normalized.NotApplicableRationale);
+            limitations, sourceChanged, auditInvocation, execution, before, after,
+            request.Policy.PolicyIdentity, request.Capability.ExecutableIdentity ?? "unavailable", plugin.ConfigurationIdentity, request.Scope,
+            persistedArtifactHashes, receiptPath, normalized.NotApplicableRationale)
+        { Plugin = plugin, TrustedReceiptProvenance = null };
+    }
+
+    internal static AuthoritativeGateReceiptContract BuildFutureV2Receipt(
+        GateRequest request,
+        RepositoryIdentity before,
+        CommandResult execution,
+        IReadOnlyDictionary<string, string> artifactHashes,
+        NormalizedEvidence normalized,
+        bool sourceChanged,
+        IReadOnlyList<string> limitations,
+        EvaluationPluginReceiptMetadata plugin) =>
+        new(
+            "2.0.0", "gate-receipt", $"sha256:{new string('0', 64)}",
+            request.GateId, request.Policy.PolicyIdentity,
+            before.BaseCommit, before.HeadCommit, before.TreeId,
+            BuildFutureV2CommandEnvelope(request, plugin),
+            execution.StartedAt, execution.CompletedAt, execution.ExitCode,
+            OutcomeText(normalized.Outcome), normalized.Reason, artifactHashes,
+            sourceChanged, limitations, normalized.NotApplicableRationale,
+            new GateAuthorityBindingContract(
+                request.GateId, request.Policy.PolicyIdentity, before.HeadCommit,
+                plugin.Id, plugin.Version, request.Capability.Tool, request.Capability.Version,
+                request.Capability.ExecutableIdentity ?? "sha256:" + new string('0', 64),
+                plugin.ConfigurationIdentity, plugin.RuntimeClosureIdentity, plugin.InputSetIdentity,
+                plugin.Enabled, PluginStatusText(plugin.Status),
+                normalized.ProductionCapable,
+                normalized.ProductionCapable ? "production" : "advisory"));
+
+    private static string BuildLegacyV1CommandEnvelope(
+        GateRequest request,
+        EvaluationPluginReceiptMetadata plugin) =>
+        JsonSerializer.Serialize(new
+        {
+            request.Invocation.FileName,
+            request.Invocation.Arguments,
+            WorkingDirectory = plugin.Id == "dmmulroy.anti-slop"
+                ? "<host-owned-frozen-inputs>"
+                : request.Invocation.WorkingDirectory,
+            Environment = request.Invocation.Environment ?? new Dictionary<string, string>(),
+            request.Scope,
+            request.Capability.ExecutableIdentity,
+            CapabilityTool = request.Capability.Tool,
+            CapabilityVersion = request.Capability.Version,
+            CapabilityFormat = request.Capability.FormatVersion,
+            CapabilityExecutable = request.Capability.ExecutablePath,
+            CapabilityFixture = request.Capability.Fixture,
+            CapabilityProbeWorkingDirectory = request.Capability.ProbeWorkingDirectory,
+            PolicySourceRevision = request.Policy.SourceRevision,
+            PolicyContentIdentity = request.Policy.ContentIdentity,
+            ConfigurationIdentity = plugin.ConfigurationIdentity
+        }, ContractJson);
+
+    private static void AppendAntiSlopBindingArtifact(
+        string gateDirectory,
+        GateRequest request,
+        RepositoryIdentity repository,
+        NormalizedEvidence normalized,
+        EvaluationPluginReceiptMetadata plugin,
+        IDictionary<string, string> artifactHashes)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            schemaVersion = "1.0.0",
+            kind = "anti-slop-evaluation-binding",
+            gateId = request.GateId,
+            policyIdentity = request.Policy.PolicyIdentity,
+            finalOutcome = OutcomeText(normalized.Outcome),
+            normalized.ProductionCapable,
+            authority = normalized.ProductionCapable ? "production-capable" : "advisory",
+            repository = new
+            {
+                baseCommit = repository.BaseCommit,
+                headCommit = repository.HeadCommit,
+                treeId = repository.TreeId
+            },
+            plugin = new
+            {
+                id = plugin.Id,
+                version = plugin.Version,
+                plugin.Enabled,
+                status = PluginStatusText(plugin.Status),
+                configurationIdentity = plugin.ConfigurationIdentity,
+                runtimeClosureIdentity = plugin.RuntimeClosureIdentity,
+                inputSetIdentity = plugin.InputSetIdentity,
+                inputs = plugin.Inputs,
+                pluginRawOutcome = plugin.PluginRawOutcome,
+                effectRulesEnabled = request.Plugin?.EnableEffectRules ?? false
+            },
+            tool = new
+            {
+                name = request.Capability.Tool,
+                version = request.Capability.Version,
+                formatVersion = request.Capability.FormatVersion,
+                executableIdentity = request.Capability.ExecutableIdentity
+            },
+            logicalWorkingDirectory = "<host-owned-frozen-inputs>",
+            scope = request.Scope
+        }, ContractJson);
+        var path = Path.Combine(gateDirectory, AntiSlopBindingArtifact);
+        using var stream = new FileStream(
+            path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough);
+        stream.Write(bytes);
+        stream.Flush(true);
+        artifactHashes[AntiSlopBindingArtifact] =
+            $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
+    }
+
+    private static string BuildFutureV2CommandEnvelope(
+        GateRequest request,
+        EvaluationPluginReceiptMetadata plugin)
+    {
+        var envelope = JsonSerializer.SerializeToNode(new
+        {
+            request.Invocation.FileName,
+            request.Invocation.Arguments,
+            WorkingDirectory = plugin.Id == "dmmulroy.anti-slop"
+                ? "<host-owned-frozen-inputs>"
+                : request.Invocation.WorkingDirectory,
+            Environment = request.Invocation.Environment ?? new Dictionary<string, string>(),
+            request.Invocation.InheritEnvironment,
+            request.Scope,
+            request.Capability.ExecutableIdentity,
+            CapabilityTool = request.Capability.Tool,
+            CapabilityVersion = request.Capability.Version,
+            CapabilityFormat = request.Capability.FormatVersion,
+            CapabilityExecutable = request.Capability.ExecutablePath,
+            CapabilityFixture = request.Capability.Fixture,
+            CapabilityProbeWorkingDirectory = request.Capability.ProbeWorkingDirectory,
+            PolicySourceRevision = request.Policy.SourceRevision,
+            PolicyContentIdentity = request.Policy.ContentIdentity,
+            ConfigurationIdentity = plugin.ConfigurationIdentity,
+            Plugin = new
+            {
+                plugin.Id,
+                plugin.Version,
+                plugin.Enabled,
+                Status = PluginStatusText(plugin.Status),
+                plugin.ConfigurationIdentity,
+                plugin.RuntimeClosureIdentity,
+                plugin.Inputs,
+                plugin.InputSetIdentity,
+                plugin.PluginRawOutcome,
+                EffectRulesEnabled = request.Plugin?.EnableEffectRules ?? false
+            }
+        }, ContractJson)?.AsObject()
+            ?? throw new InvalidOperationException("Gate command envelope serialization produced no object.");
+        return envelope.ToJsonString(ContractJson);
     }
 
     private static async Task<Dictionary<string, string>> WriteArtifactsAsync(
@@ -315,7 +725,8 @@ public sealed class GateRunner
             throw new ArgumentException("Gate output directory cannot be a reparse point.");
 
         if (string.IsNullOrWhiteSpace(request.Invocation.FileName) ||
-            request.Invocation.Arguments.Any(argument => argument is null))
+            request.Invocation.Arguments.Any(argument => argument is null) ||
+            request.Invocation.StandardInput is not null)
             throw new ArgumentException("Executable and immutable argument list are required.");
     }
 
@@ -328,15 +739,12 @@ public sealed class GateRunner
     }
 
 
-    private NormalizedEvidence? ValidateCapabilityBinding(GateRequest request)
+    private NormalizedEvidence? ValidateCapabilityBinding(
+        GateRequest request,
+        IDeterministicEvaluationPlugin plugin,
+        EvaluationPluginSnapshot? snapshot = null)
     {
-        var expectedTool = request.Adapter switch
-        {
-            EvidenceAdapterKind.DotNet => "dotnet",
-            EvidenceAdapterKind.Crap4CSharp => "crap4csharp",
-            EvidenceAdapterKind.Mutate4CSharp => "mutate4csharp",
-            _ => string.Empty
-        };
+        var expectedTool = plugin.ExpectedTool;
         if (!string.Equals(expectedTool, request.Capability.Tool, StringComparison.Ordinal))
             return NormalizedEvidence.Error("The selected adapter does not match the detected tool capability.");
         if (!request.Capability.DetectionVerified)
@@ -373,6 +781,15 @@ public sealed class GateRunner
                 : StringComparison.Ordinal))
             return NormalizedEvidence.Error("The invocation executable is not the detected capability executable.");
 
+        var snapshottedIdentity = plugin.GetExecutableIdentity(request, snapshot);
+        if (plugin is Adapters.AntiSlopEvaluationPlugin && snapshot is null)
+            return null;
+        if (snapshottedIdentity is not null)
+            return string.Equals(snapshottedIdentity, request.Capability.ExecutableIdentity, StringComparison.Ordinal)
+                ? null
+                : NormalizedEvidence.Error(
+                    "The snapshotted executable bytes do not match the bound capability identity.");
+
         try
         {
             var identity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(expected)))}";
@@ -382,9 +799,140 @@ public sealed class GateRunner
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
-            return NormalizedEvidence.Error("The bound capability executable cannot be read.");
+            return NormalizedEvidence.Incomplete(
+                "The bound capability executable cannot be read on this host; tool evidence is incomplete.");
         }
     }
+
+    private static NormalizedEvidence? ValidateRequiredGateBinding(
+        GateRequest request,
+        IDeterministicEvaluationPlugin plugin)
+    {
+        if (!request.Policy.AuthorityVerified ||
+            !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal))
+            return null;
+        var binding = request.Policy.RequiredGatePluginBindings.SingleOrDefault(candidate =>
+            string.Equals(candidate.GateId, request.GateId, StringComparison.Ordinal));
+        if (binding is null)
+            return NormalizedEvidence.Incomplete(
+                "Protected required gate has no trusted code-owned plugin identity binding and is unsatisfied.");
+        return string.Equals(binding.PluginId, plugin.Id, StringComparison.Ordinal) &&
+               string.Equals(binding.PluginVersion, plugin.Version, StringComparison.Ordinal) &&
+               string.Equals(binding.Tool, plugin.ExpectedTool, StringComparison.Ordinal) &&
+               string.Equals(binding.Tool, request.Capability.Tool, StringComparison.Ordinal)
+            ? null
+            : NormalizedEvidence.Error(
+                "Selected plugin identity/version/tool does not match the protected required-gate binding.");
+    }
+
+    private NormalizedEvidence? ValidateAuthoritativeNoExecution(
+        GateRequest request,
+        IDeterministicEvaluationPlugin plugin)
+    {
+        if (ValidateCapabilityBinding(request, plugin) is { } capabilityFailure)
+            return capabilityFailure;
+        NormalizedEvidence? pluginAuthorityFailure;
+        try
+        {
+            pluginAuthorityFailure = plugin.ValidateAuthorityWithoutExecution(request);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            pluginAuthorityFailure = NormalizedEvidence.Incomplete(
+                $"No-execution plugin authority could not be verified: {exception.Message}");
+        }
+        if (pluginAuthorityFailure is not null)
+            return pluginAuthorityFailure;
+        if (!request.Policy.AuthorityVerified ||
+            !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
+            request.Capability.Fixture || !HasTrustedLegacyV1Authority(request, plugin))
+            return NormalizedEvidence.Incomplete(
+                "NOT_APPLICABLE is advisory unless the protected policy allows it and the same trusted built-in legacy-v1, non-fixture, production-capable bindings as PASS are present.");
+        return null;
+    }
+
+    private async Task<AutomaticScopeValidation> ValidateAutomaticScopeAsync(
+        GateRequest request,
+        IDeterministicEvaluationPlugin plugin,
+        RepositoryIdentity repository,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        if (plugin is not Adapters.AntiSlopEvaluationPlugin)
+            return new(null, null, null, null);
+        if (_repository is not IRepositoryEvaluationScopeReader scopeReader)
+            return new(NormalizedEvidence.Incomplete(
+                "Anti-slop requires trusted frozen-tree scope and blob evidence."), null, null, null);
+        try
+        {
+            var scope = await scopeReader.ReadEvaluationScopeAsync(
+                repository.HeadCommit, timeout, cancellationToken).ConfigureAwait(false);
+            var expected = DeterministicEvaluationPluginRegistry.NormalizeInputs(
+                plugin.DetectInputs(scope.TrackedFiles, scope.IgnoredFiles));
+            var requested = DeterministicEvaluationPluginRegistry.NormalizeInputs(request.Plugin?.Inputs ?? []);
+            if (scope.InvalidInputs is { Count: > 0 })
+                return new(NormalizedEvidence.Incomplete(
+                    $"Anti-slop frozen scope contains non-regular JavaScript-family paths: {string.Join(", ", scope.InvalidInputs)}."),
+                    scope.InputSetIdentity, scope.MaterializedRoot, scope.MaterializedObjectIds);
+            if (!expected.SequenceEqual(requested, StringComparer.Ordinal))
+                return new(NormalizedEvidence.Incomplete(
+                    "Anti-slop requested inputs do not exactly match protected-base scope over the frozen Git tree."),
+                    scope.InputSetIdentity, scope.MaterializedRoot, scope.MaterializedObjectIds);
+            if (scope.SuppressionViolations is { Count: > 0 })
+                return new(NormalizedEvidence.Incomplete(
+                    $"Anti-slop frozen inputs add or change inline suppression directives: {string.Join(", ", scope.SuppressionViolations)}."),
+                    scope.InputSetIdentity, scope.MaterializedRoot, scope.MaterializedObjectIds);
+            if (expected.Count == 0)
+            {
+                if (!request.Policy.AllowedNotApplicable.Contains(request.GateId))
+                    return new(NormalizedEvidence.Incomplete(
+                        "Anti-slop selected zero inputs and protected policy does not permit NOT_APPLICABLE."),
+                        scope.InputSetIdentity, scope.MaterializedRoot, scope.MaterializedObjectIds);
+                return new(new NormalizedEvidence(
+                        GateOutcome.NotApplicable,
+                        "Protected anti-slop scope contains no applicable JavaScript-family files.",
+                        false,
+                        true,
+                        [],
+                        "The frozen tracked tree contains no non-ignored regular JavaScript-family files."),
+                    scope.InputSetIdentity, scope.MaterializedRoot, scope.MaterializedObjectIds);
+            }
+            return new(null, scope.InputSetIdentity, scope.MaterializedRoot, scope.MaterializedObjectIds);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or EvidenceRepositoryException or EvaluationPluginException)
+        {
+            return new(NormalizedEvidence.Incomplete(
+                $"Anti-slop frozen-tree scope could not be derived: {exception.Message}"), null, null, null);
+        }
+    }
+
+    private sealed record AutomaticScopeValidation(
+        NormalizedEvidence? Failure,
+        string? InputSetIdentity,
+        string? MaterializedRoot,
+        IReadOnlyDictionary<string, string>? MaterializedObjectIds);
+
+    private Task<RepositoryIdentity> ReadRepositoryAsync(
+        TimeSpan timeout,
+        CancellationToken cancellationToken) =>
+        _repository is IDeadlineRepositoryIdentityReader bounded
+            ? bounded.ReadAsync(timeout, cancellationToken)
+            : ReadFixtureRepositoryAsync(timeout, cancellationToken);
+
+    private async Task<RepositoryIdentity> ReadFixtureRepositoryAsync(
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        deadline.CancelAfter(timeout);
+        return await _repository.ReadAsync(deadline.Token).ConfigureAwait(false);
+    }
+
+    private sealed class FrozenMaterializationLease(string? root) : IDisposable
+    {
+        public void Dispose() => GitRepositoryIdentityReader.DeleteMaterialization(root);
+    }
+
     private static string OutcomeText(GateOutcome outcome) => outcome switch
     {
         GateOutcome.Pass => "PASS",
@@ -395,11 +943,62 @@ public sealed class GateRunner
         _ => throw new ArgumentOutOfRangeException(nameof(outcome))
     };
 
+    private static string PluginStatusText(EvaluationPluginStatus status) => status switch
+    {
+        EvaluationPluginStatus.Selected => "SELECTED",
+        EvaluationPluginStatus.Disabled => "DISABLED",
+        EvaluationPluginStatus.Executed => "EXECUTED",
+        EvaluationPluginStatus.NotApplicable => "NOT_APPLICABLE",
+        _ => throw new ArgumentOutOfRangeException(nameof(status))
+    };
+
+    private bool HasTrustedLegacyV1Authority(
+        GateRequest request,
+        IDeterministicEvaluationPlugin plugin)
+    {
+        if (!_usesBuiltInExecutionRegistry ||
+            !ReferenceEquals(_authorityRegistry, TrustedGatePluginRegistry.BuiltIns) ||
+            !_authorityRegistry.TryGet(request.GateId, out var binding) ||
+            !binding.LegacyV1Authority)
+            return false;
+
+        return LegacyV1CapabilityMatches(binding, request.Capability) &&
+               string.Equals(binding.PluginId, plugin.Id, StringComparison.Ordinal) &&
+               string.Equals(binding.PluginVersion, plugin.Version, StringComparison.Ordinal) &&
+               string.Equals(binding.Tool, request.Capability.Tool, StringComparison.Ordinal);
+    }
+
+    internal static bool LegacyV1CapabilityMatches(
+        TrustedGatePluginBinding binding,
+        ToolCapability capability) =>
+        // Protected-base v1 trusted detector-verified policy ranges. Registry tool pins
+        // remain exact for future-v2 consumers without becoming a new v1 rollout gate.
+        string.Equals(binding.Tool, capability.Tool, StringComparison.Ordinal) &&
+        (binding.ExpectedFormatVersion is null ||
+         string.Equals(binding.ExpectedFormatVersion, capability.FormatVersion, StringComparison.Ordinal));
+
+    private static TimeSpan Remaining(DateTimeOffset deadline)
+    {
+        var remaining = deadline - DateTimeOffset.UtcNow;
+        if (remaining <= TimeSpan.Zero)
+            throw new OperationCanceledException("The finite gate deadline expired.");
+        return remaining;
+    }
+
     private static JsonSerializerOptions CreateContractJson()
     {
         var options = new JsonSerializerOptions(JsonSerializerDefaults.Web);
         options.Converters.Add(new UtcDateTimeOffsetConverter());
         return options;
+    }
+
+    private static byte[] SerializeReceipt(AuthoritativeGateReceiptContract receipt)
+    {
+        var node = JsonSerializer.SerializeToNode(receipt, ContractJson)?.AsObject()
+            ?? throw new InvalidOperationException("Gate receipt serialization produced no object.");
+        if (receipt.NotApplicableRationale is null)
+            node.Remove("notApplicableRationale");
+        return JsonSerializer.SerializeToUtf8Bytes(node, ContractJson);
     }
 
     private static byte[] SerializeReceipt(GateReceiptContract receipt)

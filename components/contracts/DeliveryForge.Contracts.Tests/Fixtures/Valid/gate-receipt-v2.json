@@ -1,0 +1,38 @@
+{
+  "schemaVersion": "2.0.0",
+  "kind": "gate-receipt",
+  "identity": "sha256:9ec21fd7673dddfad0a8abade17c596dd622a7bb87956080d649d011e7f1dd40",
+  "gateId": "test",
+  "policyIdentity": "sha256:5b20c1e7cb638ae6a87f49a56a91f3c49b7d35dab394e816d0554e009f6e33fe",
+  "baseCommit": "6304c90f83df3cdb918dff03f6358dcf4a939d16",
+  "headCommit": "43113d9000000000000000000000000000000000",
+  "treeId": "2222222222222222222222222222222222222222",
+  "command": "dotnet test",
+  "startedAt": "2026-10-07T05:00:00Z",
+  "completedAt": "2026-10-07T05:01:00Z",
+  "exitCode": 0,
+  "outcome": "PASS",
+  "reason": "All tests passed",
+  "artifactHashes": {
+    "test.log": "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+  },
+  "sourceChanged": false,
+  "limitations": [],
+  "authorityBinding": {
+    "gateId": "test",
+    "policyIdentity": "sha256:5b20c1e7cb638ae6a87f49a56a91f3c49b7d35dab394e816d0554e009f6e33fe",
+    "headCommit": "43113d9000000000000000000000000000000000",
+    "pluginId": "delivery-forge.dotnet",
+    "pluginVersion": "1.0.0",
+    "tool": "dotnet",
+    "toolVersion": "10.0.401",
+    "toolIdentity": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "configurationIdentity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "runtimeClosureIdentity": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "inputSetIdentity": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "enabled": true,
+    "status": "EXECUTED",
+    "productionCapable": true,
+    "authority": "production"
+  }
+}

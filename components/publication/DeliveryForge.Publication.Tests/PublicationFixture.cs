@@ -41,8 +41,15 @@ public sealed class PublicationFixture
         Review = IssueReview(reviewPolicy, "claude", independentContext, Id(independentArtifact), ReviewEvidenceRole.Independent);
         HostedReview = IssueReview(reviewPolicy, "github-hosted", hostedContext, Id(hostedArtifact), ReviewEvidenceRole.Hosted);
         Gates = [Gate("build", "PASS"), Gate("test", "PASS")];
-        Ci = Gate("ci", "PASS");
-        Authority = PublicationAuthorityHost.CreateIsolatedFixture(ReviewHost);
+        Ci = Gate("ci", "PASS", "delivery-forge.ci", "ci");
+        var receiptStore = new HostOwnedReceiptStore(Path.Combine(
+            Path.GetTempPath(), "delivery-forge-publication-receipts", Guid.NewGuid().ToString("N")), new byte[32]);
+        foreach (var receipt in Gates.Append(Ci)) receiptStore.Append(receipt);
+        GateReceiptProvenance = receiptStore.Provenance;
+        Authority = PublicationAuthorityHost.CreateIsolatedFixture(
+            ReviewHost,
+            GateReceiptConsumerPolicy.CreateIsolatedFixture(
+                TrustedGatePluginRegistry.BuiltIns, GateReceiptProvenance));
     }
 
     public static DateTimeOffset Time => DateTimeOffset.Parse("2026-10-11T00:00:01Z");
@@ -58,14 +65,23 @@ public sealed class PublicationFixture
     public ValidatedContract HostedReview { get; }
     public IReadOnlyList<ValidatedContract> Gates { get; }
     public ValidatedContract Ci { get; }
+    public TrustedReceiptProvenance GateReceiptProvenance { get; }
     public PublicationTarget Target { get; } = new("fixture/disposable", "refs/heads/issue-10", "refs/heads/main");
 
     public PublicationRunDefinition Definition(AuthorizationCeiling ceiling = AuthorizationCeiling.Merge) => new(
-        Root.RunIdentity, "revision-" + Guid.NewGuid().ToString("N"), null, ceiling, Target, Patch, Policy, Gates, Ci, Review, HostedReview, Receiver);
+        Root.RunIdentity, "revision-" + Guid.NewGuid().ToString("N"), null, ceiling, Target, Patch, Policy, Gates, Ci, Review, HostedReview, Receiver)
+    {
+        GateReceiptProvenance = GateReceiptProvenance,
+        EnforceAuthoritativeGateReceipts = true,
+        GateAuthorityRegistryIdentity = TrustedGatePluginRegistry.BuiltIns.Identity
+    };
 
     public TransitionEvidence Transition => new(permittedCeiling, Patch.BaseCommit, Patch.HeadCommit,
         Patch.HeadTree, Policy: Policy, GateReceipts: Gates, CiReceipt: Ci,
-        ReviewReceipt: Review, HostReviewReceipt: HostedReview);
+        ReviewReceipt: Review, HostReviewReceipt: HostedReview,
+        GateReceiptProvenance: GateReceiptProvenance,
+        EnforceAuthoritativeGateReceipts: true,
+        GateAuthorityRegistryIdentity: TrustedGatePluginRegistry.BuiltIns.Identity);
 
     public ValidatedContract PublicationReceipt(string action) => Contract($$"""
         { "schemaVersion":"1.0.0", "kind":"publication-receipt", "identity":"{{Id('0')}}",
@@ -74,15 +90,41 @@ public sealed class PublicationFixture
           "resultId":"https://example.invalid/fixture/pr/10", "createdAt":"2026-10-11T00:00:01Z" }
         """);
 
-    public ValidatedContract Gate(string gateId, string outcome) => Contract($$"""
-        { "schemaVersion":"1.0.0", "kind":"gate-receipt", "identity":"{{Id('0')}}",
+    public ValidatedContract Gate(string gateId, string outcome,
+        string pluginId = "delivery-forge.dotnet", string tool = "dotnet") => Contract($$"""
+        { "schemaVersion":"2.0.0", "kind":"gate-receipt", "identity":"{{Id('0')}}",
           "gateId":"{{gateId}}", "policyIdentity":"{{Policy.Identity}}",
           "baseCommit":"{{Commit('a')}}", "headCommit":"{{Commit('b')}}", "treeId":"{{Commit('c')}}",
-          "command":"fixture command", "startedAt":"2026-10-11T00:00:00Z",
+          "command":{{CommandEnvelope(tool)}}, "startedAt":"2026-10-11T00:00:00Z",
           "completedAt":"2026-10-11T00:00:01Z", "exitCode":{{(outcome == "PASS" ? 0 : 1)}},
           "outcome":"{{outcome}}", "reason":"fixture", "artifactHashes":{},
-          "sourceChanged":false, "limitations":["fixture"] }
+          "sourceChanged":false, "limitations":["fixture"],
+          "authorityBinding":{
+            "gateId":"{{gateId}}", "policyIdentity":"{{Policy.Identity}}", "headCommit":"{{Commit('b')}}",
+            "pluginId":"{{pluginId}}", "pluginVersion":"1.0.0", "tool":"{{tool}}",
+            "toolVersion":"{{(tool == "dotnet" ? "10.0.401" : "github-actions-v1")}}", "toolIdentity":"{{Id('a')}}",
+            "configurationIdentity":"{{Id('b')}}", "runtimeClosureIdentity":"{{Id('b')}}", "inputSetIdentity":"{{Id('c')}}",
+            "enabled":true, "status":"EXECUTED", "productionCapable":true, "authority":"production" } }
         """);
+
+    private static string CommandEnvelope(string tool)
+    {
+        var version = tool == "dotnet" ? "10.0.401" : "github-actions-v1";
+        var format = tool == "dotnet" ? "trx-v1" : "github-checks-v1";
+        return JsonValue.Create(new JsonObject
+        {
+            ["capabilityTool"] = tool,
+            ["capabilityVersion"] = version,
+            ["capabilityFormat"] = format,
+            ["executableIdentity"] = Id('a'),
+            ["configurationIdentity"] = Id('b'),
+            ["plugin"] = new JsonObject
+            {
+                ["runtimeClosureIdentity"] = Id('b'),
+                ["inputSetIdentity"] = Id('c')
+            }
+        }.ToJsonString())!.ToJsonString();
+    }
 
     private ValidatedContract IssueReview(ReviewPolicy policy, string family, ReviewAcceptanceContext context,
         string artifact, ReviewEvidenceRole role)

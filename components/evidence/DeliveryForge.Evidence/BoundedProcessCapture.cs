@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 using System.Text;
 
 namespace DeliveryForge.Evidence;
@@ -16,7 +17,7 @@ internal static class BoundedProcessCapture
         var process = new Process();
         var retention = new BoundedCaptureRetention();
         retention.Add(process); retention.Add(stdout); retention.Add(stderr);
-        Task? output = null, error = null;
+        Task? input = null, output = null, error = null;
         StreamWriter? originalInput = null;
         StreamReader? originalOutput = null, originalError = null;
         var created = false; var rootExited = false; var known = true;
@@ -26,7 +27,10 @@ internal static class BoundedProcessCapture
         var stage = "prepare-command"; string? failureStage = null;
         try
         {
-            var info = new ProcessStartInfo(invocation.FileName)
+            const string setsid = "/usr/bin/setsid";
+            if (!File.Exists(setsid))
+                throw new PlatformNotSupportedException("Linux creation-owned process groups require /usr/bin/setsid.");
+            var info = new ProcessStartInfo(setsid)
             {
                 WorkingDirectory = invocation.WorkingDirectory,
                 UseShellExecute = false,
@@ -35,6 +39,9 @@ internal static class BoundedProcessCapture
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+            if (!invocation.InheritEnvironment) info.Environment.Clear();
+            info.ArgumentList.Add("--");
+            info.ArgumentList.Add(invocation.FileName);
             foreach (var argument in invocation.Arguments) info.ArgumentList.Add(argument);
             foreach (var pair in invocation.Environment ?? new Dictionary<string, string>()) info.Environment[pair.Key] = pair.Value;
             if (caller.IsCancellationRequested || !BoundedCaptureStream.Within(started, work))
@@ -49,13 +56,15 @@ internal static class BoundedProcessCapture
                 originalInput = process.StandardInput; retention.Add(originalInput);
                 originalOutput = process.StandardOutput; retention.Add(originalOutput);
                 originalError = process.StandardError; retention.Add(originalError);
-                stage = "close-original-stdin";
-                originalInput.Close();
                 stage = "enroll-original-byte-drains";
                 output = BoundedCaptureStream.Observe(stdout.DrainAsync(originalOutput.BaseStream));
                 retention.Add(output);
                 error = BoundedCaptureStream.Observe(stderr.DrainAsync(originalError.BaseStream));
                 retention.Add(error);
+                stage = "write-original-stdin";
+                input = BoundedCaptureStream.Observe(
+                    ProcessCommandExecutor.WriteStandardInputAsync(originalInput, invocation.StandardInput));
+                retention.Add(input);
                 stage = "observe-original-root-and-drains";
                 while (true)
                 {
@@ -63,7 +72,8 @@ internal static class BoundedProcessCapture
                     if (stdout.Exceeded || stderr.Exceeded) break;
                     if (!BoundedCaptureStream.Within(started, work)) { timedOut = true; break; }
                     rootExited = process.HasExited;
-                    if (output.IsFaulted || error.IsFaulted) { known = false; failure = "Owned pipe drain failed."; break; }
+                    if (input.IsFaulted || output.IsFaulted || error.IsFaulted)
+                    { known = false; failure = "Owned stdin write or pipe drain failed."; break; }
                     if (rootExited && BoundedCaptureStream.Eof(output) && BoundedCaptureStream.Eof(error)) break;
                     await Task.Delay(5).ConfigureAwait(false);
                 }
@@ -78,12 +88,16 @@ internal static class BoundedProcessCapture
             try
             {
                 rootExited = process.HasExited;
-                if (!rootExited)
+                if (!rootExited || !BoundedCaptureStream.Eof(output) || !BoundedCaptureStream.Eof(error))
                 {
-                    killAttempted = true; process.Kill(entireProcessTree: true); killSucceeded = true;
+                    killAttempted = true;
+                    killSucceeded = KillOwnedProcessGroup(process.Id, out var killFailure);
+                    if (!killSucceeded)
+                    {
+                        known = false;
+                        failure ??= killFailure;
+                    }
                 }
-                else if (!BoundedCaptureStream.Eof(output) || !BoundedCaptureStream.Eof(error))
-                { known = false; failure ??= "Exited Linux root with unresolved inherited pipes; descendant settlement unavailable."; }
                 while (BoundedCaptureStream.Within(started, budget))
                 {
                     rootExited = process.HasExited;
@@ -97,7 +111,8 @@ internal static class BoundedProcessCapture
         }
         var outputStatus = output?.Status; var errorStatus = error?.Status;
         var outEof = outputStatus == TaskStatus.RanToCompletion; var errEof = errorStatus == TaskStatus.RanToCompletion;
-        var quiescent = created && known && rootExited && outEof && errEof && (!killAttempted || killSucceeded) &&
+        var inputComplete = input?.Status == TaskStatus.RanToCompletion;
+        var quiescent = created && known && rootExited && inputComplete && outEof && errEof && (!killAttempted || killSucceeded) &&
             BoundedCaptureStream.Within(started, budget);
         int? exit = rootExited ? process.ExitCode : null;
         var outBytes = stdout.Snapshot(); var errBytes = stderr.Snapshot();
@@ -147,4 +162,19 @@ internal static class BoundedProcessCapture
         var text = exception.GetType().Name + ": " + exception.Message;
         return text.Length > 1024 ? text[..1024] : text;
     }
+
+    private static bool KillOwnedProcessGroup(int rootProcessId, out string? failure)
+    {
+        failure = null;
+        if (kill(-rootProcessId, 9) == 0)
+            return true;
+        var error = Marshal.GetLastPInvokeError();
+        if (error == 3) // ESRCH: the group became empty before the signal.
+            return true;
+        failure = $"kill-owned-process-group failed with errno {error}.";
+        return false;
+    }
+
+    [DllImport("libc", SetLastError = true)]
+    private static extern int kill(int processId, int signal);
 }

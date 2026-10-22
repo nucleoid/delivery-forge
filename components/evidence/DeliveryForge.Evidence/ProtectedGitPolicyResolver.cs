@@ -8,7 +8,8 @@ namespace DeliveryForge.Evidence;
 public sealed class ProtectedGitPolicyResolver(
     ICommandExecutor executor,
     string repositoryRoot,
-    string protectedBaseCommit)
+    string protectedBaseCommit,
+    TrustedGatePluginRegistry? trustedGatePlugins = null)
 {
     private readonly string _repositoryRoot = Path.GetFullPath(repositoryRoot);
 
@@ -51,10 +52,16 @@ public sealed class ProtectedGitPolicyResolver(
                 throw new EvidencePolicyException("Protected policy required gates are empty, malformed, or duplicated.");
 
             var contentIdentity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(bytes))}";
+            var bindings = ValidateBindings(requiredGates.Select(value => value!).ToArray());
+            var allowedNotApplicable = root.GetProperty("allowedNotApplicable").EnumerateArray()
+                .Select(item => item.GetString()!)
+                .ToHashSet(StringComparer.Ordinal);
             return new ResolvedEvidencePolicy(
                 validated.Identity, contentIdentity, baseId, PolicyAuthorityKind.ProtectedGitBase,
                 0m, requiredGates.Select(value => value!).ToArray(), authorityVerified: true,
-                sourceRepositoryRoot: _repositoryRoot);
+                sourceRepositoryRoot: _repositoryRoot,
+                requiredGatePluginBindings: bindings,
+                allowedNotApplicable: allowedNotApplicable);
         }
         catch (ContractValidationException exception)
         {
@@ -66,15 +73,44 @@ public sealed class ProtectedGitPolicyResolver(
         }
     }
 
+    private IReadOnlyList<RequiredGatePluginBinding> ValidateBindings(IReadOnlyList<string> requiredGates)
+    {
+        var supplied = trustedGatePlugins ?? TrustedGatePluginRegistry.BuiltIns;
+        return requiredGates
+            .Select(gate => supplied.TryGet(gate, out var binding) ? binding : null)
+            .Where(binding => binding is not null)
+            .Select(binding => new RequiredGatePluginBinding(
+                binding!.GateId, binding.PluginId, binding.PluginVersion, binding.Tool))
+            .ToArray();
+    }
+
     private async Task<CommandResult> GitAsync(
         IReadOnlyList<string> arguments,
         CancellationToken cancellationToken)
     {
-        var result = await executor.ExecuteAsync(
-            new CommandInvocation(
-                "git", arguments, _repositoryRoot,
-                new Dictionary<string, string> { ["GIT_OPTIONAL_LOCKS"] = "0" }),
-            TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
+        var invocation = new CommandInvocation(
+            "git", arguments, _repositoryRoot,
+            new Dictionary<string, string> { ["GIT_OPTIONAL_LOCKS"] = "0" });
+        CommandResult result;
+        if (executor is ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } owned)
+        {
+            var capture = await owned.ExecuteBoundedCaptureAsync(
+                invocation, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, cancellationToken).ConfigureAwait(false);
+            if (capture.CaptureBoundExceeded)
+                throw new EvidencePolicyException("Protected policy Git evidence exceeded the bounded capture limit.");
+            result = capture.Command;
+        }
+        else if (executor is IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true } fixture)
+        {
+            var capture = await fixture.ExecuteBoundedCaptureAsync(
+                invocation, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, cancellationToken).ConfigureAwait(false);
+            if (capture.CaptureBoundExceeded)
+                throw new EvidencePolicyException("Protected policy Git evidence exceeded the bounded capture limit.");
+            result = capture.Command;
+        }
+        else
+            result = await executor.ExecuteAsync(invocation, TimeSpan.FromSeconds(30), cancellationToken)
+                .ConfigureAwait(false);
         if (result.TimedOut || result.Cancelled || result.ExitCode != 0)
             throw new EvidencePolicyException($"Protected policy Git read failed: git {string.Join(" ", arguments)}");
         return result;

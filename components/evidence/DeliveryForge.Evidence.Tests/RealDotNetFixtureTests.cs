@@ -2,6 +2,7 @@ using System.Xml.Linq;
 
 namespace DeliveryForge.Evidence.Tests;
 
+[Collection(RealDotNetFixtureCollection.Name)]
 public sealed class RealDotNetFixtureTests
 {
     [Fact(Timeout = 180_000)]
@@ -9,6 +10,7 @@ public sealed class RealDotNetFixtureTests
     public async Task Earlier_red_commit_then_clean_green_head_produces_real_test_counts()
     {
         using var temp = new TempDirectory();
+        using var greenOwner = new TempDirectory();
         using var evidence = new TempDirectory();
         var fixture = System.IO.Path.Combine(AppContext.BaseDirectory, "Fixtures", "RealDotNet");
         CopyTree(fixture, temp.Path);
@@ -16,6 +18,8 @@ public sealed class RealDotNetFixtureTests
             System.IO.Path.Combine(temp.Path, "global.json"));
         await File.WriteAllTextAsync(System.IO.Path.Combine(temp.Path, ".gitignore"),
             "**/bin/\n**/obj/\n*.trx\n", TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(System.IO.Path.Combine(temp.Path, ".gitattributes"),
+            "* text eol=lf\n", TestContext.Current.CancellationToken);
         var subject = System.IO.Path.Combine(temp.Path, "Subject", "Calculator.cs");
         var red = await File.ReadAllTextAsync(
             System.IO.Path.Combine(temp.Path, "Subject", "Calculator.red.cs.txt"),
@@ -34,25 +38,20 @@ public sealed class RealDotNetFixtureTests
         var redHead = await GitAsync(executor, temp.Path, ["rev-parse", "HEAD"]);
 
         var dotnet = ResolveExecutable("DELIVERY_FORGE_DOTNET_HOST", "dotnet");
-        var detection = await new ToolCapabilityDetector(executor).DetectAsync(
-            new CapabilityProbe(
-                "dotnet", ExecutableSource.TrustedExplicit, dotnet, temp.Path, null,
-                ["--version"], ["--help"], "10.0.401", "trx-v1", true),
-            TestContext.Current.CancellationToken);
-        var capability = detection.Capability;
-        Assert.True(capability.Supported,
-            $"Dotnet capability: executable={dotnet}; observed={capability.Version}; " +
-            $"version exit={detection.VersionResult?.ExitCode}; " +
-            $"version output={detection.VersionResult?.StandardOutput} {detection.VersionResult?.StandardError}; " +
-            $"help exit={detection.HelpResult?.ExitCode}; " +
-            $"help output={detection.HelpResult?.StandardOutput} {detection.HelpResult?.StandardError}");
-        Assert.Equal("10.0.401", capability.Version);
+        var capability = await DetectDotNetAsync(executor, dotnet, temp.Path);
         var project = System.IO.Path.Combine(temp.Path, "Subject.Tests", "Subject.Tests.csproj");
         var redTrx = System.IO.Path.Combine(temp.Path, "red.trx");
         var protectedBase = redHead.StandardOutput.Trim();
         var redResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "red-gate",
             ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={redTrx}"]);
         ArchiveFixtureEvidence(evidence.Path, redResult);
+        Assert.True(redResult.Execution.ExitCode.HasValue,
+            $"RED process did not reach a valid exit: outcome={redResult.Outcome}; reason={redResult.Reason}; " +
+            $"timeout={redResult.Execution.TimedOut}; cancelled={redResult.Execution.Cancelled}; " +
+            $"quiescent={redResult.Execution.OwnedProcessQuiescent}; " +
+            $"native={redResult.Execution.LifecycleDiagnostics?.NativeFailure}; " +
+            $"startup={redResult.Execution.LifecycleDiagnostics?.Startup}\n" +
+            redResult.Execution.StandardOutput + "\n" + redResult.Execution.StandardError);
         Assert.NotEqual(0, redResult.Execution.ExitCode);
         Assert.True(redResult.Outcome == GateOutcome.Fail,
             $"RED gate: {redResult.Outcome}; reason: {redResult.Reason}; " +
@@ -71,31 +70,195 @@ public sealed class RealDotNetFixtureTests
         var greenHead = await GitAsync(executor, temp.Path, ["rev-parse", "HEAD"]);
         Assert.NotEqual(redHead.StandardOutput.Trim(), greenHead.StandardOutput.Trim());
 
+        // Model a platform-specific SDK residue that is not part of either committed tree.
+        // GREEN must be evaluated from committed source, never from the RED build worktree.
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(temp.Path, "red-worktree-residue.tmp"),
+            "red-only",
+            TestContext.Current.CancellationToken);
+
         DeleteBuildOutputs(temp.Path);
-        var greenTrx = System.IO.Path.Combine(temp.Path, "green.trx");
-        var assembly = System.IO.Path.Combine(temp.Path, "Subject", "bin", "Release", "net10.0", "Subject.dll");
+        var contaminatedStatus = await GitAsync(
+            executor, temp.Path, ["status", "--porcelain=v1", "--untracked-files=all"]);
+        Assert.Contains("red-worktree-residue.tmp", contaminatedStatus.StandardOutput, StringComparison.Ordinal);
+
+        var greenRepository = System.IO.Path.Combine(greenOwner.Path, "repository");
+        await GitAsync(
+            executor,
+            greenOwner.Path,
+            ["clone", "--no-local", "--no-hardlinks", "--", temp.Path, greenRepository]);
+        var clonedHead = await GitAsync(executor, greenRepository, ["rev-parse", "HEAD"]);
+        Assert.Equal(greenHead.StandardOutput.Trim(), clonedHead.StandardOutput.Trim());
+        var cleanStatus = await GitAsync(
+            executor, greenRepository, ["status", "--porcelain=v1", "--untracked-files=all"]);
+        Assert.True(string.IsNullOrEmpty(cleanStatus.StandardOutput),
+            $"Fresh GREEN clone is not clean:{Environment.NewLine}{cleanStatus.StandardOutput}");
+
+        var beforeCapability = await CaptureRepositoryDiagnosticAsync(
+            executor, greenRepository, protectedBase, "before-capability-probe");
+        capability = await DetectDotNetAsync(executor, dotnet, greenRepository);
+        var afterCapability = await CaptureRepositoryDiagnosticAsync(
+            executor, greenRepository, protectedBase, "after-capability-probe");
+        var preGate = await CaptureRepositoryDiagnosticAsync(
+            executor, greenRepository, protectedBase, "pre-gate");
+        var repositoryDiagnostics = new RepositoryDiagnosticBundle(
+            beforeCapability, afterCapability, preGate);
+        project = System.IO.Path.Combine(greenRepository, "Subject.Tests", "Subject.Tests.csproj");
+        var greenTrx = System.IO.Path.Combine(greenRepository, "green.trx");
+        var assembly = System.IO.Path.Combine(
+            greenRepository, "Subject", "bin", "Release", "net10.0", "Subject.dll");
         Assert.False(File.Exists(assembly));
-        var greenResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "green-gate",
-            ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={greenTrx}"]);
-        ArchiveFixtureEvidence(evidence.Path, greenResult);
-        Assert.Equal(0, greenResult.Execution.ExitCode);
+        GitStatusCommandDiagnostics? gateStatusDiagnostics = null;
+        var greenResult = await RunGateAsync(
+            executor, capability, greenRepository, evidence.Path, protectedBase, "green-gate",
+            ["test", project, "--configuration", "Release", "--logger", $"trx;LogFileName={greenTrx}"],
+            preGate.Identity,
+            diagnostics => gateStatusDiagnostics = diagnostics);
+        ArchiveFixtureEvidence(evidence.Path, greenResult, repositoryDiagnostics, gateStatusDiagnostics);
+        Assert.True(greenResult.Execution.ExitCode == 0,
+            $"GREEN process did not complete successfully: exit={greenResult.Execution.ExitCode}; " +
+            $"timeout={greenResult.Execution.TimedOut}; cancelled={greenResult.Execution.Cancelled}; " +
+            $"quiescent={greenResult.Execution.OwnedProcessQuiescent}; reason={greenResult.Reason}; " +
+            $"native={greenResult.Execution.LifecycleDiagnostics?.NativeFailure}\n" +
+            FormatRepositoryDiagnostics(
+                repositoryDiagnostics, preGate.Identity, greenResult.Before, gateStatusDiagnostics) + "\n" +
+            greenResult.Execution.StandardOutput + "\n" + greenResult.Execution.StandardError);
         Assert.True(File.Exists(assembly));
         Assert.Equal((1, 1, 1, 0), ReadCounts(greenTrx));
-        Assert.Equal(GateOutcome.Incomplete, greenResult.Outcome);
-        Assert.Contains("advisory", greenResult.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(GateOutcome.Pass, greenResult.Outcome);
+        Assert.True(greenResult.ProductionCapable);
         Assert.True(File.Exists(greenResult.ReceiptPath));
         Assert.Contains("evidence.trx", greenResult.ArtifactHashes.Keys);
         Assert.StartsWith("sha256:", greenResult.ArtifactHashes["evidence.trx"]);
 
-        var warmTrx = System.IO.Path.Combine(temp.Path, "warm.trx");
-        var warmResult = await RunGateAsync(executor, capability, temp.Path, evidence.Path, protectedBase, "warm-gate",
+        var warmTrx = System.IO.Path.Combine(greenRepository, "warm.trx");
+        var warmResult = await RunGateAsync(
+            executor, capability, greenRepository, evidence.Path, protectedBase, "warm-gate",
             ["test", project, "--configuration", "Release", "--no-restore", "--no-build",
                 "--logger", $"trx;LogFileName={warmTrx}"]);
         ArchiveFixtureEvidence(evidence.Path, warmResult);
+        Assert.NotNull(warmResult.Execution.ExitCode);
         Assert.Equal(0, warmResult.Execution.ExitCode);
         Assert.Equal((1, 1, 1, 0), ReadCounts(warmTrx));
         Assert.Equal(GateOutcome.Incomplete, warmResult.Outcome);
         Assert.Contains("compiler", warmResult.Reason, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public async Task Canonical_line_ending_policy_keeps_hardened_identity_clean_after_autocrlf_checkout()
+    {
+        using var sourceOwner = new TempDirectory();
+        using var noPolicyOwner = new TempDirectory();
+        using var policyOwner = new TempDirectory();
+        using var gitIsolationOwner = new TempDirectory();
+        var executor = new ProcessCommandExecutor();
+        var isolatedGlobalConfig = System.IO.Path.Combine(gitIsolationOwner.Path, "global.gitconfig");
+        var isolatedAttributes = System.IO.Path.Combine(gitIsolationOwner.Path, "global.attributes");
+        await File.WriteAllTextAsync(isolatedGlobalConfig, string.Empty, TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(isolatedAttributes, string.Empty, TestContext.Current.CancellationToken);
+        var source = System.IO.Path.Combine(sourceOwner.Path, "source");
+        Directory.CreateDirectory(source);
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(source, "sample.txt"),
+            "alpha\nbeta\n",
+            TestContext.Current.CancellationToken);
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes, ["init"]);
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes,
+            ["config", "user.name", "Delivery Forge Fixture"]);
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes,
+            ["config", "user.email", "fixture@delivery-forge.invalid"]);
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes, ["add", "."]);
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes,
+            ["commit", "-m", "fixture without line ending policy"]);
+        var noPolicyHead = (await IsolatedGitAsync(
+                executor, source, isolatedGlobalConfig, isolatedAttributes, ["rev-parse", "HEAD"]))
+            .StandardOutput.Trim();
+
+        var noPolicyClone = System.IO.Path.Combine(noPolicyOwner.Path, "repository");
+        await IsolatedGitAsync(
+            executor,
+            noPolicyOwner.Path,
+            isolatedGlobalConfig,
+            isolatedAttributes,
+            ["-c", "core.autocrlf=true", "clone", "--no-local", "--no-hardlinks", "--", source, noPolicyClone]);
+        var ordinaryNoPolicyStatus = await IsolatedGitAsync(
+            executor,
+            noPolicyClone,
+            isolatedGlobalConfig,
+            isolatedAttributes,
+            ["-c", "core.autocrlf=true", "status", "--porcelain=v1", "--untracked-files=all"]);
+        Assert.True(string.IsNullOrEmpty(ordinaryNoPolicyStatus.StandardOutput));
+        var noPolicyIdentity = await new GitRepositoryIdentityReader(
+                new EnvironmentOverlayCommandExecutor(
+                    executor,
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["GIT_ATTR_NOSYSTEM"] = "1"
+                    }),
+                noPolicyClone,
+                noPolicyHead)
+            .ReadAsync(TestContext.Current.CancellationToken);
+        Assert.False(noPolicyIdentity.IsClean);
+        var noPolicyIndex = (await IsolatedGitAsync(
+                executor, noPolicyClone, isolatedGlobalConfig, isolatedAttributes,
+                ["rev-parse", "HEAD:sample.txt"]))
+            .StandardOutput.Trim();
+        var noPolicyRaw = (await IsolatedGitAsync(
+                executor, noPolicyClone, isolatedGlobalConfig, isolatedAttributes,
+                ["hash-object", "--no-filters", "sample.txt"]))
+            .StandardOutput.Trim();
+        var noPolicyFiltered = (await IsolatedGitAsync(
+                executor, noPolicyClone, isolatedGlobalConfig, isolatedAttributes,
+                ["-c", "core.autocrlf=true", "hash-object", "sample.txt"]))
+            .StandardOutput.Trim();
+        Assert.NotEqual(noPolicyIndex, noPolicyRaw);
+        Assert.Equal(noPolicyIndex, noPolicyFiltered);
+
+        await File.WriteAllTextAsync(
+            System.IO.Path.Combine(source, ".gitattributes"),
+            "* text eol=lf\n",
+            TestContext.Current.CancellationToken);
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes,
+            ["add", ".gitattributes"]);
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes,
+            ["commit", "-m", "canonicalize fixture line endings"]);
+        var policyHead = (await IsolatedGitAsync(
+                executor, source, isolatedGlobalConfig, isolatedAttributes, ["rev-parse", "HEAD"]))
+            .StandardOutput.Trim();
+
+        var policyClone = System.IO.Path.Combine(policyOwner.Path, "repository");
+        await IsolatedGitAsync(
+            executor,
+            policyOwner.Path,
+            isolatedGlobalConfig,
+            isolatedAttributes,
+            ["-c", "core.autocrlf=true", "clone", "--no-local", "--no-hardlinks", "--", source, policyClone]);
+        var eol = await IsolatedGitAsync(
+            executor, policyClone, isolatedGlobalConfig, isolatedAttributes,
+            ["ls-files", "--eol", "sample.txt"]);
+        Assert.Contains("i/lf", eol.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("w/lf", eol.StandardOutput, StringComparison.Ordinal);
+        Assert.Contains("attr/text eol=lf", eol.StandardOutput, StringComparison.Ordinal);
+        var policyReaderExecutor = new EnvironmentOverlayCommandExecutor(
+            executor,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["GIT_ATTR_NOSYSTEM"] = "1"
+            });
+        Assert.True(policyReaderExecutor.SupportsCreationOwnedBoundedCapture);
+        var policyIdentity = await new GitRepositoryIdentityReader(
+                policyReaderExecutor, policyClone, policyHead)
+            .ReadAsync(TestContext.Current.CancellationToken);
+        Assert.True(policyIdentity.IsClean);
+        var policyIndex = (await IsolatedGitAsync(
+                executor, policyClone, isolatedGlobalConfig, isolatedAttributes,
+                ["rev-parse", "HEAD:sample.txt"]))
+            .StandardOutput.Trim();
+        var policyRaw = (await IsolatedGitAsync(
+                executor, policyClone, isolatedGlobalConfig, isolatedAttributes,
+                ["hash-object", "--no-filters", "sample.txt"]))
+            .StandardOutput.Trim();
+        Assert.Equal(policyIndex, policyRaw);
     }
 
     private static async Task<GateRunResult> RunGateAsync(
@@ -105,20 +268,46 @@ public sealed class RealDotNetFixtureTests
         string outputRoot,
         string protectedBase,
         string outputName,
-        IReadOnlyList<string> arguments)
+        IReadOnlyList<string> arguments,
+        RepositoryIdentity? expectedRepository = null,
+        Action<GitStatusCommandDiagnostics?>? captureStatusDiagnostics = null)
     {
         var reader = new GitRepositoryIdentityReader(executor, repository, protectedBase);
-        var identity = await reader.ReadAsync(TestContext.Current.CancellationToken);
-        return await new GateRunner(executor, reader, repository, protectedBase).RunAsync(
+        var identity = expectedRepository ?? await reader.ReadAsync(TestContext.Current.CancellationToken);
+        var policy = new ResolvedEvidencePolicy(
+            TestEvidence.Identity('1'), TestEvidence.Identity('2'), protectedBase,
+            PolicyAuthorityKind.ProtectedGitBase, 0m, ["test"], authorityVerified: true,
+            sourceRepositoryRoot: repository,
+            requiredGatePluginBindings:
+            [new RequiredGatePluginBinding("test", "delivery-forge.dotnet", "1.0.0", "dotnet")]);
+        var boundedArguments = arguments.Concat(
+            ["--disable-build-servers", "-m:1", "-p:UseSharedCompilation=false", "-p:BuildInParallel=false", "/nodeReuse:false"])
+            .ToArray();
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1",
+            ["MSBUILDDISABLENODEREUSE"] = "1",
+            ["UseSharedCompilation"] = "false"
+        };
+        var result = await new GateRunner(
+            executor, reader, repository, protectedBase,
+            plugins: null, authorityRegistry: null,
+            hostOwnedClaimRoot: System.IO.Path.Combine(outputRoot, ".claims", outputName)).RunAsync(
             new GateRequest(
-                "test", TestEvidence.ResolvedPolicy(), capability, EvidenceAdapterKind.DotNet,
+                "test", policy, capability, EvidenceAdapterKind.DotNet,
                 TestEvidence.Identity('6'), identity,
-                new CommandInvocation(capability.ExecutablePath!, arguments, repository),
+                new CommandInvocation(capability.ExecutablePath!, boundedArguments, repository, environment),
                 "fixture", TimeSpan.FromSeconds(90), System.IO.Path.Combine(outputRoot, outputName)),
             TestContext.Current.CancellationToken);
+        captureStatusDiagnostics?.Invoke(reader.LastIdentityStatusDiagnostics);
+        return result;
     }
 
-    private static void ArchiveFixtureEvidence(string evidenceRoot, GateRunResult result)
+    private static void ArchiveFixtureEvidence(
+        string evidenceRoot,
+        GateRunResult result,
+        RepositoryDiagnosticBundle? repositoryDiagnostics = null,
+        GitStatusCommandDiagnostics? gateStatusDiagnostics = null)
     {
         var destination = Environment.GetEnvironmentVariable("DELIVERY_FORGE_TEST_ARTIFACTS");
         if (string.IsNullOrWhiteSpace(destination)) return;
@@ -127,7 +316,16 @@ public sealed class RealDotNetFixtureTests
         var ownedLeaf = Path.Combine(destination, "real-dotnet", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(ownedLeaf);
         File.WriteAllText(Path.Combine(ownedLeaf, "observed-result.json"),
-            System.Text.Json.JsonSerializer.Serialize(new { result.Outcome, result.Reason, result.Execution }));
+            System.Text.Json.JsonSerializer.Serialize(new
+            {
+                result.Outcome,
+                result.Reason,
+                result.Execution,
+                result.Before,
+                result.After,
+                repositoryDiagnostics,
+                gateStatusDiagnostics
+            }));
         var files = new EnumerationOptions { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.ReparsePoint };
         foreach (var source in Directory.EnumerateFiles(evidenceRoot, "*", files))
         {
@@ -137,12 +335,182 @@ public sealed class RealDotNetFixtureTests
         }
     }
 
+    private static async Task<RepositoryDiagnosticSnapshot> CaptureRepositoryDiagnosticAsync(
+        ProcessCommandExecutor executor,
+        string repository,
+        string protectedBase,
+        string label)
+    {
+        var porcelain = await RunGitDiagnosticAsync(
+            executor, repository, ["status", "--porcelain=v1", "--untracked-files=all"]);
+        var topLevel = await RunGitDiagnosticAsync(
+            executor, repository, ["rev-parse", "--show-toplevel"]);
+        var config = await RunGitDiagnosticAsync(
+            executor,
+            repository,
+            [
+                "config", "--show-origin", "--get-regexp",
+                "^(core\\.(autocrlf|eol|safecrlf|ignorecase|filemode|fsmonitor)|status\\.showUntrackedFiles)$"
+            ]);
+        // Keep the hardened identity read last. Diagnostic Git commands must not run
+        // between the expected snapshot and GateRunner's independent observed read.
+        var identityReader = new GitRepositoryIdentityReader(executor, repository, protectedBase);
+        var identity = await identityReader.ReadAsync(TestContext.Current.CancellationToken);
+        return new RepositoryDiagnosticSnapshot(
+            label,
+            Environment.CurrentDirectory,
+            repository,
+            Path.GetFullPath(repository),
+            new DirectoryInfo(repository).FullName,
+            topLevel.ExitCode,
+            topLevel.StandardOutput,
+            topLevel.StandardError,
+            identity,
+            identityReader.LastIdentityStatusDiagnostics,
+            porcelain.ExitCode,
+            porcelain.StandardOutput,
+            porcelain.StandardError,
+            config.ExitCode,
+            config.StandardOutput,
+            config.StandardError);
+    }
+
+    private static string FormatRepositoryDiagnostics(
+        RepositoryDiagnosticBundle diagnostics,
+        RepositoryIdentity expected,
+        RepositoryIdentity observed,
+        GitStatusCommandDiagnostics? gateStatusDiagnostics) =>
+        "Repository identity diagnostics: " + System.Text.Json.JsonSerializer.Serialize(new
+        {
+            ExpectedRepositoryIdentity = expected,
+            ObservedRepositoryIdentity = observed,
+            GateStatusCommand = gateStatusDiagnostics,
+            Snapshots = diagnostics
+        });
+
     private static async Task<CommandResult> GitAsync(
         ProcessCommandExecutor executor, string directory, IReadOnlyList<string> arguments)
     {
         var result = await RunAsync(executor, "git", directory, arguments);
         Assert.Equal(0, result.ExitCode);
         return result;
+    }
+
+    private static async Task<CommandResult> IsolatedGitAsync(
+        ProcessCommandExecutor executor,
+        string directory,
+        string isolatedGlobalConfig,
+        string isolatedAttributes,
+        IReadOnlyList<string> arguments)
+    {
+        var isolatedArguments = new[]
+        {
+            "-c", "core.autocrlf=false",
+            "-c", "core.eol=lf",
+            "-c", "core.safecrlf=false",
+            "-c", "core.fsmonitor=false",
+            "-c", $"core.attributesFile={isolatedAttributes}"
+        }.Concat(arguments).ToArray();
+        var result = await executor.ExecuteAsync(
+            new CommandInvocation(
+                ResolveExecutable("DELIVERY_FORGE_GIT_HOST", "git"),
+                isolatedArguments,
+                directory,
+                CreateIsolatedGitEnvironment(isolatedGlobalConfig),
+                InheritEnvironment: false),
+            TimeSpan.FromSeconds(90),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(0, result.ExitCode);
+        return result;
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateIsolatedGitEnvironment(string isolatedGlobalConfig)
+    {
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["GIT_ATTR_NOSYSTEM"] = "1",
+            ["GIT_CONFIG_GLOBAL"] = isolatedGlobalConfig,
+            ["GIT_CONFIG_NOSYSTEM"] = "1",
+            ["GIT_OPTIONAL_LOCKS"] = "0"
+        };
+        foreach (var name in new[]
+                 {
+                     "PATH", "PATHEXT", "SystemRoot", "ComSpec", "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE"
+                 })
+        {
+            var value = Environment.GetEnvironmentVariable(name);
+            if (!string.IsNullOrEmpty(value))
+                environment[name] = value;
+        }
+        return environment;
+    }
+
+    private sealed class EnvironmentOverlayCommandExecutor(
+        ICommandExecutor inner,
+        IReadOnlyDictionary<string, string> environment) : IBoundedGateFixtureExecutor
+    {
+        public bool SupportsCreationOwnedBoundedCapture => inner switch
+        {
+            ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } => true,
+            IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true } => true,
+            _ => false
+        };
+
+        public Task<CommandResult> ExecuteAsync(
+            CommandInvocation invocation,
+            TimeSpan timeout,
+            CancellationToken cancellationToken)
+        {
+            return inner.ExecuteAsync(Overlay(invocation), timeout, cancellationToken);
+        }
+
+        public Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+            CommandInvocation invocation,
+            TimeSpan entireBudget,
+            int maximumBytesPerStream,
+            CancellationToken cancellationToken) => inner switch
+            {
+                ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } owned =>
+                    owned.ExecuteBoundedCaptureAsync(
+                        Overlay(invocation), entireBudget, maximumBytesPerStream, cancellationToken),
+                IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true } fixture =>
+                    fixture.ExecuteBoundedCaptureAsync(
+                        Overlay(invocation), entireBudget, maximumBytesPerStream, cancellationToken),
+                _ => throw new InvalidOperationException(
+                    "The wrapped executor cannot provide creation-owned bounded capture.")
+            };
+
+        private CommandInvocation Overlay(CommandInvocation invocation)
+        {
+            var merged = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (invocation.Environment is not null)
+                foreach (var pair in invocation.Environment)
+                    merged[pair.Key] = pair.Value;
+            foreach (var pair in environment)
+                merged[pair.Key] = pair.Value;
+            return invocation with { Environment = merged };
+        }
+    }
+
+    private static async Task<ToolCapability> DetectDotNetAsync(
+        ProcessCommandExecutor executor,
+        string dotnet,
+        string repository)
+    {
+        var detection = await new ToolCapabilityDetector(executor).DetectAsync(
+            new CapabilityProbe(
+                "dotnet", ExecutableSource.TrustedExplicit, dotnet, repository, null,
+                ["--version"], ["--help"], "10.0.401", "trx-v1", false),
+            TestContext.Current.CancellationToken);
+        var capability = detection.Capability;
+        Assert.True(capability.Supported,
+            $"Dotnet capability: executable={dotnet}; observed={capability.Version}; " +
+            $"version exit={detection.VersionResult?.ExitCode}; " +
+            $"version output={detection.VersionResult?.StandardOutput} {detection.VersionResult?.StandardError}; " +
+            $"help exit={detection.HelpResult?.ExitCode}; " +
+            $"help output={detection.HelpResult?.StandardOutput} {detection.HelpResult?.StandardError}");
+        Assert.Equal("10.0.401", capability.Version);
+        return capability;
     }
 
     private static string FindRepositoryFile(string name)
@@ -167,6 +535,25 @@ public sealed class RealDotNetFixtureTests
             new CommandInvocation(executable, arguments, directory),
             TimeSpan.FromSeconds(90),
             TestContext.Current.CancellationToken);
+
+    private static Task<CommandResult> RunGitDiagnosticAsync(
+        ProcessCommandExecutor executor,
+        string directory,
+        IReadOnlyList<string> arguments)
+    {
+        var hardenedArguments = new[] { "-c", "core.fsmonitor=false" }.Concat(arguments).ToArray();
+        return executor.ExecuteAsync(
+            new CommandInvocation(
+                "git",
+                hardenedArguments,
+                directory,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["GIT_OPTIONAL_LOCKS"] = "0"
+                }),
+            TimeSpan.FromSeconds(90),
+            TestContext.Current.CancellationToken);
+    }
 
     private static (int Total, int Executed, int Passed, int Failed) ReadCounts(string trx)
     {
@@ -217,4 +604,27 @@ public sealed class RealDotNetFixtureTests
             if (Directory.Exists(directory))
                 Directory.Delete(directory, true);
     }
+
+    private sealed record RepositoryDiagnosticBundle(
+        RepositoryDiagnosticSnapshot BeforeCapabilityProbe,
+        RepositoryDiagnosticSnapshot AfterCapabilityProbe,
+        RepositoryDiagnosticSnapshot PreGate);
+
+    private sealed record RepositoryDiagnosticSnapshot(
+        string Label,
+        string ProcessCurrentDirectory,
+        string RepositoryArgument,
+        string FullRepositoryPath,
+        string DirectoryInfoFullName,
+        int? GitTopLevelExitCode,
+        string GitTopLevelStandardOutput,
+        string GitTopLevelStandardError,
+        RepositoryIdentity Identity,
+        GitStatusCommandDiagnostics? IdentityStatusCommand,
+        int? PorcelainExitCode,
+        string PorcelainStandardOutput,
+        string PorcelainStandardError,
+        int? RelevantConfigExitCode,
+        string RelevantConfigStandardOutput,
+        string RelevantConfigStandardError);
 }

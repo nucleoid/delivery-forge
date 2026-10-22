@@ -200,6 +200,25 @@ public sealed class PublicationSafetyTests(PublicationFixture fixture) : IClassF
     }
 
     [Fact]
+    public async Task Anti_slop_pass_cannot_impersonate_a_publication_gate()
+    {
+        var definition = fixture.Definition() with
+        {
+            GateReceipts =
+            [
+                fixture.Gate("build", "PASS", "delivery-forge.anti-slop", "oxlint"),
+                fixture.Gate("test", "PASS")
+            ]
+        };
+        var lane = Lane(definition);
+        var result = await lane.Service.ExecuteAsync(
+            lane.Run, new(PublicationMode.Pr, "anti-slop-impersonation", false),
+            TestContext.Current.CancellationToken);
+        Assert.Equal(PublicationDenial.PolicyGate, result.Denial);
+        Assert.Equal(0, lane.Host.Mutations);
+    }
+
+    [Fact]
     public async Task Lost_response_is_read_back_and_same_key_never_blindly_retries()
     {
         var lane = Lane();

@@ -1,11 +1,121 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Security.Cryptography;
+using System.Text;
 
 namespace DeliveryForge.Evidence.Tests;
 
 public sealed class ProcessCommandExecutorTests
 {
+    [Fact]
+    public async Task Creation_owned_capture_writes_bounded_standard_input()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+        const string input = "first\nsecond\n";
+
+        var result = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
+            new CommandInvocation(
+                "/bin/sh", ["-c", "cat"], System.IO.Path.GetTempPath(), StandardInput: input),
+            TimeSpan.FromSeconds(10), 1024, TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.Command.ExitCode);
+        Assert.Equal(input, result.Command.StandardOutput);
+        Assert.True(result.Command.OwnedProcessQuiescent);
+    }
+
+    [Fact]
+    public async Task Linux_timeout_kills_exited_roots_remaining_process_group_children()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+        using var temp = new TempDirectory();
+        var childPath = Path.Combine(temp.Path, "child.pid");
+        var script = Path.Combine(temp.Path, "descendant.sh");
+        await File.WriteAllTextAsync(
+            script,
+            $"sleep 30 &\nprintf '%s' \"$!\" > '{childPath.Replace("'", "'\\''", StringComparison.Ordinal)}'\nexit 0\n",
+            TestContext.Current.CancellationToken);
+
+        var result = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
+            new CommandInvocation("/bin/sh", [script], temp.Path),
+            TimeSpan.FromSeconds(2), 1024, TestContext.Current.CancellationToken);
+
+        Assert.True(result.Command.TimedOut);
+        Assert.True(result.Command.OwnedProcessQuiescent);
+        Assert.True(result.Command.LifecycleDiagnostics?.KillAttempted);
+        Assert.True(result.Command.LifecycleDiagnostics?.KillSucceeded);
+        var childPid = int.Parse(await File.ReadAllTextAsync(childPath, TestContext.Current.CancellationToken));
+        Assert.True(SpinWait.SpinUntil(
+            () => !Directory.Exists($"/proc/{childPid}"), TimeSpan.FromSeconds(2)),
+            $"Owned descendant {childPid} survived process-group cleanup.");
+    }
+
+    [Fact]
+    public async Task Bounded_capture_accepts_existing_gate_budgets_over_fifteen_minutes()
+    {
+        if (!OperatingSystem.IsLinux())
+            return;
+
+        var executor = new ProcessCommandExecutor();
+        var result = await executor.ExecuteBoundedCaptureAsync(
+            new CommandInvocation("/usr/bin/true", [], System.IO.Path.GetTempPath()),
+            TimeSpan.FromMinutes(16),
+            1024,
+            TestContext.Current.CancellationToken);
+
+        Assert.Equal(0, result.Command.ExitCode);
+        Assert.True(result.Command.OwnedProcessQuiescent);
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Creation_owned_capture_bounds_large_stdout_and_stderr(bool standardError)
+    {
+        using var temp = new TempDirectory();
+        var invocation = await LargeOutputInvocationAsync(temp.Path, standardError);
+        const int quota = 4096;
+
+        var capture = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
+            invocation, TimeSpan.FromSeconds(10), quota, TestContext.Current.CancellationToken);
+
+        Assert.True(capture.CaptureBoundExceeded);
+        Assert.True(capture.StandardOutputBytes.Length <= quota);
+        Assert.True(capture.StandardErrorBytes.Length <= quota);
+        Assert.True(capture.Command.OwnedProcessQuiescent);
+        Assert.True(capture.RootExitObserved);
+        Assert.True(capture.StandardOutputDrainCompleted);
+        Assert.True(capture.StandardErrorDrainCompleted);
+        Assert.Equal(standardError ? 0 : quota, capture.StandardOutputBytes.Length);
+        Assert.Equal(standardError ? quota : 0, capture.StandardErrorBytes.Length);
+    }
+
+    [Fact]
+    public async Task Existing_gate_output_over_one_megabyte_is_not_silently_truncated()
+    {
+        using var temp = new TempDirectory();
+        var request = TestEvidence.GateRequest(temp.Path);
+        var invocation = await LargeOutputInvocationAsync(request.Invocation.WorkingDirectory, standardError: false);
+        var capability = ToolCapability.FromDetection(
+            "dotnet", "10.0.401", "trx-v1", true, [], invocation.FileName,
+            $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(invocation.FileName)))}",
+            ["test"], request.Invocation.WorkingDirectory);
+        request = request with { Invocation = invocation, Capability = capability, Timeout = TimeSpan.FromSeconds(10) };
+        var runner = new GateRunner(
+            new ProcessCommandExecutor(),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
+            request.Invocation.WorkingDirectory,
+            TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.DoesNotContain("capture limit", result.Reason, StringComparison.Ordinal);
+        Assert.True(result.Execution.OwnedProcessQuiescent);
+        Assert.True(Encoding.UTF8.GetByteCount(result.Execution.StandardOutput) > 1024 * 1024);
+        Assert.True(Encoding.UTF8.GetByteCount(result.Execution.StandardOutput) <= GateRunner.ExistingGateMaximumCapturedBytesPerStream);
+    }
+
     [Fact]
     public async Task Lifecycle_diagnostics_preserve_partial_kill_exception_without_promoting_root_exit()
     {
@@ -48,6 +158,9 @@ public sealed class ProcessCommandExecutorTests
         await File.WriteAllTextAsync(script, scriptText, TestContext.Current.CancellationToken);
         var invocation = request.Invocation with
         {
+            FileName = OperatingSystem.IsWindows()
+                ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe")
+                : request.Invocation.FileName,
             Arguments = OperatingSystem.IsWindows()
                 ? ["/d", "/s", "/c", script]
                 : [script]
@@ -93,10 +206,10 @@ public sealed class ProcessCommandExecutorTests
     }
 
     [Fact]
-    public async Task Partial_tree_kill_failure_flows_through_real_executor_to_gate_error()
+    public async Task Partial_tree_kill_failure_flows_through_real_executor_to_gate_incomplete()
     {
         using var temp = new TempDirectory();
-        var request = LongRunningRequest(temp.Path);
+        var request = LongRunningRequest(temp.Path) with { Timeout = TimeSpan.FromSeconds(2) };
         Process? killedProcess = null;
         Process? observedProcess = null;
         var executor = new ProcessCommandExecutor(
@@ -122,12 +235,15 @@ public sealed class ProcessCommandExecutorTests
 
         var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
 
-        Assert.True(result.Execution.TimedOut);
+        Assert.True(result.Execution.TimedOut,
+            $"Expected the real command to reach timeout cleanup: outcome={result.Outcome}; " +
+            $"reason={result.Reason}; exit={result.Execution.ExitCode}; " +
+            $"cancelled={result.Execution.Cancelled}; native={result.Execution.LifecycleDiagnostics?.NativeFailure}");
         Assert.False(result.Execution.Cancelled);
         Assert.Same(killedProcess, observedProcess);
         Assert.False(result.Execution.OwnedProcessQuiescent);
-        Assert.Equal(GateOutcome.Error, result.Outcome);
-        Assert.Contains("quiescent", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("identity could not be read after evaluation", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -210,7 +326,8 @@ public sealed class ProcessCommandExecutorTests
     {
         var request = TestEvidence.GateRequest(output);
         var (fileName, arguments) = OperatingSystem.IsWindows()
-            ? (Environment.GetEnvironmentVariable("ComSpec")!, new[] { "/d", "/s", "/c", "for /L %i in (1,1,2147483647) do @rem" })
+            ? (Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "PING.EXE"),
+                new[] { "-n", "30", "127.0.0.1" })
             : ("/bin/sh", new[] { "-c", "exec sleep 30" });
         var executableIdentity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(fileName)))}";
         var capability = ToolCapability.FromDetection(
@@ -230,5 +347,18 @@ public sealed class ProcessCommandExecutorTests
             Invocation = new CommandInvocation(fileName, arguments, request.Invocation.WorkingDirectory),
             Timeout = TimeSpan.FromMilliseconds(100)
         };
+    }
+
+    private static async Task<CommandInvocation> LargeOutputInvocationAsync(string directory, bool standardError)
+    {
+        var line = new string('x', 255);
+        var path = Path.Combine(directory, OperatingSystem.IsWindows() ? "large-output.cmd" : "large-output.sh");
+        var script = OperatingSystem.IsWindows()
+            ? $"@echo off\r\nfor /L %%i in (1,1,10000) do @echo {line}{(standardError ? " 1>&2" : "")}\r\n"
+            : $"i=0\nwhile [ \"$i\" -lt 10000 ]; do printf '{line}\\n'{(standardError ? " >&2" : "")}; i=$((i+1)); done\n";
+        await File.WriteAllTextAsync(path, script, TestContext.Current.CancellationToken);
+        return OperatingSystem.IsWindows()
+            ? new CommandInvocation(Environment.GetEnvironmentVariable("ComSpec")!, ["/d", "/s", "/c", path], directory)
+            : new CommandInvocation("/bin/sh", [path], directory);
     }
 }

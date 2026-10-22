@@ -90,6 +90,22 @@ internal static class TestEvidence
     }
 
     public static string WorkingDirectory(string output) => System.IO.Path.Combine(output, "work");
+
+    public static string ResolveNodeExecutable()
+    {
+        var names = OperatingSystem.IsWindows() ? new[] { "node.exe", "node" } : new[] { "node" };
+        foreach (var directory in (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
+                     .Split(Path.PathSeparator, StringSplitOptions.RemoveEmptyEntries))
+        {
+            if (!Path.IsPathFullyQualified(directory)) continue;
+            foreach (var name in names)
+            {
+                var candidate = Path.Combine(directory, name);
+                if (File.Exists(candidate)) return Path.GetFullPath(candidate);
+            }
+        }
+        throw new FileNotFoundException("The setup-provided Node.js executable was not found on PATH.");
+    }
 }
 
 internal sealed class QueueCommandExecutor(params CommandResult[] results) : ICommandExecutor
@@ -121,10 +137,29 @@ internal sealed class DeletingProcessCommandExecutor : ICommandExecutor
     }
 }
 
-internal sealed class StubCommandExecutor(CommandResult result) : ICommandExecutor
+internal sealed class StubCommandExecutor(CommandResult result) : IBoundedGateFixtureExecutor
 {
+    public bool SupportsCreationOwnedBoundedCapture => true;
     public Task<CommandResult> ExecuteAsync(
         CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken) => Task.FromResult(result);
+
+    public Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+        CommandInvocation invocation, TimeSpan entireBudget, int maximumBytesPerStream,
+        CancellationToken cancellationToken)
+    {
+        var stdout = System.Text.Encoding.UTF8.GetBytes(result.StandardOutput);
+        var stderr = System.Text.Encoding.UTF8.GetBytes(result.StandardError);
+        var exceeded = stdout.Length > maximumBytesPerStream || stderr.Length > maximumBytesPerStream;
+        stdout = stdout[..Math.Min(stdout.Length, maximumBytesPerStream)];
+        stderr = stderr[..Math.Min(stderr.Length, maximumBytesPerStream)];
+        var command = result with
+        {
+            StandardOutput = System.Text.Encoding.UTF8.GetString(stdout),
+            StandardError = System.Text.Encoding.UTF8.GetString(stderr)
+        };
+        return Task.FromResult(new BoundedCommandCaptureResult(
+            command, stdout, stderr, exceeded, true, true, true));
+    }
 }
 
 internal sealed class CancellingCommandExecutor : ICommandExecutor
@@ -134,17 +169,93 @@ internal sealed class CancellingCommandExecutor : ICommandExecutor
         throw new OperationCanceledException(cancellationToken);
 }
 
-internal sealed class SequenceRepositoryIdentityReader(params RepositoryIdentity[] identities) : IRepositoryIdentityReader
+internal sealed class TrxWritingCommandExecutor(CommandResult result, string trxPath) : IBoundedGateFixtureExecutor
+{
+    public bool SupportsCreationOwnedBoundedCapture => true;
+
+    public Task<CommandResult> ExecuteAsync(
+        CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        WriteTrx();
+        return Task.FromResult(result);
+    }
+
+    public Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+        CommandInvocation invocation, TimeSpan entireBudget, int maximumBytesPerStream,
+        CancellationToken cancellationToken)
+    {
+        WriteTrx();
+        var stdout = System.Text.Encoding.UTF8.GetBytes(result.StandardOutput);
+        var stderr = System.Text.Encoding.UTF8.GetBytes(result.StandardError);
+        return Task.FromResult(new BoundedCommandCaptureResult(
+            result, stdout, stderr, false, true, true, true));
+    }
+
+    private void WriteTrx()
+    {
+        File.WriteAllText(
+            trxPath,
+            "<TestRun><ResultSummary><Counters total=\"1\" executed=\"1\" passed=\"1\" failed=\"0\" /></ResultSummary></TestRun>");
+        var bin = Path.Combine(Path.GetDirectoryName(trxPath)!, "bin");
+        Directory.CreateDirectory(bin);
+        File.WriteAllText(Path.Combine(bin, "Subject.dll"), "fresh fixture assembly");
+    }
+}
+
+internal sealed class BlockingCommandExecutor(CommandResult result) : ICommandExecutor
+{
+    private readonly TaskCompletionSource entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly TaskCompletionSource released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    internal Task Entered => entered.Task;
+    internal void Release() => released.TrySetResult();
+
+    public async Task<CommandResult> ExecuteAsync(
+        CommandInvocation invocation, TimeSpan timeout, CancellationToken cancellationToken)
+    {
+        entered.TrySetResult();
+        await released.Task.WaitAsync(cancellationToken);
+        return result;
+    }
+}
+
+internal sealed class SequenceRepositoryIdentityReader(params RepositoryIdentity[] identities) : IBoundedRepositoryFixtureReader
 {
     private int _index;
+    public bool SupportsCreationOwnedBoundedRead => true;
     public Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken) =>
         Task.FromResult(identities[Math.Min(_index++, identities.Length - 1)]);
+}
+
+internal sealed class ScopedSequenceRepositoryIdentityReader(
+    RepositoryEvaluationScope scope,
+    params RepositoryIdentity[] identities)
+    : IBoundedRepositoryFixtureReader, IRepositoryEvaluationScopeReader
+{
+    private int _index;
+    public bool SupportsCreationOwnedBoundedRead => true;
+
+    public Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken) =>
+        Task.FromResult(identities[Math.Min(_index++, identities.Length - 1)]);
+
+    public Task<RepositoryEvaluationScope> ReadEvaluationScopeAsync(
+        string expectedHeadCommit,
+        TimeSpan timeout,
+        CancellationToken cancellationToken) => Task.FromResult(scope);
 }
 
 internal sealed class ThrowingRepositoryIdentityReader : IRepositoryIdentityReader
 {
     public Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken) =>
         throw new EvidenceRepositoryException("fixture repository failure");
+}
+
+internal sealed class CancellingRepositoryIdentityReader : IRepositoryIdentityReader
+{
+    public async Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken)
+    {
+        await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+        throw new InvalidOperationException("unreachable");
+    }
 }
 
 internal sealed class FirstThenThrowRepositoryIdentityReader(RepositoryIdentity identity)

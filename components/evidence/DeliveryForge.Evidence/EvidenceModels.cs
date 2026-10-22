@@ -1,10 +1,13 @@
+using DeliveryForge.Contracts.Validation;
+
 namespace DeliveryForge.Evidence;
 
 public enum EvidenceAdapterKind
 {
     DotNet,
     Crap4CSharp,
-    Mutate4CSharp
+    Mutate4CSharp,
+    External
 }
 
 public enum GateOutcome
@@ -103,7 +106,9 @@ public sealed record CommandInvocation(
     string FileName,
     IReadOnlyList<string> Arguments,
     string WorkingDirectory,
-    IReadOnlyDictionary<string, string>? Environment = null);
+    IReadOnlyDictionary<string, string>? Environment = null,
+    bool InheritEnvironment = true,
+    string? StandardInput = null);
 
 public sealed record CommandResult(
     int? ExitCode,
@@ -143,7 +148,8 @@ public sealed record GateRequest(
     CommandInvocation Invocation,
     string Scope,
     TimeSpan Timeout,
-    string OutputDirectory);
+    string OutputDirectory,
+    EvaluationPluginSelection? Plugin = null);
 
 public sealed record GateRunResult(
     GateOutcome Outcome,
@@ -162,7 +168,11 @@ public sealed record GateRunResult(
     string Scope,
     IReadOnlyDictionary<string, string> ArtifactHashes,
     string ReceiptPath,
-    string? NotApplicableRationale);
+    string? NotApplicableRationale)
+{
+    public EvaluationPluginReceiptMetadata Plugin { get; init; } = EvaluationPluginReceiptMetadata.Unbound;
+    public TrustedReceiptProvenance? TrustedReceiptProvenance { get; init; }
+}
 
 public interface ICommandExecutor
 {
@@ -172,9 +182,49 @@ public interface ICommandExecutor
         CancellationToken cancellationToken);
 }
 
+// Friend test assemblies may provide finite fixture captures without widening the production
+// authority surface. Actual code-owned capture is sealed in ProcessCommandExecutor.
+internal interface IBoundedGateFixtureExecutor : ICommandExecutor
+{
+    bool SupportsCreationOwnedBoundedCapture { get; }
+    Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+        CommandInvocation invocation,
+        TimeSpan entireBudget,
+        int maximumBytesPerStream,
+        CancellationToken cancellationToken);
+}
+
 public interface IRepositoryIdentityReader
 {
     Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken);
+}
+
+internal interface IDeadlineRepositoryIdentityReader : IRepositoryIdentityReader
+{
+    Task<RepositoryIdentity> ReadAsync(TimeSpan timeout, CancellationToken cancellationToken);
+}
+
+internal interface IBoundedRepositoryFixtureReader : IRepositoryIdentityReader
+{
+    bool SupportsCreationOwnedBoundedRead { get; }
+}
+
+public sealed record RepositoryEvaluationScope(
+    IReadOnlyList<string> TrackedFiles,
+    IReadOnlySet<string> IgnoredFiles,
+    string? InputSetIdentity = null,
+    IReadOnlyList<string>? SuppressionViolations = null,
+    IReadOnlyList<string>? InvalidInputs = null,
+    IReadOnlyList<string>? RetiredIgnoredFiles = null,
+    string? MaterializedRoot = null,
+    IReadOnlyDictionary<string, string>? MaterializedObjectIds = null);
+
+public interface IRepositoryEvaluationScopeReader
+{
+    Task<RepositoryEvaluationScope> ReadEvaluationScopeAsync(
+        string expectedHeadCommit,
+        TimeSpan timeout,
+        CancellationToken cancellationToken);
 }
 
 public sealed class EvidenceWriteException(string message) : Exception(message);

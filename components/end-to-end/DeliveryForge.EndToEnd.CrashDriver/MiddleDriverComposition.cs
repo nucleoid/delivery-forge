@@ -114,6 +114,7 @@ internal static class MiddleDriverComposition
                     actual.SourceChanged || actual.Execution.TimedOut || actual.Execution.Cancelled || !actual.Execution.OwnedProcessQuiescent)
                     throw new InvalidOperationException("Genuine advisory test/TRX gate prerequisite was not established.");
                 files.Add(boundary); files.AddRange(actual.ArtifactHashes.Keys.Select(name => Path.Combine(gateDirectory, name)));
+                _ = ContractValidator.ParseAndValidate(await Read(boundary, input, token));
                 files.Add(Path.Combine(input.ArtifactRoot, "actual-driver-gate-configuration.json"));
                 files.Add(Path.Combine(input.ArtifactRoot, "actual-driver-gate-provenance.json"));
                 var gateObservation = Path.Combine(input.ArtifactRoot, "actual-driver-gate-observation.json");
@@ -336,9 +337,13 @@ internal static class MiddleDriverComposition
             frozenBase = input.RuntimeBaseCommit
         });
         var configPath = Path.Combine(input.ArtifactRoot, "actual-driver-gate-configuration.json"); await WriteBytes(configPath, configuration, token);
-        var gate = await new GateRunner(executor, reader, clone, input.RuntimeBaseCommit).RunAsync(new("test", policy, detection.Capability,
+        var gate = await new GateRunner(executor, reader, clone, input.RuntimeBaseCommit).RunAsync(
+            new("test", policy, detection.Capability,
             EvidenceAdapterKind.DotNet, Hash(configuration), before, invocation, "actual-middle-driver",
             Remaining(input, 75), Path.Combine(input.ArtifactRoot, "actual-driver-gates")), token);
+        var receipt = ContractValidator.ParseAndValidate(await Read(gate.ReceiptPath, input, token));
+        if (gate.ProductionCapable || receipt.SchemaVersion != "1.0.0")
+            throw new IOException("Same-principal crash-driver evidence must remain non-authoritative v1.");
         var provenance = Path.Combine(input.ArtifactRoot, "actual-driver-gate-provenance.json");
         await Write(provenance, new
         {
@@ -355,7 +360,7 @@ internal static class MiddleDriverComposition
             trx,
             configurationPath = configPath,
             calls = executor.Calls,
-            limitation = "Actual fresh cold test/TRX gate in distinct original/calibration clone; SAME case clock, no certified quality PASS."
+            limitation = "Actual fresh cold test/TRX gate is same-principal advisory evidence; production authority remains disabled."
         }, token);
         return gate;
     }
@@ -523,9 +528,25 @@ internal static class MiddleDriverComposition
     {
         Within(receiptPath, input);
         var receiptDirectory = Path.GetDirectoryName(receiptPath)!;
-        if (Path.GetFileName(receiptDirectory) != "receipts") throw new IOException("Public gate receipt directory differs.");
-        var gateDirectory = Path.GetDirectoryName(receiptDirectory) ?? throw new IOException("Public gate artifact directory is missing.");
+        string gateDirectory;
+        if (Path.GetFileName(receiptDirectory) == "receipts")
+            gateDirectory = Path.GetDirectoryName(receiptDirectory) ??
+                throw new IOException("Public gate artifact directory is missing.");
+        else if (string.Equals(
+                     Path.GetFullPath(receiptDirectory),
+                     Path.GetFullPath(Path.Combine(input.ArtifactRoot, "host-owned-gate-receipts")),
+                     PathComparison()))
+        {
+            var gateRoot = Path.Combine(input.ArtifactRoot, "actual-driver-gates");
+            var attempts = Directory.GetDirectories(gateRoot, "test.attempt-*", SearchOption.TopDirectoryOnly);
+            if (attempts.Length != 1)
+                throw new IOException("Host-owned receipt does not identify exactly one immutable public gate attempt.");
+            gateDirectory = attempts[0];
+        }
+        else
+            throw new IOException("Public gate receipt directory differs.");
         Within(gateDirectory, input);
+        if (!Directory.Exists(gateDirectory)) throw new IOException("Public gate artifact directory is missing.");
         return gateDirectory; // GateRunner stores raw artifacts beside its receipts subdirectory.
     }
 
