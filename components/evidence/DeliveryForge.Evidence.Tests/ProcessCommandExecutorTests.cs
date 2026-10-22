@@ -7,6 +7,51 @@ namespace DeliveryForge.Evidence.Tests;
 
 public sealed class ProcessCommandExecutorTests
 {
+    [Theory(Timeout = 30000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Actual_Windows_capture_suppresses_ambient_environment_and_keeps_explicit_marker(bool complete)
+    {
+        if (!OperatingSystem.IsWindows()) Assert.Skip("Actual Windows creation-owned environment block; Linux inheritance is separate.");
+        // Read only a known ambient variable's presence, never its value in
+        // diagnostics, and never mutate the test process environment.
+        Assert.False(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PATH")));
+        var executable = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+        Assert.True(Path.IsPathFullyQualified(executable) && File.Exists(executable));
+        var marker = "forge-explicit-environment-" + Guid.NewGuid().ToString("N");
+        var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["FORGE_CAPTURE_FIXTURE_MARKER"] = marker
+        };
+        var invocation = new CommandInvocation(executable,
+            ["/d", "/c", "if defined PATH (echo ambient-leak) else (echo %FORGE_CAPTURE_FIXTURE_MARKER%)"],
+            Path.GetTempPath(), environment, InheritEnvironment: false)
+        {
+            EnvironmentIsComplete = complete
+        };
+        var capture = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(invocation,
+            TimeSpan.FromSeconds(10), 4096, TestContext.Current.CancellationToken);
+        TestContext.Current.TestOutputHelper!.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            Complete = complete,
+            capture.Command,
+            capture.RootExitObserved,
+            capture.StandardOutputDrainCompleted,
+            capture.StandardErrorDrainCompleted,
+            capture.CaptureBoundExceeded,
+            capture.Timing
+        }));
+        Assert.Equal(0, capture.Command.ExitCode);
+        Assert.Equal(marker, capture.Command.StandardOutput.Trim());
+        Assert.Equal("", capture.Command.StandardError);
+        Assert.False(capture.Command.TimedOut);
+        Assert.False(capture.Command.Cancelled);
+        Assert.False(capture.CaptureBoundExceeded);
+        Assert.True(capture.RootExitObserved && capture.StandardOutputDrainCompleted && capture.StandardErrorDrainCompleted);
+        Assert.True(capture.Command.OwnedProcessQuiescent);
+        Assert.True(capture.Command.LifecycleDiagnostics?.OwnedTree is { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 });
+    }
+
     [Theory]
     [InlineData(false, false)]
     [InlineData(true, false)]
