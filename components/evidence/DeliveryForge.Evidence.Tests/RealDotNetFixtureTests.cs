@@ -150,40 +150,58 @@ public sealed class RealDotNetFixtureTests
         using var sourceOwner = new TempDirectory();
         using var noPolicyOwner = new TempDirectory();
         using var policyOwner = new TempDirectory();
+        using var gitIsolationOwner = new TempDirectory();
         var executor = new ProcessCommandExecutor();
+        var isolatedGlobalConfig = System.IO.Path.Combine(gitIsolationOwner.Path, "global.gitconfig");
+        var isolatedAttributes = System.IO.Path.Combine(gitIsolationOwner.Path, "global.attributes");
+        await File.WriteAllTextAsync(isolatedGlobalConfig, string.Empty, TestContext.Current.CancellationToken);
+        await File.WriteAllTextAsync(isolatedAttributes, string.Empty, TestContext.Current.CancellationToken);
         var source = System.IO.Path.Combine(sourceOwner.Path, "source");
         Directory.CreateDirectory(source);
         await File.WriteAllTextAsync(
             System.IO.Path.Combine(source, "sample.txt"),
             "alpha\nbeta\n",
             TestContext.Current.CancellationToken);
-        await GitAsync(executor, source, ["init"]);
-        await GitAsync(executor, source, ["config", "user.name", "Delivery Forge Fixture"]);
-        await GitAsync(executor, source, ["config", "user.email", "fixture@delivery-forge.invalid"]);
-        await GitAsync(executor, source, ["add", "."]);
-        await GitAsync(executor, source, ["commit", "-m", "fixture without line ending policy"]);
-        var noPolicyHead = (await GitAsync(executor, source, ["rev-parse", "HEAD"]))
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes, ["init"]);
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes,
+            ["config", "user.name", "Delivery Forge Fixture"]);
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes,
+            ["config", "user.email", "fixture@delivery-forge.invalid"]);
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes, ["add", "."]);
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes,
+            ["commit", "-m", "fixture without line ending policy"]);
+        var noPolicyHead = (await IsolatedGitAsync(
+                executor, source, isolatedGlobalConfig, isolatedAttributes, ["rev-parse", "HEAD"]))
             .StandardOutput.Trim();
 
         var noPolicyClone = System.IO.Path.Combine(noPolicyOwner.Path, "repository");
-        await GitAsync(
+        await IsolatedGitAsync(
             executor,
             noPolicyOwner.Path,
+            isolatedGlobalConfig,
+            isolatedAttributes,
             ["-c", "core.autocrlf=true", "clone", "--no-local", "--no-hardlinks", "--", source, noPolicyClone]);
-        var ordinaryNoPolicyStatus = await GitAsync(
+        var ordinaryNoPolicyStatus = await IsolatedGitAsync(
             executor,
             noPolicyClone,
+            isolatedGlobalConfig,
+            isolatedAttributes,
             ["-c", "core.autocrlf=true", "status", "--porcelain=v1", "--untracked-files=all"]);
         Assert.True(string.IsNullOrEmpty(ordinaryNoPolicyStatus.StandardOutput));
         var noPolicyIdentity = await new GitRepositoryIdentityReader(executor, noPolicyClone, noPolicyHead)
             .ReadAsync(TestContext.Current.CancellationToken);
         Assert.False(noPolicyIdentity.IsClean);
-        var noPolicyIndex = (await GitAsync(executor, noPolicyClone, ["rev-parse", "HEAD:sample.txt"]))
+        var noPolicyIndex = (await IsolatedGitAsync(
+                executor, noPolicyClone, isolatedGlobalConfig, isolatedAttributes,
+                ["rev-parse", "HEAD:sample.txt"]))
             .StandardOutput.Trim();
-        var noPolicyRaw = (await GitAsync(executor, noPolicyClone, ["hash-object", "--no-filters", "sample.txt"]))
+        var noPolicyRaw = (await IsolatedGitAsync(
+                executor, noPolicyClone, isolatedGlobalConfig, isolatedAttributes,
+                ["hash-object", "--no-filters", "sample.txt"]))
             .StandardOutput.Trim();
-        var noPolicyFiltered = (await GitAsync(
-                executor, noPolicyClone, ["-c", "core.autocrlf=true", "hash-object", "sample.txt"]))
+        var noPolicyFiltered = (await IsolatedGitAsync(
+                executor, noPolicyClone, isolatedGlobalConfig, isolatedAttributes,
+                ["-c", "core.autocrlf=true", "hash-object", "sample.txt"]))
             .StandardOutput.Trim();
         Assert.NotEqual(noPolicyIndex, noPolicyRaw);
         Assert.Equal(noPolicyIndex, noPolicyFiltered);
@@ -192,26 +210,37 @@ public sealed class RealDotNetFixtureTests
             System.IO.Path.Combine(source, ".gitattributes"),
             "* text eol=lf\n",
             TestContext.Current.CancellationToken);
-        await GitAsync(executor, source, ["add", ".gitattributes"]);
-        await GitAsync(executor, source, ["commit", "-m", "canonicalize fixture line endings"]);
-        var policyHead = (await GitAsync(executor, source, ["rev-parse", "HEAD"]))
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes,
+            ["add", ".gitattributes"]);
+        await IsolatedGitAsync(executor, source, isolatedGlobalConfig, isolatedAttributes,
+            ["commit", "-m", "canonicalize fixture line endings"]);
+        var policyHead = (await IsolatedGitAsync(
+                executor, source, isolatedGlobalConfig, isolatedAttributes, ["rev-parse", "HEAD"]))
             .StandardOutput.Trim();
 
         var policyClone = System.IO.Path.Combine(policyOwner.Path, "repository");
-        await GitAsync(
+        await IsolatedGitAsync(
             executor,
             policyOwner.Path,
+            isolatedGlobalConfig,
+            isolatedAttributes,
             ["-c", "core.autocrlf=true", "clone", "--no-local", "--no-hardlinks", "--", source, policyClone]);
-        var eol = await GitAsync(executor, policyClone, ["ls-files", "--eol", "sample.txt"]);
+        var eol = await IsolatedGitAsync(
+            executor, policyClone, isolatedGlobalConfig, isolatedAttributes,
+            ["ls-files", "--eol", "sample.txt"]);
         Assert.Contains("i/lf", eol.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("w/lf", eol.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("attr/text eol=lf", eol.StandardOutput, StringComparison.Ordinal);
         var policyIdentity = await new GitRepositoryIdentityReader(executor, policyClone, policyHead)
             .ReadAsync(TestContext.Current.CancellationToken);
         Assert.True(policyIdentity.IsClean);
-        var policyIndex = (await GitAsync(executor, policyClone, ["rev-parse", "HEAD:sample.txt"]))
+        var policyIndex = (await IsolatedGitAsync(
+                executor, policyClone, isolatedGlobalConfig, isolatedAttributes,
+                ["rev-parse", "HEAD:sample.txt"]))
             .StandardOutput.Trim();
-        var policyRaw = (await GitAsync(executor, policyClone, ["hash-object", "--no-filters", "sample.txt"]))
+        var policyRaw = (await IsolatedGitAsync(
+                executor, policyClone, isolatedGlobalConfig, isolatedAttributes,
+                ["hash-object", "--no-filters", "sample.txt"]))
             .StandardOutput.Trim();
         Assert.Equal(policyIndex, policyRaw);
     }
@@ -347,6 +376,39 @@ public sealed class RealDotNetFixtureTests
         ProcessCommandExecutor executor, string directory, IReadOnlyList<string> arguments)
     {
         var result = await RunAsync(executor, "git", directory, arguments);
+        Assert.Equal(0, result.ExitCode);
+        return result;
+    }
+
+    private static async Task<CommandResult> IsolatedGitAsync(
+        ProcessCommandExecutor executor,
+        string directory,
+        string isolatedGlobalConfig,
+        string isolatedAttributes,
+        IReadOnlyList<string> arguments)
+    {
+        var isolatedArguments = new[]
+        {
+            "-c", "core.autocrlf=false",
+            "-c", "core.eol=lf",
+            "-c", "core.safecrlf=false",
+            "-c", "core.fsmonitor=false",
+            "-c", $"core.attributesFile={isolatedAttributes}"
+        }.Concat(arguments).ToArray();
+        var result = await executor.ExecuteAsync(
+            new CommandInvocation(
+                "git",
+                isolatedArguments,
+                directory,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["GIT_ATTR_NOSYSTEM"] = "1",
+                    ["GIT_CONFIG_GLOBAL"] = isolatedGlobalConfig,
+                    ["GIT_CONFIG_NOSYSTEM"] = "1",
+                    ["GIT_OPTIONAL_LOCKS"] = "0"
+                }),
+            TimeSpan.FromSeconds(90),
+            TestContext.Current.CancellationToken);
         Assert.Equal(0, result.ExitCode);
         return result;
     }
