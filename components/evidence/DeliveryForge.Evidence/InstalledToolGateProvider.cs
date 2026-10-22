@@ -336,7 +336,7 @@ public sealed class InstalledToolGateProvider
             // timing can refuse it. Recording facts is not a new external effect.
             var rawOut = capture.StandardOutputBytes; var rawError = capture.StandardErrorBytes;
             _capturedBytes += rawOut.LongLength + rawError.LongLength;
-            var command = capture.Command;
+            var command = capture.ProjectOrdinaryCommand();
             Exception? decodingFailure = null;
             if (!capture.CaptureBoundExceeded)
             {
@@ -350,7 +350,7 @@ public sealed class InstalledToolGateProvider
             if (decodingFailure is not null) failures.Add(decodingFailure);
             try { files.AdmitCaptureBytes(rawOut.LongLength + rawError.LongLength); }
             catch (Exception error) { failures.Add(error); }
-            if (ReferenceEquals(invocation, _main) || capture.Command.ExitCode != 0 || !capture.Command.OwnedProcessQuiescent || failures.Count > 0)
+            if (ReferenceEquals(invocation, _main) || capture.CaptureBoundExceeded || capture.Command.ExitCode != 0 || !capture.Command.OwnedProcessQuiescent || failures.Count > 0)
             {
                 try
                 {
