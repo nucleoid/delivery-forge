@@ -45,6 +45,29 @@ public sealed class BoundedCommandCaptureResult
         StandardErrorDrainCompleted = actual.StandardErrorDrainCompleted;
     }
 
+    // Ordinary ICommandExecutor consumers cannot see the byte-quota flag.
+    // Refuse their success projection while retaining the actual bounded capture
+    // and its physical exit/EOF/owner observations unchanged.
+    internal CommandResult ProjectOrdinaryCommand()
+    {
+        if (!CaptureBoundExceeded) return Command;
+        const string reason = "Bounded command output exceeded the byte capture limit; retained output is a prefix.";
+        var actual = Command.LifecycleDiagnostics ?? new CommandLifecycleDiagnostics(
+            false, false, null, null, false, RootExitObserved, RootExitObserved,
+            StandardOutputDrainCompleted && StandardErrorDrainCompleted, 0,
+            new(StandardOutputDrainCompleted, false, false, StandardOutputDrainCompleted ? Command.StandardOutput : null),
+            new(StandardErrorDrainCompleted, false, false, StandardErrorDrainCompleted ? Command.StandardError : null));
+        return Command with
+        {
+            OwnedProcessQuiescent = false,
+            LifecycleDiagnostics = actual with
+            {
+                NativeFailure = CommandStartupObservation.Clip(reason +
+                    (actual.NativeFailure is null ? "" : " " + actual.NativeFailure), 2048)
+            }
+        };
+    }
+
     internal BoundedCommandCaptureResult RefuseLateCompletion() => new(this, Command with
     {
         OwnedProcessQuiescent = false,

@@ -342,14 +342,16 @@ public sealed class GateRunner
                     .ConfigureAwait(false);
             }
         }
-        catch (OperationCanceledException)
+        // The installed executor retains its exact captures and primary failures.
+        // Only public compatibility execution may synthesize a fallback result.
+        catch (OperationCanceledException) when (request.InstalledInvocation is null)
         {
             var now = DateTimeOffset.UtcNow;
             execution = new CommandResult(
                 null, string.Empty, "Command execution was cancelled.", false, true, now, now,
                 OwnedProcessQuiescent: false);
         }
-        catch (Exception exception)
+        catch (Exception exception) when (request.InstalledInvocation is null)
         {
             var now = DateTimeOffset.UtcNow;
             execution = new CommandResult(
@@ -492,8 +494,13 @@ public sealed class GateRunner
         EvaluationPluginReceiptMetadata plugin,
         CancellationToken cancellationToken)
     {
-        if (request.InstalledInvocation is { } installedDirectory) installedDirectory.EnsureDirectory(gateDirectory);
-        else Directory.CreateDirectory(gateDirectory);
+        // Installed stdout/stderr and receipts require the exact retained main result.
+        // A preexecution refusal has no such result. Preserve its typed original
+        // reason for the provider's existing same-original failure capture instead
+        // of fabricating an execution or creating an empty refusal directory.
+        if (request.InstalledInvocation is not null)
+            throw new EvidenceWriteException($"Installed gate '{request.GateId}' refused with {normalized.Outcome}: {normalized.Reason}");
+        Directory.CreateDirectory(gateDirectory);
         var now = DateTimeOffset.UtcNow;
         var execution = new CommandResult(null, string.Empty, string.Empty, false, false, now, now);
         var hashes = await WriteArtifactsAsync(gateDirectory, execution, cancellationToken, request.InstalledInvocation).ConfigureAwait(false);

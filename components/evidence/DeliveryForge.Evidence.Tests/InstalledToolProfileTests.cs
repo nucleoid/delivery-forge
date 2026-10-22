@@ -260,6 +260,123 @@ public sealed class InstalledToolProfileTests
         public void BeginFailureCleanup() { if (!closing) { closing = true; CleanupEntries++; } }
     }
 
+    [Theory]
+    [InlineData("preexisting-directory", "Gate artifact directory existed before the atomic claim.")]
+    [InlineData("capability", "The selected adapter does not match the detected tool capability.")]
+    [InlineData("policy-root", "Protected policy authority is not bound to this gate's frozen repository base and root.")]
+    [InlineData("gate-binding", "Protected required gate has no trusted code-owned plugin identity binding and is unsatisfied.")]
+    [InlineData("executor-policy", "Installed mutation requires the default packaged graph deployment; graph manifest override keys must be absent.")]
+    [InlineData("executor-cancel", "Unit original admission cancelled before native birth.")]
+    public async Task Installed_preexecution_refusal_keeps_target_reason_without_adopting_an_execution(
+        string change, string expectedReason)
+    {
+        using var fixture = new ProfileFiles();
+        var profile = fixture.Load();
+        Assert.True(profile.Fixture); // Complete nonexecutable file/profile DATA, never a producer PASS.
+        using var output = new TempDirectory();
+        var seed = TestEvidence.GateRequest(output.Path);
+        var original = new ProfileOriginal(); var admission = new RefusalAdmission(change == "executor-cancel");
+        const string runId = "unit-installed-refusal";
+        var files = new InstalledToolFiles(original, TimeSpan.FromSeconds(30),
+            new InstalledToolHostScope.Credits(), admission, runId);
+        var owner = new InstalledToolGateProvider.ActualExecutor(files, profile.Data.Environment,
+            profile.Data.GitExecutablePath, admission, runId, installedTool: profile.Tool);
+        var invocation = new CommandInvocation(fixture.Paths["payload"], ["check"], seed.Invocation.WorkingDirectory);
+        var policy = new ResolvedEvidencePolicy(TestEvidence.Identity('1'), TestEvidence.Identity('2'),
+            TestEvidence.Commit('a'), PolicyAuthorityKind.ProtectedGitBase, 0m, ["mutation"], true,
+            sourceRepositoryRoot: change == "policy-root" ? Path.Combine(seed.Invocation.WorkingDirectory, "foreign") : seed.Invocation.WorkingDirectory,
+            requiredGatePluginBindings: change == "gate-binding" ? [] :
+                [new RequiredGatePluginBinding("mutation", "delivery-forge.mutate4csharp", "1.0.0", "mutate4csharp")]);
+        var installedRequest = new InstalledToolGateRequest("mutation", policy, seed.ExpectedRepository,
+            "base", null, TimeSpan.FromSeconds(30), output.Path);
+        // These completion-only fields are unreachable in this negative test.
+        // No resource admission, report, native result or producer proof is fabricated.
+        var binding = new InstalledToolInvocation(profile, installedRequest, files, owner, invocation, null,
+            new(), new(), new(), "unexecuted", "unexecuted", null!, null, () => new(), () => new());
+        owner.BindMain(invocation, binding);
+        var request = seed with
+        {
+            GateId = "mutation", Policy = policy, Adapter = EvidenceAdapterKind.Mutate4CSharp,
+            Invocation = invocation,
+            Capability = ToolCapability.FromDetection(
+                change == "capability" ? "crap4csharp" : profile.Tool, profile.Version, profile.Data.Format,
+                true, [], invocation.FileName, profile.Data.Payload.Single().Sha256, ["check"], invocation.WorkingDirectory),
+            InstalledInvocation = binding
+        };
+        var gate = Path.Combine(output.Path, "mutation");
+        var marker = Path.Combine(gate, "preserved.txt");
+        if (change == "preexisting-directory") { Directory.CreateDirectory(gate); File.WriteAllText(marker, "keep"); }
+
+        const string graphKey = "MUTATE4CSHARP_GRAPH_CAPTURE_MANIFEST";
+        var previousGraph = Environment.GetEnvironmentVariable(graphKey);
+        var reader = new RefusalRepository(seed.ExpectedRepository, () =>
+        {
+            // Change only after capability preflight and before main dispatch:
+            // the real ActualExecutor must refuse this inherited override.
+            if (change == "executor-policy") Environment.SetEnvironmentVariable(graphKey, "outside-installed-payload");
+        });
+        Exception error;
+        try
+        {
+            error = await Assert.ThrowsAnyAsync<Exception>(() => new GateRunner(owner, reader,
+                invocation.WorkingDirectory, seed.ExpectedRepository.BaseCommit)
+                .RunAsync(request, TestContext.Current.CancellationToken));
+        }
+        finally { if (change == "executor-policy") Environment.SetEnvironmentVariable(graphKey, previousGraph); }
+
+        if (change == "executor-cancel")
+        {
+            Assert.Same(admission.Cancellation, error);
+            Assert.Equal(1, admission.NativeEntries); // Delegate was never invoked; no process was born.
+        }
+        else
+        {
+            Assert.IsType<EvidenceWriteException>(error);
+            Assert.Equal(change == "executor-policy" ? expectedReason :
+                $"Installed gate 'mutation' refused with {(change == "gate-binding" ? GateOutcome.Incomplete : GateOutcome.Error)}: {expectedReason}", error.Message);
+            Assert.Equal(0, admission.NativeEntries);
+        }
+        Assert.Empty(owner.Calls); // No fake main result or native launch stands in for this refusal.
+        Assert.True(admission.Effects > 0); // The real claim/capability file path used the original admission.
+        Assert.True(File.Exists(Path.Combine(output.Path, "mutation.claim")));
+        Assert.Empty(Directory.EnumerateDirectories(output.Path, "mutation.claim-error-*"));
+        Assert.Empty(Directory.EnumerateDirectories(output.Path, "receipts", SearchOption.AllDirectories));
+        if (change == "preexisting-directory") Assert.Equal("keep", File.ReadAllText(marker));
+        else if (change is "executor-policy" or "executor-cancel")
+        {
+            Assert.True(Directory.Exists(gate)); // Existing main directory, never a synthetic-refusal directory.
+            Assert.Empty(Directory.EnumerateFiles(gate));
+        }
+        else Assert.False(Directory.Exists(gate));
+        // The strict executed-result writer is unchanged: it still rejects every
+        // copied/synthetic result, including this explicitly unstarted owner.
+        Assert.Throws<EvidenceWriteException>(() => binding.WriteExecutionArtifacts(output.Path, TestEvidence.CommandResult()));
+        files.ReleaseKnown();
+    }
+
+    private sealed class RefusalRepository(RepositoryIdentity identity, Action beforeReturn) : IRepositoryIdentityReader
+    {
+        public Task<RepositoryIdentity> ReadAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested(); beforeReturn(); return Task.FromResult(identity);
+        }
+    }
+
+    private sealed class RefusalAdmission(bool cancelNativeBeforeEntry) : DeliveryForge.Coordination.ICoordinatedSynchronousEffectAdmission
+    {
+        internal int Effects, NativeEntries;
+        internal readonly OperationCanceledException Cancellation = new("Unit original admission cancelled before native birth.");
+        public void CheckCurrent(string runId) => Assert.Equal("unit-installed-refusal", runId);
+        public T EnterSynchronous<T>(string runId, Func<T> invoke) { CheckCurrent(runId); Effects++; return invoke(); }
+        public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke)
+        {
+            CheckCurrent(runId); NativeEntries++;
+            if (cancelNativeBeforeEntry) throw Cancellation;
+            throw new InvalidOperationException("No native task is admitted by this negative control.");
+        }
+        public void RetainUncertain(string runId, string reason) => throw new InvalidOperationException("No entered native resource exists in this negative control.");
+    }
+
     private sealed class ProfileFiles : IDisposable
     {
         private readonly TempDirectory _temp = new();

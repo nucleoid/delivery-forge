@@ -30,59 +30,67 @@ internal static partial class BoundedProcessCapture
         var stage = "prepare-command"; string? failureStage = null;
         try
         {
-            const string setsid = "/usr/bin/setsid";
-            if (!File.Exists(setsid))
-                throw new PlatformNotSupportedException("Linux creation-owned process groups require /usr/bin/setsid.");
-            var info = new ProcessStartInfo(setsid)
-            {
-                WorkingDirectory = invocation.WorkingDirectory,
-                UseShellExecute = false,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-            CommandEnvironment.Complete(info, invocation);
-            info.ArgumentList.Add("--");
-            info.ArgumentList.Add(invocation.FileName);
-            foreach (var argument in invocation.Arguments) info.ArgumentList.Add(argument);
-            foreach (var pair in invocation.Environment ?? new Dictionary<string, string>()) info.Environment[pair.Key] = pair.Value;
             if (caller.IsCancellationRequested || !restrictive.WorkAvailable)
             { cancelled = caller.IsCancellationRequested; timedOut = !cancelled; }
             else
             {
-                process.StartInfo = info;
-                stage = "create-original-root"; creationAttempted = true;
-                created = process.Start();
-                if (!created) throw new InvalidOperationException("Original process did not start.");
-                readersEstablished = true;
-                originalInput = process.StandardInput; retention.Add(originalInput);
-                originalOutput = process.StandardOutput; retention.Add(originalOutput);
-                originalError = process.StandardError; retention.Add(originalError);
-                stage = "enroll-original-byte-drains";
-                output = BoundedCaptureStream.Observe(stdout.DrainAsync(originalOutput.BaseStream));
-                retention.Add(output);
-                error = BoundedCaptureStream.Observe(stderr.DrainAsync(originalError.BaseStream));
-                retention.Add(error);
-                stage = "write-original-stdin";
-                input = BoundedCaptureStream.Observe(
-                    ProcessCommandExecutor.WriteStandardInputAsync(originalInput, invocation.StandardInput));
-                retention.Add(input);
-                stage = "observe-original-root-and-drains";
-                while (true)
+                stage = "resolve-parent-executable";
+                var executable = CommandExecutableResolver.ResolveLinux(invocation.FileName);
+                stage = "prepare-command";
+                const string setsid = "/usr/bin/setsid";
+                if (!File.Exists(setsid))
+                    throw new PlatformNotSupportedException("Linux creation-owned process groups require /usr/bin/setsid.");
+                var info = new ProcessStartInfo(setsid)
                 {
-                    if (caller.IsCancellationRequested) { cancelled = true; break; }
-                    if (stdout.Exceeded || stderr.Exceeded) break;
-                    if (!restrictive.WorkAvailable) { timedOut = true; break; }
-                    rootExited = process.HasExited;
-                    if (input.IsFaulted || output.IsFaulted || error.IsFaulted)
-                    { known = false; failure = "Owned stdin write or pipe drain failed."; break; }
-                    if (rootExited && input.Status == TaskStatus.RanToCompletion && BoundedCaptureStream.Eof(output) && BoundedCaptureStream.Eof(error)) break;
-                    await Task.Delay(5).ConfigureAwait(false);
+                    WorkingDirectory = invocation.WorkingDirectory,
+                    UseShellExecute = false,
+                    RedirectStandardInput = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    CreateNoWindow = true
+                };
+                CommandEnvironment.Complete(info, invocation);
+                info.ArgumentList.Add("--");
+                info.ArgumentList.Add(executable);
+                foreach (var argument in invocation.Arguments) info.ArgumentList.Add(argument);
+                foreach (var pair in invocation.Environment ?? new Dictionary<string, string>()) info.Environment[pair.Key] = pair.Value;
+                if (caller.IsCancellationRequested || !restrictive.WorkAvailable)
+                { cancelled = caller.IsCancellationRequested; timedOut = !cancelled; }
+                else
+                {
+                    process.StartInfo = info;
+                    stage = "create-original-root"; creationAttempted = true;
+                    created = process.Start();
+                    if (!created) throw new InvalidOperationException("Original process did not start.");
+                    readersEstablished = true;
+                    originalInput = process.StandardInput; retention.Add(originalInput);
+                    originalOutput = process.StandardOutput; retention.Add(originalOutput);
+                    originalError = process.StandardError; retention.Add(originalError);
+                    stage = "enroll-original-byte-drains";
+                    output = BoundedCaptureStream.Observe(stdout.DrainAsync(originalOutput.BaseStream));
+                    retention.Add(output);
+                    error = BoundedCaptureStream.Observe(stderr.DrainAsync(originalError.BaseStream));
+                    retention.Add(error);
+                    stage = "write-original-stdin";
+                    input = BoundedCaptureStream.Observe(
+                        ProcessCommandExecutor.WriteStandardInputAsync(originalInput, invocation.StandardInput));
+                    retention.Add(input);
+                    stage = "observe-original-root-and-drains";
+                    while (true)
+                    {
+                        if (caller.IsCancellationRequested) { cancelled = true; break; }
+                        if (stdout.Exceeded || stderr.Exceeded) break;
+                        if (!restrictive.WorkAvailable) { timedOut = true; break; }
+                        rootExited = process.HasExited;
+                        if (input.IsFaulted || output.IsFaulted || error.IsFaulted)
+                        { known = false; failure = "Owned stdin write or pipe drain failed."; break; }
+                        if (rootExited && input.Status == TaskStatus.RanToCompletion && BoundedCaptureStream.Eof(output) && BoundedCaptureStream.Eof(error)) break;
+                        await Task.Delay(5).ConfigureAwait(false);
+                    }
                 }
             }
         }
-        catch (Exception exception) when (exception is Win32Exception or IOException or InvalidOperationException or ArgumentException)
+        catch (Exception exception) when (exception is Win32Exception or IOException or InvalidOperationException or ArgumentException or NotSupportedException)
         { known = false; failure = Bounded(exception); failureStage = stage; retention.Add(exception); }
         if (failure is not null || timedOut || cancelled || stdout.Exceeded || stderr.Exceeded || output?.IsFaulted == true || error?.IsFaulted == true) restrictive.BeginFailureCleanup();
         restrictive.BeginCleanup(); cleanupStarted = restrictive.CleanupStarted;
@@ -97,7 +105,7 @@ internal static partial class BoundedProcessCapture
                 if (!rootExited && restrictive.CleanupAvailable)
                 {
                     killAttempted = true;
-                    killSucceeded = KillOwnedProcessGroup(process.Id, out var killFailure);
+                    killSucceeded = KillOwnedProcessGroup(process, out var killFailure);
                     if (!killSucceeded)
                     {
                         known = false;
@@ -183,14 +191,18 @@ internal static partial class BoundedProcessCapture
         return text.Length > 1024 ? text[..1024] : text;
     }
 
-    private static bool KillOwnedProcessGroup(int rootProcessId, out string? failure)
+    internal static bool KillOwnedProcessGroup(Process originalRoot, out string? failure)
     {
         failure = null;
-        if (kill(-rootProcessId, 9) == 0)
+        if (kill(-originalRoot.Id, 9) == 0)
             return true;
         var error = Marshal.GetLastPInvokeError();
-        if (error == 3) // ESRCH: the group became empty before the signal.
-            return true;
+        if (error == 3) // ESRCH alone does not prove that setsid ran or the root exited.
+        {
+            if (originalRoot.HasExited) return true;
+            failure = "Legacy Linux process group is absent while the original root remains live; settlement is unknown.";
+            return false;
+        }
         failure = $"kill-owned-process-group failed with errno {error}.";
         return false;
     }

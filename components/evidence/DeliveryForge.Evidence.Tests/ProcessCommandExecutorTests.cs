@@ -212,6 +212,51 @@ public sealed class ProcessCommandExecutorTests
         Assert.True(capture.StandardErrorDrainCompleted);
         Assert.Equal(standardError ? 0 : quota, capture.StandardOutputBytes.Length);
         Assert.Equal(standardError ? quota : 0, capture.StandardErrorBytes.Length);
+
+        // This is the same projection used by ordinary Windows, legacy Linux
+        // and selected Linux ExecuteAsync. Physical bounded-capture DATA stays
+        // intact, but a truncated prefix cannot become an ordinary success.
+        var ordinary = capture.ProjectOrdinaryCommand();
+        Assert.False(ordinary.OwnedProcessQuiescent);
+        Assert.Equal(capture.Command.ExitCode, ordinary.ExitCode);
+        Assert.Equal(capture.Command.StandardOutput, ordinary.StandardOutput);
+        Assert.Equal(capture.Command.StandardError, ordinary.StandardError);
+        Assert.Equal(capture.Command.TimedOut, ordinary.TimedOut);
+        Assert.Equal(capture.Command.Cancelled, ordinary.Cancelled);
+        Assert.Contains("byte capture limit", ordinary.LifecycleDiagnostics!.NativeFailure);
+        Assert.Equal(capture.Command.LifecycleDiagnostics!.OwnedTree, ordinary.LifecycleDiagnostics.OwnedTree);
+        Assert.True(capture.Command.OwnedProcessQuiescent);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Actual_fallback_broken_stdin_preserves_exit_raw_streams_and_refuses_settlement()
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+            Assert.Skip("Actual Windows/Linux fallback pipe behavior.");
+        var invocation = OperatingSystem.IsWindows()
+            ? new CommandInvocation(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"),
+                ["/d", "/c", "echo stdout-before-exit&echo stderr-before-exit 1>&2&exit /b 0"], Path.GetTempPath(),
+                StandardInput: new string('x', 4 * 1024 * 1024))
+            : new CommandInvocation("/bin/sh", ["-c", "exec 0<&-; printf 'stdout-before-exit\n'; printf 'stderr-before-exit\n' >&2; exit 0"],
+                Path.GetTempPath(), StandardInput: new string('x', 4 * 1024 * 1024));
+        // This existing injected constructor selects the actual legacy fallback;
+        // the child closes stdin itself. No injected I/O failure or fake exit.
+        var executor = new ProcessCommandExecutor(process => process.Kill(entireProcessTree: true), process => process.HasExited);
+        var actual = await executor.ExecuteAsync(invocation, TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        TestContext.Current.TestOutputHelper!.WriteLine(System.Text.Json.JsonSerializer.Serialize(actual));
+        Assert.Equal(0, actual.ExitCode);
+        Assert.False(actual.TimedOut);
+        Assert.False(actual.Cancelled);
+        Assert.False(actual.OwnedProcessQuiescent);
+        Assert.Contains("stdout-before-exit", actual.StandardOutput);
+        Assert.Contains("stderr-before-exit", actual.StandardError);
+        var diagnostics = Assert.IsType<CommandLifecycleDiagnostics>(actual.LifecycleDiagnostics);
+        Assert.True(diagnostics.RootExited);
+        Assert.False(diagnostics.DrainWaitCompleted);
+        Assert.False(diagnostics.KillAttempted);
+        Assert.Contains("IOException", diagnostics.NativeFailure);
+        Assert.Equal(actual.StandardOutput, diagnostics.StandardOutput.CompletedText);
+        Assert.Equal(actual.StandardError, diagnostics.StandardError.CompletedText);
     }
 
     [Fact]

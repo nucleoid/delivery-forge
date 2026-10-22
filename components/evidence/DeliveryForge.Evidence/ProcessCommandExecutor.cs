@@ -137,10 +137,10 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
     {
         if (_selectedLinuxScope is not null)
             return (await ExecuteBoundedCaptureAsync(invocation, timeout, 8 * 1024 * 1024, cancellationToken,
-                _selectedLinuxOriginal, _selectedLinuxScope).ConfigureAwait(false)).Command;
+                _selectedLinuxOriginal, _selectedLinuxScope).ConfigureAwait(false)).ProjectOrdinaryCommand();
         if (_creationOwnedWindows && (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()))
             return (await ExecuteBoundedCaptureAsync(
-                invocation, timeout, 64 * 1024 * 1024, cancellationToken).ConfigureAwait(false)).Command;
+                invocation, timeout, 64 * 1024 * 1024, cancellationToken).ConfigureAwait(false)).ProjectOrdinaryCommand();
         var startInfo = new ProcessStartInfo
         {
             FileName = invocation.FileName,
@@ -171,7 +171,8 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
                 null, string.Empty, $"Process start failed: {exception.Message}",
                 false, false, startedAt, DateTimeOffset.UtcNow);
         }
-        var inputTask = WriteStandardInputAsync(process.StandardInput, invocation.StandardInput);
+        var originalInput = process.StandardInput;
+        var inputTask = BoundedCaptureStream.Observe(WriteStandardInputAsync(originalInput, invocation.StandardInput));
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
 
@@ -209,9 +210,11 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         string stdout;
         string stderr;
         var drainCompleted = true;
+        Exception? drainFailure = null;
+        var drains = Task.WhenAll(stdoutTask, stderrTask, inputTask);
         try
         {
-            await _waitForDrain(Task.WhenAll(stdoutTask, stderrTask, inputTask), _waitTimeout).ConfigureAwait(false);
+            await _waitForDrain(drains, _waitTimeout).ConfigureAwait(false);
             stdout = await stdoutTask.ConfigureAwait(false);
             stderr = await stderrTask.ConfigureAwait(false);
         }
@@ -220,6 +223,17 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             drainCompleted = false;
             stdout = "<stdout drain timed out>";
             stderr = "<stderr drain timed out>";
+        }
+        catch (Exception failure) when (IsDrainIoFailure(failure))
+        {
+            drainFailure = failure; drainCompleted = false;
+            stdout = stdoutTask.Status == TaskStatus.RanToCompletion ? stdoutTask.Result : "<stdout drain failed>";
+            stderr = stderrTask.Status == TaskStatus.RanToCompletion ? stderrTask.Result : "<stderr drain failed>";
+            // The exact failed write/first-close/drain graph stays rooted. This
+            // legacy result cannot turn an I/O failure into settlement proof.
+            var retained = new BoundedCaptureRetention();
+            retained.Add(process); retained.Add(originalInput); retained.Add(inputTask);
+            retained.Add(stdoutTask); retained.Add(stderrTask); retained.Add(drains); retained.Add(failure);
         }
         var processExited = ObserveHasExited(process);
         return new CommandResult(
@@ -237,6 +251,9 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
                 killExceptionDetailTruncated, exitWaitCompleted, processExited, drainCompleted,
                 (int)Math.Clamp(_waitTimeout.TotalMilliseconds, 0, int.MaxValue),
                 ObserveStream(stdoutTask), ObserveStream(stderrTask))
+            {
+                NativeFailure = drainFailure is null ? null : BoundedExceptionDetail(drainFailure).Detail
+            }
         };
     }
 
@@ -259,6 +276,12 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         }
         if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
     }
+
+    // Only actual stream I/O/first-close failures are projected. Cancellation,
+    // owner expiry and unrelated failures keep their original throwing semantics.
+    private static bool IsDrainIoFailure(Exception failure) =>
+        failure is IOException or InvalidOperationException or System.ComponentModel.Win32Exception ||
+        failure is AggregateException aggregate && aggregate.InnerExceptions.All(IsDrainIoFailure);
 
     private bool TryKillTree(Process process, out bool attempted, out string? exceptionType,
         out string? exceptionDetail, out bool detailTruncated)
@@ -302,7 +325,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         {
             if (++count > 8 || builder.Length >= limit) { truncated = true; break; }
             var type = current.GetType().FullName ?? current.GetType().Name;
-            var message = current is AggregateException ? "aggregate kill failure" : current.Message;
+            var message = current is AggregateException ? "aggregate command failure" : current.Message;
             var text = type + ": " + message +
                 (current is System.ComponentModel.Win32Exception native ? " (Win32=" + native.NativeErrorCode + ")" : "") + "\n";
             var length = Math.Min(limit - builder.Length, text.Length);

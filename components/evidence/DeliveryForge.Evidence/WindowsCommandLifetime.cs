@@ -330,7 +330,7 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
         (_inRead, _inWrite) = Pipe(parentReads: false);
         CheckRestrictiveStartup(originalStarted, originalTimeout, caller);
         _stage = "prepare-command";
-        var executable = ResolveExecutable(invocation.FileName);
+        var executable = CommandExecutableResolver.ResolveWindows(invocation.FileName);
         var commandLine = new StringBuilder(Quote(executable, force: true));
         foreach (var argument in invocation.Arguments)
         {
@@ -447,18 +447,6 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
         if (!SetHandleInformation(parentReads ? read : write, 1, 0))
         { var failure = Native("noninheritable-parent-pipe"); read.Dispose(); write.Dispose(); throw failure; }
         return (read, write);
-    }
-    private static string ResolveExecutable(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name) || name.Contains('\0')) throw new ArgumentException("Invalid executable name.");
-        name = name.Trim();
-        if (name.Length >= 2 && name[0] == '"' && name[^1] == '"') name = name[1..^1];
-        if (Path.IsPathFullyQualified(name) || name.Contains(Path.DirectorySeparatorChar) || name.Contains(Path.AltDirectorySeparatorChar))
-            return Path.GetFullPath(name);
-        var buffer = new StringBuilder(32768);
-        var length = SearchPathW(null, name, ".exe", (uint)buffer.Capacity, buffer, IntPtr.Zero);
-        if (length == 0 || length >= buffer.Capacity) throw Native("resolve-executable");
-        return buffer.ToString();
     }
     private static string Quote(string value, bool force = false)
     {
@@ -613,5 +601,4 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)][return: MarshalAs(UnmanagedType.Bool)] private static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, nuint attribute, IntPtr value, nuint size, IntPtr previous, IntPtr returnedSize);
     [DllImport("kernel32.dll")] private static extern void DeleteProcThreadAttributeList(IntPtr list);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)][return: MarshalAs(UnmanagedType.Bool)] private static extern bool CreateProcessW(string executable, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, [MarshalAs(UnmanagedType.Bool)] bool inheritHandles, uint flags, [MarshalAs(UnmanagedType.LPWStr)] string environment, string directory, ref StartupInfoEx startup, out ProcessInformation information);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern uint SearchPathW(string? path, string name, string? extension, uint length, StringBuilder result, IntPtr filePart);
 }
