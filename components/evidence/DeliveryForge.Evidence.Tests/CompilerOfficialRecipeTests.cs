@@ -181,12 +181,19 @@ public sealed class CompilerOfficialRecipeTests
             var manifestBytes = files.Read(manifestPath, ProducerJson.MaximumBytes);
             Assert.Equal(selected.GetProperty("manifestSha256").GetString(), InstalledToolFiles.Identity(manifestBytes));
             using var originalManifest = ProducerJson.Read(manifestBytes);
+            // This test consumes a frozen DATA snapshot, not live producer
+            // authority. Retain each first bounded read; decoding still checks
+            // every hash and the production reducer rereads current source.
+            var retainedBytes = new Dictionary<string, byte[]>(StringComparer.Ordinal);
             byte[] ReadRetained(string locator)
             {
+                files.Check();
                 InstalledToolProfile.Relative(locator);
+                if (retainedBytes.TryGetValue(locator, out var captured)) return captured;
                 var path = Path.GetFullPath(Path.Combine(bundle, locator));
                 Assert.True(InstalledToolGateProvider.Inside(path, bundle));
-                return files.Read(path, 128 * 1024 * 1024);
+                var bytes = files.Read(path, 128 * 1024 * 1024);
+                retainedBytes.Add(locator, bytes); files.Check(); return bytes;
             }
             var contextId = selected.GetProperty("contextId").GetString()!;
             var buildId = selected.GetProperty("buildId").GetString()!;
