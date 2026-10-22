@@ -229,11 +229,8 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             drainFailure = failure; drainCompleted = false;
             stdout = stdoutTask.Status == TaskStatus.RanToCompletion ? stdoutTask.Result : "<stdout drain failed>";
             stderr = stderrTask.Status == TaskStatus.RanToCompletion ? stderrTask.Result : "<stderr drain failed>";
-            // The exact failed write/first-close/drain graph stays rooted. This
-            // legacy result cannot turn an I/O failure into settlement proof.
-            var retained = new BoundedCaptureRetention();
-            retained.Add(process); retained.Add(originalInput); retained.Add(inputTask);
-            retained.Add(stdoutTask); retained.Add(stderrTask); retained.Add(drains); retained.Add(failure);
+            // This injected/unsupported-platform compatibility path returns its
+            // failure diagnostics without claiming a retained creation-owned graph.
         }
         var processExited = ObserveHasExited(process);
         return new CommandResult(

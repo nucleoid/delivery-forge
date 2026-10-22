@@ -57,7 +57,8 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
             executable, [.. prefixArguments, .. probe.VersionArguments], workingDirectory);
         var versionResult = await executor.ExecuteAsync(
             versionInvocation, TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
-        if (versionResult.TimedOut || versionResult.Cancelled || versionResult.ExitCode != 0)
+        if (versionResult.TimedOut || versionResult.Cancelled || versionResult.ExitCode != 0 ||
+            !versionResult.OwnedProcessQuiescent)
             return Unsupported(probe, "Version probe did not complete successfully.", versionInvocation, versionResult);
 
         var version = ParseVersion(probe, versionResult.StandardOutput, versionResult.StandardError);
@@ -69,6 +70,7 @@ public sealed partial class ToolCapabilityDetector(ICommandExecutor executor)
         var helpResult = await executor.ExecuteAsync(
             helpInvocation, TimeSpan.FromSeconds(30), cancellationToken).ConfigureAwait(false);
         if (helpResult.TimedOut || helpResult.Cancelled || helpResult.ExitCode != 0 ||
+            !helpResult.OwnedProcessQuiescent ||
             string.IsNullOrWhiteSpace(helpResult.StandardOutput + helpResult.StandardError))
             return Unsupported(
                 probe, "Help/capability probe did not complete with documented output.",
