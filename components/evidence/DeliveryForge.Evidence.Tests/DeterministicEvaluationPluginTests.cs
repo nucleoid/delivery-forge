@@ -1249,6 +1249,37 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
+    public void Advisory_example_accepts_help_only_when_it_is_the_sole_argument()
+    {
+        Assert.True(AdvisoryAntiSlopExample.IsHelpRequest(["--help"]));
+        Assert.False(AdvisoryAntiSlopExample.IsHelpRequest(["--help", "--inpt", "src/app.ts"]));
+        Assert.False(AdvisoryAntiSlopExample.IsHelpRequest(["--help", "--effect", "--effect"]));
+
+        var exception = Assert.Throws<ArgumentException>(() => AdvisoryAntiSlopExample.ParseOptions(
+            ["--help", "--inpt", "src/app.ts"]));
+        Assert.Contains("Unknown option '--help'", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("   ")]
+    [InlineData("-x")]
+    public void Advisory_example_rejects_empty_or_option_like_values(string invalidInput)
+    {
+        var exception = Assert.Throws<ArgumentException>(() => AdvisoryAntiSlopExample.ParseOptions(
+        [
+            "--repository", "/repository",
+            "--base", TestEvidence.Commit('a'),
+            "--bundle", "/bundle",
+            "--node", "/node",
+            "--output", "/output",
+            "--input", invalidInput
+        ]));
+
+        Assert.Contains("--input", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Canonical_v1_envelope_remains_legacy_shaped_while_result_exposes_plugin_raw_outcome()
     {
         using var temp = new TempDirectory();

@@ -28,7 +28,7 @@ public static class AdvisoryAntiSlopExample
 
     public static async Task<int> Main(string[] args)
     {
-        if (args.Length == 0 || args.Contains("--help", StringComparer.Ordinal))
+        if (args.Length == 0 || IsHelpRequest(args))
         {
             Console.WriteLine("""
                 Advisory anti-slop composition example (never production authority)
@@ -82,6 +82,9 @@ public static class AdvisoryAntiSlopExample
             execution.Result?.Outcome is GateOutcome.Fail or GateOutcome.Error or GateOutcome.Incomplete) ? 2 : 0;
     }
 
+    internal static bool IsHelpRequest(IReadOnlyList<string> args) =>
+        args.Count == 1 && string.Equals(args[0], "--help", StringComparison.Ordinal);
+
     internal static AdvisoryAntiSlopOptions ParseOptions(IReadOnlyList<string> args)
     {
         var values = new Dictionary<string, List<string>>(StringComparer.Ordinal);
@@ -97,11 +100,14 @@ public static class AdvisoryAntiSlopExample
             }
             if (!ValueOptions.Contains(argument))
                 throw new ArgumentException($"Unknown option '{argument}'.");
-            if (index + 1 == args.Count || args[index + 1].StartsWith("--", StringComparison.Ordinal))
+            if (index + 1 == args.Count || IsOptionLike(args[index + 1]))
                 throw new ArgumentException($"Expected --name value, received '{argument}'.");
+            var value = args[++index];
+            if (string.IsNullOrWhiteSpace(value))
+                throw new ArgumentException($"Option '{argument}' requires a non-empty value.");
             if (!values.TryGetValue(argument, out var collected))
                 values[argument] = collected = [];
-            collected.Add(args[++index]);
+            collected.Add(value);
         }
 
         string One(string name) => values.TryGetValue(name, out var items) && items.Count == 1
@@ -124,4 +130,7 @@ public static class AdvisoryAntiSlopExample
             Enabled: !flags.Contains("--disabled"),
             EnableEffectRules: flags.Contains("--effect"));
     }
+
+    private static bool IsOptionLike(string value) =>
+        string.IsNullOrWhiteSpace(value) || value.StartsWith("-", StringComparison.Ordinal);
 }
