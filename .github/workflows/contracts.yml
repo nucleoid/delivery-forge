@@ -172,6 +172,7 @@ jobs:
       - run: dotnet format DeliveryForge.slnx --no-restore --verify-no-changes
       - name: Retain public test TRX diagnostics
         if: always()
+        continue-on-error: true
         uses: actions/upload-artifact@v4
         with:
           name: public-test-results-${{ runner.os }}

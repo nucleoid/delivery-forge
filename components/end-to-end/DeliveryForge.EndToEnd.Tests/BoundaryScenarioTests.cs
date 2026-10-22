@@ -59,6 +59,55 @@ public sealed class BoundaryScenarioTests
         finally { await run.DisposeAsync(); }
         Assert.True(Directory.Exists(run.Root), "Corrupt bytes must not be erased by a passing rejection assertion.");
     }
+    // Reads only the selected immutable receipt; never repairs current.json or adopts a saved path.
+    private static async Task<(System.Text.Json.JsonElement Payload, string Sha256)> ReadInterruptedCommandReceiptAsync(
+        OwnedScenarioRun run, ScenarioResult result, CancellationToken cancellationToken)
+    {
+        if (result.ReceiptIds.Count != 1) throw new InvalidDataException("Interrupted-command receipt selection is not singular.");
+        var hash = result.ReceiptIds[0];
+        if (hash.Length != 64 || hash.Any(character => character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f')))
+            throw new InvalidDataException("Interrupted-command receipt identity is invalid.");
+        var directory = Path.Combine(run.Store.RootPath, "runs", run.Store.GetRunNamespaceIdentity(run.RunId));
+        static void RequirePlainAncestors(string entry)
+        {
+            for (var current = new DirectoryInfo(Path.GetFullPath(entry)); current is not null; current = current.Parent)
+                if (current.Exists && (current.Attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new InvalidDataException("Diagnostic receipt path traverses a reparse entry.");
+        }
+        RequirePlainAncestors(directory);
+        cancellationToken.ThrowIfCancellationRequested();
+        var paths = Directory.EnumerateFiles(directory, "*-sha256-*.json").Take(4097).ToArray();
+        if (paths.Length > 4096) throw new InvalidDataException("Diagnostic receipt inventory exceeds the existing store extent.");
+        var selected = paths.Single(candidate => Path.GetFileName(candidate).EndsWith("-sha256-" + hash + ".json", StringComparison.Ordinal));
+        var name = Path.GetFileName(selected);
+        if (name.Length != 89 || name[12..] != "-sha256-" + hash + ".json" ||
+            name[..12].Any(character => character is < '0' or > '9') ||
+            !long.TryParse(name[..12], out var sequence) || sequence < 1)
+            throw new InvalidDataException("Diagnostic receipt filename is invalid.");
+        if ((File.GetAttributes(selected) & FileAttributes.ReparsePoint) != 0)
+            throw new InvalidDataException("Diagnostic receipt is a reparse entry.");
+        byte[] bytes;
+        using (var stream = new FileStream(selected, FileMode.Open, FileAccess.Read, FileShare.Read, 4096, FileOptions.Asynchronous))
+        {
+            if (stream.Length is <= 0 or > 16 * 1024 * 1024)
+                throw new InvalidDataException("Diagnostic receipt exceeds the existing per-record extent.");
+            bytes = new byte[checked((int)stream.Length)];
+            await stream.ReadExactlyAsync(bytes, cancellationToken);
+            if (stream.ReadByte() != -1) throw new InvalidDataException("Diagnostic receipt grew during read.");
+        }
+        RequirePlainAncestors(directory);
+        if ((File.GetAttributes(selected) & FileAttributes.ReparsePoint) != 0 ||
+            Convert.ToHexStringLower(SHA256.HashData(bytes)) != hash)
+            throw new InvalidDataException("Diagnostic receipt identity changed or does not match its content.");
+        using var document = System.Text.Json.JsonDocument.Parse(bytes, new System.Text.Json.JsonDocumentOptions { MaxDepth = 64 });
+        var record = document.RootElement;
+        if (record.GetProperty("runId").GetString() != run.RunId || record.GetProperty("sequence").GetInt64() != sequence ||
+            record.GetProperty("kind").GetString() != "scenario-command" ||
+            record.GetProperty("payload").ValueKind != System.Text.Json.JsonValueKind.Object)
+            throw new InvalidDataException("Diagnostic receipt does not match the selected scenario namespace.");
+        return (record.GetProperty("payload").Clone(), hash);
+    }
+
     // Only failed fixture observations. No stdout, environment, owner token or native handles.
     private static async Task WriteInterruptedCommandDiagnosticAsync(OwnedScenarioRun run,
         ScenarioResult result, CancellationToken cancellationToken)
@@ -67,8 +116,7 @@ public sealed class BoundaryScenarioTests
         try
         {
             output?.WriteLine("Retained interrupted-command fixture: " + run.Root[..Math.Min(run.Root.Length, 4096)]);
-            var records = await run.Store.RecoverAsync(run.RunId, cancellationToken);
-            var command = records.Records.Single(record => record.Kind == "scenario-command");
+            var command = await ReadInterruptedCommandReceiptAsync(run, result, cancellationToken);
             var execution = command.Payload.GetProperty("execution");
             System.Text.Json.JsonElement lifecycle = default, startup = default, stdout = default, stderr = default, tree = default;
             execution.TryGetProperty("lifecycleDiagnostics", out lifecycle);
