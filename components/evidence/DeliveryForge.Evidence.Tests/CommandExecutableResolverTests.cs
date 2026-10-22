@@ -73,8 +73,11 @@ public sealed class CommandExecutableResolverTests
     public async Task Actual_absent_legacy_group_does_not_prove_the_original_root_exited()
     {
         if (!OperatingSystem.IsLinux()) Assert.Skip("Actual Linux ESRCH and original root observation.");
-        using var original = new Process { StartInfo = new ProcessStartInfo("/bin/sh")
-        { UseShellExecute = false, RedirectStandardInput = true } };
+        using var original = new Process
+        {
+            StartInfo = new ProcessStartInfo("/bin/sh")
+            { UseShellExecute = false, RedirectStandardInput = true }
+        };
         original.StartInfo.ArgumentList.Add("-c"); original.StartInfo.ArgumentList.Add("read ignored; exit 0");
         Assert.True(original.Start());
         try

@@ -296,7 +296,9 @@ public sealed class InstalledToolProfileTests
         owner.BindMain(invocation, binding);
         var request = seed with
         {
-            GateId = "mutation", Policy = policy, Adapter = EvidenceAdapterKind.Mutate4CSharp,
+            GateId = "mutation",
+            Policy = policy,
+            Adapter = EvidenceAdapterKind.Mutate4CSharp,
             Invocation = invocation,
             Capability = ToolCapability.FromDetection(
                 change == "capability" ? "crap4csharp" : profile.Tool, profile.Version, profile.Data.Format,
