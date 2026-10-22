@@ -28,8 +28,10 @@ Plugin configuration records an explicit enabled state. Disabling a selected req
 The opt-in executable entry point `AdvisoryAntiSlopExample` is compiled in the existing Evidence project and calls that exact API:
 
 ```bash
-dotnet run --project components/evidence/DeliveryForge.Evidence \
-  -p:OutputType=Exe -p:StartupObject=DeliveryForge.Evidence.AdvisoryAntiSlopExample -- \
+dotnet build components/evidence/DeliveryForge.Evidence -c Release --no-restore \
+  -o /absolute/example-host -p:OutputType=Exe \
+  -p:StartupObject=DeliveryForge.Evidence.AdvisoryAntiSlopExample
+dotnet /absolute/example-host/DeliveryForge.Evidence.dll \
   --repository /absolute/repository --base <protected-base-sha> \
   --bundle /absolute/components/evidence/anti-slop --node /absolute/node \
   --output /absolute/output --input src/app.ts --input src/server.cs

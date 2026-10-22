@@ -4,7 +4,8 @@ namespace DeliveryForge.Evidence;
 
 /// <summary>
 /// Executable developer example for the supported advisory composition. The Evidence project
-/// remains a library normally; opt into this entry point with OutputType and StartupObject.
+/// remains a library normally; build this entry point into an isolated output with OutputType
+/// and StartupObject, then execute that output.
 /// </summary>
 public static class AdvisoryAntiSlopExample
 {
@@ -15,8 +16,10 @@ public static class AdvisoryAntiSlopExample
             Console.WriteLine("""
                 Advisory anti-slop composition example (never production authority)
 
-                dotnet run --project components/evidence/DeliveryForge.Evidence \
-                  -p:OutputType=Exe -p:StartupObject=DeliveryForge.Evidence.AdvisoryAntiSlopExample -- \
+                dotnet build components/evidence/DeliveryForge.Evidence -c Release --no-restore \
+                  -o /absolute/example-host -p:OutputType=Exe \
+                  -p:StartupObject=DeliveryForge.Evidence.AdvisoryAntiSlopExample
+                dotnet /absolute/example-host/DeliveryForge.Evidence.dll \
                   --repository /absolute/repository --base <protected-base-sha> \
                   --bundle /absolute/components/evidence/anti-slop --node /absolute/node \
                   --output /absolute/output [--effect] [--disabled] \
