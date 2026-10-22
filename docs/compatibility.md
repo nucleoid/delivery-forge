@@ -8,6 +8,8 @@ Required pipeline chain: actual compiler RED of missing seam where applicable; f
 
 Codex app-server and Pi RPC ports use exact parent-selected task instructions. Installed runtime support requires actual conformance for the selected image and platform. Linux native commands require an explicitly provisioned creation-owned scope; missing host prerequisites remain INCOMPLETE. Windows process ownership does not certify Linux ownership.
 
+Selected Linux bounded capture currently requires `StandardInput=null`. It checks original ownership and cancellation, then refuses supplied stdin before any capture budget, frame or process is created. Supporting stdin requires writes tracked by that same original owner.
+
 Linux independent Claude review currently returns INCOMPLETE before native observation or review. A process scope and separate file hashes do not prove that the executed image is the exact immutable selected image. This route requires a supported exact-image execution primitive before it can be enabled. No configuration flag or receipt DATA can supply that missing capability.
 
 Windows production independent Claude review currently returns INCOMPLETE before

@@ -10,6 +10,15 @@ internal static class ScopedBoundedCapture
     static readonly List<Frame> Retained = [];
     internal static async Task<BoundedCommandCaptureResult> ExecuteAsync(CommandInvocation invocation, TimeSpan localGrant, int quota, CancellationToken caller, IOwnedDuplexBudget actualParent, LinuxScopeSelection scope)
     {
+        if (invocation.StandardInput is not null)
+        {
+            // This owner currently closes stdin without a byte-write operation.
+            // Refuse the unsupported profile before any local/native birth;
+            // original refusal/cancellation still takes precedence.
+            actualParent.CheckWork();
+            caller.ThrowIfCancellationRequested();
+            throw new PlatformNotSupportedException("Selected owned Linux capture does not support supplied standard input; no unscoped fallback is permitted.");
+        }
         var began = DateTimeOffset.UtcNow; var budget = new ScopedCaptureBudget(actualParent, localGrant, caller); var frame = new Frame { Budget = budget }; lock (Retained) Retained.Add(frame); var stdout = new BoundedCaptureStream(quota); bool timedOut = false, cancelled = false; Exception? primary = null; DuplexNativeObservation native = new(false, false, uint.MaxValue, null, "Not entered.");
         try
         {
