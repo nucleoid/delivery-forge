@@ -1109,6 +1109,115 @@ public sealed class DeterministicEvaluationPluginTests
     }
 
     [Fact]
+    public async Task Advisory_composition_selects_mixed_inputs_runs_gate_and_returns_receipt()
+    {
+        using var temp = new TempDirectory();
+        var repositoryRoot = TestEvidence.WorkingDirectory(temp.Path);
+        Directory.CreateDirectory(repositoryRoot);
+        var (config, nodePath, _) = CreateFixtureAntiSlopClosure(temp.Path);
+        var bundleRoot = System.IO.Path.GetDirectoryName(config)!;
+        var plugin = AntiSlopEvaluationPlugin.CreateBundledForFixture(bundleRoot, nodePath);
+        var registry = new TrustedEvaluationPluginRegistry(
+        [
+            new TrustedEvaluationPluginRegistration(
+                "anti-slop", plugin,
+                AntiSlopEvaluationPlugin.OxlintVersion,
+                "oxlint-json-v1")
+        ]);
+        var executableIdentity = $"sha256:{Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(nodePath)))}";
+        var capability = ToolCapability.FromDetection(
+            "oxlint", AntiSlopEvaluationPlugin.OxlintVersion, "oxlint-json-v1", true, [],
+            nodePath, executableIdentity, ["lint"], repositoryRoot);
+        var repository = TestEvidence.Repository();
+        var reader = new ScopedSequenceRepositoryIdentityReader(
+            new RepositoryEvaluationScope(
+                ["src/app.ts", "src/app.cs", "src/ignored.jsx"],
+                new HashSet<string>(["src/ignored.jsx"], StringComparer.Ordinal),
+                MaterializedRoot: repositoryRoot),
+            repository, repository, repository);
+        var now = DateTimeOffset.UtcNow;
+        var executor = new StubCommandExecutor(new CommandResult(
+            0,
+            "{\"diagnostics\":[],\"number_of_files\":1,\"number_of_rules\":19}",
+            string.Empty,
+            false,
+            false,
+            now,
+            now));
+
+        var composed = await AdvisoryAntiSlopComposition.RunFixtureAsync(
+            new AdvisoryAntiSlopOptions(
+                repositoryRoot,
+                repository.BaseCommit,
+                bundleRoot,
+                nodePath,
+                System.IO.Path.Combine(temp.Path, "advisory-output"),
+                ["src/app.ts", "src/app.cs", "src/ignored.jsx"],
+                new HashSet<string>(["src/ignored.jsx"], StringComparer.Ordinal)),
+            reader,
+            registry,
+            executor,
+            capability,
+            TestContext.Current.CancellationToken);
+
+        Assert.False(composed.ProductionAuthorityActivated);
+        var selection = Assert.Single(composed.Selections);
+        Assert.Equal(["src/app.ts"], selection.Inputs);
+        var execution = Assert.Single(composed.Executions);
+        Assert.Equal("executed advisory gate; inspect outcome and receipt", execution.Disposition);
+        var result = Assert.IsType<GateRunResult>(execution.Result);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Equal("PASS", result.Plugin.PluginRawOutcome);
+        Assert.False(result.ProductionCapable);
+        Assert.True(File.Exists(result.ReceiptPath));
+        Assert.Contains(GateRunner.AntiSlopBindingArtifact, result.ArtifactHashes.Keys);
+    }
+
+    [Theory]
+    [InlineData(false, "src/app.ts", "disabled")]
+    [InlineData(true, "src/app.cs", "not applicable")]
+    public async Task Advisory_composition_does_not_fabricate_receipts_when_execution_is_skipped(
+        bool enabled,
+        string candidateInput,
+        string expectedDisposition)
+    {
+        using var temp = new TempDirectory();
+        var repositoryRoot = TestEvidence.WorkingDirectory(temp.Path);
+        Directory.CreateDirectory(repositoryRoot);
+        var (config, nodePath, _) = CreateFixtureAntiSlopClosure(temp.Path);
+        var bundleRoot = System.IO.Path.GetDirectoryName(config)!;
+        var plugin = AntiSlopEvaluationPlugin.CreateBundledForFixture(bundleRoot, nodePath);
+        var registry = new TrustedEvaluationPluginRegistry(
+            [new TrustedEvaluationPluginRegistration("anti-slop", plugin)]);
+        var executableIdentity = $"sha256:{Convert.ToHexStringLower(
+            System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(nodePath)))}";
+        var capability = ToolCapability.FromDetection(
+            "oxlint", AntiSlopEvaluationPlugin.OxlintVersion, "oxlint-json-v1", true, [],
+            nodePath, executableIdentity, ["lint"], repositoryRoot);
+        var repository = TestEvidence.Repository();
+
+        var composed = await AdvisoryAntiSlopComposition.RunFixtureAsync(
+            new AdvisoryAntiSlopOptions(
+                repositoryRoot,
+                repository.BaseCommit,
+                bundleRoot,
+                nodePath,
+                System.IO.Path.Combine(temp.Path, "advisory-output"),
+                [candidateInput],
+                Enabled: enabled),
+            new SequenceRepositoryIdentityReader(repository),
+            registry,
+            new QueueCommandExecutor(),
+            capability,
+            TestContext.Current.CancellationToken);
+
+        var execution = Assert.Single(composed.Executions);
+        Assert.Null(execution.Result);
+        Assert.Contains(expectedDisposition, execution.Disposition, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Canonical_v1_envelope_remains_legacy_shaped_while_result_exposes_plugin_raw_outcome()
     {
         using var temp = new TempDirectory();

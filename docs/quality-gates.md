@@ -21,30 +21,25 @@ Gate execution resolves a trusted, code-registered deterministic evaluation plug
 
 Plugin configuration records an explicit enabled state. Disabling a selected required gate yields `INCOMPLETE`; it is evidence metadata, not a policy bypass. One code-owned gate/plugin registry drives protected-policy resolution, evidence writing, and consumer authority checks, including .NET, Crap4CSharp, Mutate4CSharp, and anti-slop mappings. An unmapped required gate remains unsatisfied and non-authoritative.
 
-### Host integration status and opt-in path
+### Supported advisory host composition and production status
 
-The library exposes the anti-slop integration, but no supported production launcher or orchestrator in this repository invokes it automatically. `DeterministicEvaluationPluginRegistry.CreateBuiltIns(trustedAntiSlopBundleRoot, trustedNodePath)` registers the bundled plugin, and `SelectApplicable(configurations, candidateInputs, ignoredInputs)` automatically selects JavaScript-family inputs once a host calls it. Today those selection and request-composition APIs are called only by tests. The only non-test end-to-end `GateRunner` composition is the CrashDriver, while `AuthoritativeEvaluationHost` deliberately throws `NotSupportedException`.
+`AdvisoryAntiSlopComposition.RunAsync` is the supported developer-facing composition. It accepts frozen candidate inputs and host-owned repository/base/bundle/Node/output values, calls `SelectApplicable`, constructs enabled JavaScript-family requests through `AntiSlopRequestFactory`, executes them through `GateRunner`, and returns selections plus receipt-bearing `GateRunResult` values. Disabled and no-match selections do not execute and do not fabricate successful or `NOT_APPLICABLE` receipts. The implementation is exercised end to end by `Advisory_composition_selects_mixed_inputs_runs_gate_and_returns_receipt`.
 
-An integrating host would use the following **pseudocode** (policy, capability, repository identity, paths, scope, timeout, output, runner dependencies, and cancellation are host-owned values):
+The opt-in executable entry point `AdvisoryAntiSlopExample` is compiled in the existing Evidence project and calls that exact API:
 
-```csharp
-var registry = DeterministicEvaluationPluginRegistry.CreateBuiltIns(bundleRoot, nodePath);
-var selections = registry.SelectApplicable(
-    [new EvaluationPluginConfiguration("dmmulroy.anti-slop", Enabled: true, EnableEffectRules: false)],
-    candidateInputs,
-    ignoredInputs);
-
-foreach (var selection in selections.Where(x => x.Enabled && x.Inputs.Count > 0))
-{
-    var request = AntiSlopRequestFactory.Create(/* host-owned gate and repository values */,
-        inputs: selection.Inputs, enableEffectRules: selection.EnableEffectRules);
-    await gateRunner.RunAsync(request, cancellationToken);
-}
+```bash
+dotnet run --project components/evidence/DeliveryForge.Evidence \
+  -p:OutputType=Exe -p:StartupObject=DeliveryForge.Evidence.AdvisoryAntiSlopExample -- \
+  --repository /absolute/repository --base <protected-base-sha> \
+  --bundle /absolute/components/evidence/anti-slop --node /absolute/node \
+  --output /absolute/output --input src/app.ts --input src/server.cs
 ```
+
+The JSON output includes effective selections, disposition, final outcome/reason, raw plugin outcome, receipt path, and artifact hashes. Exit code `2` means a receipt reported `FAIL`, `ERROR`, or `INCOMPLETE`; that remains advisory evidence rather than production authority. `--effect` opts into the five Effect rules, `--disabled` records a disabled selection without execution, and repeated `--ignore` excludes exact candidate paths during selection.
 
 Set `Enabled: false` to retain explicit disabled metadata; a required disabled gate is `INCOMPLETE`, not bypassed. Detection is case-insensitive for `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.mts`, and `.cts`. In a mixed-language candidate set, only those JavaScript-family paths are selected; other paths remain available to their applicable gates. Host-supplied `ignoredInputs` are excluded during selection, and execution additionally honors the protected-base `.delivery-forge/anti-slop-ignore` contract described below. The five Effect rules require `EnableEffectRules: true`; the default is false.
 
-Accordingly, the framework, adapters, plugin, and tests are implemented, but automatic production invocation remains open integration work, blocked here by the absence of a supported host and paused runtime wiring. This PR must not be described as satisfying automatic runtime invocation.
+The framework, adapters, plugin, advisory composition, executable sample, and tests are implemented. No supported production launcher or delivery orchestrator in this repository invokes anti-slop automatically. `AuthoritativeEvaluationHost` deliberately throws `NotSupportedException`; automatic production invocation and separate-principal authority remain future integration work. This PR must not be described as satisfying production pipeline invocation or restarting pipeline issue #17.
 
 The bundled `dmmulroy.anti-slop` plugin derives JavaScript-family files from the exact frozen Git tree. Regular tracked files are mandatory unless their exact paths occur in the optional protected-base `.delivery-forge/anti-slop-ignore`; patch-head ignore changes have no authority. Paths, blob ids, Git modes, include/exclude decisions, and retired protected ignores contribute to the complete tracked-head identity. Protected ignores may exempt an explicitly named non-regular entry, and stale entries are retained as retired identity evidence rather than deadlocking a deletion or rename. Selected blobs are obtained through bounded `git cat-file --batch-check` and `git cat-file --batch` groups, verified in memory with Git's object hash, and written byte-for-byte to a fresh private host-owned root outside the repository. They are made read-only, linted there using repository-relative paths, and removed after receipt persistence. This preserves the committed bytes despite checkout filters, `autocrlf`, smudge/LFS behavior, or index hints such as skip-worktree and assume-unchanged; repository cleanliness is bound separately. The receipt records the frozen object/input-set identity and a deterministic logical materialization label, not the random private path. Object/file/aggregate counts and sizes are bounded, paths are consumed from NUL-delimited Git output, and all phases consume one finite gate deadline; a missing/malformed object, ambiguity, cancellation, or exceeded bound is `INCOMPLETE`.
 
@@ -54,7 +49,11 @@ Its invocation is read-only and canonical. `AntiSlopRequestFactory` is the publi
 
 External code-owned plugins register through one `TrustedEvaluationPluginRegistry` entry per gate. Each entry binds the implementation, stable plugin/tool identities, expected tool/format versions, and optional runtime-closure identity together; repository policy may select a registered id but cannot register an implementation or supply a command.
 
+A plugin author implements `IDeterministicEvaluationPlugin`, including stable `Id`, `Version`, `ExpectedTool`, compatibility adapter, snapshot, normalization, and artifact binding. Trusted host code then creates `TrustedEvaluationPluginRegistration` and passes the resulting `TrustedEvaluationPluginRegistry` to `GateRunner`. Duplicate IDs, unknown selections, incompatible adapters, and registry/authority drift throw `EvaluationPluginException`; candidate repository code cannot register an implementation or executable command. The tested minimal implementation is `StubEvaluationPlugin` in `DeterministicEvaluationPluginTests`; the built-in compatibility registrations are the concrete default examples.
+
 Implementation tracking: plugin contract and registry [#48](https://github.com/nucleoid/delivery-forge/issues/48), compatibility adapters [#49](https://github.com/nucleoid/delivery-forge/issues/49), pinned JavaScript/TypeScript anti-slop integration [#50](https://github.com/nucleoid/delivery-forge/issues/50), and tests/review/documentation [#51](https://github.com/nucleoid/delivery-forge/issues/51).
+
+The detailed acceptance mapping and remaining limitations are recorded in [issues 48–51 acceptance](issues-48-51-acceptance.md).
 
 ## Receipt contract
 

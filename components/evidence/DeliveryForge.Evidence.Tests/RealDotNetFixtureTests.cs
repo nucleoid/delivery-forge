@@ -239,7 +239,15 @@ public sealed class RealDotNetFixtureTests
         Assert.Contains("i/lf", eol.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("w/lf", eol.StandardOutput, StringComparison.Ordinal);
         Assert.Contains("attr/text eol=lf", eol.StandardOutput, StringComparison.Ordinal);
-        var policyIdentity = await new GitRepositoryIdentityReader(executor, policyClone, policyHead)
+        var policyReaderExecutor = new EnvironmentOverlayCommandExecutor(
+            executor,
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                ["GIT_ATTR_NOSYSTEM"] = "1"
+            });
+        Assert.True(policyReaderExecutor.SupportsCreationOwnedBoundedCapture);
+        var policyIdentity = await new GitRepositoryIdentityReader(
+                policyReaderExecutor, policyClone, policyHead)
             .ReadAsync(TestContext.Current.CancellationToken);
         Assert.True(policyIdentity.IsClean);
         var policyIndex = (await IsolatedGitAsync(
@@ -439,12 +447,40 @@ public sealed class RealDotNetFixtureTests
 
     private sealed class EnvironmentOverlayCommandExecutor(
         ICommandExecutor inner,
-        IReadOnlyDictionary<string, string> environment) : ICommandExecutor
+        IReadOnlyDictionary<string, string> environment) : IBoundedGateFixtureExecutor
     {
+        public bool SupportsCreationOwnedBoundedCapture => inner switch
+        {
+            ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } => true,
+            IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true } => true,
+            _ => false
+        };
+
         public Task<CommandResult> ExecuteAsync(
             CommandInvocation invocation,
             TimeSpan timeout,
             CancellationToken cancellationToken)
+        {
+            return inner.ExecuteAsync(Overlay(invocation), timeout, cancellationToken);
+        }
+
+        public Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+            CommandInvocation invocation,
+            TimeSpan entireBudget,
+            int maximumBytesPerStream,
+            CancellationToken cancellationToken) => inner switch
+            {
+                ProcessCommandExecutor { SupportsCreationOwnedBoundedCapture: true } owned =>
+                    owned.ExecuteBoundedCaptureAsync(
+                        Overlay(invocation), entireBudget, maximumBytesPerStream, cancellationToken),
+                IBoundedGateFixtureExecutor { SupportsCreationOwnedBoundedCapture: true } fixture =>
+                    fixture.ExecuteBoundedCaptureAsync(
+                        Overlay(invocation), entireBudget, maximumBytesPerStream, cancellationToken),
+                _ => throw new InvalidOperationException(
+                    "The wrapped executor cannot provide creation-owned bounded capture.")
+            };
+
+        private CommandInvocation Overlay(CommandInvocation invocation)
         {
             var merged = new Dictionary<string, string>(StringComparer.Ordinal);
             if (invocation.Environment is not null)
@@ -452,7 +488,7 @@ public sealed class RealDotNetFixtureTests
                     merged[pair.Key] = pair.Value;
             foreach (var pair in environment)
                 merged[pair.Key] = pair.Value;
-            return inner.ExecuteAsync(invocation with { Environment = merged }, timeout, cancellationToken);
+            return invocation with { Environment = merged };
         }
     }
 

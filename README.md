@@ -8,7 +8,7 @@ The design packages a thin skill entry point with progressively loaded reference
 
 ## Status
 
-Planning bootstrap only. The contracts and roadmap in this repository describe the intended system; they are not claims that the integrations or quality gates already exist.
+The repository contains implemented contracts and bounded components for planning, coordination, execution, evidence, review, publication, and scheduling. These are not a deployed autonomous delivery pipeline. In particular, deterministic-evaluation plugins and the advisory anti-slop sample exist, while production automatic anti-slop invocation and separate-principal receipt authority remain deliberately unavailable.
 
 ## Operating model
 
@@ -38,7 +38,7 @@ The normal intake is a minimal interview. Delivery Forge asks one plain conversa
 - Unsupported tools, timeouts, missing coverage, and incomplete mutation enumeration cannot become a pass.
 - PR, CI, merge, release, and deployment are distinct states and authorizations.
 
-## Planned package shape
+## Package shape
 
 ```text
 delivery-forge/
@@ -52,11 +52,9 @@ delivery-forge/
 │   └── recovery-publication.md
 ├── schemas/
 ├── scripts/          # deterministic helpers only when justified
-├── adapters/
+├── components/
 └── tests/
 ```
-
-This skeleton is planned, not yet implemented or installed.
 
 ## Documents
 
