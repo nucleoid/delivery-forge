@@ -11,7 +11,11 @@ public sealed class CommandExecutableResolverTests
     [InlineData(true)]
     public async Task Actual_legacy_Linux_bare_image_is_selected_before_child_environment_clear(bool complete)
     {
-        if (!OperatingSystem.IsLinux()) Assert.Skip("Actual legacy Linux parent PATH and setsid invocation.");
+        if (!OperatingSystem.IsLinux())
+        {
+            Assert.Skip("Actual legacy Linux parent PATH and setsid invocation.");
+            return;
+        }
         var nonce = Guid.NewGuid().ToString("N");
         var marker = "parent-selected-image-" + nonce;
         var root = Path.Combine(Path.GetTempPath(), "forge-parent-path-capture-" + nonce);
@@ -53,7 +57,11 @@ public sealed class CommandExecutableResolverTests
     [Fact]
     public void Parent_snapshot_lookup_skips_nonexecutable_candidate_and_resolves_relative_roles_from_parent()
     {
-        if (!OperatingSystem.IsLinux()) Assert.Skip("Actual Linux executable access and parent PATH lookup.");
+        if (!OperatingSystem.IsLinux())
+        {
+            Assert.Skip("Actual Linux executable access and parent PATH lookup.");
+            return;
+        }
         var root = Path.Combine(Path.GetTempPath(), "forge-parent-executable-" + Guid.NewGuid().ToString("N"));
         var first = Path.Combine(root, "first"); var second = Path.Combine(root, "second");
         Directory.CreateDirectory(first); Directory.CreateDirectory(second);
