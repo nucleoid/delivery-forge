@@ -149,7 +149,17 @@ public sealed class CompilerOfficialRecipeTests
 
     [Fact]
     [Trait("Category", "InstalledToolAcceptance")]
-    public void Compiled_exact401_record_DATA_uses_the_production_recipe_fallback_without_granting_producer_authority()
+    public void Compiled_exact401_record_DATA_uses_the_production_recipe_fallback_without_granting_producer_authority() =>
+        CompiledRecordBranch(unsupportedScenario: false);
+
+    [Fact]
+    [Trait("Category", "InstalledToolAcceptance")]
+    public void Compiled_exact401_record_DATA_preserves_unsupported_recipe_and_actual_read_failure_outcomes() =>
+        CompiledRecordBranch(unsupportedScenario: true);
+
+    // Independent positive and adversarial cases each create their own original
+    // owner below. Neither case renews that owner's clock or extends its limits.
+    private static void CompiledRecordBranch(bool unsupportedScenario)
     {
         var specPath = Environment.GetEnvironmentVariable("DELIVERY_FORGE_QUALITY_ACTUAL_MANIFEST");
         var specHash = Environment.GetEnvironmentVariable("DELIVERY_FORGE_QUALITY_ACTUAL_MANIFEST_SHA256");
@@ -347,8 +357,9 @@ public sealed class CompilerOfficialRecipeTests
 
             File.WriteAllBytes(Path.Combine(diagnostic, "manifest-DATA.json"), JsonSerializer.SerializeToUtf8Bytes(manifest));
             File.WriteAllBytes(Path.Combine(diagnostic, "diff-DATA.patch"), diff);
-            using (var parsed = ProducerJson.Read(JsonSerializer.SerializeToUtf8Bytes(manifest)))
+            if (!unsupportedScenario)
             {
+                using var parsed = ProducerJson.Read(JsonSerializer.SerializeToUtf8Bytes(manifest));
                 var reduction = ChangedLineCoverage.ReadCompilerBound(diff, parsed.RootElement, fixtureRoot, ReadFixture, files);
                 Assert.True(reduction.CompilerCensusComplete, reduction.Reason);
                 Assert.Equal(GateOutcome.Pass, reduction.Outcome); Assert.Equal(6, reduction.ChangedExecutableLines);
@@ -356,6 +367,8 @@ public sealed class CompilerOfficialRecipeTests
                 Assert.Equal(0, reduction.UnmeasuredChangedLines);
                 Assert.True(compilerReads.SetEquals(compilerLocators));
             }
+            else
+            {
             // Coherent adversarial recipe DATA: valid /target:exe is outside
             // this reconstruction profile. It grants no original producer claim.
             var unsupportedManifest = manifest.DeepClone();
@@ -393,6 +406,7 @@ public sealed class CompilerOfficialRecipeTests
                 Assert.Same(originalReadFailure, Assert.Throws<IOException>(() => ChangedLineCoverage.ReadCompilerBound(
                     diff, parsed.RootElement, fixtureRoot,
                     locator => compilerLocators.Contains(locator) ? throw originalReadFailure : ReadFixture(locator), files)));
+            }
             // Same exact source/module/visit DATA, now without the optional recipe.
             // A complete result here would mean the positive did not need fallback.
             compilerReads.Clear(); manifest["artifacts"]!.AsArray().Remove(recipeArtifact);
