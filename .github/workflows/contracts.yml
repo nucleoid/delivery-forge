@@ -167,6 +167,14 @@ jobs:
           # Public contract CI is not live/profile certification.
           $publicFilter += "&Category!=LiveContinuumAcceptance&Category!=InstalledLocalRealAcceptance"
           if ($IsWindows) { $publicFilter += "&FullyQualifiedName!=DeliveryForge.Evidence.Tests.InstalledToolProfileTests.Unsupported_current_owner_refuses_before_tool_birth_or_artifact_writes" }
-          dotnet test DeliveryForge.slnx --no-restore --configuration Release --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false --filter $publicFilter
+          dotnet test DeliveryForge.slnx --no-restore --configuration Release --disable-build-servers -m:1 -p:UseSharedCompilation=false -p:BuildInParallel=false --filter $publicFilter --logger trx
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - run: dotnet format DeliveryForge.slnx --no-restore --verify-no-changes
+      - name: Retain public test TRX diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-test-results-${{ runner.os }}
+          path: '**/TestResults/*.trx'
+          if-no-files-found: warn
+          retention-days: 7
