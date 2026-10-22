@@ -467,6 +467,47 @@ public sealed class GitRepositoryIdentityReaderTests
         Assert.True(diagnostics.OwnedProcessQuiescent);
     }
 
+    [Fact]
+    public async Task Identity_diagnostics_never_serialize_complete_lifecycle_stream_text()
+    {
+        const string stdoutSentinel = "complete-stdout-must-not-be-serialized";
+        const string stderrSentinel = "complete-stderr-must-not-be-serialized";
+        var status = Result(string.Empty) with
+        {
+            LifecycleDiagnostics = new CommandLifecycleDiagnostics(
+                false, false, null, null, false, true, true, true, 25,
+                new(true, false, false, stdoutSentinel),
+                new(true, false, false, stderrSentinel))
+            {
+                OwnedTree = new(true, true, 0),
+                NativeFailure = "native-failure-text-must-not-be-serialized"
+            }
+        };
+        var reader = new GitRepositoryIdentityReader(
+            new QueueCommandExecutor(
+                Result(TestEvidence.Commit('b') + Environment.NewLine),
+                Result(TestEvidence.Commit('a') + Environment.NewLine),
+                Result(string.Empty),
+                Result(TestEvidence.Commit('c') + Environment.NewLine),
+                status),
+            System.IO.Path.GetTempPath(),
+            TestEvidence.Commit('a'));
+
+        await reader.ReadAsync(TestContext.Current.CancellationToken);
+
+        var diagnostics = Assert.IsType<GitStatusCommandDiagnostics>(reader.LastIdentityStatusDiagnostics);
+        var serialized = System.Text.Json.JsonSerializer.Serialize(diagnostics);
+        Assert.DoesNotContain(stdoutSentinel, serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain(stderrSentinel, serialized, StringComparison.Ordinal);
+        Assert.DoesNotContain("native-failure-text-must-not-be-serialized", serialized, StringComparison.Ordinal);
+        var lifecycle = Assert.IsType<GitStatusLifecycleDiagnostics>(diagnostics.LifecycleDiagnostics);
+        Assert.True(lifecycle.StandardOutput.CompletedSuccessfully);
+        Assert.True(lifecycle.StandardError.CompletedSuccessfully);
+        Assert.True(lifecycle.OwnedTree?.SettlementObserved);
+        Assert.True(lifecycle.NativeFailurePresent);
+        Assert.Equal("native-failure-text-must-not-be-serialized".Length, lifecycle.NativeFailureLength);
+    }
+
     [Theory]
     [InlineData("filter.evil.clean", "touch-should-never-run")]
     [InlineData("include.path", "/tmp/patch-controlled-git-include")]

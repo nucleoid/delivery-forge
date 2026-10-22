@@ -860,7 +860,7 @@ internal sealed record GitStatusCommandDiagnostics(
     bool OwnedProcessQuiescent,
     DateTimeOffset StartedAt,
     DateTimeOffset CompletedAt,
-    CommandLifecycleDiagnostics? LifecycleDiagnostics)
+    GitStatusLifecycleDiagnostics? LifecycleDiagnostics)
 {
     private const int MaximumDiagnosticPrefixBytes = 4096;
 
@@ -927,10 +927,91 @@ internal sealed record GitStatusCommandDiagnostics(
             command.OwnedProcessQuiescent,
             command.StartedAt,
             command.CompletedAt,
-            command.LifecycleDiagnostics);
+            GitStatusLifecycleDiagnostics.From(command.LifecycleDiagnostics));
 
     private static string PrefixHex(byte[] value) =>
         Convert.ToHexStringLower(value.AsSpan(0, Math.Min(value.Length, MaximumDiagnosticPrefixBytes)));
+}
+
+internal sealed record GitStatusStreamLifecycleDiagnostics(
+    bool CompletedSuccessfully,
+    bool Faulted,
+    bool Cancelled);
+
+internal sealed record GitStatusStartupDiagnostics(
+    CommandStartupState Creation,
+    CommandStartupState RootHandle,
+    CommandStartupState JobAssignment,
+    CommandStartupState Resume,
+    CommandStartupState ReaderEndpoints,
+    CommandStartupState StandardOutputDrain,
+    CommandStartupState StandardErrorDrain,
+    string LastStage,
+    string? FailureStage,
+    double OriginalElapsedSeconds,
+    double OriginalTotalSeconds,
+    double OriginalWorkSeconds,
+    bool ReasonPresent,
+    int ReasonLength);
+
+internal sealed record GitStatusLifecycleDiagnostics(
+    bool KillAttempted,
+    bool KillSucceeded,
+    string? KillExceptionType,
+    bool KillExceptionDetailPresent,
+    int KillExceptionDetailLength,
+    bool KillExceptionDetailTruncated,
+    bool ExitWaitCompleted,
+    bool RootExited,
+    bool DrainWaitCompleted,
+    int CleanupWaitMilliseconds,
+    GitStatusStreamLifecycleDiagnostics StandardOutput,
+    GitStatusStreamLifecycleDiagnostics StandardError,
+    CommandOwnedTreeObservation? OwnedTree,
+    bool NativeFailurePresent,
+    int NativeFailureLength,
+    GitStatusStartupDiagnostics? Startup)
+{
+    internal static GitStatusLifecycleDiagnostics? From(CommandLifecycleDiagnostics? actual)
+    {
+        if (actual is null) return null;
+        var startup = actual.Startup;
+        return new(
+            actual.KillAttempted,
+            actual.KillSucceeded,
+            actual.KillExceptionType,
+            actual.KillExceptionDetail is not null,
+            actual.KillExceptionDetail?.Length ?? 0,
+            actual.KillExceptionDetailTruncated,
+            actual.ExitWaitCompleted,
+            actual.RootExited,
+            actual.DrainWaitCompleted,
+            actual.CleanupWaitMilliseconds,
+            new(actual.StandardOutput.CompletedSuccessfully, actual.StandardOutput.Faulted,
+                actual.StandardOutput.Cancelled),
+            new(actual.StandardError.CompletedSuccessfully, actual.StandardError.Faulted,
+                actual.StandardError.Cancelled),
+            actual.OwnedTree is null ? null : actual.OwnedTree with { },
+            actual.NativeFailure is not null,
+            actual.NativeFailure?.Length ?? 0,
+            startup is null
+                ? null
+                : new(
+                    startup.Creation,
+                    startup.RootHandle,
+                    startup.JobAssignment,
+                    startup.Resume,
+                    startup.ReaderEndpoints,
+                    startup.StandardOutputDrain,
+                    startup.StandardErrorDrain,
+                    startup.LastStage,
+                    startup.FailureStage,
+                    startup.OriginalElapsedSeconds,
+                    startup.OriginalTotalSeconds,
+                    startup.OriginalWorkSeconds,
+                    startup.Reason is not null,
+                    startup.Reason?.Length ?? 0));
+    }
 }
 
 internal sealed record TreeEntry(string Mode, string Path, string ObjectId);
