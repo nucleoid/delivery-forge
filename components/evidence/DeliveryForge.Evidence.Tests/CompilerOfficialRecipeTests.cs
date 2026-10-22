@@ -147,9 +147,6 @@ public sealed class CompilerOfficialRecipeTests
         finally { files.ReleaseKnown(); }
     }
 
-    // Add to CompilerOfficialRecipeTests. Additional usings required:
-    // System.Buffers.Binary; System.Globalization; System.Reflection.Metadata;
-    // System.Reflection.PortableExecutable; System.Security.Cryptography; System.Xml.Linq.
     [Fact]
     [Trait("Category", "InstalledToolAcceptance")]
     public void Compiled_exact401_record_DATA_uses_the_production_recipe_fallback_without_granting_producer_authority()
@@ -359,6 +356,43 @@ public sealed class CompilerOfficialRecipeTests
                 Assert.Equal(0, reduction.UnmeasuredChangedLines);
                 Assert.True(compilerReads.SetEquals(compilerLocators));
             }
+            // Coherent adversarial recipe DATA: valid /target:exe is outside
+            // this reconstruction profile. It grants no original producer claim.
+            var unsupportedManifest = manifest.DeepClone();
+            var unsupportedRecipe = JsonNode.Parse(data["fixture/recipe.json"])!.AsObject();
+            var targetRole = Assert.Single(unsupportedRecipe["argumentRoles"]!.AsArray(), row =>
+                row!["role"]!.GetValue<string>() == "scalar" && row["name"]!.GetValue<string>() == "target")!;
+            var targetInput = targetRole["inputOrdinal"]!.GetValue<int>();
+            Assert.Equal("/target:library", unsupportedRecipe["scalarArguments"]![targetInput]!.GetValue<string>());
+            const string unsupportedTarget = "/target:exe";
+            unsupportedRecipe["scalarArguments"]![targetInput] = unsupportedTarget;
+            var targetArgument = unsupportedRecipe["arguments"]![targetRole["ordinal"]!.GetValue<int>()]!;
+            targetArgument["utf8Length"] = Encoding.UTF8.GetByteCount(unsupportedTarget);
+            targetArgument["sha256"] = InstalledToolFiles.Identity(Encoding.UTF8.GetBytes(unsupportedTarget))[7..];
+            foreach (var option in unsupportedRecipe["taskOptions"]!.AsArray())
+                if (option!["name"]!.GetValue<string>() == "TargetType") option["value"] = "exe";
+            unsupportedRecipe["taskAssociationSha256"] = InstalledToolFiles.Identity(
+                JsonSerializer.SerializeToUtf8Bytes(unsupportedRecipe["arguments"]))[7..];
+            var unsupportedBytes = JsonSerializer.SerializeToUtf8Bytes(unsupportedRecipe);
+            const string unsupportedLocator = "fixture/unsupported-recipe.json";
+            var unsupportedArtifact = Assert.Single(unsupportedManifest["artifacts"]!.AsArray(), row =>
+                row!["id"]!.GetValue<string>() == recipeArtifact["id"]!.GetValue<string>())!;
+            unsupportedArtifact["locator"] = unsupportedLocator; unsupportedArtifact["length"] = unsupportedBytes.Length;
+            unsupportedArtifact["sha256"] = InstalledToolFiles.Identity(unsupportedBytes)[7..];
+            using (var parsed = ProducerJson.Read(JsonSerializer.SerializeToUtf8Bytes(unsupportedManifest)))
+            {
+                var reduction = ChangedLineCoverage.ReadCompilerBound(diff, parsed.RootElement, fixtureRoot,
+                    locator => locator == unsupportedLocator ? unsupportedBytes : ReadFixture(locator), files);
+                Assert.False(reduction.CompilerCensusComplete); Assert.Equal(GateOutcome.Incomplete, reduction.Outcome);
+                Assert.Contains("Optional compiler recipe unsupported:", reduction.Reason, StringComparison.Ordinal);
+            }
+            // An actual input-read failure remains its original ERROR; the
+            // optional-profile catch cannot turn arbitrary I/O into INCOMPLETE.
+            var originalReadFailure = new IOException("Original compiler image read failed.");
+            using (var parsed = ProducerJson.Read(JsonSerializer.SerializeToUtf8Bytes(manifest)))
+                Assert.Same(originalReadFailure, Assert.Throws<IOException>(() => ChangedLineCoverage.ReadCompilerBound(
+                    diff, parsed.RootElement, fixtureRoot,
+                    locator => compilerLocators.Contains(locator) ? throw originalReadFailure : ReadFixture(locator), files)));
             // Same exact source/module/visit DATA, now without the optional recipe.
             // A complete result here would mean the positive did not need fallback.
             compilerReads.Clear(); manifest["artifacts"]!.AsArray().Remove(recipeArtifact);
@@ -373,8 +407,8 @@ public sealed class CompilerOfficialRecipeTests
         finally
         {
             files.ReleaseKnown();
-            // Retain test fixture source on either outcome; it contains no secrets
-            // and lets failures be inspected without deleting original evidence.
+            // Selected private capture only; ordinary CI skips before creating
+            // this root. Preserve bounded source/PE/PDB/manifest DATA on either outcome.
             Console.WriteLine("Compiled recipe branch DATA fixture retained: " + fixtureRoot);
         }
     }
@@ -439,9 +473,65 @@ public sealed class CompilerOfficialRecipeTests
         Assert.DoesNotContain(fixture.CSharpLocator, fixture.Reads);
     }
 
+    [Fact]
+    public void Declared_combined_capacity_is_typed_unsupported_before_input_reads()
+    {
+        using var fixture = new Fixture(); fixture.Change("aggregate");
+        var error = Assert.Throws<CompilerRecipeUnsupportedException>(() => fixture.Decode());
+        Assert.Contains("combined128MiB", error.Message, StringComparison.Ordinal);
+        Assert.Single(fixture.Reads); // Recipe only; no128MiB content allocation.
+        Assert.DoesNotContain(fixture.CommonLocator, fixture.Reads);
+        Assert.DoesNotContain(fixture.CSharpLocator, fixture.Reads);
+    }
+
+    [Theory]
+    [InlineData("unknown", "closed object shape")]
+    [InlineData("role", "typed argument role")]
+    public void Combined_capacity_does_not_hide_malformed_metadata(string fault, string reason)
+    {
+        using var fixture = new Fixture(); fixture.Change("aggregate"); fixture.Change(fault);
+        var error = Assert.Throws<EvidenceWriteException>(() => fixture.Decode());
+        Assert.Contains(reason, error.Message, StringComparison.Ordinal);
+        Assert.Single(fixture.Reads);
+    }
+
+    [Theory]
+    [InlineData("missing-path-policy", "required property")]
+    [InlineData("path-policy-kind", "object type")]
+    [InlineData("embed-kind", "canonical reference embed metadata")]
+    public void Malformed_JSON_access_is_a_typed_integrity_refusal(string fault, string reason)
+    {
+        using var fixture = new Fixture(); fixture.Change(fault);
+        var error = Assert.Throws<EvidenceWriteException>(() => fixture.Decode());
+        Assert.Contains(reason, error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Actual_read_failure_keeps_its_exact_exception_identity()
+    {
+        using var fixture = new Fixture(); var failure = new IOException("Original read failed.");
+        Assert.Same(failure, Assert.Throws<IOException>(() => fixture.Decode(failure)));
+    }
+
+    [Fact]
+    public void Original_cancelled_owner_refuses_before_recipe_read()
+    {
+        using var cancellation = new CancellationTokenSource();
+        using var fixture = new Fixture(token: cancellation.Token); cancellation.Cancel();
+        var error = Assert.Throws<OperationCanceledException>(() => fixture.Decode());
+        Assert.Equal(cancellation.Token, error.CancellationToken); Assert.Empty(fixture.Reads);
+    }
+
+    [Fact]
+    public void Original_expired_owner_refuses_before_recipe_read()
+    {
+        using var fixture = new Fixture(work: TimeSpan.FromTicks(1));
+        Assert.Throws<TimeoutException>(() => fixture.Decode()); Assert.Empty(fixture.Reads);
+    }
+
     private sealed class Fixture : IDisposable
     {
-        internal readonly InstalledToolFiles Files = new(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        internal readonly InstalledToolFiles Files;
         internal readonly byte[] SourceBytes = Encoding.UTF8.GetBytes("public static class Subject {}\n"), ReferenceBytes = [1, 2, 3];
         private readonly Dictionary<string, byte[]> bytes = new(StringComparer.Ordinal);
         internal readonly List<string> Reads = [];
@@ -450,8 +540,9 @@ public sealed class CompilerOfficialRecipeTests
         internal string CSharpLocator => csharp["locator"]!.GetValue<string>();
         private readonly JsonObject manifest, recipe, common, csharp;
         private string selectedContext = "context";
-        internal Fixture()
+        internal Fixture(TimeSpan? work = null, CancellationToken? token = null)
         {
+            Files = new(work ?? TimeSpan.FromSeconds(30), token ?? TestContext.Current.CancellationToken);
             var root = Path.Combine(Path.GetTempPath(), "official-recipe-data-" + Guid.NewGuid().ToString("N"));
             SourcePath = Path.Combine(root, "Subject.cs");
             var source = Input("source", "Subject.cs", SourceBytes);
@@ -572,6 +663,14 @@ public sealed class CompilerOfficialRecipeTests
                 recipe["sources"]![0]!["length"] = 128L * 1024 * 1024 + 1;
                 manifest["contexts"]![0]!["inputs"]![0]!["length"] = 128L * 1024 * 1024 + 1;
             }
+            if (fault == "aggregate")
+            {
+                recipe["references"]![0]!["length"] = 128L * 1024 * 1024;
+                manifest["contexts"]![0]!["inputs"]![1]!["length"] = 128L * 1024 * 1024;
+            }
+            if (fault == "missing-path-policy") manifest["contexts"]![0]!.AsObject().Remove("pathPolicy");
+            if (fault == "path-policy-kind") manifest["contexts"]![0]!["pathPolicy"] = "not-object";
+            if (fault == "embed-kind") manifest["contexts"]![0]!["inputs"]![1]!["embedInteropTypes"] = "false";
             if (fault == "aliases") recipe["references"]![0]!["aliases"] = new JsonArray("Probe");
             if (fault == "coherent-aliases")
             {
@@ -593,11 +692,11 @@ public sealed class CompilerOfficialRecipeTests
             }
             RebindRecipe();
         }
-        internal CompilerOfficialRecipe.Decoded Decode()
+        internal CompilerOfficialRecipe.Decoded Decode(Exception? readFailure = null)
         {
             using var document = ProducerJson.Read(JsonSerializer.SerializeToUtf8Bytes(manifest));
             return CompilerOfficialRecipe.Decode(document.RootElement, selectedContext, "build", locator =>
-            { Reads.Add(locator); return bytes[locator]; }, Files);
+            { Reads.Add(locator); if (readFailure is not null) throw readFailure; return bytes[locator]; }, Files);
         }
         public void Dispose() => Files.ReleaseKnown();
     }

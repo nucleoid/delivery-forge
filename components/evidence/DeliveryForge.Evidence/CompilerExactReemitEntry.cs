@@ -28,7 +28,7 @@ internal static class CompilerExactReemitEntry
             parsed.SourceLink is not null || !parsed.EmitPdbFile || parsed.EmitOptions.DebugInformationFormat != DebugInformationFormat.PortablePdb ||
             parsed.CompilationOptions.OutputKind != OutputKind.DynamicallyLinkedLibrary || !parsed.CompilationOptions.Deterministic ||
             parsed.OutputFileName is null || parsed.ParseOptions.Kind != SourceCodeKind.Regular)
-            throw Unsupported("The effective compiler recipe is outside the exact library/portable/deterministic profile.");
+            throw UnsupportedProfile("The effective compiler recipe is outside the exact library/portable/deterministic profile.");
         var trees = new List<SyntaxTree>();
         var embedded = new List<EmbeddedText>();
         for (var i = 0; i < sources.Length; i++)
@@ -61,7 +61,7 @@ internal static class CompilerExactReemitEntry
             var name = parsed.CompilationName ?? Path.GetFileNameWithoutExtension(parsed.OutputFileName);
             var compilation = CSharpCompilation.Create(name, trees, metadata, options);
             var mappedPdbPath = resolver.NormalizePath(parsed.GetPdbFilePath(parsed.OutputFileName), baseFilePath: null)
-                ?? throw Unsupported("The exact compiler PDB path is unsupported.");
+                ?? throw UnsupportedProfile("The exact compiler PDB path is unsupported.");
             var emit = parsed.EmitOptions.WithPdbFilePath(mappedPdbPath)
                 .WithOutputNameOverride(parsed.OutputFileName);
             using var pe = new BoundedOutput(check);
@@ -76,7 +76,7 @@ internal static class CompilerExactReemitEntry
             var result = compilation.Emit(pe, pdb, win32Resources: resources, options: emit,
                 embeddedTexts: embedded, metadataPEStream: parsed.OutputRefFilePath is null ? null : refAssembly, cancellationToken: token);
             check(); token.ThrowIfCancellationRequested();
-            if (!result.Success) throw DiagnosticFailure("The exact input compilation did not emit successfully.", result.Diagnostics, check, token);
+            if (!result.Success) throw DiagnosticFailure("The exact input compilation did not emit successfully.", result.Diagnostics, check, token, unsupportedProfile: true);
             var emittedPe = pe.ToArray(); var emittedPdb = pdb.ToArray();
             var origins = CompilerSourceOrigins.Capture(compilation, emittedPe, emittedPdb, check, token);
             return [emittedPe, emittedPdb, origins];
@@ -84,7 +84,7 @@ internal static class CompilerExactReemitEntry
         finally { foreach (var image in owned) image.Dispose(); }
     }
 
-    private static IOException DiagnosticFailure(string message, ImmutableArray<Diagnostic> diagnostics, Action check, CancellationToken token)
+    private static Exception DiagnosticFailure(string message, ImmutableArray<Diagnostic> diagnostics, Action check, CancellationToken token, bool unsupportedProfile = false)
     {
         var ids = new HashSet<string>(StringComparer.Ordinal);
         foreach (var diagnostic in diagnostics.Take(64))
@@ -94,18 +94,21 @@ internal static class CompilerExactReemitEntry
             ids.Add(id.Length is > 0 and <= 32 && id.All(char.IsAsciiLetterOrDigit) ? id : "UNSUPPORTED-ID");
         }
         check(); token.ThrowIfCancellationRequested();
-        return Unsupported($"{message} Diagnostic count={diagnostics.Length}; first64 distinct IDs=[{string.Join(',', ids.Order(StringComparer.Ordinal))}]. No diagnostic messages or paths retained.");
+        var reason = $"{message} Diagnostic count={diagnostics.Length}; first64 distinct IDs=[{string.Join(',', ids.Order(StringComparer.Ordinal))}]. No diagnostic messages or paths retained.";
+        return unsupportedProfile ? UnsupportedProfile(reason) : Unsupported(reason);
     }
 
     private static IOException Unsupported(string message) => new(message);
+    private static CompilerRecipeUnsupportedException UnsupportedProfile(string message) => new(message);
     private sealed class BoundedOutput(Action check) : MemoryStream
     {
         private const int MaximumBytes = 128 * 1024 * 1024;
         private void Before(int count)
         {
             check();
-            if (count < 0 || Position > MaximumBytes - (long)count)
-                throw Unsupported("Complete re-emitted compiler output exceeds the existing artifact bound.");
+            if (count < 0) throw new ArgumentOutOfRangeException(nameof(count));
+            if (Position > MaximumBytes - (long)count)
+                throw UnsupportedProfile("Complete re-emitted compiler output exceeds the existing artifact bound.");
         }
         public override void Write(byte[] buffer, int offset, int count)
         { Before(count); base.Write(buffer, offset, count); check(); }
@@ -115,7 +118,8 @@ internal static class CompilerExactReemitEntry
         public override void SetLength(long value)
         {
             check();
-            if (value is < 0 or > MaximumBytes) throw Unsupported("Complete re-emitted compiler output exceeds the existing artifact bound.");
+            if (value < 0) throw new ArgumentOutOfRangeException(nameof(value));
+            if (value > MaximumBytes) throw UnsupportedProfile("Complete re-emitted compiler output exceeds the existing artifact bound.");
             base.SetLength(value); check();
         }
     }

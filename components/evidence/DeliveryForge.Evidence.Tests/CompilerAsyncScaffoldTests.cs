@@ -50,6 +50,39 @@ public sealed class CompilerAsyncScaffoldTests
     }
 
     [Theory]
+    [InlineData(false, "namespace Unrelated; public struct Marker {}")]
+    [InlineData(true, "namespace Unrelated; public class Marker {}")]
+    public void Additional_nonclass_or_generated_source_refuses_the_whole_actual_async_profile(bool generated, string extraSource)
+    {
+        var files = new InstalledToolFiles(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        try
+        {
+            var output = typeof(AsyncSubject).Assembly.Location;
+            var pe = files.Read(output, 128 * 1024 * 1024);
+            var pdb = files.Read(Path.ChangeExtension(output, ".pdb"), 128 * 1024 * 1024);
+            var testOutput = Path.GetDirectoryName(typeof(CompilerAsyncScaffoldTests).Assembly.Location)!;
+            var sourcePath = Path.GetFullPath(Path.Combine(testOutput, "../../../../DeliveryForge.Evidence.AsyncFixture/AsyncSubject.cs"));
+            var source = files.Read(sourcePath, 128 * 1024 * 1024);
+            var document = new CompilerLineCensus.Document("AsyncSubject.cs",
+                "components/evidence/DeliveryForge.Evidence.AsyncFixture/AsyncSubject.cs", sourcePath,
+                InstalledToolFiles.Identity(source)[7..], new UTF8Encoding(false, true).GetString(source), false);
+            var expected = Expected(pe);
+            var positive = CompilerLineCensus.Inspect(pe, pdb, expected, [document], files);
+            Assert.True(positive.Complete, positive.Reason);
+
+            // Extra captured-source DATA, with the same genuine module/PDB.
+            // An unrelated unsupported input may not be silently omitted.
+            var bytes = Encoding.UTF8.GetBytes(extraSource);
+            var extra = new CompilerLineCensus.Document("Unrelated.cs", null, null,
+                InstalledToolFiles.Identity(bytes)[7..], extraSource, generated);
+            var refused = CompilerLineCensus.Inspect(pe, pdb, expected, [document, extra], files);
+            Assert.False(refused.Complete);
+            Assert.Contains(refused.Limitations, value => value.Contains("Debugger-hiding", StringComparison.Ordinal));
+        }
+        finally { files.ReleaseKnown(); }
+    }
+
+    [Theory]
     [InlineData("AwaitOne", 2)]
     [InlineData("MoveNext", 0)]
     [InlineData("MoveNext", 100)]

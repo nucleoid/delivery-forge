@@ -15,9 +15,10 @@ internal static class CompilerExactReemit
 {
     internal sealed record Input(string Path, byte[] Bytes);
     internal sealed record Reference(string Path, byte[] Bytes, string[] Aliases, bool EmbedInteropTypes);
-    // ScalarArguments is the closed projection of the SAME completed Csc argv;
-    // role ordinals, input bytes, configs and output association must be bound by
-    // the producer/consumer recipe decoder BEFORE calling this comparison slice.
+    // Closed reconstruction DATA: the decoder checks input membership,
+    // descriptor/scalar consistency and inert observation shape. It cannot
+    // prove the original task or non-scalar argv bytes; Compare grants no
+    // runtime-task authority.
     internal sealed record Request(string BaseDirectory, string[] ScalarArguments,
         Input[] Sources, Reference[] References, string[] EmbeddedSourcePaths);
     // Only the actual reconstruction factory can create this result. A caller's
@@ -106,6 +107,8 @@ internal static class CompilerExactReemit
         // Read only this actual running Evidence image, never a recipe-provided
         // assembly path. MVID checks that the retained bytes name this module.
         var own = typeof(CompilerExactReemit).Assembly;
+        if (string.IsNullOrEmpty(own.Location))
+            throw new CompilerRecipeUnsupportedException("The current Evidence host has no ordinary image for exact reconstruction.");
         var image = files.Read(own.Location, MaximumArtifactBytes);
         using (var stream = new MemoryStream(image, writable: false))
         using (var pe = new PEReader(stream))
@@ -133,7 +136,18 @@ internal static class CompilerExactReemit
                     request.EmbeddedSourcePaths, (Action)files.Check, files.Token]);
             }
             catch (TargetInvocationException error) when (error.InnerException is not null)
-            { ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw; }
+            {
+                // The island loaded this exact MVID-bound Evidence image. Only
+                // its actual closed Type denotes unsupported reconstruction;
+                // a name, message, generic IOException or caller DATA does not.
+                var unsupportedType = assembly.GetType(typeof(CompilerRecipeUnsupportedException).FullName!, throwOnError: true)!;
+                if (error.InnerException.GetType() == unsupportedType)
+                {
+                    files.Check();
+                    throw new CompilerRecipeUnsupportedException(error.InnerException.Message);
+                }
+                ExceptionDispatchInfo.Capture(error.InnerException).Throw(); throw;
+            }
             files.Check();
             if (result is not byte[][] { Length: 3 } emitted || emitted[2].Length > MaximumArtifactBytes)
                 throw new IOException("Exact compiler comparison returned an unsupported result shape.");

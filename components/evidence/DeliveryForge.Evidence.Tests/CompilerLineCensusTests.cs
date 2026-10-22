@@ -30,6 +30,42 @@ public sealed class CompilerLineCensusTests
         Assert.Equal(3, result.CoveredChangedLines); Assert.Equal(100m, result.Percent);
     }
 
+    [Theory]
+    [InlineData("source")]
+    [InlineData("compiler-source")]
+    public void Changed_generated_context_cannot_borrow_another_contexts_genuine_covered_lines(string role)
+    {
+        using var fixture = new Fixture();
+        var positive = fixture.Read(secondContext: true);
+        Assert.True(positive.CompilerCensusComplete); Assert.Equal(GateOutcome.Pass, positive.Outcome);
+        var result = fixture.Read(secondContext: true, generatedChangedContext: true, generatedChangedRole: role);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome); Assert.False(result.CompilerCensusComplete);
+        Assert.Contains("marked generated", result.Reason, StringComparison.Ordinal);
+        Assert.Equal(3, result.ChangedExecutableLines); Assert.Equal(3, result.CoveredChangedLines);
+        Assert.Equal(100m, result.Percent); // The other context's partial ratio cannot become PASS.
+    }
+
+    [Fact]
+    public void Generated_changed_role_still_requires_current_repository_bytes_after_coherent_capture_hashing()
+    {
+        using var fixture = new Fixture();
+        Assert.Equal(GateOutcome.Pass, fixture.Read(secondContext: true).Outcome);
+        var error = Assert.Throws<EvidenceWriteException>(() => fixture.Read(secondContext: true,
+            generatedChangedContext: true, generatedChangedSourceDrift: true));
+        Assert.Contains("differs from captured source", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Changed_generated_repository_file_cannot_disappear_behind_another_covered_file()
+    {
+        using var fixture = new Fixture();
+        Assert.Equal(GateOutcome.Pass, fixture.Read(includeDeclarations: true).Outcome);
+        var result = fixture.Read(includeDeclarations: true, generatedDeclaration: true);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome); Assert.False(result.CompilerCensusComplete);
+        Assert.Contains("marked generated", result.Reason, StringComparison.Ordinal);
+        Assert.Equal(3, result.CoveredChangedLines);
+    }
+
     [Fact]
     public void Genuine_declaration_only_input_does_not_add_unmeasured_lines_to_a_fully_covered_compiler_change()
     {
@@ -332,7 +368,9 @@ public sealed class CompilerLineCensusTests
         internal ChangedLineCoverage.Result Read(int? omitLine = null, int? zeroLine = null, bool omitFile = false,
             bool secondContext = false, string? fault = null, bool omitReport = false, bool commentOnly = false,
             bool includeDeclarations = false, bool declarationsOnly = false, bool rawReports = false,
-            bool declarationCompilerSource = false, bool extraCompilerConstructor = false, bool compilerSourceHashDrift = false)
+            bool declarationCompilerSource = false, bool extraCompilerConstructor = false, bool compilerSourceHashDrift = false,
+            bool generatedChangedContext = false, string generatedChangedRole = "source", bool generatedChangedSourceDrift = false,
+            bool generatedDeclaration = false)
         {
             var rawSource = fault == "checksum" ? Source.Concat(" "u8.ToArray()).ToArray() : Source;
             // Only the checksum-negative uses a separate logical copy. Physical source
@@ -348,19 +386,24 @@ public sealed class CompilerLineCensusTests
                 ["pe"] = Pe,
                 ["pdb"] = fault == "malformed-pdb" ? [0xff] : Pdb
             };
+            var generatedContextSource = Source.ToArray();
+            if (generatedChangedSourceDrift) generatedContextSource[0] ^= 1;
+            data.Add("generated-context-source", generatedContextSource);
             if (extraCompilerConstructor)
                 data.Add("extra", Encoding.UTF8.GetBytes("namespace DeliveryForge.Evidence.CensusFixture; public class Subject { public Subject() {} }"));
             var contexts = new JsonArray(); var builds = new JsonArray(); var executions = new JsonArray(); var artifacts = new JsonArray();
             foreach (var context in secondContext ? new[] { "c", "c2" } : new[] { "c" })
             {
+                var generatedContext = generatedChangedContext && context == "c2";
+                var contextSource = generatedContext ? generatedContextSource : Source;
                 var contextNode = JsonSerializer.SerializeToNode(new
                 {
                     id = context,
                     project = ProjectRole + "/DeliveryForge.Evidence.CensusFixture.csproj",
-                    inputs = new[] { new { role = "source", logicalPath = "Subject.cs", repositoryPath = ProjectRole + "/Subject.cs", locator = "source",
-                        length = Source.Length, sha256 = InstalledToolFiles.Identity(Source)[7..], generated = false, encoding = "utf-8" },
+                    inputs = new[] { new { role = generatedContext ? generatedChangedRole : "source", logicalPath = "Subject.cs", repositoryPath = ProjectRole + "/Subject.cs", locator = generatedContext ? "generated-context-source" : "source",
+                        length = contextSource.Length, sha256 = InstalledToolFiles.Identity(contextSource)[7..], generated = generatedContext, encoding = "utf-8" },
                         new { role = declarationCompilerSource ? "compiler-source" : "source", logicalPath = "Declarations.cs", repositoryPath = ProjectRole + "/Declarations.cs", locator = "declaration",
-                        length = DeclarationSource.Length, sha256 = InstalledToolFiles.Identity(DeclarationSource)[7..], generated = false, encoding = "utf-8" } }
+                        length = DeclarationSource.Length, sha256 = InstalledToolFiles.Identity(DeclarationSource)[7..], generated = generatedDeclaration, encoding = "utf-8" } }
                 })!;
                 if (extraCompilerConstructor)
                     contextNode["inputs"]!.AsArray().Add(JsonSerializer.SerializeToNode(new
@@ -414,7 +457,7 @@ public sealed class CompilerLineCensusTests
                     new XElement("Classes", new XElement("Class", new XElement("Methods", omitFile ? null : points))))));
                 var locatorCoverage = context + "coverage";
                 data.Add(locatorCoverage, Encoding.UTF8.GetBytes(xml.ToString(SaveOptions.DisableFormatting)));
-                if (!omitReport) artifacts.Add(JsonSerializer.SerializeToNode(new
+                if (!omitReport && !generatedContext) artifacts.Add(JsonSerializer.SerializeToNode(new
                 {
                     id = locatorCoverage,
                     kind = "coverage",

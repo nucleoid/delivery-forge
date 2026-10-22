@@ -42,8 +42,8 @@ internal static class CompilerSourceOrigins
         {
             check(); token.ThrowIfCancellationRequested();
             if (!System.Runtime.CompilerServices.RuntimeHelpers.TryEnsureSufficientExecutionStack())
-                throw new IOException("Semantic origin recursion exceeds the available execution stack.");
-            if (++steps > MaximumSteps) throw new IOException("Semantic origin inventory exceeds the existing finite work profile.");
+                throw new CompilerRecipeUnsupportedException("Semantic origin recursion exceeds the available execution stack.");
+            if (++steps > MaximumSteps) throw new CompilerRecipeUnsupportedException("Semantic origin inventory exceeds the existing finite work profile.");
         }
         // Charge before retaining rows or allocating their arrays. Eight bytes per
         // UTF-16 unit covers worst-case JSON escaping, with conservative row space.
@@ -55,12 +55,12 @@ internal static class CompilerSourceOrigins
                 rowBytes = checked(rowBytes + 32L + 8L * (identity?.Length ?? 0));
             admittedBytes = checked(admittedBytes + rowBytes);
             if (admittedBytes > MaximumBytes)
-                throw new IOException("Semantic runtime inventory exceeds the existing artifact bound.");
+                throw new CompilerRecipeUnsupportedException("Semantic runtime inventory exceeds the existing artifact bound.");
         }
         string Text(string value)
         {
             Step();
-            if (value.Length > 16384) throw new IOException("Semantic origin identity exceeds the existing path/identity profile.");
+            if (value.Length > 16384) throw new CompilerRecipeUnsupportedException("Semantic origin identity exceeds the existing path/identity profile.");
             Admit(32, value);
             return value;
         }
@@ -69,7 +69,7 @@ internal static class CompilerSourceOrigins
         using var symbols = MetadataReaderProvider.FromPortablePdbStream(new MemoryStream(pdb, writable: false));
         var reader = symbols.GetMetadataReader();
         if (metadata.MethodDefinitions.Count > MaximumRows || reader.Documents.Count > MaximumRows)
-            throw new IOException("Semantic origin inventory exceeds the bounded method/document profile.");
+            throw new CompilerRecipeUnsupportedException("Semantic origin inventory exceeds the bounded method/document profile.");
         var namedBindings = CompilerNamedMethodBindings.Capture(compilation, metadata, reader, Step, Admit);
         var points = new List<Point>();
         var documentPaths = new Dictionary<DocumentHandle, string>();
@@ -121,7 +121,7 @@ internal static class CompilerSourceOrigins
         foreach (var tree in compilation.SyntaxTrees)
         {
             Step();
-            if (sourceRows.Count >= MaximumRows) throw new IOException("Semantic source inventory exceeds the bounded source profile.");
+            if (sourceRows.Count >= MaximumRows) throw new CompilerRecipeUnsupportedException("Semantic source inventory exceeds the bounded source profile.");
             var root = tree.GetRoot(token);
             var text = tree.GetText(token);
             var model = compilation.GetSemanticModel(tree);
@@ -139,7 +139,7 @@ internal static class CompilerSourceOrigins
             }
             void Add(string kind, SyntaxNode span, ISymbol? owner, string obligation, bool constructorGroup = false)
             {
-                Step(); if (regions.Count >= MaximumRows) throw new IOException("Semantic runtime-region membership exceeds the bounded profile.");
+                Step(); if (regions.Count >= MaximumRows) throw new CompilerRecipeUnsupportedException("Semantic runtime-region membership exceeds the bounded profile.");
                 Admit(1024, kind, path, obligation);
                 int? parentRegion = null;
                 for (var ancestor = span.Parent; ancestor is not null; ancestor = ancestor.Parent)
@@ -166,11 +166,12 @@ internal static class CompilerSourceOrigins
                 var candidates = counts.OrderBy(pair => pair.Key)
                     .Select(pair => new Candidate(pair.Key, pair.Value, perMethod[pair.Key], pair.Value == perMethod[pair.Key])).ToArray();
                 var constructors = new List<ConstructorRole>();
-                if (constructorGroup && (owner?.ContainingType ?? owner as INamedTypeSymbol) is { } ownerType)
+                var ownerType = owner as INamedTypeSymbol ?? owner?.ContainingType;
+                if (constructorGroup && ownerType is not null)
                     foreach (var constructor in owner?.IsStatic == true ? ownerType.StaticConstructors : ownerType.InstanceConstructors)
                     {
                         Step();
-                        if (constructors.Count >= MaximumRows) throw new IOException("Constructor group exceeds the bounded method profile.");
+                        if (constructors.Count >= MaximumRows) throw new CompilerRecipeUnsupportedException("Constructor group exceeds the bounded method profile.");
                         Admit(128);
                         var delegates = false;
                         foreach (var reference in constructor.DeclaringSyntaxReferences)
@@ -191,7 +192,7 @@ internal static class CompilerSourceOrigins
                 regions.Add(new(kind, path, sl, sc, el, ec,
                     owner?.GetDocumentationCommentId() is { } id ? Text(id) : null,
                     Text(owner?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
-                    Text((owner?.ContainingType ?? owner as INamedTypeSymbol)?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
+                    Text(ownerType?.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat) ?? string.Empty),
                     owner?.IsStatic, (owner as IMethodSymbol)?.IsAsync ?? false,
                     span is BlockSyntax { Statements.Count: 0 }, obligation, NamedBinding(owner as IMethodSymbol), constructors, candidates,
                     parentRegion, HasOwnYield(span, Step), null, SourceForm(kind, span, owner), null)
@@ -217,7 +218,7 @@ internal static class CompilerSourceOrigins
                 var name = constructor.ContainingType.ToDisplayString();
                 if (name is not ("System.Diagnostics.DebuggerHiddenAttribute" or "System.Diagnostics.DebuggerStepThroughAttribute"
                     or "System.Diagnostics.DebuggerNonUserCodeAttribute" or "System.Diagnostics.CodeAnalysis.ExcludeFromCodeCoverageAttribute")) return;
-                if (hiding.Count >= MaximumRows) throw new IOException("Authored hiding inventory exceeds the bounded profile.");
+                if (hiding.Count >= MaximumRows) throw new CompilerRecipeUnsupportedException("Authored hiding inventory exceeds the bounded profile.");
                 Admit(512, path, name);
                 hiding.Add(new { path, name, start = syntax.Span.Start, length = syntax.Span.Length });
                 Unsupported("source.authored-hiding-unsupported");
@@ -225,7 +226,7 @@ internal static class CompilerSourceOrigins
             void Declaration(string kind, SyntaxNode syntax, bool associated, string disposition)
             {
                 Step();
-                if (declarations.Count >= MaximumRows) throw new IOException("Source declaration semantics exceed the bounded profile.");
+                if (declarations.Count >= MaximumRows) throw new CompilerRecipeUnsupportedException("Source declaration semantics exceed the bounded profile.");
                 Admit(512, kind, path, disposition);
                 declarations.Add(new(kind, path, syntax.Span.Start, associated, disposition));
                 if (!associated) Unsupported(disposition);
@@ -364,7 +365,7 @@ internal static class CompilerSourceOrigins
             sourceExhaustion = new { complete = unresolved.Count == 0, unresolved = unresolved.Order(StringComparer.Ordinal), pendingInitializerCount },
             unresolved = "Every supported region has an explicit positive or unresolved association. Source exhaustion is conditional on trusted exact PE/PDB equality; pending initializer and source-form guards remain blocking. No coverage point or hit is fabricated."
         });
-        if (bytes.Length > MaximumBytes) throw new IOException("Semantic runtime inventory exceeds the existing artifact bound.");
+        if (bytes.Length > MaximumBytes) throw new CompilerRecipeUnsupportedException("Semantic runtime inventory exceeds the existing artifact bound.");
         Step(); return bytes;
     }
 

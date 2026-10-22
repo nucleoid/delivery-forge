@@ -360,8 +360,8 @@ internal sealed class CompilerAsyncScaffold
                 }
                 var identity = string.Join('.', names) + ":" + declaration.Identifier.ValueText;
                 if (!sources.TryGetValue(identity, out var matches)) sources.Add(identity, matches = []);
-                // An ambiguous, generated or non-class declaration poisons this
-                // identity rather than disappearing from the complete vector.
+                // A generated or non-class declaration refuses this entire
+                // source-vector profile; no unsupported input disappears from it.
                 if (declaration is not ClassDeclarationSyntax type || document.Generated) { sources.Clear(); return; }
                 matches.Add((document, type));
             }

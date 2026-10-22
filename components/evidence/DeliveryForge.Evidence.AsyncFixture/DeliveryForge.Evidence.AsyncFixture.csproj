@@ -4,6 +4,8 @@
     <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
     <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
     <ImplicitUsings>disable</ImplicitUsings>
+    <!-- Fixed optimized lowering is the fixture contract in both Debug and Release. -->
+    <Optimize>true</Optimize>
     <DebugType>portable</DebugType>
     <DebugSymbols>true</DebugSymbols>
   </PropertyGroup>

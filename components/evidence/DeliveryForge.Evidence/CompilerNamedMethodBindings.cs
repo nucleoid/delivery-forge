@@ -47,7 +47,7 @@ internal static class CompilerNamedMethodBindings
             step();
             method = Normalize(method);
             if (sourceMethods.Contains(method)) return;
-            if (sourceMethods.Count >= maximumRows) throw new IOException("Named source membership exceeds the existing bounded method profile.");
+            if (sourceMethods.Count >= maximumRows) throw new CompilerRecipeUnsupportedException("Named source membership exceeds the existing bounded method profile.");
             admit(512, []);
             sourceMethods.Add(method);
             string? key = null;
@@ -98,7 +98,7 @@ internal static class CompilerNamedMethodBindings
         VisitNamespace(compilation.SourceModule.GlobalNamespace);
 
         if (metadata.MethodDefinitions.Count > maximumRows)
-            throw new IOException("Named emitted membership exceeds the existing bounded method profile.");
+            throw new CompilerRecipeUnsupportedException("Named emitted membership exceeds the existing bounded method profile.");
         foreach (var handle in metadata.MethodDefinitions)
         {
             step();
@@ -179,7 +179,7 @@ internal static class CompilerNamedMethodBindings
             step();
             if (fields.TryGetValue(field, out var previous)) return previous;
             if (fields.Count >= maximumRows || metadata.FieldDefinitions.Count > maximumRows)
-                throw new IOException("Initializer field membership exceeds the existing bounded profile.");
+                throw new CompilerRecipeUnsupportedException("Initializer field membership exceeds the existing bounded profile.");
             int? found = null;
             var count = 0;
             var reason = "no-exact-emitted-field-signature";
@@ -235,7 +235,7 @@ internal static class CompilerNamedMethodBindings
             if (bindings.TryGetValue(method, out var own)) return own;
             if (targets.TryGetValue(method, out var previous)) return previous;
             if (targets.Count >= maximumRows || metadata.MemberReferences.Count > maximumRows)
-                throw new IOException("Constructor target membership exceeds the existing bounded profile.");
+                throw new CompilerRecipeUnsupportedException("Constructor target membership exceeds the existing bounded profile.");
             int? selected = null;
             var reason = "no-exact-emitted-constructor-reference";
             try

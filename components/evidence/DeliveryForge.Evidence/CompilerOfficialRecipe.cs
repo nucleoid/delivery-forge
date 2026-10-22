@@ -6,6 +6,9 @@ using System.Text.Json;
 
 namespace DeliveryForge.Evidence;
 
+// Closed implementation-only profile result; never a manifest or owner authority.
+internal sealed class CompilerRecipeUnsupportedException(string reason) : Exception(reason);
+
 // Private DATA decoder only. A retained official recipe does not grant freshness,
 // loaded-image attestation, authored origin, census, coverage or execution authority.
 internal static class CompilerOfficialRecipe
@@ -51,9 +54,12 @@ internal static class CompilerOfficialRecipe
             "taskAssociationSha256", "taskBinding", "commandBinding", "images", "arguments", "argumentRoles", "taskOptions", "unsupportedAttestations");
         Require(Text(recipe, "provider") == "completed-csc-typed-input-recipe-v1" && Text(recipe, "disposition") == "typed-input-data-only" &&
             Text(recipe, "contextId") == contextId && Text(recipe, "buildId") == buildId, "recipe provider/disposition/tuple");
+        // Producer observation identifiers/digests are structural DATA here.
+        // The recipe has no independent task key or original non-scalar argv
+        // spelling; these labels do not attest an actual task or currentness.
         _ = RawHash(recipe, "taskAssociationSha256");
         Require(Text(recipe, "taskBinding") == "selected-sdk-core-target" && Text(recipe, "commandBinding") is
-            "selected-host-exec-csc-arguments-match" or "selected-sdk-csc-exe-arguments-match", "completed task association");
+            "selected-host-exec-csc-arguments-match" or "selected-sdk-csc-exe-arguments-match", "producer-declared task/command profile");
         Require(Strings(recipe, "unsupportedAttestations").SequenceEqual(new[]
         { "recipe.loadedCompilerAndTaskImageNotAttested", "recipe.runtimeLoadedImageNotAttested" }), "unsupported attestations");
         var baseDirectory = Absolute(recipe, "baseDirectory");
@@ -73,7 +79,7 @@ internal static class CompilerOfficialRecipe
         }
         var sourceIndex = InputIndex(sourceInputs); var referenceIndex = InputIndex(referenceInputs);
         var mappings = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
-        foreach (var mapping in Rows(context.GetProperty("pathPolicy"), "reportRootMappings"))
+        foreach (var mapping in Rows(Property(context, "pathPolicy"), "reportRootMappings"))
         {
             files.Check(); Shape(mapping, "logicalRoot", "reportRoot");
             Require(mappings.TryAdd(Text(mapping, "logicalRoot"), mapping), "duplicate captured source path role");
@@ -82,7 +88,8 @@ internal static class CompilerOfficialRecipe
         void Charge(JsonElement row)
         {
             files.Check(); var length = Integer(row, "length");
-            Require(length is >= 0 && length <= MaximumBytes && declared <= MaximumBytes - length, "aggregate declared extent"); declared += length;
+            Require(length is >= 0 && length <= MaximumBytes, "aggregate declared extent");
+            declared = checked(declared + length);
         }
         var matchedSources = new HashSet<string>(StringComparer.Ordinal); var matchedReferences = new HashSet<string>(StringComparer.Ordinal);
         var sourcePaths = new string[sources.Length]; var referencePaths = new string[references.Length];
@@ -112,8 +119,9 @@ internal static class CompilerOfficialRecipe
             Require(aliases[i].Length == 0 ? expectedAliases is null : string.Join(',', aliases[i]) == expectedAliases, "reference aliases");
             Require(aliases[i].Distinct(StringComparer.Ordinal).Count() == aliases[i].Length &&
                 aliases[i].SequenceEqual(aliases[i].Order(StringComparer.Ordinal)) && !(aliases[i].Length == 1 && aliases[i][0] == "global"), "canonical aliases");
-            var expectedEmbed = input.TryGetProperty("embedInteropTypes", out var embed) && embed.ValueKind != JsonValueKind.Null && embed.GetBoolean();
-            Require(!input.TryGetProperty("embedInteropTypes", out embed) || embed.ValueKind == JsonValueKind.Null || embed.ValueKind == JsonValueKind.True, "canonical reference embed metadata");
+            var hasEmbed = input.TryGetProperty("embedInteropTypes", out var embed);
+            Require(!hasEmbed || embed.ValueKind is JsonValueKind.Null or JsonValueKind.True, "canonical reference embed metadata");
+            var expectedEmbed = hasEmbed && embed.ValueKind == JsonValueKind.True;
             Require(embedInterop[i] == expectedEmbed, "reference embed semantics");
             Require(logical == ReferenceLogical(RawHash(input, "sha256"), expectedAliases, expectedEmbed), "canonical reference property identity"); Charge(row);
         }
@@ -127,13 +135,13 @@ internal static class CompilerOfficialRecipe
                 Identity(row, "sha256") == "sha256:" + RawHash(found, "sha256"), "artifact descriptor");
             return found;
         }
-        var common = recipe.GetProperty("compilerCommon"); var csharp = recipe.GetProperty("compilerCSharp");
+        var common = Property(recipe, "compilerCommon"); var csharp = Property(recipe, "compilerCSharp");
         foreach (var (row, role) in new[] { (common, "compiler-common"), (csharp, "compiler-csharp") })
         {
             Shape(row, "locator", "length", "sha256", "artifactId", "role", "compilerPath");
             Require(Text(row, "role") == role, "compiler image role"); _ = Absolute(row, "compilerPath"); _ = Artifact(row, "compiler-image"); Charge(row);
         }
-        var assembly = recipe.GetProperty("assembly"); var pdb = recipe.GetProperty("pdb");
+        var assembly = Property(recipe, "assembly"); var pdb = Property(recipe, "pdb");
         foreach (var (row, kind, hashField) in new[] { (assembly, "assembly", "assemblySha256"), (pdb, "pdb", "pdbSha256") })
         {
             Require(artifacts.Values.Count(a => Text(a, "kind") == kind && Optional(a, "contextId") == contextId &&
@@ -141,7 +149,7 @@ internal static class CompilerOfficialRecipe
             Shape(row, "locator", "length", "sha256", "artifactId", "compilerPath"); _ = Absolute(row, "compilerPath");
             _ = Artifact(row, kind); Require(Identity(row, "sha256") == "sha256:" + RawHash(build, hashField), "build output digest"); Charge(row);
         }
-        var referenceAssembly = recipe.GetProperty("referenceAssembly");
+        var referenceAssembly = Property(recipe, "referenceAssembly");
         if (referenceAssembly.ValueKind != JsonValueKind.Null)
         {
             Shape(referenceAssembly, "compilerPath", "length", "sha256"); _ = Absolute(referenceAssembly, "compilerPath");
@@ -160,6 +168,9 @@ internal static class CompilerOfficialRecipe
             "complete compiler image membership");
         Require(Text(common, "artifactId") != Text(csharp, "artifactId"), "distinct compiler image roles");
         ValidateObservations(recipe, scalar, sources.Length, references.Length, embedded.Length, embedInterop, closure, common, csharp, files);
+        files.Check();
+        if (declared > MaximumBytes)
+            throw new CompilerRecipeUnsupportedException("Optional compiler reconstruction exceeds the existing combined128MiB profile.");
         // All structural/extent/role checks above precede any input/compiler byte reads.
         var sourceBytes = sources.Select(row => Read(row)).ToArray(); var referenceBytes = references.Select(row => Read(row)).ToArray();
         foreach (var row in closure) _ = Read(row); // Inert bytes only; never loaded.
@@ -203,7 +214,7 @@ internal static class CompilerOfficialRecipe
             var hash = RawHash(argument, "sha256"); var name = Text(role, "role"); var option = Optional(role, "name");
             if (name == "generated-output")
             {
-                Require(++generatedOutput == 1 && role.GetProperty("inputOrdinal").ValueKind == JsonValueKind.Null && option == "generatedfilesout", "generated output role"); continue;
+                Require(++generatedOutput == 1 && Property(role, "inputOrdinal").ValueKind == JsonValueKind.Null && option == "generatedfilesout", "generated output role"); continue;
             }
             Require(limits.ContainsKey(name) && Integer(role, "inputOrdinal") == seen[name] && seen[name] < limits[name], "typed argument role");
             var ordinal = seen[name]++;
@@ -291,9 +302,15 @@ internal static class CompilerOfficialRecipe
         foreach (var row in rows) { files.Check(); Require(result.TryAdd(Text(row, "id"), row), "duplicate manifest id"); }
         return result;
     }
+    private static JsonElement Property(JsonElement value, string name)
+    {
+        Require(value.ValueKind == JsonValueKind.Object, "object type");
+        Require(value.TryGetProperty(name, out var property), "required property");
+        return property;
+    }
     private static JsonElement[] Rows(JsonElement value, string name, int maximum = MaximumRows)
     {
-        var row = value.GetProperty(name); Require(row.ValueKind == JsonValueKind.Array && row.GetArrayLength() <= maximum, "array membership/extent"); return row.EnumerateArray().ToArray();
+        var row = Property(value, name); Require(row.ValueKind == JsonValueKind.Array && row.GetArrayLength() <= maximum, "array membership/extent"); return row.EnumerateArray().ToArray();
     }
     private static string[] Strings(JsonElement value, string name) => Rows(value, name, 32768).Select(item => String(item)).ToArray();
     private static string String(JsonElement value)
@@ -301,15 +318,15 @@ internal static class CompilerOfficialRecipe
         Require(value.ValueKind == JsonValueKind.String, "string type"); var text = value.GetString()!;
         Require(text.Length is > 0 and <= 16384 && !text.Any(char.IsControl), "string extent/content"); return text;
     }
-    private static string Text(JsonElement value, string name) => String(value.GetProperty(name));
+    private static string Text(JsonElement value, string name) => String(Property(value, name));
     private static string? Optional(JsonElement value, string name) => !value.TryGetProperty(name, out var item) || item.ValueKind == JsonValueKind.Null ? null : String(item);
     private static long Integer(JsonElement value, string name)
     {
-        var item = value.GetProperty(name); Require(item.ValueKind == JsonValueKind.Number && item.TryGetInt64(out _), "integer type"); return item.GetInt64();
+        var item = Property(value, name); Require(item.ValueKind == JsonValueKind.Number && item.TryGetInt64(out _), "integer type"); return item.GetInt64();
     }
     private static bool Boolean(JsonElement value, string name)
     {
-        var item = value.GetProperty(name); Require(item.ValueKind is JsonValueKind.True or JsonValueKind.False, "boolean type"); return item.GetBoolean();
+        var item = Property(value, name); Require(item.ValueKind is JsonValueKind.True or JsonValueKind.False, "boolean type"); return item.GetBoolean();
     }
     private static string RawHash(JsonElement value, string name)
     {

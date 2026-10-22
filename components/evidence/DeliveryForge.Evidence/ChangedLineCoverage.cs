@@ -28,6 +28,7 @@ internal static partial class ChangedLineCoverage
         var changes = ReadHunks(diff);
         var comparer = InstalledToolFiles.PathComparer;
         var sources = new Dictionary<string, Dictionary<string, Source>>(StringComparer.Ordinal);
+        var generatedChangedContexts = new HashSet<string>(StringComparer.Ordinal);
         var contexts = Array(manifest, "contexts").ToArray();
         if (contexts.Length is 0 or > 10000) throw Refuse("Context membership is absent or exceeds the finite profile.");
         foreach (var context in contexts)
@@ -49,8 +50,10 @@ internal static partial class ChangedLineCoverage
                     throw Refuse("Captured source bytes differ from the current manifest.");
                 var repositoryPath = OptionalText(input, "repositoryPath");
                 var generated = Boolean(input, "generated");
+                var changedGenerated = requireCompilerCensus && generated && repositoryPath is not null && changes.ContainsKey(repositoryPath);
+                if (changedGenerated) generatedChangedContexts.Add(id);
                 string? path = null;
-                if (!generated && repositoryPath is not null)
+                if (repositoryPath is not null && (!generated || changedGenerated))
                 {
                     InstalledToolProfile.Relative(repositoryPath);
                     path = Path.GetFullPath(Path.Combine(repository, repositoryPath));
@@ -86,8 +89,9 @@ internal static partial class ChangedLineCoverage
             files.Check();
             if (++membershipSteps > 1_000_000) throw Refuse("Complete compiler line/context membership exceeds the existing finite profile.");
         }
-        var censusComplete = requireCompilerCensus;
-        string? censusReason = null;
+        var censusComplete = requireCompilerCensus && generatedChangedContexts.Count == 0;
+        string? censusReason = generatedChangedContexts.Count == 0 ? null :
+            "Changed repository source marked generated is unsupported; no generated-role exemption or complete compiler census is inferred.";
         if (requireCompilerCensus)
         {
             foreach (var context in sources)
@@ -122,16 +126,25 @@ internal static partial class ChangedLineCoverage
                     // Existing source reads and exact repository/physical roles
                     // above stay authoritative. Optional recipe DATA grants no
                     // new path access or producer/currentness authority.
-                    var recipe = CompilerOfficialRecipe.Decode(manifest, context.Key, buildId, readArtifact, files);
-                    if (CompilerExactReemit.Supports(recipe.Request, recipe.Common, recipe.CSharp, recipe.Assembly, recipe.Pdb, files))
+                    CompilerExactReemit.Comparison? comparison = null;
+                    try
                     {
-                        var comparison = CompilerExactReemit.Compare(recipe.Request, recipe.Common, recipe.CSharp, recipe.Assembly, recipe.Pdb, files);
-                        if (comparison.HasProvenSourceOrigin)
-                            inventory = CompilerLineCensus.Inspect(assembly, pdb, expected, documents, files, comparison);
+                        var recipe = CompilerOfficialRecipe.Decode(manifest, context.Key, buildId, readArtifact, files);
+                        if (CompilerExactReemit.Supports(recipe.Request, recipe.Common, recipe.CSharp, recipe.Assembly, recipe.Pdb, files))
+                            comparison = CompilerExactReemit.Compare(recipe.Request, recipe.Common, recipe.CSharp, recipe.Assembly, recipe.Pdb, files);
                     }
+                    catch (CompilerRecipeUnsupportedException unsupported)
+                    {
+                        files.Check();
+                        censusReason ??= "Optional compiler recipe unsupported: " + unsupported.Message;
+                    }
+                    // This private certificate inspection is deliberately outside
+                    // the optional-profile catch. Corruption still refuses.
+                    if (comparison?.HasProvenSourceOrigin == true)
+                        inventory = CompilerLineCensus.Inspect(assembly, pdb, expected, documents, files, comparison);
                 }
                 if (!inventory.Complete) { censusComplete = false; censusReason ??= inventory.Reason; }
-                else completeContexts.Add(context.Key);
+                else if (!generatedChangedContexts.Contains(context.Key)) completeContexts.Add(context.Key);
                 foreach (var row in inventory.ProviderLines)
                 {
                     MembershipStep();

@@ -130,6 +130,26 @@ public sealed class CompilerInitializerOriginsTests
         Assert.Equal(0, fixture.ConstructorParameterRows(arguments.TargetToken!.Value));
     }
 
+    [Fact]
+    public void Nested_primary_base_inventory_describes_the_inner_constructor_and_type()
+    {
+        using var fixture = new Fixture("public class B { public B(int x) {} } public class Outer { public Outer(string ignored) {} public class Inner(int value) : B(value + 1) {} }");
+        using var json = System.Text.Json.JsonDocument.Parse(CompilerSourceOrigins.Capture(fixture.Compilation,
+            fixture.Pe, fixture.Pdb, fixture.Check, TestContext.Current.CancellationToken));
+        var region = Assert.Single(json.RootElement.GetProperty("regions").EnumerateArray(),
+            row => row.GetProperty("Kind").GetString() == "primary-constructor-base");
+        var inner = fixture.Compilation.GetTypeByMetadataName("Outer+Inner")!;
+        var constructor = Assert.Single(inner.InstanceConstructors);
+        Assert.Equal(inner.ToDisplayString(SymbolDisplayFormat.FullyQualifiedFormat), region.GetProperty("ContainingType").GetString());
+        var group = Assert.Single(region.GetProperty("ConstructorGroup").EnumerateArray());
+        Assert.Equal(constructor.GetDocumentationCommentId(), group.GetProperty("DeclarationId").GetString());
+        var arguments = region.GetProperty("ConstructorArgumentOrigin");
+        Assert.Equal("constructor-argument-origin-conditional-on-exact-reemit", arguments.GetProperty("Disposition").GetString());
+        var caller = arguments.GetProperty("CallerToken").GetInt32();
+        Assert.Equal("Inner", fixture.ConstructorType(caller));
+        Assert.Equal(caller, group.GetProperty("NamedMethodBinding").GetProperty("MethodToken").GetInt32());
+    }
+
     private sealed class Fixture : IDisposable
     {
         internal readonly CSharpCompilation Compilation;
