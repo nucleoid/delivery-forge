@@ -34,10 +34,14 @@ public sealed class ProductionReviewFiniteAdmissionTests
                 .ToDictionary(row => (string)row.Key, row => row.Value?.ToString() ?? "", StringComparer.OrdinalIgnoreCase);
             environment["GIT_CONFIG_NOSYSTEM"] = "1"; environment["GIT_CONFIG_GLOBAL"] = "NUL";
             environment["GIT_CONFIG_SYSTEM"] = "NUL"; environment["GIT_TERMINAL_PROMPT"] = "0";
+            // Fixture setup consumes the SAME decreasing original WORK, like
+            // the installed golden path; no fresh per-command clock/time grant.
+            var remaining = original.Remaining;
+            var elapsedAtEntry = System.Diagnostics.Stopwatch.GetElapsedTime(original.OriginalStarted);
             var capture = await executor.ExecuteBoundedCaptureAsync(new(git,
                 ["-c", "core.hooksPath=NUL", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", .. args], directory, environment)
-            { EnvironmentIsComplete = true }, TimeSpan.FromSeconds(15), 1048576,
-                TestContext.Current.CancellationToken, new OwnedWorkPhaseBudget(original));
+            { EnvironmentIsComplete = true }, remaining, 1048576,
+                original.Token, new OwnedWorkPhaseBudget(original));
             // The finite observation already exists: retain it before assertions.
             var call = ++gitCalls;
             File.WriteAllBytes(Path.Combine(root, $"git-{call:D3}-stdout.bin"), capture.StandardOutputBytes);
@@ -46,6 +50,11 @@ public sealed class ProductionReviewFiniteAdmissionTests
             {
                 Arguments = args,
                 Directory = directory,
+                GitCall = call,
+                OriginalElapsedAtEntrySeconds = elapsedAtEntry.TotalSeconds,
+                OriginalRemainingAtEntrySeconds = remaining.TotalSeconds,
+                OriginalWholeSeconds = original.WholeLimit.TotalSeconds,
+                OriginalWorkSeconds = original.WorkLimit.TotalSeconds,
                 capture.Command,
                 capture.RootExitObserved,
                 capture.StandardOutputDrainCompleted,

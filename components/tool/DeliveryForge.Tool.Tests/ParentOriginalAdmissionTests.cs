@@ -279,7 +279,13 @@ public sealed class ParentOriginalAdmissionTests
         if (!OperatingSystem.IsWindows()) Assert.Skip("Actual Windows original scope; Linux scoped ownership remains separate.");
         using var life = new ToolLifetime(TimeSpan.FromSeconds(60), TestContext.Current.CancellationToken);
         var current = true;
-        var admission = new ParentEffectAdmission(new object(), _ => Volatile.Read(ref current), _ => Volatile.Write(ref current, false));
+        long revocationObservedTimestamp = 0;
+        var admission = new ParentEffectAdmission(new object(), _ =>
+        {
+            var observed = Volatile.Read(ref current);
+            if (!observed) Interlocked.CompareExchange(ref revocationObservedTimestamp, System.Diagnostics.Stopwatch.GetTimestamp(), 0);
+            return observed;
+        }, _ => Volatile.Write(ref current, false));
         var files = new InstalledToolFiles(life, TimeSpan.FromSeconds(30), new InstalledToolHostScope.Credits(), admission, "owned");
         var shell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
         var root = Path.Combine(Path.GetTempPath(), "forge-capture-revocation-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
@@ -287,21 +293,87 @@ public sealed class ParentOriginalAdmissionTests
         var script = "[IO.File]::WriteAllText('" + marker.Replace("'", "''", StringComparison.Ordinal) + "','entered'); Start-Sleep -Seconds 30";
         var executor = new InstalledToolGateProvider.ActualExecutor(files, new Dictionary<string, string>(), shell, admission, "owned");
         var actual = executor.ExecuteAsync(new(shell, ["-NoProfile", "-NonInteractive", "-Command", script], root), TimeSpan.FromSeconds(20), life.Token);
+        Exception? failure = null;
+        Exception? retirementFailure = null;
+        long? revocationTimestamp = null;
         try
         {
-            var began = System.Diagnostics.Stopwatch.GetTimestamp();
-            while (!File.Exists(marker) && !actual.IsCompleted && System.Diagnostics.Stopwatch.GetElapsedTime(began) < TimeSpan.FromSeconds(8))
-                await Task.Delay(10, TestContext.Current.CancellationToken);
+            // Observe entry within the SAME actual capture's existing endpoint;
+            // an independent eight-second startup cutoff is not revocation proof.
+            while (!File.Exists(marker) && !actual.IsCompleted)
+            {
+                files.CheckWork();
+                await Task.Delay(10, life.Token);
+            }
             Assert.True(File.Exists(marker));
+            Assert.False(actual.IsCompleted);
+            files.CheckWork();
+            revocationTimestamp = System.Diagnostics.Stopwatch.GetTimestamp();
             Volatile.Write(ref current, false);
             await Assert.ThrowsAnyAsync<Exception>(() => actual.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken));
         }
+        catch (Exception error) { failure = error; throw; }
         finally
         {
             Volatile.Write(ref current, false);
-            try { await actual.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken); } catch (Exception) { }
+            try { await actual.WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken); }
+            catch (Exception error) { retirementFailure = error; }
+            try
+            {
+                // Preserve even zero-call/prebirth failure before an assertion exits.
+                var calls = executor.Calls.ToArray();
+                var observation = System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    MarkerPresent = File.Exists(marker),
+                    ActualCompleted = actual.IsCompleted,
+                    RevocationTimestamp = revocationTimestamp,
+                    RevocationObservedTimestamp = Interlocked.Read(ref revocationObservedTimestamp),
+                    Calls = calls.Length,
+                    OriginalElapsedSeconds = System.Diagnostics.Stopwatch.GetElapsedTime(life.OriginalStarted).TotalSeconds,
+                    life.WholeLimit,
+                    life.WorkLimit,
+                    Files = files.TimingData,
+                    Failure = failure?.ToString(),
+                    RetirementFailure = retirementFailure?.ToString()
+                });
+                TestContext.Current.TestOutputHelper!.WriteLine("Retained actual revocation capture: " + root + " " + observation);
+                File.WriteAllText(Path.Combine(root, "capture-attempt.json"), observation);
+                if (calls.Length == 1)
+                {
+                    var retained = calls[0].Capture;
+                    File.WriteAllBytes(Path.Combine(root, "actual-stdout.bin"), retained.StandardOutputBytes);
+                    File.WriteAllBytes(Path.Combine(root, "actual-stderr.bin"), retained.StandardErrorBytes);
+                    var captureObservation = System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        retained.Command,
+                        retained.RootExitObserved,
+                        retained.StandardOutputDrainCompleted,
+                        retained.StandardErrorDrainCompleted,
+                        retained.CaptureBoundExceeded,
+                        retained.Timing,
+                        OutputBytes = retained.StandardOutputBytes.Length,
+                        ErrorBytes = retained.StandardErrorBytes.Length
+                    });
+                    File.WriteAllText(Path.Combine(root, "capture.json"), captureObservation);
+                    TestContext.Current.TestOutputHelper!.WriteLine("Actual revocation native observation: " + captureObservation);
+                }
+            }
+            catch (Exception diagnosticFailure) when (failure is not null)
+            {
+                // Secondary diagnostics cannot replace the original failed assertion.
+                try { TestContext.Current.TestOutputHelper?.WriteLine("Capture diagnostic failure: " + diagnosticFailure); }
+                catch (Exception) { }
+            }
         }
         var capture = Assert.Single(executor.Calls).Capture;
+        var timing = Assert.IsType<BoundedCaptureTimingObservation>(capture.Timing);
+        var startup = Assert.IsType<CommandStartupObservation>(capture.Command.LifecycleDiagnostics!.Startup);
+        Assert.NotNull(revocationTimestamp);
+        var observedRevocation = Interlocked.Read(ref revocationObservedTimestamp);
+        Assert.True(observedRevocation >= revocationTimestamp.Value);
+        Assert.NotNull(timing.CleanupStartedTimestamp);
+        Assert.True(observedRevocation <= timing.CleanupStartedTimestamp.Value);
+        Assert.True(System.Diagnostics.Stopwatch.GetElapsedTime(timing.OriginalStartedTimestamp, observedRevocation).TotalSeconds < startup.OriginalWorkSeconds);
         Assert.True(capture.Command.OwnedProcessQuiescent);
         Assert.True(capture.RootExitObserved && capture.StandardOutputDrainCompleted && capture.StandardErrorDrainCompleted);
         Assert.False(life.HasExplicitUnknown);
