@@ -214,19 +214,21 @@ public sealed class RealDotNetFixtureTests
         string protectedBase,
         string label)
     {
-        var identity = await new GitRepositoryIdentityReader(executor, repository, protectedBase)
-            .ReadAsync(TestContext.Current.CancellationToken);
-        var porcelain = await RunAsync(
-            executor, "git", repository, ["status", "--porcelain=v1", "--untracked-files=all"]);
-        var topLevel = await RunAsync(executor, "git", repository, ["rev-parse", "--show-toplevel"]);
-        var config = await RunAsync(
+        var porcelain = await RunGitDiagnosticAsync(
+            executor, repository, ["status", "--porcelain=v1", "--untracked-files=all"]);
+        var topLevel = await RunGitDiagnosticAsync(
+            executor, repository, ["rev-parse", "--show-toplevel"]);
+        var config = await RunGitDiagnosticAsync(
             executor,
-            "git",
             repository,
             [
                 "config", "--show-origin", "--get-regexp",
-                "^(core\\.(autocrlf|eol|safecrlf|ignorecase|filemode)|status\\.showUntrackedFiles)$"
+                "^(core\\.(autocrlf|eol|safecrlf|ignorecase|filemode|fsmonitor)|status\\.showUntrackedFiles)$"
             ]);
+        // Keep the hardened identity read last. Diagnostic Git commands must not run
+        // between the expected snapshot and GateRunner's independent observed read.
+        var identity = await new GitRepositoryIdentityReader(executor, repository, protectedBase)
+            .ReadAsync(TestContext.Current.CancellationToken);
         return new RepositoryDiagnosticSnapshot(
             label,
             Environment.CurrentDirectory,
@@ -307,6 +309,25 @@ public sealed class RealDotNetFixtureTests
             new CommandInvocation(executable, arguments, directory),
             TimeSpan.FromSeconds(90),
             TestContext.Current.CancellationToken);
+
+    private static Task<CommandResult> RunGitDiagnosticAsync(
+        ProcessCommandExecutor executor,
+        string directory,
+        IReadOnlyList<string> arguments)
+    {
+        var hardenedArguments = new[] { "-c", "core.fsmonitor=false" }.Concat(arguments).ToArray();
+        return executor.ExecuteAsync(
+            new CommandInvocation(
+                "git",
+                hardenedArguments,
+                directory,
+                new Dictionary<string, string>(StringComparer.Ordinal)
+                {
+                    ["GIT_OPTIONAL_LOCKS"] = "0"
+                }),
+            TimeSpan.FromSeconds(90),
+            TestContext.Current.CancellationToken);
+    }
 
     private static (int Total, int Executed, int Passed, int Failed) ReadCounts(string trx)
     {
