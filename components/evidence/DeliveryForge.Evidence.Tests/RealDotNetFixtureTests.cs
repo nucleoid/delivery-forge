@@ -188,7 +188,15 @@ public sealed class RealDotNetFixtureTests
             isolatedAttributes,
             ["-c", "core.autocrlf=true", "status", "--porcelain=v1", "--untracked-files=all"]);
         Assert.True(string.IsNullOrEmpty(ordinaryNoPolicyStatus.StandardOutput));
-        var noPolicyIdentity = await new GitRepositoryIdentityReader(executor, noPolicyClone, noPolicyHead)
+        var noPolicyIdentity = await new GitRepositoryIdentityReader(
+                new EnvironmentOverlayCommandExecutor(
+                    executor,
+                    new Dictionary<string, string>(StringComparer.Ordinal)
+                    {
+                        ["GIT_ATTR_NOSYSTEM"] = "1"
+                    }),
+                noPolicyClone,
+                noPolicyHead)
             .ReadAsync(TestContext.Current.CancellationToken);
         Assert.False(noPolicyIdentity.IsClean);
         var noPolicyIndex = (await IsolatedGitAsync(
@@ -397,20 +405,55 @@ public sealed class RealDotNetFixtureTests
         }.Concat(arguments).ToArray();
         var result = await executor.ExecuteAsync(
             new CommandInvocation(
-                "git",
+                ResolveExecutable("DELIVERY_FORGE_GIT_HOST", "git"),
                 isolatedArguments,
                 directory,
-                new Dictionary<string, string>(StringComparer.Ordinal)
-                {
-                    ["GIT_ATTR_NOSYSTEM"] = "1",
-                    ["GIT_CONFIG_GLOBAL"] = isolatedGlobalConfig,
-                    ["GIT_CONFIG_NOSYSTEM"] = "1",
-                    ["GIT_OPTIONAL_LOCKS"] = "0"
-                }),
+                CreateIsolatedGitEnvironment(isolatedGlobalConfig),
+                InheritEnvironment: false),
             TimeSpan.FromSeconds(90),
             TestContext.Current.CancellationToken);
         Assert.Equal(0, result.ExitCode);
         return result;
+    }
+
+    private static IReadOnlyDictionary<string, string> CreateIsolatedGitEnvironment(string isolatedGlobalConfig)
+    {
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["GIT_ATTR_NOSYSTEM"] = "1",
+            ["GIT_CONFIG_GLOBAL"] = isolatedGlobalConfig,
+            ["GIT_CONFIG_NOSYSTEM"] = "1",
+            ["GIT_OPTIONAL_LOCKS"] = "0"
+        };
+        foreach (var name in new[]
+                 {
+                     "PATH", "PATHEXT", "SystemRoot", "ComSpec", "TEMP", "TMP", "TMPDIR", "HOME", "USERPROFILE"
+                 })
+        {
+            var value = Environment.GetEnvironmentVariable(name);
+            if (!string.IsNullOrEmpty(value))
+                environment[name] = value;
+        }
+        return environment;
+    }
+
+    private sealed class EnvironmentOverlayCommandExecutor(
+        ICommandExecutor inner,
+        IReadOnlyDictionary<string, string> environment) : ICommandExecutor
+    {
+        public Task<CommandResult> ExecuteAsync(
+            CommandInvocation invocation,
+            TimeSpan timeout,
+            CancellationToken cancellationToken)
+        {
+            var merged = new Dictionary<string, string>(StringComparer.Ordinal);
+            if (invocation.Environment is not null)
+                foreach (var pair in invocation.Environment)
+                    merged[pair.Key] = pair.Value;
+            foreach (var pair in environment)
+                merged[pair.Key] = pair.Value;
+            return inner.ExecuteAsync(invocation with { Environment = merged }, timeout, cancellationToken);
+        }
     }
 
     private static async Task<ToolCapability> DetectDotNetAsync(
