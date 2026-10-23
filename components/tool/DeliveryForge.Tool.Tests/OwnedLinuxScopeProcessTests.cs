@@ -21,7 +21,9 @@ public sealed class OwnedLinuxScopeProcessTests
         // The separately compiled fixture deliberately emits a partial birth
         // frame and waits without releasing a target. Parent retains only its
         // actual creation-owned group identity, never a name/PID adoption.
-        Assert.NotNull(run.Session.StartupFailure); var closed = await run.Session.RetireAsync(true);
+        var refusal = Assert.IsType<IOException>(run.Session.StartupFailure);
+        Assert.Equal("Actual private birth identity/clock differs.", refusal.Message);
+        var closed = await run.Session.RetireAsync(true);
         // Private actual PID+generation/cgroup/FD binding preceded READY. The
         // original group can therefore be stopped even though target release
         // never returned. No success or foreign name/PID adoption is inferred.
