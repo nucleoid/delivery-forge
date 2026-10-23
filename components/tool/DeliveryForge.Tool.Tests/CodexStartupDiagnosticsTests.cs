@@ -71,6 +71,32 @@ public sealed class CodexStartupDiagnosticsTests
         var text = JsonSerializer.Serialize(snapshot, BoundedFiles.Json); Assert.DoesNotContain("private", text, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData(5, true)]
+    [InlineData(7, true)]
+    [InlineData(5, false)]
+    [InlineData(7, false)]
+    public void A_new_configuration_read_cannot_retain_an_earlier_pass_after_missing_or_refused_reply(long id, bool refusedReply)
+    {
+        var journal = new CodexStartupJournal(Stopwatch.GetTimestamp());
+        using var supported = JsonDocument.Parse("{\"id\":2,\"result\":{\"routeDiagnostic\":\"Supported\",\"destinationOrigin\":\"Missing\"}}");
+        journal.Server(supported.RootElement);
+        Assert.Equal(CodexConfigReadDiagnostic.Supported, journal.Snapshot([], null, null, null, [], false, false).ConfigurationDiagnostic);
+        journal.Client("thread/start", 4, CodexWireState.WriteEntered);
+        Assert.Equal(CodexConfigReadDiagnostic.Supported, journal.Snapshot([], null, null, null, [], false, false).ConfigurationDiagnostic);
+        journal.Client("config/read", id, CodexWireState.WriteEntered);
+        if (refusedReply)
+        {
+            using var reply = JsonDocument.Parse(JsonSerializer.Serialize(new { id, error = new { code = -32602, message = "private-sentinel" } }));
+            journal.Server(reply.RootElement);
+        }
+        var snapshot = journal.Snapshot([], null, null, null, [], false, false);
+        Assert.Equal(CodexConfigReadDiagnostic.NotObserved, snapshot.ConfigurationDiagnostic);
+        Assert.Equal(CodexConfigOriginClass.NotObserved, snapshot.ConfigurationDestinationOrigin);
+        Assert.DoesNotContain("private-sentinel", JsonSerializer.Serialize(snapshot, BoundedFiles.Json), StringComparison.Ordinal);
+        if (refusedReply) Assert.True(snapshot.Wire[^1].HasError);
+    }
+
     [Fact]
     public void Real_CreateNew_failure_snapshot_uses_closed_WORK_original_cleanup_and_preserves_existing_evidence()
     {

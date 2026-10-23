@@ -32,7 +32,14 @@ internal sealed class CodexStartupJournal(long originalStarted)
         null => CodexWireMethod.None,
         _ => CodexWireMethod.Other
     };
-    internal void Client(string method, long? id, CodexWireState state) => Add(CodexWireDirection.Client, Method(method), state, id is null ? CodexWireIdKind.None : CodexWireIdKind.ClientNumber, id, false, null);
+    internal void Client(string method, long? id, CodexWireState state)
+    {
+        // A new read owns the current diagnostic even when writing or its reply
+        // fails before a projected result is available. Never retain an older pass.
+        if (method == "config/read" && state == CodexWireState.WriteEntered)
+            lock (gate) { configurationDiagnostic = CodexConfigReadDiagnostic.NotObserved; configurationDestinationOrigin = CodexConfigOriginClass.NotObserved; }
+        Add(CodexWireDirection.Client, Method(method), state, id is null ? CodexWireIdKind.None : CodexWireIdKind.ClientNumber, id, false, null);
+    }
     internal void Server(JsonElement message)
     {
         var method = message.TryGetProperty("method", out var m) && m.ValueKind == JsonValueKind.String ? m.GetString() : null;
