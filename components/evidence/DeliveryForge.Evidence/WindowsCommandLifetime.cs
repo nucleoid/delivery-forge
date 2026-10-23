@@ -185,7 +185,7 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
             }
         }
         catch (StartupStoppedException stopped) { cancelled = stopped.Cancelled; timedOut = stopped.TimedOut; startupFailureStage = owner?._stage; failure = stopped.Message; retention.Add(stopped); }
-        catch (Exception exception) when (exception is Win32Exception or IOException or ArgumentException or InvalidOperationException)
+        catch (Exception exception) when (exception is Win32Exception or IOException or ArgumentException or InvalidOperationException or TaskSchedulerException)
         { known = false; failure = Bounded(exception); startupFailureStage = owner?._stage ?? "create-job"; retention.Add(exception); }
         if (cancelled || timedOut || stdout.Exceeded || stderr.Exceeded || !known || failure is not null || !rootExited || active != 0)
             restrictive.BeginFailureCleanup(); // synchronous actual parent latch BEFORE terminate/first disposition.
@@ -378,10 +378,19 @@ internal sealed partial class WindowsCommandLifetime : IDisposable
         if (_captureRetention is not null)
         {
             _stage = "enroll-original-byte-drains";
-            _captureOutputTask = BoundedCaptureStream.Observe(_captureStdout!.DrainAsync(_stdout.BaseStream));
+            // Enroll each exact task before starting its blocking original
+            // reader. Async-over-sync pipe reads otherwise use the same pool
+            // as the bounded owner's monitor continuation.
+            _captureOutputTask = new Task(() => _captureStdout!.DrainSynchronously(_stdout.BaseStream),
+                CancellationToken.None, TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach);
             _captureRetention.Add(_captureOutputTask);
-            _captureErrorTask = BoundedCaptureStream.Observe(_captureStderr!.DrainAsync(_stderr.BaseStream));
+            _ = BoundedCaptureStream.Observe(_captureOutputTask);
+            _captureOutputTask.Start(TaskScheduler.Default);
+            _captureErrorTask = new Task(() => _captureStderr!.DrainSynchronously(_stderr.BaseStream),
+                CancellationToken.None, TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach);
             _captureRetention.Add(_captureErrorTask);
+            _ = BoundedCaptureStream.Observe(_captureErrorTask);
+            _captureErrorTask.Start(TaskScheduler.Default);
         }
         _stage = "resume-owned-root";
         CheckStartupBudget(originalStarted, originalTimeout, caller);
