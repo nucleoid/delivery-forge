@@ -9,13 +9,13 @@ internal enum CodexWireMethod { None, Initialize, Initialized, ThreadStart, Thre
 internal enum CodexWireState { WriteEntered, WriteReturned, Received }
 internal enum CodexWireIdKind { None, ClientNumber, OtherNumber, String }
 internal sealed record CodexWireObservation(long ElapsedTicks, CodexStartupStage Stage, CodexWireDirection Direction, CodexWireMethod Method, CodexWireState State, CodexWireIdKind IdKind, long? ClientId, bool HasError, int? ErrorCode);
-internal sealed record CodexStartupDiagnostics(CodexStartupStage Stage, long OriginalStarted, long ElapsedTicks, IReadOnlyList<CodexWireObservation> Wire, bool WireBoundExceeded, int ReceivedMessages, int SentMessages, IReadOnlyList<long> PendingIds, string? ReplyFailureType, string? PumpFailureType, TaskStatus? PumpStatus, IReadOnlyList<TaskStatus> OriginalTasks, bool ThreadReceived, bool TurnReceived, CodexConfigReadDiagnostic ConfigurationDiagnostic = CodexConfigReadDiagnostic.NotObserved);
+internal sealed record CodexStartupDiagnostics(CodexStartupStage Stage, long OriginalStarted, long ElapsedTicks, IReadOnlyList<CodexWireObservation> Wire, bool WireBoundExceeded, int ReceivedMessages, int SentMessages, IReadOnlyList<long> PendingIds, string? ReplyFailureType, string? PumpFailureType, TaskStatus? PumpStatus, IReadOnlyList<TaskStatus> OriginalTasks, bool ThreadReceived, bool TurnReceived, CodexConfigReadDiagnostic ConfigurationDiagnostic = CodexConfigReadDiagnostic.NotObserved, CodexConfigOriginClass ConfigurationDestinationOrigin = CodexConfigOriginClass.NotObserved);
 
 // Fixed Codex-only metadata. No prompts, params/results, account values, arbitrary
 // methods or string IDs enter this ledger. It issues no process/capability proof.
 internal sealed class CodexStartupJournal(long originalStarted)
 {
-    readonly object gate = new(); readonly List<CodexWireObservation> wire = []; CodexStartupStage stage; bool exceeded; int received, sent; CodexConfigReadDiagnostic configurationDiagnostic;
+    readonly object gate = new(); readonly List<CodexWireObservation> wire = []; CodexStartupStage stage; bool exceeded; int received, sent; CodexConfigReadDiagnostic configurationDiagnostic; CodexConfigOriginClass configurationDestinationOrigin;
     internal void SetStage(CodexStartupStage value) { lock (gate) stage = value; }
     static CodexWireMethod Method(string? method) => method switch
     {
@@ -46,7 +46,7 @@ internal sealed class CodexStartupJournal(long originalStarted)
         var hasError = message.TryGetProperty("error", out var error); int? code = null;
         if (hasError && error.ValueKind == JsonValueKind.Object && error.TryGetProperty("code", out var wireCode) && wireCode.ValueKind == JsonValueKind.Number && wireCode.TryGetInt32(out var actualCode)) code = actualCode;
         if (message.TryGetProperty("result", out var result) && result.ValueKind == JsonValueKind.Object && result.TryGetProperty("routeDiagnostic", out _))
-            lock (gate) configurationDiagnostic = CodexConfigReadData.Diagnostic(result);
+            lock (gate) { configurationDiagnostic = CodexConfigReadData.Diagnostic(result); configurationDestinationOrigin = CodexConfigReadData.DestinationOrigin(result); }
         Add(CodexWireDirection.Server, Method(method), CodexWireState.Received, kind, number, hasError, code);
     }
     void Add(CodexWireDirection direction, CodexWireMethod method, CodexWireState state, CodexWireIdKind kind, long? id, bool error, int? errorCode)
@@ -60,7 +60,7 @@ internal sealed class CodexStartupJournal(long originalStarted)
     }
     internal CodexStartupDiagnostics Snapshot(IReadOnlyList<long> pending, Exception? replyFailure, Exception? pumpFailure, Task? pump, IReadOnlyList<Task> tasks, bool thread, bool turn)
     {
-        lock (gate) return new(stage, originalStarted, Stopwatch.GetTimestamp() - originalStarted, wire.ToArray(), exceeded, received, sent, pending, replyFailure?.GetType().FullName, pumpFailure?.GetType().FullName, pump?.Status, tasks.Select(t => t.Status).ToArray(), thread, turn, configurationDiagnostic);
+        lock (gate) return new(stage, originalStarted, Stopwatch.GetTimestamp() - originalStarted, wire.ToArray(), exceeded, received, sent, pending, replyFailure?.GetType().FullName, pumpFailure?.GetType().FullName, pump?.Status, tasks.Select(t => t.Status).ToArray(), thread, turn, configurationDiagnostic, configurationDestinationOrigin);
     }
 }
 

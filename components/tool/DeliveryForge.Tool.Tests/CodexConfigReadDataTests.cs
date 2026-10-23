@@ -98,6 +98,8 @@ public sealed class CodexConfigReadDataTests
     {
         var result = Project("{\"openai_base_url\":null,\"model_providers\":{}}");
         Assert.Equal(64, CodexConfigReadData.RequireSupported(result).Length);
+        Assert.Equal(CodexConfigReadDiagnostic.Supported, CodexConfigReadData.Diagnostic(result));
+        Assert.Equal(CodexConfigOriginClass.NotObserved, CodexConfigReadData.DestinationOrigin(result));
         Assert.False(result.TryGetProperty("endpoint", out _));
     }
     [Fact]
@@ -127,7 +129,7 @@ public sealed class CodexConfigReadDataTests
         Assert.EndsWith("Diagnostic=" + expected, refusal.Message, StringComparison.Ordinal);
     }
     [Theory]
-    [InlineData("{\"openai_base_url\":\"secret-sentinel\"}", "KnownDestinationOverride")]
+    [InlineData("{\"openai_base_url\":\"secret-sentinel\"}", "EffectiveOpenAiStringDestination")]
     [InlineData("{\"model_providers\":{\"private-provider\":{\"base_url\":\"secret-sentinel\"}}}", "CustomProviderDefinitions")]
     [InlineData("{\"model\":\"secret-sentinel\"}", "UnsupportedModelIdentity")]
     [InlineData("{\"model_provider\":\"secret-sentinel\"}", "UnsupportedProviderIdentity")]
@@ -170,5 +172,84 @@ public sealed class CodexConfigReadDataTests
         Assert.DoesNotContain("secret-sentinel", JsonSerializer.Serialize(snapshot, BoundedFiles.Json));
         var refusal = Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(forged.RootElement.GetProperty("result")));
         Assert.DoesNotContain("secret-sentinel", refusal.ToString());
+    }
+
+    static JsonElement DestinationProjection(bool layer, string key, string rawValue)
+    {
+        using var value = JsonDocument.Parse(rawValue);
+        var configuration = new Dictionary<string, JsonElement> { [key] = value.RootElement.Clone() };
+        object empty = new { };
+        var source = new { type = layer ? "user" : "packagedDefaults", file = "private-path-sentinel" };
+        var raw = JsonSerializer.SerializeToElement(new
+        {
+            id = 7,
+            result = new
+            {
+                config = layer ? empty : configuration,
+                origins = layer ? new Dictionary<string, object>() : new Dictionary<string, object> { [key] = new { name = source, version = "private-version-sentinel" } },
+                layers = new[] { new { config = layer ? (object)configuration : empty, name = source, version = "private-version-sentinel" } }
+            }
+        });
+        return CodexConfigReadData.Redact(raw, 7).GetProperty("result");
+    }
+    [Theory]
+    [InlineData(false, "openai_base_url", "\"private-value-sentinel\"", "EffectiveOpenAiStringDestination")]
+    [InlineData(true, "openai_base_url", "\"private-value-sentinel\"", "LayerOpenAiStringDestination")]
+    [InlineData(false, "openai_base_url", "false", "EffectiveOpenAiNonStringDestination")]
+    [InlineData(true, "openai_base_url", "{}", "LayerOpenAiNonStringDestination")]
+    [InlineData(false, "chatgpt_base_url", "\"https://chatgpt.com/backend-api/\"", "EffectiveChatGptDocumentedDefaultDestination")]
+    [InlineData(true, "chatgpt_base_url", "\"https://chatgpt.com/backend-api/\"", "LayerChatGptDocumentedDefaultDestination")]
+    [InlineData(false, "chatgpt_base_url", "\"private-value-sentinel\"", "EffectiveChatGptOtherStringDestination")]
+    [InlineData(true, "chatgpt_base_url", "\"private-value-sentinel\"", "LayerChatGptOtherStringDestination")]
+    [InlineData(false, "chatgpt_base_url", "false", "EffectiveChatGptNonStringDestination")]
+    [InlineData(true, "chatgpt_base_url", "[]", "LayerChatGptNonStringDestination")]
+    public void Destination_classification_is_diagnostic_only_and_keeps_every_nonnull_value_refused(bool layer, string key, string value, string expected)
+    {
+        var projected = DestinationProjection(layer, key, value);
+        Assert.Equal(expected, CodexConfigReadData.Diagnostic(projected).ToString());
+        Assert.Equal(layer ? CodexConfigOriginClass.User : CodexConfigOriginClass.PackagedDefaults, CodexConfigReadData.DestinationOrigin(projected));
+        Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(projected));
+        Assert.DoesNotContain("https://", projected.GetRawText());
+        Assert.DoesNotContain("private-", projected.GetRawText());
+        var journal = new CodexStartupJournal(System.Diagnostics.Stopwatch.GetTimestamp());
+        journal.Server(JsonSerializer.SerializeToElement(new { id = 7, result = projected }));
+        var snapshot = journal.Snapshot([], null, null, null, [], false, false);
+        Assert.Equal(CodexConfigReadData.Diagnostic(projected), snapshot.ConfigurationDiagnostic);
+        Assert.Equal(CodexConfigReadData.DestinationOrigin(projected), snapshot.ConfigurationDestinationOrigin);
+        Assert.DoesNotContain("private-", JsonSerializer.Serialize(snapshot, BoundedFiles.Json));
+    }
+    [Theory]
+    [InlineData("https://chatgpt.com.evil.invalid/backend-api/")]
+    [InlineData("https://chatgpt.com/backend-api/?private-sentinel")]
+    [InlineData("https://chatgpt.com/backend-api")]
+    public void Documented_literal_classification_does_not_normalize_or_allow_hostnames_prefixes_or_suffixes(string value)
+    {
+        var projected = DestinationProjection(false, "chatgpt_base_url", JsonSerializer.Serialize(value));
+        Assert.Equal(CodexConfigReadDiagnostic.EffectiveChatGptOtherStringDestination, CodexConfigReadData.Diagnostic(projected));
+        Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(projected));
+        Assert.DoesNotContain(value, projected.GetRawText());
+    }
+    [Fact]
+    public void Nested_effective_destination_does_not_guess_a_top_level_origin()
+    {
+        var projected = Project("{\"profiles\":{\"private-profile-sentinel\":{\"chatgpt_base_url\":\"https://chatgpt.com/backend-api/\"}}}");
+        Assert.Equal(CodexConfigReadDiagnostic.EffectiveChatGptDocumentedDefaultDestination, CodexConfigReadData.Diagnostic(projected));
+        Assert.Equal(CodexConfigOriginClass.NestedNotResolved, CodexConfigReadData.DestinationOrigin(projected));
+        Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(projected));
+        Assert.DoesNotContain("private-profile-sentinel", projected.GetRawText());
+    }
+    [Fact]
+    public void Missing_or_unknown_origin_labels_are_not_promoted_or_retained()
+    {
+        var projected = Project("{\"chatgpt_base_url\":\"https://chatgpt.com/backend-api/\"}");
+        Assert.Equal(CodexConfigOriginClass.Missing, CodexConfigReadData.DestinationOrigin(projected));
+        Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(projected));
+        using var forged = JsonDocument.Parse("{\"routeDiagnostic\":\"EffectiveChatGptDocumentedDefaultDestination\",\"routeStatus\":\"unsupported\",\"destinationOrigin\":\"private-origin-sentinel\"}");
+        Assert.Equal(CodexConfigOriginClass.Unrecognized, CodexConfigReadData.DestinationOrigin(forged.RootElement));
+        var journal = new CodexStartupJournal(System.Diagnostics.Stopwatch.GetTimestamp());
+        journal.Server(JsonSerializer.SerializeToElement(new { id = 7, result = forged.RootElement }));
+        var snapshot = journal.Snapshot([], null, null, null, [], false, false);
+        Assert.Equal(CodexConfigOriginClass.Unrecognized, snapshot.ConfigurationDestinationOrigin);
+        Assert.DoesNotContain("private-origin-sentinel", JsonSerializer.Serialize(snapshot, BoundedFiles.Json));
     }
 }
