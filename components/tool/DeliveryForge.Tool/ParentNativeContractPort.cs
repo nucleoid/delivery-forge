@@ -36,7 +36,7 @@ internal sealed class ParentNativeContractPort : IHostToolSessionPort, IOriginal
     internal void BindProvisionedObservation(FrozenWorkerPlan assignment, WorktreeObservation observation)
     {
         Life.Check();
-        if (entered || provisionedAssignment is not null || !observation.IsClean || observation.HeadCommit != assignment.BaseCommit || observation.RootPath != assignment.Worktree)
+        if (entered || provisionedAssignment is not null || !observation.IsClean || observation.HeadCommit != assignment.BaseCommit || !git.IsSameDirectory(observation.RootPath, assignment.Worktree))
             throw new IOException("Exact clean same-original fixture provisioning observation required once before start.");
         provisionedAssignment = assignment; BeforeStart = observation;
     }

@@ -107,7 +107,10 @@ public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssue
             intent = await Observe("ActualIssueRead", () => issues.ReadPublicIssueAsync(issue, life.Remaining, life.Token), life).ConfigureAwait(false);
         }
         else intent = BoundedFiles.ReadJson<PlanIntent>(command.Get("intent-file")!, life);
-        if (intent.Request.Repository != config.Repository || intent.Request.Mode != "plan" || TrustedConfiguration.Ceiling(intent.Request.RequestedCeiling) > TrustedConfiguration.Ceiling(config.MaximumCeiling)) throw new ToolUsageException("Intent identity/mode/ceiling differs from protected selection.");
+        if (intent.Request.Repository != config.Repository || intent.Request.Mode is not ("plan" or "implement") ||
+            TrustedConfiguration.Ceiling(intent.Request.RequestedCeiling) > TrustedConfiguration.Ceiling(config.MaximumCeiling) ||
+            (intent.Request.Mode == "implement" && TrustedConfiguration.Ceiling(intent.Request.RequestedCeiling) < AuthorizationCeiling.Implement))
+            throw new ToolUsageException("Intent identity/mode/ceiling differs from protected selection.");
         var reader = actualExecutor is null ? new GitRepositoryContextReader(config.GitExecutable) : new GitRepositoryContextReader(config.GitExecutable, actualExecutor, life); var context = await Observe("ActualRepositoryRead", () => reader.ReadAsync(repo, config.MutableReference, life.Token), life).ConfigureAwait(false); life.Check();
         if (intent.EvidencePaths.Count is < 1 or > 128) throw new ToolUsageException("Explicit bounded repository evidence paths are required.");
         var evidence = new List<EvidenceItem>();

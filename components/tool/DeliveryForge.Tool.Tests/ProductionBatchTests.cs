@@ -1,5 +1,8 @@
 using System.Text.Json;
 using DeliveryForge.Evidence;
+using DeliveryForge.Execution;
+using DeliveryForge.Execution.Git;
+using DeliveryForge.Execution.Host;
 using DeliveryForge.Coordination;
 using DeliveryForge.Planning;
 using DeliveryForge.Scheduling;
@@ -298,6 +301,87 @@ public sealed class ProductionBatchTests
         // real positive path with its Root-selected Linux scope where required.
         original.Check();
     }
+
+    [Theory(Timeout = 150000)]
+    [InlineData("implement", true)]
+    [InlineData("plan", false)]
+    public async Task Actual_CLI_plan_preserves_explicit_intent_and_only_implement_artifact_is_schedulable(string mode, bool schedulable)
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(120), TestContext.Current.CancellationToken);
+        var root = Path.Combine(Path.GetTempPath(), "forge-cli-plan-mode-" + Guid.NewGuid().ToString("N"));
+        var repository = Path.Combine(root, "parent"); Directory.CreateDirectory(repository);
+        var gitName = OperatingSystem.IsWindows() ? "git.exe" : "git";
+        var git = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator).Where(Path.IsPathFullyQualified)
+            .Select(path => Path.Combine(path, gitName)).First(File.Exists);
+        var executor = new ProcessCommandExecutor();
+        async Task<string> Git(params string[] arguments)
+        {
+            var nullPath = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+            var argv = new[] { "--no-replace-objects", "-c", "core.hooksPath=" + nullPath, "-c", "core.fsmonitor=false", "-c", "user.name=PlanFixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false" }.Concat(arguments).ToArray();
+            var actual = await executor.ExecuteAsync(new(git, argv, repository, new Dictionary<string, string>
+            {
+                ["GIT_CONFIG_NOSYSTEM"] = "1",
+                ["GIT_CONFIG_GLOBAL"] = nullPath,
+                ["GIT_CONFIG_SYSTEM"] = nullPath,
+                ["GIT_NO_REPLACE_OBJECTS"] = "1",
+                ["GIT_TERMINAL_PROMPT"] = "0",
+                ["GIT_OPTIONAL_LOCKS"] = "0"
+            }), original.Remaining, original.Token);
+            original.Check(); Assert.True(actual.OwnedProcessQuiescent && actual.ExitCode == 0 && !actual.TimedOut && !actual.Cancelled, root + ": " + actual.StandardError);
+            return actual.StandardOutput;
+        }
+        await File.WriteAllTextAsync(Path.Combine(repository, "tracked.txt"), "actual unchanged planning evidence\n", original.Token);
+        await Git("init", "-q", "-b", "main"); await Git("add", "--", "tracked.txt"); await Git("commit", "-q", "-m", "actual CLI planning base");
+        var request = new PlanningRequest("fixture/cli-plan", "#1", mode, "Update the one tracked file", ["tracked.txt"], [], ["Only tracked.txt changes"], "implement");
+        var intent = new PlanIntent(request, ["tracked.txt"], [new("tracked.txt", "content", "update")], [new("#1", [], "root")],
+            [new("test", new("dotnet", [PlanCommandArgument.Literal("test")]), "PASS")],
+            new("additive", "none", "none", "none", "none", "none", "receipt", "revert", []), [], "cli-plan-mode");
+        var configPath = Path.Combine(root, "config.json"); var intentPath = Path.Combine(root, "intent.json"); var outputPath = Path.Combine(root, "frozen-plan.json");
+        await File.WriteAllBytesAsync(configPath, JsonSerializer.SerializeToUtf8Bytes(new TrustedConfiguration(request.Repository, repository, "refs/heads/main", git, MaximumCeiling: "implement", OperationSeconds: 120), BoundedFiles.Json), original.Token);
+        await File.WriteAllBytesAsync(intentPath, JsonSerializer.SerializeToUtf8Bytes(intent, BoundedFiles.Json), original.Token);
+        var application = new ToolApplication(actualOriginal: original);
+        var result = await application.ExecuteAsync(CommandLine.Parse(["plan", "--repo", repository, "--intent-file", intentPath, "--config", configPath, "--plan-out", outputPath]), original.Token);
+        Assert.Equal("COMPLETE", result.Outcome); Assert.Equal("PLAN_FROZEN", result.Code); Assert.False(result.RuntimeCertified);
+        var bytes = await File.ReadAllBytesAsync(outputPath, original.Token);
+        using var json = JsonDocument.Parse(bytes); var envelope = json.RootElement; var material = envelope.GetProperty("plan");
+        Assert.Equal(mode, material.GetProperty("mode").GetString()); Assert.Equal("implement", material.GetProperty("requestedCeiling").GetString());
+        var imported = await PlanImporter.ImportAndReconcileAsync(bytes, new(repository, "refs/heads/main", git),
+            new(envelope.GetProperty("identity").GetString()!, envelope.GetProperty("contractIdentity").GetString()!, request.Repository, "#1", repository, "refs/heads/main", "implement"),
+            original.Remaining, cancellationToken: original.Token);
+        Assert.True(imported.DownstreamReady, string.Join("; ", imported.Diagnostics)); var frozen = Assert.IsType<FrozenPlan>(imported.Plan);
+        using var contract = JsonDocument.Parse(frozen.PlanContractBytes); Assert.Equal(mode, contract.RootElement.GetProperty("mode").GetString());
+        var work = Path.Combine(root, "assigned"); var results = Path.Combine(root, "results");
+        var worker = new FrozenWorkerPlan("cli-mode-worker", frozen.ContractIdentity, frozen.BaseCommit, frozen.Repository, repository, work, results,
+            "fixture-writer", ["tracked.txt"], [], "codex.cli", "fixture", [AgentCapability.Launch, AgentCapability.CompletionEvidence]);
+        var store = new RunStore(Path.Combine(root, "store")); var worktrees = new WorktreeManager(git);
+        await using var processes = new ProcessControl(); using var coordinator = new ExecutionCoordinator(store, worktrees, processes);
+        var slots = new ResourceSlots(1, 1, 64, 0, 0, 0); var budget = ResourceBudget.Measure(slots, new("cli-mode-fixture", true, slots, TimeSpan.FromSeconds(60), 1, 0));
+        LocalSingleScheduler Create() => LocalSingleScheduler.Create(frozen, worker, new(slots, [], TimeSpan.FromSeconds(60), 1, 0), budget, store, coordinator, worktrees, new GitRepositoryContextReader(git));
+        if (schedulable) Assert.NotNull(Create()); else Assert.Throws<SchedulingException>(() => Create());
+        Assert.Empty(await Git("status", "--porcelain=v1", "--untracked-files=all"));
+        Assert.Equal("actual unchanged planning evidence\n", await File.ReadAllTextAsync(Path.Combine(repository, "tracked.txt"), original.Token));
+        Assert.False(Directory.Exists(work)); Assert.False(Directory.Exists(results)); original.Check();
+    }
+
+    [Theory]
+    [InlineData("implement", "plan", "implement")]
+    [InlineData("implement", "implement", "plan")]
+    [InlineData("pr", "pr", "pr")]
+    [InlineData("merge", "merge", "merge")]
+    [InlineData("resume", "implement", "implement")]
+    public async Task CLI_plan_invalid_or_untrusted_execution_intent_refuses_before_Git_or_output(string mode, string requested, string maximum)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-cli-plan-refusal-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+        var request = new PlanningRequest("fixture/cli-plan", "#1", mode, "Refused intent", ["source.cs"], [], ["No effects"], requested);
+        var intent = new PlanIntent(request, ["source.cs"], [], [], [], new("none", "none", "none", "none", "none", "none", "none", "none", []), [], "refused");
+        var configPath = Path.Combine(root, "config.json"); var intentPath = Path.Combine(root, "intent.json"); var output = Path.Combine(root, "absent-output.json");
+        await File.WriteAllBytesAsync(configPath, JsonSerializer.SerializeToUtf8Bytes(new TrustedConfiguration(request.Repository, root, "refs/heads/main", Path.Combine(root, "absent-git"), MaximumCeiling: maximum), BoundedFiles.Json), TestContext.Current.CancellationToken);
+        await File.WriteAllBytesAsync(intentPath, JsonSerializer.SerializeToUtf8Bytes(intent, BoundedFiles.Json), TestContext.Current.CancellationToken);
+        var application = new ToolApplication();
+        await Assert.ThrowsAsync<ToolUsageException>(() => application.ExecuteAsync(CommandLine.Parse(["plan", "--repo", root, "--intent-file", intentPath, "--config", configPath, "--plan-out", output]), TestContext.Current.CancellationToken));
+        Assert.Empty(application.RetainedExternalCalls); Assert.False(File.Exists(output)); Assert.False(File.Exists(Path.Combine(root, "absent-git")));
+    }
+
     sealed class ReaderParentFixture : ICoordinatedEffectAdmission
     {
         internal int Entries;
