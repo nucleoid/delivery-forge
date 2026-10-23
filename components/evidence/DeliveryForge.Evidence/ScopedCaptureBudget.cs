@@ -46,7 +46,12 @@ internal sealed class ScopedCaptureBudget : IOwnedDuplexBudget, IOwnedFailureCle
     {
         var left = WorkLimit - Stopwatch.GetElapsedTime(OriginalStarted);
         if (left <= TimeSpan.Zero) throw new TimeoutException("Original MIN command work allowance expired during native observation.");
-        return left < TimeSpan.FromSeconds(1) ? left : TimeSpan.FromSeconds(1);
+        // Fast commands need not consume a whole second before their actual
+        // native exit is observed. Bound the faster cadence to this capture's
+        // existing first second; long commands retain the original cadence.
+        var cadence = Stopwatch.GetElapsedTime(localStarted) < TimeSpan.FromSeconds(1)
+            ? TimeSpan.FromMilliseconds(100) : TimeSpan.FromSeconds(1);
+        return left < cadence ? left : cadence;
     }
     internal (bool TimedOut, bool Cancelled) ClassifyFailure(Exception failure, bool callerCancellationRequested)
     {

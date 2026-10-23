@@ -113,7 +113,14 @@ public sealed class OwnedDuplexProcessTests
     {
         var gitImage = Environment.GetEnvironmentVariable("DELIVERY_FORGE_DUPLEX_TEST_GIT") ?? throw new IOException("Explicit actual Git image required for post-retirement verification.");
         Assert.True(Path.IsPathFullyQualified(gitImage) && File.Exists(gitImage));
-        using var affinity = new Affinity(); await using var run = new Run("orphan-parent-release"); await run.Ready();
+        using var affinity = new Affinity(); await using var run = new Run("orphan-parent-release");
+        void Trace(string stage)
+        {
+            // Diagnostic only; the original budget and outcome remain authoritative.
+            try { TestContext.Current.TestOutputHelper?.WriteLine($"{stage}: original elapsed {Stopwatch.GetElapsedTime(run.Original.OriginalStarted).TotalSeconds:F3}s"); }
+            catch { } // Output failure must not replace the actual assertion or failure.
+        }
+        Trace("fixture opened"); await run.Ready(); Trace("fixture ready");
         var originalStarted = run.Original.OriginalStarted; var whole = run.Original.WholeLimit; var work = run.Original.WorkLimit;
         // Root completion is a native observation. An inherited pipe writer in
         // the surviving descendant can keep stdout open until actual retirement.
@@ -144,6 +151,8 @@ public sealed class OwnedDuplexProcessTests
         Assert.True(closed.InputCloseReturned && closed.OutputEof && closed.ErrorEof); Assert.False(run.Session.HasUnknownIo);
         Assert.All(run.Session.ActualIo, row => Assert.False(row.Unknown)); run.Original.Check();
         Assert.Equal(originalStarted, run.Original.OriginalStarted); Assert.Equal(whole, run.Original.WholeLimit); Assert.Equal(work, run.Original.WorkLimit);
+        Trace("native retirement verified");
+        Assert.False(File.Exists(Path.Combine(run.DirectoryPath, run.Nonce + "-child-returned")));
         var repository = Path.Combine(run.DirectoryPath, "post-retirement-git"); run.Original.Check(); Directory.CreateDirectory(repository); run.Original.Check();
         var executor = ActualOrdinaryCapture.Select(run.Original);
         async Task<string> Git(params string[] arguments)
@@ -153,6 +162,7 @@ public sealed class OwnedDuplexProcessTests
             var argv = new[] { "--no-replace-objects", "-c", "core.hooksPath=" + disabled, "-c", "core.fsmonitor=false", "-c", "user.name=DuplexFixture", "-c", "user.email=fixture@example.invalid" }.Concat(arguments).ToArray();
             var actual = await executor.ExecuteBoundedCaptureAsync(new(gitImage, argv, repository, env), run.Original.Remaining, 65536, run.Original.Token, new OwnedWorkPhaseBudget(run.Original));
             ActualOrdinaryCapture.Require(actual); Assert.Equal(0, actual.Command.ExitCode); Assert.False(actual.Command.TimedOut || actual.Command.Cancelled); run.Original.Check();
+            Trace("serial Git " + arguments[0] + " verified");
             return Encoding.UTF8.GetString(actual.StandardOutputBytes).Trim();
         }
         await Git("init", "-q", "-b", "main");
@@ -167,12 +177,16 @@ public sealed class OwnedDuplexProcessTests
         var manager = new WorktreeManager(gitImage, executor, run.Original).WithParentAdmission(parent, run.Nonce);
         // Bind an actual fresh linked worktree to this SAME original parent;
         // existing repository metadata cannot be adopted as provisioning proof.
+        Trace("linked worktree prepare entered");
         await manager.PrepareAsync(repository, worker, baseCommit, run.Original.Token);
+        Trace("linked worktree prepare returned");
         var binding = manager.RequireOriginalBinding(worker);
         Assert.Equal(Path.GetFullPath(worker), binding.Worktree);
         Assert.True(File.Exists(Path.Combine(worker, ".git")));
         var beforeObserve = manager.ActualOwnedGitInvocations;
+        Trace("linked worktree observe entered");
         var observed = await manager.ObserveAsync(worker, run.Original.Token); run.Original.Check();
+        Trace("linked worktree observe returned");
         Assert.Equal(baseCommit, observed.HeadCommit); Assert.True(observed.IsClean);
         Assert.True(manager.ActualOwnedGitInvocations > beforeObserve);
         Assert.InRange(parent.EnteredCount, 1, 1023); Assert.True(parent.AllKnownSettled);
@@ -187,6 +201,7 @@ public sealed class OwnedDuplexProcessTests
         run.Original.Check(); Assert.True(Stopwatch.GetElapsedTime(armedObserved) > TimeSpan.FromSeconds(4));
         Assert.False(File.Exists(Path.Combine(run.DirectoryPath, run.Nonce + "-child-returned")));
         Assert.Equal(originalStarted, run.Original.OriginalStarted); Assert.Equal(whole, run.Original.WholeLimit); Assert.Equal(work, run.Original.WorkLimit);
+        Trace("final marker absence verified");
         run.Preserve(closed);
     }
     [Fact(Timeout = 90000)]
