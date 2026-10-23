@@ -241,7 +241,7 @@ internal static class CompilerOfficialRecipe
         var imageRoles = new[] { "dotnet-host", "csc", "compiler-common", "compiler-csharp", "compiler-deps", "compiler-runtimeconfig", "sdk-csc-target", "sdk-csc-task" };
         Require(images.Select(i => Text(i, "role")).SequenceEqual(imageRoles) ||
             images.Select(i => Text(i, "role")).SequenceEqual(imageRoles.Append("csc-launcher")), "observed image roles");
-        Require(commandBinding != "selected-sdk-csc-unix-apphost-arguments-match" || images.Length == imageRoles.Length + 1,
+        Require(Text(recipe, "commandBinding") != "selected-sdk-csc-unix-apphost-arguments-match" || images.Length == imageRoles.Length + 1,
             "Unix apphost launcher identity");
         foreach (var image in images)
         {
