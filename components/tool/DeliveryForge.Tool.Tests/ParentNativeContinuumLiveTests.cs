@@ -56,7 +56,7 @@ public sealed class ParentNativeContinuumLiveTests
         {
             var result = await Keep(Owner.ImplementAsync(Plan, Selected.Paths)).WaitAsync(Original.Remaining, TestContext.Current.CancellationToken);
             var observedFrame = Owner.Bridge.RetainedFrames.SingleOrDefault();
-            Assert.True(result.Result.Outcome == "COMPLETE", $"Actual fixture result {result.Result.Outcome}/{result.Result.Code}; original failure {observedFrame?.Primary?.GetType().FullName}: {observedFrame?.Primary?.Message}");
+            Assert.True(result.Result.Outcome == "COMPLETE", $"Actual fixture result {result.Result.Outcome}/{result.Result.Code}; frame primary={observedFrame?.Primary?.GetType().FullName}, post={observedFrame?.Post?.GetType().FullName}; worker primary={observedFrame?.Worker.Primary?.GetType().FullName}, post={observedFrame?.Worker.Post?.GetType().FullName}");
             Assert.Equal("CONTRACT_FIXTURE_COMPLETE", result.Result.Code);
             Assert.Equal(HostObservationRealm.ContractFixture, Owner.Bridge.Realm); Assert.Equal(ParentNativeContractPort.AdapterId, Owner.Bridge.AdapterProfile.AdapterId);
             Assert.True(Owner.Bridge.ObserveCoordinationWorkSettled(result.Assignment.RunId)); var frame = Assert.Single(Owner.Bridge.RetainedFrames); Assert.True(frame.OwnerCompleted); Assert.False(frame.Unknown);
@@ -93,7 +93,7 @@ public sealed class ParentNativeContinuumLiveTests
             Assert.True(OwnerDisposed); Assert.All(Tasks, task => Assert.True(task.IsCompletedSuccessfully));
             if (A is not null) await Keep(A.DisposeAsync().AsTask()).WaitAsync(ObserverOriginal.Remaining, TestContext.Current.CancellationToken);
             if (B is not null) await Keep(B.DisposeAsync().AsTask()).WaitAsync(ObserverOriginal.Remaining, TestContext.Current.CancellationToken);
-            Assert.False(Original.HasRetainedUnknown); BoundedFiles.WriteNew(Selected.EvidenceOutput, JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualParentNativeFixtureCaseEnvelope-v1", ProfileSha256, ToolAssemblySha256 = BoundedFiles.Sha(BoundedFiles.Read(typeof(ParentCoordinationHost).Assembly.Location, ObserverOriginal, 16777216)), Fixture = true, ProductionHostAccepted = false, ProductionPublicationAccepted = false, ProductionSchedulingAccepted = false, Case = evidence }, BoundedFiles.Json), ObserverOriginal); Completed = true; Original.Dispose(); ObserverOriginal.Dispose(); lock (Retained) Retained.Remove(this);
+            Assert.False(Original.HasRetainedUnknown); BoundedFiles.WriteNew(Selected.EvidenceOutput, JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualParentNativeFixtureCaseEnvelope-v1", ProfileSha256, ToolAssemblySha256 = BoundedFiles.Sha(BoundedFiles.Read(typeof(ParentCoordinationHost).Assembly.Location, ObserverOriginal, 16777216)), Fixture = true, ProductionHostAccepted = false, ProductionPublicationAccepted = false, ProductionSchedulingAccepted = false, RetainedParentCheckout = Selected.Configuration.RepositoryRoot, RetainedWorktree = Selected.Paths.Worktree, WorktreeEvidencePreserved = true, Case = evidence }, BoundedFiles.Json), ObserverOriginal); Completed = true; Original.Dispose(); ObserverOriginal.Dispose(); lock (Retained) Retained.Remove(this);
         }
     }
     // Genuine approved artifacts are mandatory. This is issuer conformance only;
@@ -158,8 +158,7 @@ public sealed class ParentNativeContinuumLiveTests
         try
         {
             var actual = await f.CompleteWorker();
-            var git = new DeliveryForge.Execution.Git.WorktreeManager(f.Selected.Configuration.GitExecutable, f.Owner.Executor, f.Original)
-                .WithParentAdmission(f.Owner.Parent, actual.Run);
+            var git = f.Owner.Git.WithParentAdmission(f.Owner.Parent, actual.Run);
             var positive = await f.Keep(git.ObserveAsync(f.Selected.Paths.Worktree, f.Original.Token));
             Assert.True(positive.IsClean); Assert.NotEqual(f.Plan.BaseCommit, positive.HeadCommit); Assert.Equal(Assert.Single(f.Owner.Bridge.RetainedFrames).Completion!.HeadCommit, positive.HeadCommit);
             var births = git.ActualOwnedGitInvocations; Assert.True(births > 0);

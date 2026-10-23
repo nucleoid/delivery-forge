@@ -20,6 +20,7 @@ internal sealed class ParentNativeContractPort : IHostToolSessionPort, IOriginal
     internal Exception? InterruptedWaitFailure { get; private set; }
     internal AgentRunBinding? ActualBinding => binding;
     internal WorktreeObservation? BeforeStart { get; private set; }
+    FrozenWorkerPlan? provisionedAssignment;
     readonly StandaloneHostSelection image; readonly IReadOnlyList<AdmissionFile> closure;
     readonly WorktreeManager git; readonly ProcessCommandExecutor executor; readonly string gitImage; readonly LinuxScopeSelection? linux;
     ToolLifetime? original; HostInstructionContext? instructions; AgentRequest? request; AgentRunBinding? binding;
@@ -32,6 +33,13 @@ internal sealed class ParentNativeContractPort : IHostToolSessionPort, IOriginal
         .Select(capability => new AgentCapabilityEvidence(capability, AgentCapabilityStatus.Supported, "deterministic native contract fixture only; never AI-host support", "fixture:native-duplex-only")).ToArray());
     public void BindOriginal(ToolLifetime actual) { if (original is not null) throw new IOException("Fixture original binds once."); original = actual; }
     public void BindInstructions(HostInstructionContext actual) { if (instructions is not null) throw new IOException("Fixture instructions bind once."); instructions = actual; }
+    internal void BindProvisionedObservation(FrozenWorkerPlan assignment, WorktreeObservation observation)
+    {
+        Life.Check();
+        if (entered || provisionedAssignment is not null || !observation.IsClean || observation.HeadCommit != assignment.BaseCommit || observation.RootPath != assignment.Worktree)
+            throw new IOException("Exact clean same-original fixture provisioning observation required once before start.");
+        provisionedAssignment = assignment; BeforeStart = observation;
+    }
     T Keep<T>(T task) where T : Task { lock (tasks) { tasks.Add(task); if (tasks.Count > 16384) { Life.RetainUnknown(); throw new IOException("Finite retained fixture native task ledger exhausted; entered task retained."); } } return task; }
     ToolLifetime Life => original ?? throw new IOException("Original fixture lifetime missing.");
     async Task<string> Line(CancellationToken token) { var bytes = new List<byte>(); var one = new byte[1]; while (true) { Life.Check(); var read = process!.Output.ReadAsync(one, 0, 1, token); ActiveRead = read; var count = await Keep(read).ConfigureAwait(false); if (count == 0) throw new IOException("Fixture EOF before complete line."); if (one[0] == 10) return new UTF8Encoding(false, true).GetString(bytes.ToArray()); if (bytes.Count >= 4096) throw new IOException("Fixture line exceeds4096."); if (one[0] == 13) throw new IOException("Canonical LF-only fixture protocol required."); bytes.Add(one[0]); } }
@@ -46,8 +54,8 @@ internal sealed class ParentNativeContractPort : IHostToolSessionPort, IOriginal
         if (!Directory.EnumerateFileSystemEntries(directory).Take(6).Select(Path.GetFullPath).Order(StringComparer.Ordinal).SequenceEqual(closure.Select(pin => Path.GetFullPath(pin.Path)).Order(StringComparer.Ordinal), StringComparer.Ordinal)) throw new IOException("Fixture output membership changed.");
         foreach (var pin in closure) _ = InstalledHostAdmission.ReadExact(pin, Life, 268435456);
         if (!closure.Any(pin => Path.GetFullPath(pin.Path) == Path.GetFullPath(image.Executable) && pin.Bytes == image.Bytes && pin.Sha256 == image.Sha256)) throw new IOException("Fixture image not in pinned closure.");
-        BeforeStart = await Keep(git.ObserveAsync(actual.Worktree, token)).ConfigureAwait(false);
-        if (!BeforeStart.IsClean || BeforeStart.HeadCommit != actual.BaseCommit) throw new IOException("Actual provisioned fixture base is not clean before native birth.");
+        if (provisionedAssignment is null || BeforeStart is null || provisionedAssignment.RunId != actual.RunId || provisionedAssignment.Worktree != actual.Worktree || provisionedAssignment.BaseCommit != actual.BaseCommit)
+            throw new IOException("Actual same-assignment prebirth provisioning observation missing.");
         var nonce = Guid.NewGuid().ToString("N"); var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1" };
         process = OwnedDuplexProcess.Open(new(image.Executable, [mode == ParentNativeContractMode.Complete ? "parent-contract" : "parent-contract-hold", actual.Worktree, nonce], actual.Worktree, environment), Life, linux);
         if (process.StartupFailure is Exception error) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
@@ -153,6 +161,7 @@ internal sealed class ParentNativeContractComposition : IAsyncDisposable
     internal ParentNativeContractPort Native { get; }
     internal NamedHostAdapter Adapter { get; }
     readonly WorktreeManager actualGit; readonly ParentNativeContractMode mode;
+    internal WorktreeManager Git => actualGit;
     ParentNativeContractComposition(TrustedConfiguration actual, ToolLifetime life, string store, StandaloneHostSelection image, IReadOnlyList<AdmissionFile> closure, LinuxScopeSelection? linux, ParentNativeContractMode selectedMode)
     {
         if (actual.Adapter != ParentNativeContractPort.AdapterId || actual.AdapterVersion != ParentNativeContractPort.Version || actual.StandaloneRoot is not null || actual.Coordination is null || actual.OperationSeconds != 600 || actual.MaximumCeiling != "implement" || actual.ExpectedPlanCeiling != "implement") throw new ToolUsageException("Closed fixture configuration only; no installed host/publication authority.");
@@ -170,6 +179,8 @@ internal sealed class ParentNativeContractComposition : IAsyncDisposable
         var admitted = actualGit.WithParentAdmission(actualParent, assignment.RunId);
         _ = coordinator.BindOriginalScheduling(original, actualParent, assignment.RunId, admitted);
         await Keep(admitted.PrepareAsync(assignment.ParentCheckout, assignment.Worktree, assignment.BaseCommit, original.Token)).WaitAsync(original.Remaining).ConfigureAwait(false);
+        var before = await Keep(admitted.ObserveAsync(assignment.Worktree, original.Token)).WaitAsync(original.Remaining).ConfigureAwait(false);
+        Native.BindProvisionedObservation(assignment, before);
         original.Check(); return true;
     }
     static readonly List<ParentNativeContractComposition> Retained = []; bool disposeEntered; readonly List<Task> lifecycle = [];
@@ -232,6 +243,16 @@ internal sealed class ParentNativeContractComposition : IAsyncDisposable
             lock (lifecycle) if (lifecycle.Any(task => !task.IsCompletedSuccessfully && !ExpectedStoppedBridgeFailure(task))) throw new IOException("Original fixture composition operation remains failed/unsettled.");
             if (Bridge.RetainedFrames.Any(frame => frame.Unknown)) throw new IOException("Original fixture work unsettled; owners retained.");
             if (Parent is null) throw new IOException("Original fixture parent construction did not return.");
+            var frame = Bridge.RetainedFrames.Single();
+            bool Quiet() => !frame.Unknown && Bridge.ObserveCoordinationWorkSettled(frame.RunId) && Native.ObserveOriginalSettled(frame.RunId);
+            // Final disposition also follows deliberate lease-loss cases. The
+            // existing cleanup route checks this exact completed receipt/live
+            // writer and first close without requiring renewed forward authority.
+            if (frame.OwnerCompleted && frame.Completion is { } completed)
+                await Keep(coordinator.ReleaseCompletedWriterAfterFailureAsync(frame.RunId, completed, Quiet)).WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
+            else if (frame.OwnerStopped)
+                await Keep(coordinator.ReleaseStoppedWriterAsync(frame.RunId, Quiet)).WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
+            else throw new IOException("Actual completed or stopped fixture writer required before lease disposition.");
             await Keep(Parent.DisposeAsync().AsTask()).WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
             coordinator.Dispose(); await Keep(processes.DisposeAsync().AsTask()).WaitAsync(original.CleanupRemaining).ConfigureAwait(false);
         }
