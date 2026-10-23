@@ -1,5 +1,23 @@
 using System.Diagnostics;
+using System.Globalization;
 // Test-only actual process. No model/provider/auth/SDK/production capability.
+if (args.Length is >= 12 and <= 76 && args[0] == "--original")
+{
+    // Negative birth fixture only: never release or execute the supplied target.
+    if (!OperatingSystem.IsLinux() || args[2] != "--frequency" || args[4] != "--work-ticks" || args[6] != "--parent" || args[8] != "--ticket" || args[10] != "--" ||
+        !long.TryParse(args[1], NumberStyles.None, CultureInfo.InvariantCulture, out var original) || original <= 0 || original > Stopwatch.GetTimestamp() ||
+        !long.TryParse(args[3], NumberStyles.None, CultureInfo.InvariantCulture, out var frequency) || frequency != Stopwatch.Frequency ||
+        !long.TryParse(args[5], NumberStyles.None, CultureInfo.InvariantCulture, out var workTicks) || workTicks <= 0 || workTicks > TimeSpan.FromSeconds(1100).Ticks ||
+        !int.TryParse(args[7], NumberStyles.None, CultureInfo.InvariantCulture, out var parent) || parent <= 0 ||
+        args[9].Length != 32 || args[9].Any(c => !char.IsAsciiHexDigit(c) || char.IsAsciiLetterUpper(c))) return 64;
+    var workLimit = TimeSpan.FromTicks(workTicks);
+    if (Stopwatch.GetElapsedTime(original) >= workLimit) return 125;
+    Console.Out.NewLine = "\n"; Console.WriteLine("DF_SCOPE_READY|partial"); Console.Out.Flush();
+    // Stay live for the actual parent's private group binding and refusal;
+    // its original WORK endpoint also bounds a lost-parent fixture lifetime.
+    while (Stopwatch.GetElapsedTime(original) < workLimit) await Task.Delay(5);
+    return 125;
+}
 if (args.Length != 3) return 64;
 var mode = args[0]; var directory = Path.GetFullPath(args[1]); var nonce = args[2];
 if (!Directory.Exists(directory) || nonce.Length != 32 || nonce.Any(x => !char.IsAsciiHexDigit(x))) return 65;
@@ -37,6 +55,7 @@ using (var actual = Process.GetCurrentProcess())
 {
     Console.WriteLine("READY|" + actual.ProcessorAffinity.ToInt64() + "|" + Environment.GetEnvironmentVariable("DOTNET_PROCESSOR_COUNT") + "|" + Environment.GetEnvironmentVariable("DOTNET_GCHeapHardLimit")); Console.Out.Flush();
 }
+if (mode == "fast-exit") return 0;
 if (mode is "parent-contract" or "parent-contract-hold")
 {
     // Explicit fixture task, bounded stdin protocol; no model/provider/auth.
