@@ -163,9 +163,18 @@ public sealed partial class InstalledHostAdmission
                 var parent = Path.GetDirectoryName(current); if (parent is null) return; current = parent;
             }
         }
+        // Refusal-only preflight over selected DATA. It creates no runtime trust.
+        internal static void RequireSelectedProfile(InstalledHostRootAcceptance accepted, TrustedConfiguration config, string platform)
+        {
+            if (accepted.RuntimeTrust is null) return;
+            if (platform != "windows" || accepted.Platform != "windows" || accepted.Adapter != "codex.cli" || config.Adapter != "codex.cli" ||
+                accepted.RuntimeTrust.Kind != "Issue17OwnerTrustedPersonalHost-v1" || config.InstalledReview?.IndependentReviewer is null)
+                throw new ToolUsageException("The scoped issue17 trust profile requires the selected Windows GPT worker and independent Claude reviewer.");
+        }
         internal readonly record struct ReadRequirement(int Operations, long Bytes);
         internal static ReadRequirement ReadCapacity(InstalledHostRootAcceptance accepted, AdmissionFile rootPin, AdmissionFile configPin, TrustedConfiguration config)
         {
+            RequireSelectedProfile(accepted, config, accepted.Platform);
             if (accepted.RuntimeTrust is not { } trust || config.InstalledReview?.IndependentReviewer is not { } reviewer)
                 throw new ToolUsageException("Exact selected runtime-trust reviewer profile required for read admission.");
             if (trust.OwnerDecision is null || accepted.ToolAssembly is null || accepted.Host is null || trust.HostInputs is null || trust.HostInputs.Count is < 2 or > 16 || accepted.Artifacts is null || accepted.Artifacts.Count is < 1 or > 32)
@@ -184,8 +193,9 @@ public sealed partial class InstalledHostAdmission
                 selectedBytes = checked(selectedBytes + (row.Bytes ?? 0));
             }
             if (selectedBytes > 1048576) throw new ToolUsageException("Selected host inputs exceed their complete finite profile.");
-            // This includes the future root admission, image verification, capture,
-            // all bounded rechecks and extra settings/config reads. No new credit.
+            // Selected trust-read subset only: future root/image/input admission,
+            // bounded trust rechecks and these settings/config reads. This does
+            // not pre-admit the full reviewer/pipeline or its Git/receipt effects.
             Read(rootPin.Bytes, 1048576); Read(accepted.ToolAssembly.Bytes, 16777216);
             Read(accepted.Host.Bytes, BoundedFiles.MaximumNativeImageBytes); // root conformance rehash
             Read(accepted.Host.Bytes, BoundedFiles.MaximumNativeImageBytes); // retained actual worker image

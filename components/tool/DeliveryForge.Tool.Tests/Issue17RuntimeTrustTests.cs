@@ -131,4 +131,105 @@ public sealed class Issue17RuntimeTrustTests
         Assert.False(Directory.Exists(Path.GetDirectoryName(selected.Root.Path)));
         life.Check(); // Metadata rejection did not invent a cleanup or allocate a file owner.
     }
+
+    static StandaloneHostSelection TraceHost => new("C:/selected/codex.exe", 123, new string('a', 64), "observed");
+    static System.Text.Json.Nodes.JsonNode RouteTrace()
+    {
+        string[] methods = ["initialize", "config/read", "account/read", "thread/start", "config/read", "turn/start", "config/read"];
+        return System.Text.Json.JsonSerializer.SerializeToNode(new
+        {
+            Kind = "ActualCodexAppServerTrace-v1",
+            Host = TraceHost,
+            Version = TraceHost.Version,
+            TrustRouteConformanceOnly = true,
+            RuntimeCertified = false,
+            Events = methods.Select((method, index) => new
+            {
+                TrustRpcMethod = method,
+                Message = new { id = index + 1, result = new { routeStatus = "owner-trusted-no-known-override" } }
+            }).ToArray()
+        }, BoundedFiles.Json)!;
+    }
+    [Fact]
+    public void Exact_route_trace_structure_is_data_only_not_native_conformance()
+    {
+        var raw = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(RouteTrace(), BoundedFiles.Json);
+        InstalledHostAdmission.RequireRuntimeTrustRouteArtifact(raw, TraceHost, TraceHost.Version);
+    }
+    [Theory]
+    [InlineData("kind")]
+    [InlineData("probe")]
+    [InlineData("authority")]
+    [InlineData("version")]
+    [InlineData("host-path")]
+    [InlineData("host-size")]
+    [InlineData("host-hash")]
+    [InlineData("host-version")]
+    [InlineData("method")]
+    [InlineData("id")]
+    [InlineData("missing")]
+    [InlineData("route")]
+    [InlineData("error")]
+    public void Relabelled_or_wrong_image_route_artifacts_are_refused(string mutation)
+    {
+        var trace = RouteTrace();
+        switch (mutation)
+        {
+            case "kind": trace["Kind"] = "ActualLegacyCompletion-v1"; break;
+            case "probe": trace["TrustRouteConformanceOnly"] = false; break;
+            case "authority": trace["RuntimeCertified"] = true; break;
+            case "version": trace["Version"] = "other"; break;
+            case "host-path": trace["Host"]!["Executable"] = "C:/other/codex.exe"; break;
+            case "host-size": trace["Host"]!["Bytes"] = 124; break;
+            case "host-hash": trace["Host"]!["Sha256"] = new string('b', 64); break;
+            case "host-version": trace["Host"]!["Version"] = "other"; break;
+            case "method": trace["Events"]![1]!["TrustRpcMethod"] = "account/read"; break;
+            case "id": trace["Events"]![6]!["Message"]!["id"] = 6; break;
+            case "missing": trace["Events"]!.AsArray().RemoveAt(6); break;
+            case "route": trace["Events"]![4]!["Message"]!["result"]!["routeStatus"] = "unknown"; break;
+            case "error": trace["Events"]![0]!["Message"]!["error"] = new System.Text.Json.Nodes.JsonObject(); break;
+            default: throw new ArgumentException("Unknown DATA mutation.", nameof(mutation));
+        }
+        var raw = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(trace, BoundedFiles.Json);
+        Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RequireRuntimeTrustRouteArtifact(raw, TraceHost, TraceHost.Version));
+    }
+    [Fact]
+    public void Sixth_case_cannot_reuse_a_legacy_completion_artifact()
+    {
+        string[] names = ["actual_launch_assignment", "actual_completion_commit", "actual_stop_same_original", "foreign_completion_refused", "malformed_protocol_refused", "actual_runtime_trust_route"];
+        var rows = names.Select(name => new InstalledHostCase(name, "PASS", "same-artifact")).ToArray();
+        Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RequireConformanceCases(rows, new HashSet<string> { "same-artifact" }, true));
+    }
+    [Theory]
+    [InlineData("no-reviewer")]
+    [InlineData("other-worker")]
+    [InlineData("linux")]
+    public void Invalid_trust_node_profile_is_refused_without_opening_selected_files(string mismatch)
+    {
+        var selected = DeclaredTrust(2);
+        var config = mismatch switch
+        {
+            "no-reviewer" => selected.Config with { InstalledReview = selected.Config.InstalledReview! with { IndependentReviewer = null } },
+            "other-worker" => selected.Config with { Adapter = "claude-code.cli" },
+            _ => selected.Config
+        };
+        Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RuntimeTrust.RequireSelectedProfile(selected.Host, config, mismatch == "linux" ? "linux" : "windows"));
+        var host = mismatch == "linux" ? selected.Host with { Platform = "linux" } : selected.Host;
+        Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RuntimeTrust.ReadCapacity(host, selected.Root, selected.ConfigPin, config));
+        Assert.False(Directory.Exists(Path.GetDirectoryName(selected.Root.Path)));
+        // Default roots retain their existing profile admission, without trust.
+        InstalledHostAdmission.RuntimeTrust.RequireSelectedProfile(selected.Host with { RuntimeTrust = null }, config, "linux");
+    }
+
+    [Theory]
+    [InlineData("{not-json")]
+    [InlineData("{\"Kind\":\"first\",\"Kind\":\"second\"}")]
+    [InlineData("[]")]
+    public void Malformed_route_artifact_is_a_fixed_message_admission_refusal(string json)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(json);
+        var failure = Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RequireRuntimeTrustRouteArtifact(bytes, TraceHost, TraceHost.Version));
+        Assert.Equal("Malformed actual runtime-trust trace.", failure.Message);
+        Assert.Null(failure.InnerException); // No raw malformed payload/parser text retained.
+    }
 }

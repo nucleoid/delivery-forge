@@ -81,7 +81,11 @@ The actual Codex-home `config.toml` and Claude configuration-directory
 The existing restrictive Claude user-settings check remains. Repository/ancestor
 Codex configuration is unsupported by this host-only selection. Selected input,
 root/configuration decision or relevant environment drift revokes the same WORK
-admission without renewal. No credential/configuration values are exported.
+admission without renewal. Selected owner/configuration-file contents are not
+copied into public receipts. Complete reviewer transcripts remain private local
+evidence and may contain working directories, tool/MCP/runtime metadata, prompts
+and reports. This is not transcript sanitization; inspect and sanitize that
+evidence before any external export.
 
 Known API/provider/endpoint environment overrides refuse before native birth.
 Codex must observe its existing ChatGPT account before thread creation and the

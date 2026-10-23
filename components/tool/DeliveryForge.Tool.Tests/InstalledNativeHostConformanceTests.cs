@@ -179,15 +179,7 @@ public sealed class InstalledNativeHostConformanceTests
         {
             var artifact = Assert.Single(completion.ArtifactPaths);
             var traceBytes = BoundedFiles.Read(artifact, frame.Original);
-            using var trace = JsonDocument.Parse(traceBytes);
-            Assert.True(trace.RootElement.GetProperty("TrustRouteConformanceOnly").GetBoolean());
-            Assert.False(trace.RootElement.GetProperty("RuntimeCertified").GetBoolean());
-            var replies = trace.RootElement.GetProperty("Events").EnumerateArray().Where(row => row.TryGetProperty("TrustRpcMethod", out _)).ToArray();
-            Assert.Equal(new[] { "initialize", "config/read", "account/read", "thread/start", "config/read", "turn/start", "config/read" },
-                replies.Select(row => row.GetProperty("TrustRpcMethod").GetString()));
-            Assert.Equal(Enumerable.Range(1, 7).Select(id => (long)id), replies.Select(row => row.GetProperty("Message").GetProperty("id").GetInt64()));
-            Assert.Equal(3, replies.Count(row => row.GetProperty("TrustRpcMethod").GetString() == "config/read" &&
-                row.GetProperty("Message").GetProperty("result").GetProperty("routeStatus").GetString() == "owner-trusted-no-known-override"));
+            InstalledHostAdmission.RequireRuntimeTrustRouteArtifact(traceBytes, f.Host, f.Host.Version);
         }
         var native = frame.Native ?? throw new IOException("Actual original process reference missing."); var sameRetirement = native.RetireAsync(false); frame.Retirement = await sameRetirement.WaitAsync(frame.Original.Remaining, TestContext.Current.CancellationToken); HostTransportRetirement.RequireSuccessful(frame.Retirement);
         var after = await frame.Call(() => frame.Git.ObserveAsync(f.Worktree, TestContext.Current.CancellationToken)); Assert.True(after.IsClean); Assert.Equal(after.HeadCommit, completion.HeadCommit); Assert.Equal(after.TreeId, completion.TreeId); Assert.Equal(Encoding.UTF8.GetBytes(f.ExpectedText), BoundedFiles.Read(Path.Combine(f.Worktree, f.RelativePath.Replace('/', Path.DirectorySeparatorChar)), frame.Original));

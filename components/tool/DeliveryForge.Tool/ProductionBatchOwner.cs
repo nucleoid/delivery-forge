@@ -107,15 +107,13 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             StandaloneEntrypoint.SeparateSelection(config, selection.Configuration.Path, root);
             // Inspect the exact already selected root DATA while all nodes are
             // still preflight; aggregate trust reads before any host is created.
-            if (config.InstalledReview?.IndependentReviewer is not null)
+            var host = Read<InstalledHostRootAcceptance>(root.InstalledHostAdmission, 1048576);
+            InstalledHostAdmission.RuntimeTrust.RequireSelectedProfile(host, config, OperatingSystem.IsWindows() ? "windows" : OperatingSystem.IsLinux() ? "linux" : "unsupported");
+            if (host.RuntimeTrust is not null)
             {
-                var host = Read<InstalledHostRootAcceptance>(root.InstalledHostAdmission, 1048576);
-                if (host.RuntimeTrust is not null)
-                {
-                    var readPlan = InstalledHostAdmission.RuntimeTrust.ReadCapacity(host, root.InstalledHostAdmission, selection.Configuration, config);
-                    trustedReadOperations = checked(trustedReadOperations + readPlan.Operations);
-                    trustedReadBytes = checked(trustedReadBytes + readPlan.Bytes);
-                }
+                var readPlan = InstalledHostAdmission.RuntimeTrust.ReadCapacity(host, root.InstalledHostAdmission, selection.Configuration, config);
+                trustedReadOperations = checked(trustedReadOperations + readPlan.Operations);
+                trustedReadBytes = checked(trustedReadBytes + readPlan.Bytes);
             }
             if (!command.Has("dry-run")) StandaloneOwnerComposition.RequireFreshExecutionStore(root.StoreRoot, original);
             LinuxScopeSelection? scope = OperatingSystem.IsLinux()

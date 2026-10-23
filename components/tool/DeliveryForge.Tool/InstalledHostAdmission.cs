@@ -1,4 +1,5 @@
 using DeliveryForge.Execution.Host;
+using System.Text.Json;
 namespace DeliveryForge.Tool;
 
 // Exact independent trust-root pins selected by the human-owned containing
@@ -31,6 +32,58 @@ public sealed partial class InstalledHostAdmission
             if (row is null || row.Outcome != "PASS" || !required.Remove(row.Name) || !artifacts.Contains(row.ArtifactSha256))
                 throw new ToolUsageException("Actual independent host conformance case proof is missing, duplicated or incomplete.");
         if (required.Count != 0) throw new ToolUsageException("Complete selected installed conformance required.");
+        if (runtimeTrust)
+        {
+            var route = cases.Single(row => row.Name == "actual_runtime_trust_route");
+            if (cases.Any(row => row.Name != route.Name && row.ArtifactSha256 == route.ArtifactSha256))
+                throw new ToolUsageException("The actual runtime-trust route requires its own distinct artifact.");
+        }
+    }
+    // Structure of already-pinned actual conformance DATA, not a producer or issuer.
+    internal static void RequireRuntimeTrustRouteArtifact(byte[] bytes, StandaloneHostSelection host, string version)
+    {
+        if (bytes.Length is < 1 or > 1048576) throw new ToolUsageException("Finite actual runtime-trust trace required.");
+        static JsonDocument ParseArtifact(byte[] raw)
+        {
+            try
+            {
+                _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(raw);
+                return JsonDocument.Parse(raw, new JsonDocumentOptions { MaxDepth = 48 });
+            }
+            catch (DeliveryForge.Contracts.Serialization.ContractJsonException) { throw new ToolUsageException("Malformed actual runtime-trust trace."); }
+            catch (JsonException) { throw new ToolUsageException("Malformed actual runtime-trust trace."); }
+        }
+        using var document = ParseArtifact(bytes);
+        var root = document.RootElement;
+        if (root.ValueKind != JsonValueKind.Object) throw new ToolUsageException("Malformed actual runtime-trust trace.");
+        static bool Field(JsonElement value, string name, JsonValueKind kind, out JsonElement field)
+        {
+            field = default;
+            return value.ValueKind == JsonValueKind.Object && value.TryGetProperty(name, out field) && field.ValueKind == kind;
+        }
+        static bool Text(JsonElement value, string name, string expected) => Field(value, name, JsonValueKind.String, out var field) && field.GetString() == expected;
+        if (!Text(root, "Kind", "ActualCodexAppServerTrace-v1") || !Field(root, "TrustRouteConformanceOnly", JsonValueKind.True, out _) ||
+            !Field(root, "RuntimeCertified", JsonValueKind.False, out _) || !Text(root, "Version", version) || host.Version != version ||
+            !Field(root, "Host", JsonValueKind.Object, out var image) || !Text(image, "Executable", host.Executable) ||
+            !Text(image, "Sha256", host.Sha256) || !Text(image, "Version", version) ||
+            !Field(image, "Bytes", JsonValueKind.Number, out var extent) || !extent.TryGetInt64(out var length) || length != host.Bytes ||
+            !Field(root, "Events", JsonValueKind.Array, out var events))
+            throw new ToolUsageException("Actual runtime-trust trace does not bind the exact selected host/version.");
+        string[] methods = ["initialize", "config/read", "account/read", "thread/start", "config/read", "turn/start", "config/read"];
+        var count = 0;
+        foreach (var row in events.EnumerateArray())
+        {
+            if (row.ValueKind != JsonValueKind.Object) throw new ToolUsageException("Malformed actual runtime-trust event.");
+            if (!row.TryGetProperty("TrustRpcMethod", out var method)) continue;
+            if (count >= methods.Length || method.ValueKind != JsonValueKind.String || method.GetString() != methods[count] ||
+                !Field(row, "Message", JsonValueKind.Object, out var message) ||
+                !Field(message, "id", JsonValueKind.Number, out var id) || !id.TryGetInt64(out var number) || number != count + 1 ||
+                message.TryGetProperty("error", out _) || !message.TryGetProperty("result", out var result) ||
+                methods[count] == "config/read" && !Text(result, "routeStatus", "owner-trusted-no-known-override"))
+                throw new ToolUsageException("Actual runtime-trust RPC sequence or route observation is incomplete.");
+            count++;
+        }
+        if (count != methods.Length) throw new ToolUsageException("Complete actual runtime-trust RPC sequence required.");
     }
     public static InstalledHostAdmission ReadRootAccepted(AdmissionFile rootPin, TrustedConfiguration config, ToolLifetime original, AdmissionFile? actualConfigurationPin = null)
     {
@@ -44,9 +97,13 @@ public sealed partial class InstalledHostAdmission
             RuntimeTrust.RequireReadCapacity(receipt, rootPin, actualConfigurationPin ?? throw new ToolUsageException("Owner runtime trust requires the containing configuration pin."), config, original);
         var self = System.Reflection.Assembly.GetExecutingAssembly().Location; if (Path.GetFullPath(receipt.ToolAssembly.Path) != Path.GetFullPath(self)) throw new ToolUsageException("Actual installed Tool assembly differs from independently accepted host conformance."); _ = ReadExact(receipt.ToolAssembly, original, 16777216);
         BoundedFiles.VerifyNativeImage(new(receipt.Host.Executable, receipt.Host.Bytes, receipt.Host.Sha256), original);
-        var artifacts = new HashSet<string>(StringComparer.Ordinal); long total = 0;
-        foreach (var pin in receipt.Artifacts) { if (pin is null) throw new ToolUsageException("Missing actual conformance artifact."); if (pin.Bytes <= 0 || pin.Bytes > 1048576 || total > 33554432 - pin.Bytes || !artifacts.Add(pin.Sha256)) throw new ToolUsageException("Actual conformance artifacts exceed finite complete profile or collide."); total += pin.Bytes; _ = ReadExact(pin, original, 1048576); }
+        var artifacts = new HashSet<string>(StringComparer.Ordinal); long total = 0; byte[]? routeArtifact = null;
+        foreach (var pin in receipt.Artifacts) { if (pin is null) throw new ToolUsageException("Missing actual conformance artifact."); if (pin.Bytes <= 0 || pin.Bytes > 1048576 || total > 33554432 - pin.Bytes || !artifacts.Add(pin.Sha256)) throw new ToolUsageException("Actual conformance artifacts exceed finite complete profile or collide."); total += pin.Bytes; var raw = ReadExact(pin, original, 1048576); if (receipt.RuntimeTrust is not null && receipt.Cases.Any(row => row is not null && row.Name == "actual_runtime_trust_route" && row.ArtifactSha256 == pin.Sha256)) routeArtifact = raw; }
         RequireConformanceCases(receipt.Cases, artifacts, receipt.RuntimeTrust is not null);
+        if (receipt.RuntimeTrust is not null)
+        {
+            original.Check(); RequireRuntimeTrustRouteArtifact(routeArtifact ?? throw new ToolUsageException("Actual runtime-trust artifact missing."), receipt.Host, receipt.Version); original.Check();
+        }
         // This derives version-specific capability EVIDENCE only from a pinned
         // independent Root decision. No live native/task/session is adopted.
         var reference = "sha256:" + rootPin.Sha256; var rows = new[]{

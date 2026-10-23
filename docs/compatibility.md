@@ -51,7 +51,10 @@ selected personal Windows host's administrator/server-managed configuration,
 not evidence that safe mode inspected or disabled that policy. The containing
 root must still pass the five legacy installed-host cases plus a sixth
 `actual_runtime_trust_route` case for the exact selected binary and version, and
-match the installed Tool image. The sixth case must actually exercise
+match the installed Tool image. Its sixth-case artifact must be distinct from
+the other five, and its already-pinned trace bytes must bind the exact selected
+image path, length, hash and version plus the complete seven-response sequence.
+This structural check cannot issue conformance authority. The sixth case must actually exercise
 `experimentalApi=false`, `config/read(includeLayers=true)` three times, existing
 account observation before thread creation, and the actual thread model/provider.
 The existing native conformance producer can observe this sequence only with an
@@ -67,7 +70,11 @@ The actual Codex-home `config.toml` and Claude configuration-directory
 The existing restrictive Claude user-settings check remains. Repository/ancestor
 Codex configuration is unsupported by this host-only selection. Selected input,
 root/configuration decision or relevant environment drift revokes the same WORK
-admission without renewal. No credential/configuration values are exported.
+admission without renewal. Selected owner/configuration-file contents are not
+copied into public receipts. Complete reviewer transcripts remain private local
+evidence and may contain working directories, tool/MCP/runtime metadata, prompts
+and reports. This is not transcript sanitization; inspect and sanitize that
+evidence before any external export.
 
 Known API/provider/endpoint environment overrides refuse before native birth.
 Codex must observe its existing ChatGPT account before thread creation and the
@@ -92,14 +99,18 @@ it does not manufacture a resolved-endpoint descriptor. Cooperative selected
 file checks do not exclude an arbitrary hostile same-user writer or remote
 policy change that the selected CLI does not expose.
 
-Trust-read feasibility is checked against the SAME original remaining4096 file
-operations and1GiB read credit before host creation. Batch preflight sums all
-selected trust nodes. The conservative plan uses the existing64-RPC bound plus
-fixed bind/reviewer calls, and counts image, selected-file and settings reads.
-No credit is reserved, refunded or increased; other pipeline file effects still
-consume the same original allowance and remain independently bounded. An
-infeasible trust selection refuses before host creation instead of starting a
-known-overcommitted trust batch. The default non-trust protocol does not use
+The selected trust-read subset is checked against the SAME original remaining
+4096 file operations and1GiB read credit before host creation. Batch preflight
+reads every selected host root, refuses trust on nodes without a Windows
+`codex.cli` worker and independent reviewer, and sums that subset for all trust
+nodes. It counts root/image/input admission, the existing64-RPC bound plus fixed
+trust rechecks, and selected settings/configuration reads. It is not a complete
+reviewer or pipeline capacity guarantee: quality receipts, directory markers,
+per-command Git-image verification and remaining evidence writes consume the
+same allowance separately. These effects can still exhaust credit after earlier
+nodes complete. No credit is reserved, refunded or increased. An infeasible
+counted subset refuses before host creation; passing it does not establish full
+batch feasibility. The default non-trust protocol does not use
 these trust-only projections or the foreign-configuration-shape heuristic.
 
 Exact selected Windows executable handles remain held through their actual
