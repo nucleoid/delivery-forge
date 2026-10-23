@@ -103,6 +103,7 @@ public sealed class InstalledNativeHostConformanceTests
         internal void CaptureFailureAfterNativeSettlement()
         {
             _ = Original.CleanupRemaining;
+            if (FailureSnapshot is { Unknown: true }) throw new IOException("Original snapshot remains UNKNOWN; no replacement or second artifact attempt.");
             var native = Native ?? throw new IOException("No retained actual native owner for failure snapshot.");
             if (Retirement is not { KnownClosed: true, RootExited: true, ActiveProcesses: 0, DispositionReturned: true } || native.HasUnknownIo) throw new IOException("No failure snapshot before actual same-original native settlement.");
             var stderr = native.StandardError; _ = Original.CleanupRemaining;
@@ -192,9 +193,15 @@ public sealed class InstalledNativeHostConformanceTests
     [InlineData("codex.cli")]
     [InlineData("claude-code.cli")]
     [InlineData("pi.cli")]
-    public async Task Actual_installed_live_session_stops_only_through_its_same_original_group(string adapter)
+    public Task Actual_installed_live_session_stops_only_through_its_same_original_group(string adapter) => ActualStop(adapter, requireInterruptSuccess: true);
+    [Fact(Timeout = 700000)]
+    [Trait("Category", "InstalledLocalRealAcceptance")]
+    public Task Actual_installed_trust_route_same_original_stop_preserves_optional_interrupt_refusal_and_terminal_work_faults() => ActualStop("codex.cli", requireInterruptSuccess: false);
+    static async Task ActualStop(string adapter, bool requireInterruptSuccess)
     {
-        using var affinity = new OwnedDuplexProcessTests.Affinity(); await using var frame = Frame.Prepare(adapter, true); var accepted = await frame.Start(true); var binding = Frame.Binding(accepted);
+        using var affinity = new OwnedDuplexProcessTests.Affinity(); await using var frame = Frame.Prepare(adapter, true);
+        if (!requireInterruptSuccess) Assert.True(frame.Selected.ObserveRuntimeTrustRoute, "Contract-specific Stop requires the actual selected Windows Codex trust route.");
+        var accepted = await frame.Start(true); var binding = Frame.Binding(accepted);
         if (frame.Selected.ObserveRuntimeTrustRoute)
         {
             // Six startup replies only: stopping is not successful completion and
@@ -232,7 +239,7 @@ public sealed class InstalledNativeHostConformanceTests
             // This must still be a live turn before the actual Stop attempt.
             // The correlated id7 reply below independently refuses the branch
             // that skips interrupt because the turn has already finished.
-            Assert.DoesNotContain(startup.Wire, row => row.Method == DeliveryForge.Tool.Codex.CodexWireMethod.TurnCompleted);
+            if (requireInterruptSuccess) Assert.DoesNotContain(startup.Wire, row => row.Method == DeliveryForge.Tool.Codex.CodexWireMethod.TurnCompleted);
         }
         await Assert.ThrowsAsync<WorkerEnvelopeException>(() => frame.Port.ControlAsync(binding with { RuntimeRunIdentity = binding.RuntimeRunIdentity + "-foreign" }, AgentControlAction.Stop, frame.Original.Remaining, TestContext.Current.CancellationToken));
         var native = frame.Native ?? throw new IOException("Actual native original missing."); var live = native.ObserveActualNative(); Assert.True(live.Known); Assert.False(live.RootExited); Assert.True(live.ActiveProcesses > 0);
@@ -245,14 +252,19 @@ public sealed class InstalledNativeHostConformanceTests
         var retired = native.RetireAsync(true); frame.Retirement = await retired.WaitAsync(frame.Original.CleanupRemaining, TestContext.Current.CancellationToken); Assert.True(frame.Retirement.KnownClosed); Assert.True(frame.Retirement.RootExited); Assert.Equal(0u, frame.Retirement.ActiveProcesses); Assert.True(frame.Retirement.DispositionReturned); _ = frame.Original.CleanupRemaining;
         if (frame.Selected.ObserveRuntimeTrustRoute)
         {
-            Assert.True(control.Limitation.EndsWith("InterruptFailure=", StringComparison.Ordinal), "Actual turn/interrupt must return successfully before same-original retirement.");
+            Assert.Equal(AgentControlAction.Stop, control.Action); Assert.True(control.CapabilitySupported);
+            Assert.False(string.IsNullOrWhiteSpace(control.EvidenceReference));
+            if (requireInterruptSuccess) Assert.True(control.Limitation.EndsWith("InterruptFailure=", StringComparison.Ordinal), "Actual turn/interrupt must return successfully before same-original retirement.");
             var stopped = Assert.IsType<DeliveryForge.Tool.Codex.CodexAppServerPort>(frame.Port).SnapshotStartupDiagnostics();
             Assert.False(stopped.WireBoundExceeded);
             Assert.Empty(stopped.PendingIds);
             // ControlAsync deliberately closes the reply registry with this
             // fixed terminal cause after retirement. This is not an RPC refusal.
-            Assert.Equal(typeof(OperationCanceledException).FullName, stopped.ReplyFailureType);
-            Assert.DoesNotContain(stopped.Wire, row => row.HasError || row.ErrorCode is not null);
+            if (requireInterruptSuccess)
+            {
+                Assert.Equal(typeof(OperationCanceledException).FullName, stopped.ReplyFailureType);
+                Assert.DoesNotContain(stopped.Wire, row => row.HasError || row.ErrorCode is not null);
+            }
             var numbered = stopped.Wire.Where(row => row.ClientId is not null).ToArray();
             Assert.Equal(21, numbered.Length);
             var entered = Assert.Single(numbered, row => row.ClientId == 7 && row.Direction == DeliveryForge.Tool.Codex.CodexWireDirection.Client && row.State == DeliveryForge.Tool.Codex.CodexWireState.WriteEntered);
@@ -265,13 +277,61 @@ public sealed class InstalledNativeHostConformanceTests
             Assert.Same(native, frame.Native);
             Assert.Same(retired, native.OriginalRetirementTask);
             Assert.True(frame.Retirement.OutputEof); Assert.True(frame.Retirement.ErrorEof);
-            Assert.True(frame.Retirement.InputCloseReturned); Assert.Empty(frame.Retirement.Failures);
+            Assert.True(frame.Retirement.InputCloseReturned);
+            if (requireInterruptSuccess) Assert.Empty(frame.Retirement.Failures);
             Assert.False(native.HasUnknownIo);
             Assert.All(frame.ActualCalls, call => Assert.True(call.IsCompleted));
             Assert.All(Assert.IsType<DeliveryForge.Tool.Codex.CodexAppServerPort>(frame.Port).OriginalTasks, call => Assert.True(call.IsCompleted));
             // RouteConformanceOnly=true; RuntimeCertified=false. This existing
             // UNVERIFIED probe cannot construct Root trust or an accepted profile.
             Assert.All(frame.Port.Profile.Capabilities, capability => Assert.Equal(AgentCapabilityStatus.Unverified, capability.Status));
+            if (!requireInterruptSuccess)
+            {
+                // This is a stopped owner, not successful WORK or a successful
+                // optional protocol interrupt. Preserve refused/terminal faults
+                // as bounded metadata after actual known physical disposition.
+                _ = frame.Original.CleanupRemaining;
+                var io = native.ActualIo;
+                var faultRows = io.Where(row => row.Primary is not null || row.Post is not null).ToArray();
+                var summary = new
+                {
+                    Kind = "ActualInstalledCodexContractStopDisposition-v1",
+                    frame.Selected.Host,
+                    Version = frame.Selected.Host.Version,
+                    control.Action,
+                    control.Activity,
+                    control.CapabilitySupported,
+                    control.EvidenceReference,
+                    StartupTrustReplyCount = 6,
+                    StartupTrustNumberedRows = 18,
+                    FinalNumberedRows = numbered.Length,
+                    OptionalInterrupt = new { RequestId = 7, WriteEntered = true, WriteReturned = true, ReplyReceived = true, Refused = received.HasError, received.ErrorCode },
+                    Native = new { frame.Retirement.KnownClosed, frame.Retirement.RootExited, frame.Retirement.ActiveProcesses, frame.Retirement.OutputEof, frame.Retirement.ErrorEof, frame.Retirement.InputCloseReturned, frame.Retirement.DispositionReturned, frame.Retirement.ExitCode, FailureCount = frame.Retirement.Failures.Count },
+                    IoCount = io.Count,
+                    IoFaultCount = faultRows.Length,
+                    IoFaultRows = faultRows.Take(128).Select(row => new { row.Kind, row.Entered, row.InvocationReturned, TaskStatus = row.ActualTask?.Status, PrimaryType = row.Primary?.GetType().FullName, PostType = row.Post?.GetType().FullName, row.Unknown }).ToArray(),
+                    IoFaultMetadataTruncated = faultRows.Length > 128,
+                    PortTasks = stopped.OriginalTasks,
+                    FrameTaskCount = frame.ActualCalls.Count,
+                    AllOriginalTasksTerminal = true,
+                    stopped.ReplyFailureType,
+                    stopped.PumpFailureType,
+                    stopped.PumpStatus,
+                    StopContractDispositionProven = true,
+                    SuccessfulWorkerCompletionClaimed = false,
+                    SuccessfulProtocolInterruptRequired = false,
+                    RuntimeCertified = false,
+                    AuthorityIssued = false,
+                    RawAccountConfigPromptOrErrorTextExported = false
+                };
+                _ = frame.Original.CleanupRemaining;
+                var bytes = JsonSerializer.SerializeToUtf8Bytes(summary, BoundedFiles.Json);
+                _ = frame.Original.CleanupRemaining;
+                frame.FailureSnapshot = new(frame.Original);
+                try { frame.FailureSnapshot.Write(Path.Combine(frame.Selected.ResultDirectory, "codex-contract-stop-disposition.json"), bytes); }
+                catch (Exception failure) { frame.Failure ??= failure; throw; }
+                _ = frame.Original.CleanupRemaining;
+            }
         }
         // A stop attempt is not a successful worker commit. Native kill/actual
         // protocol-control outcomes remain separately recorded by the port.

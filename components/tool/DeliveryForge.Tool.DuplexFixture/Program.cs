@@ -17,7 +17,7 @@ if (args.Length is >= 12 and <= 79 && args[0] == "--original")
     var workLimit = TimeSpan.FromTicks(workTicks);
     if (Stopwatch.GetElapsedTime(original) >= workLimit) return 125;
     void CheckOriginal() { if (Stopwatch.GetElapsedTime(original) < TimeSpan.Zero || Stopwatch.GetElapsedTime(original) >= workLimit) throw new TimeoutException("Original negative fixture WORK expired."); }
-    if (exact && args.Length == 20 && args[16] is "replace-before-ready" or "cancel-mid-copy")
+    if (exact && args.Length == 20 && args[16] is "replace-before-ready" or "cancel-mid-copy" or "forged-sealed-ready")
     {
         using var control = FixtureExactCopyControl.Create(args[16], args[14], args[11], args[12], args[17], args[18], args[19], CheckOriginal);
         CheckOriginal(); Console.Out.NewLine = "\n";
@@ -213,7 +213,7 @@ internal sealed class FixtureExactCopyControl : IDisposable
     }
     internal static FixtureExactCopyControl Create(string mode, string source, string extent, string expectedHash, string dll, string dllExtent, string dllHash, Action clock)
     {
-        clock(); Require(mode is "replace-before-ready" or "cancel-mid-copy");
+        clock(); Require(mode is "replace-before-ready" or "cancel-mid-copy" or "forged-sealed-ready");
         Require(long.TryParse(extent, NumberStyles.None, CultureInfo.InvariantCulture, out var length) && length is >= 64 and <= 11534336);
         Require(long.TryParse(dllExtent, NumberStyles.None, CultureInfo.InvariantCulture, out var dllLength));
         Require(Path.GetFileName(dll) == "DeliveryForge.LinuxScopeBirthGate.dll");
@@ -254,6 +254,22 @@ internal sealed class FixtureExactCopyControl : IDisposable
         var owner = (IDisposable)value!;
         try
         {
+            if (mode == "forged-sealed-ready")
+            {
+                Require(partial == 0 && !cancellation.IsCancellationRequested && length <= 1048576);
+                clock(); var firstReady = (string?)ready!.GetValue(value); clock();
+                // Both retained objects come from the actual selected production
+                // copier. Only the emitted READY tuple is deliberately forged.
+                var secondValue = create!.Invoke(null, [source, length, expectedHash, (Action)OriginalCheck]);
+                Require(secondValue is IDisposable); owner = new ActualPair(owner, (IDisposable)secondValue!); clock();
+                var secondReady = (string?)ready.GetValue(secondValue); clock();
+                var first = ObserveSealed(firstReady, length, expectedHash, clock);
+                var second = ObserveSealed(secondReady, length, expectedHash, clock);
+                Require(first.Fd != second.Fd && (first.Identity.Inode != second.Identity.Inode || first.Identity.Major != second.Identity.Major || first.Identity.Minor != second.Identity.Minor));
+                var fields = firstReady!.Split('|'); fields[1] = second.Fd.ToString(CultureInfo.InvariantCulture);
+                string Witness((int Fd, Statx Identity, int Seals) row) => string.Join('|', row.Fd.ToString(CultureInfo.InvariantCulture), row.Identity.Inode.ToString(CultureInfo.InvariantCulture), row.Identity.Major.ToString(CultureInfo.InvariantCulture), row.Identity.Minor.ToString(CultureInfo.InvariantCulture), row.Identity.Size.ToString(CultureInfo.InvariantCulture), row.Identity.Mode.ToString(CultureInfo.InvariantCulture), row.Seals.ToString(CultureInfo.InvariantCulture));
+                return new(owner, string.Join('|', fields), "DF_SCOPE_FORGED_SEALED_READY|" + Witness(first) + "|" + Witness(second));
+            }
             Require(mode == "replace-before-ready" && partial == 0 && !cancellation.IsCancellationRequested);
             clock(); var actualReady = (string?)ready!.GetValue(value); clock(); Require(actualReady is not null && actualReady.StartsWith("ELF|", StringComparison.Ordinal));
             // Effects are confined to this test-created private copy. Never
@@ -292,8 +308,32 @@ internal sealed class FixtureExactCopyControl : IDisposable
         }
         clock(); return partial;
     }
+    sealed class ActualPair(IDisposable first, IDisposable second) : IDisposable
+    {
+        public void Dispose()
+        {
+            Exception? primary = null;
+            try { first.Dispose(); } catch (Exception error) { primary = error; }
+            try { second.Dispose(); } catch (Exception error) { if (primary is not null) throw new AggregateException("Both actual sealed fixture first-closes failed.", primary, error); throw; }
+            if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+        }
+    }
+    static (int Fd, Statx Identity, int Seals) ObserveSealed(string? ready, long length, string hash, Action clock)
+    {
+        Require(ready is not null); var fields = ready!.Split('|');
+        Require(fields.Length == 7 && fields[0] == "ELF" && fields[2] == length.ToString(CultureInfo.InvariantCulture) && fields[3] == hash);
+        Require(int.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out var fd) && fd > 2);
+        Require(ulong.TryParse(fields[4], NumberStyles.None, CultureInfo.InvariantCulture, out var inode) && inode > 0);
+        Require(uint.TryParse(fields[5], NumberStyles.None, CultureInfo.InvariantCulture, out var major));
+        Require(uint.TryParse(fields[6], NumberStyles.None, CultureInfo.InvariantCulture, out var minor));
+        clock(); var result = statx(fd, "", 0x1000, 0x7ff, out var actual); clock();
+        Require(result == 0 && (actual.Mask & 0x303) == 0x303 && (actual.Mode & 0xf000) == 0x8000 && (actual.Mode & 0x1ff) == 0x140 && actual.Size == (ulong)length && actual.Inode == inode && actual.Major == major && actual.Minor == minor);
+        clock(); var seals = fcntl(fd, 1034, 0); clock(); Require(seals >= 0 && (seals & 0x2f) == 0x2f);
+        return (fd, actual, seals);
+    }
     public void Dispose() => actual?.Dispose();
-    [StructLayout(LayoutKind.Explicit, Size = 256)] struct Statx { [FieldOffset(0)] public uint Mask; [FieldOffset(40)] public ulong Size; }
+    [StructLayout(LayoutKind.Explicit, Size = 256)] struct Statx { [FieldOffset(0)] public uint Mask; [FieldOffset(28)] public ushort Mode; [FieldOffset(32)] public ulong Inode; [FieldOffset(40)] public ulong Size; [FieldOffset(136)] public uint Major; [FieldOffset(140)] public uint Minor; }
+    [DllImport("libc", SetLastError = true)] static extern int fcntl(int fd, int command, int value);
     [DllImport("libc", SetLastError = true)] static extern nint readlink([MarshalAs(UnmanagedType.LPUTF8Str)] string path, [Out] byte[] bytes, nuint extent);
     [DllImport("libc", SetLastError = true)] static extern int statx(int fd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out Statx value);
 }

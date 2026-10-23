@@ -179,6 +179,8 @@ public sealed class OwnedLinuxExactImageTests
     public Task Actual_pre_release_path_replacement_preserves_original_sealed_descriptor_before_negative_release_barrier() => ActualCopyFixture("replace-before-ready");
     [Fact(Timeout = 90000, Skip = "Sealed descriptor execution requires Linux.", SkipUnless = nameof(IsLinux))]
     public Task Actual_copy_cancellation_after_partial_memfd_never_publishes_ready_or_enters_target() => ActualCopyFixture("cancel-mid-copy");
+    [Fact(Timeout = 90000, Skip = "Parent sealed descriptor identity requires Linux.", SkipUnless = nameof(IsLinux))]
+    public Task Actual_forged_ready_fd_with_other_fully_sealed_identity_is_refused_before_release() => ActualCopyFixture("forged-sealed-ready");
     static async Task ActualCopyFixture(string mode)
     {
         using var affinity = new OwnedDuplexProcessTests.Affinity();
@@ -208,7 +210,7 @@ public sealed class OwnedLinuxExactImageTests
         try
         {
             var refused = Assert.IsType<IOException>(session.StartupFailure);
-            Assert.Equal(mode == "replace-before-ready" ? "Negative gate-build profile may never release a target." : "Actual private birth identity/clock differs.", refused.Message);
+            Assert.Equal(mode switch { "replace-before-ready" => "Negative gate-build profile may never release a target.", "forged-sealed-ready" => "Actual sealed image identity/extent/mode differs.", _ => "Actual private birth identity/clock differs." }, refused.Message);
             Assert.False(session.HasCreationOwnedExactLinuxImage); Assert.False(File.Exists(marker));
             if (mode == "replace-before-ready") Assert.Equal("private pre-release replacement\n", ActualKernelText(selected.Image.Path, original, 4096, failurePhase: true));
             var retired = await session.RetireAsync(true);
@@ -216,6 +218,25 @@ public sealed class OwnedLinuxExactImageTests
             var drain = session.OriginalErrorDrainTask; Assert.NotNull(drain); await drain.WaitAsync(original.CleanupRemaining, TestContext.Current.CancellationToken); Assert.False(session.ErrorQuotaExceeded);
             var lines = new UTF8Encoding(false, true).GetString(session.StandardError).Split('\n').Select(row => row.TrimEnd('\r')).ToArray();
             if (mode == "replace-before-ready") Assert.Single(lines, row => row == "DF_SCOPE_PRE_RELEASE_REPLACED|" + selected.Image.Bytes.ToString(CultureInfo.InvariantCulture) + "|" + selected.Image.Sha256);
+            else if (mode == "forged-sealed-ready")
+            {
+                var line = Assert.Single(lines, row => row.StartsWith("DF_SCOPE_FORGED_SEALED_READY|", StringComparison.Ordinal)); var fields = line.Split('|'); Assert.Equal(15, fields.Length);
+                Assert.All(fields.Skip(1), field => Assert.True(field.Length is > 0 and <= 20 && field.All(char.IsAsciiDigit)));
+                Assert.True(int.TryParse(fields[1], NumberStyles.None, CultureInfo.InvariantCulture, out var firstFd) && firstFd > 2);
+                Assert.True(int.TryParse(fields[8], NumberStyles.None, CultureInfo.InvariantCulture, out var secondFd) && secondFd > 2); Assert.NotEqual(firstFd, secondFd);
+                Assert.True(ulong.TryParse(fields[2], NumberStyles.None, CultureInfo.InvariantCulture, out var firstInode) && firstInode > 0);
+                Assert.True(ulong.TryParse(fields[9], NumberStyles.None, CultureInfo.InvariantCulture, out var secondInode) && secondInode > 0);
+                Assert.True(fields[2] != fields[9] || fields[3] != fields[10] || fields[4] != fields[11]);
+                foreach (var start in new[] { 1, 8 })
+                {
+                    Assert.True(uint.TryParse(fields[start + 2], NumberStyles.None, CultureInfo.InvariantCulture, out _)); Assert.True(uint.TryParse(fields[start + 3], NumberStyles.None, CultureInfo.InvariantCulture, out _));
+                    Assert.Equal(selected.Image.Bytes.ToString(CultureInfo.InvariantCulture), fields[start + 4]);
+                    Assert.True(ushort.TryParse(fields[start + 5], NumberStyles.None, CultureInfo.InvariantCulture, out var actualMode) && (actualMode & 0xf000) == 0x8000 && (actualMode & 0x1ff) == 0x140);
+                    Assert.True(int.TryParse(fields[start + 6], NumberStyles.None, CultureInfo.InvariantCulture, out var actualSeals) && (actualSeals & 0x2f) == 0x2f);
+                }
+                Assert.NotEqual(0, retired.ExitCode); Assert.False(session.HasUnknownIo);
+                Assert.All(session.ActualIo, row => { Assert.True(row.InvocationReturned); Assert.False(row.Unknown); if (row.ActualTask is { } task) Assert.True(task.IsCompleted); });
+            }
             else
             {
                 var line = Assert.Single(lines, row => row.StartsWith("DF_SCOPE_COPY_CANCELLED|", StringComparison.Ordinal)); var fields = line.Split('|'); Assert.Equal(5, fields.Length);
