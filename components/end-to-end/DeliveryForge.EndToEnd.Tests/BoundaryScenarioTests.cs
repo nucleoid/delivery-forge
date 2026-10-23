@@ -18,6 +18,8 @@ public sealed class BoundaryScenarioTests
             var result = await new ScenarioRunner(run).RunAsync("recovery.interrupted-command", Options, TestContext.Current.CancellationToken);
             if (result.Outcome != GateOutcome.Incomplete)
                 await WriteInterruptedCommandDiagnosticAsync(run, result, TestContext.Current.CancellationToken);
+            else
+                _ = await ReadInterruptedCommandReceiptAsync(run, result, TestContext.Current.CancellationToken);
             Assert.Equal(GateOutcome.Incomplete, result.Outcome);
             Assert.True(result.Invariants.TryGetValue("real-command-deadline-observed", out var observed) && observed,
                 "A generic incomplete result is not an observed real command timeout.");
@@ -63,10 +65,13 @@ public sealed class BoundaryScenarioTests
     private static async Task<(System.Text.Json.JsonElement Payload, string Sha256)> ReadInterruptedCommandReceiptAsync(
         OwnedScenarioRun run, ScenarioResult result, CancellationToken cancellationToken)
     {
-        if (result.ReceiptIds.Count != 1) throw new InvalidDataException("Interrupted-command receipt selection is not singular.");
+        // ScenarioRunner returns the command receipt first, then its scenario-result receipt.
+        if (result.ReceiptIds.Count != 2 || result.ReceiptIds[0] == result.ReceiptIds[1])
+            throw new InvalidDataException("Interrupted-command receipt selection is not the command/result pair.");
+        foreach (var identity in result.ReceiptIds)
+            if (identity.Length != 64 || identity.Any(character => character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f')))
+                throw new InvalidDataException("Interrupted-command receipt identity is invalid.");
         var hash = result.ReceiptIds[0];
-        if (hash.Length != 64 || hash.Any(character => character is not (>= '0' and <= '9') and not (>= 'a' and <= 'f')))
-            throw new InvalidDataException("Interrupted-command receipt identity is invalid.");
         var directory = Path.Combine(run.Store.RootPath, "runs", run.Store.GetRunNamespaceIdentity(run.RunId));
         static void RequirePlainAncestors(string entry)
         {
@@ -116,6 +121,14 @@ public sealed class BoundaryScenarioTests
         try
         {
             output?.WriteLine("Retained interrupted-command fixture: " + run.Root[..Math.Min(run.Root.Length, 4096)]);
+            // These already-returned fixed booleans remain useful if the optional receipt read fails.
+            output?.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+            {
+                outcome = result.Outcome.ToString(),
+                receiptCount = result.ReceiptIds.Count,
+                realCommandDeadlineObserved = result.Invariants.TryGetValue("real-command-deadline-observed", out var deadlineObserved) ? (bool?)deadlineObserved : null,
+                commandOwnedQuiescent = result.Invariants.TryGetValue("command-owned-quiescent", out var quiescent) ? (bool?)quiescent : null
+            }));
             var command = await ReadInterruptedCommandReceiptAsync(run, result, cancellationToken);
             var execution = command.Payload.GetProperty("execution");
             System.Text.Json.JsonElement lifecycle = default, startup = default, stdout = default, stderr = default, tree = default;
