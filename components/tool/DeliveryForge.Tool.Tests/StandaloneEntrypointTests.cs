@@ -107,7 +107,12 @@ public sealed class StandaloneEntrypointTests
         var absent = Path.Combine(root, "absent-image");
         var image = new DeliveryForge.Evidence.LinuxScopeImage(absent, 1, new string('a', 64));
         var scope = new DeliveryForge.Evidence.LinuxScopeSelection(image, image, "unexecuted-DATA", "unexecuted-DATA", image, [], image);
-        var config = new TrustedConfiguration("fixture/repo", root, "refs/heads/main", absent + "-git", Adapter: adapter, AdapterVersion: "unverified-fixture");
+        // Shared composition validates the configured Git path even without dispatch.
+        // Select the existing trusted parent-PATH image; this test never invokes it.
+        var git = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
+            .Where(Path.IsPathFullyQualified).Select(path => Path.Combine(path, "git")).FirstOrDefault(File.Exists)
+            ?? throw new IOException("Existing Git fixture path required for non-dispatch composition.");
+        var config = new TrustedConfiguration("fixture/repo", root, "refs/heads/main", git, Adapter: adapter, AdapterVersion: "unverified-fixture");
         var host = new StandaloneHostSelection(absent, DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1, new string('b', 64), "unverified-fixture");
         var profile = new DeliveryForge.Execution.Host.AgentAdapterProfile(adapter, host.Version,
             Enum.GetValues<DeliveryForge.Execution.Host.AgentCapability>().Select(capability => new DeliveryForge.Execution.Host.AgentCapabilityEvidence(capability,
