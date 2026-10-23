@@ -36,8 +36,8 @@ public sealed class InstalledNativeHostConformanceTests
             var path = Environment.GetEnvironmentVariable(fixtureKey) ?? throw new IOException("Fresh Root-admitted real native conformance fixture required; no model/CLI fallback.");
             var rawFixture = BoundedFiles.Read(path, frame.Original, 65536); var expectedFixtureHash = Environment.GetEnvironmentVariable(fixtureKey + "_SHA256") ?? throw new IOException("Independent complete fixture hash required."); Assert.Equal(expectedFixtureHash, BoundedFiles.Sha(rawFixture)); _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(rawFixture); frame.Original.Check(); frame.Selected = JsonSerializer.Deserialize<Fixture>(rawFixture, BoundedFiles.Json) ?? throw new IOException("Actual probe fixture null."); var f = frame.Selected;
             if (f.Kind != "RootAdmittedNativeConformanceProvisioningFixture-v2" || f.CaseKind != (stop ? "stop" : "completion") || f.PlanBundle is null || f.Expectations is null || f.Adapter != adapter || f.Host is null || string.IsNullOrWhiteSpace(f.Host.Version) || f.Host.Version == "unverified" || f.Host.Version.Length > 256 || f.RelativePath is null || f.RelativePath.Length is < 1 or > 256 || f.RelativePath.Contains('\\') || Path.IsPathFullyQualified(f.RelativePath) || f.RelativePath.Split('/').Any(v => v is "" or "." or "..") || f.ExpectedText is null || f.ExpectedText.Length is < 1 or > 4096 || f.ExpectedText.Contains('\0')) throw new IOException("Exact finite independently prepared real-host task fixture required.");
-            if (f.ObserveRuntimeTrustRoute && (adapter != "codex.cli" || stop || !OperatingSystem.IsWindows()))
-                throw new IOException("Trust-route conformance selects only the existing Windows Codex completion producer; no authority is granted.");
+            if (f.ObserveRuntimeTrustRoute && (adapter != "codex.cli" || !OperatingSystem.IsWindows()))
+                throw new IOException("Trust-route conformance selects only the existing Windows Codex UNVERIFIED producer; no authority is granted.");
             BoundedFiles.Plain(f.ParentCheckout, true); BoundedFiles.Plain(f.Worktree, true); BoundedFiles.Plain(f.ResultDirectory, true); BoundedFiles.Separate(f.ParentCheckout, f.Worktree); BoundedFiles.Separate(f.Worktree, f.ResultDirectory);
             if (Directory.Exists(f.Worktree) || File.Exists(f.Worktree))
                 throw new IOException("Native conformance v2 requires the exact independently admitted absent destination; existing metadata cannot be adopted.");
@@ -195,10 +195,58 @@ public sealed class InstalledNativeHostConformanceTests
     public async Task Actual_installed_live_session_stops_only_through_its_same_original_group(string adapter)
     {
         using var affinity = new OwnedDuplexProcessTests.Affinity(); await using var frame = Frame.Prepare(adapter, true); var accepted = await frame.Start(true); var binding = Frame.Binding(accepted);
+        if (frame.Selected.ObserveRuntimeTrustRoute)
+        {
+            // Six startup replies only: stopping is not successful completion and
+            // cannot satisfy the distinct seven-reply completion route artifact.
+            var codex = Assert.IsType<DeliveryForge.Tool.Codex.CodexAppServerPort>(frame.Port);
+            var startup = codex.SnapshotStartupDiagnostics();
+            Assert.Equal(DeliveryForge.Tool.Codex.CodexStartupStage.Accepted, startup.Stage);
+            Assert.False(startup.WireBoundExceeded);
+            Assert.True(startup.ThreadReceived); Assert.True(startup.TurnReceived);
+            Assert.Null(startup.ReplyFailureType); Assert.Null(startup.PumpFailureType);
+            Assert.Empty(startup.PendingIds);
+            Assert.DoesNotContain(startup.Wire, row => row.HasError || row.ErrorCode is not null);
+            DeliveryForge.Tool.Codex.CodexWireMethod[] methods =
+            [
+                DeliveryForge.Tool.Codex.CodexWireMethod.Initialize,
+                DeliveryForge.Tool.Codex.CodexWireMethod.ConfigRead,
+                DeliveryForge.Tool.Codex.CodexWireMethod.AccountRead,
+                DeliveryForge.Tool.Codex.CodexWireMethod.ThreadStart,
+                DeliveryForge.Tool.Codex.CodexWireMethod.ConfigRead,
+                DeliveryForge.Tool.Codex.CodexWireMethod.TurnStart
+            ];
+            var numbered = startup.Wire.Where(row => row.ClientId is not null).ToArray();
+            Assert.Equal(18, numbered.Length);
+            for (var index = 0; index < methods.Length; index++)
+            {
+                var id = index + 1L;
+                var entered = Assert.Single(numbered, row => row.ClientId == id && row.Direction == DeliveryForge.Tool.Codex.CodexWireDirection.Client && row.State == DeliveryForge.Tool.Codex.CodexWireState.WriteEntered);
+                var returned = Assert.Single(numbered, row => row.ClientId == id && row.Direction == DeliveryForge.Tool.Codex.CodexWireDirection.Client && row.State == DeliveryForge.Tool.Codex.CodexWireState.WriteReturned);
+                var received = Assert.Single(numbered, row => row.ClientId == id && row.Direction == DeliveryForge.Tool.Codex.CodexWireDirection.Server && row.State == DeliveryForge.Tool.Codex.CodexWireState.Received);
+                Assert.Equal(methods[index], entered.Method); Assert.Equal(methods[index], returned.Method);
+                Assert.Equal(DeliveryForge.Tool.Codex.CodexWireMethod.None, received.Method);
+                Assert.All(new[] { entered, returned, received }, row => Assert.Equal(DeliveryForge.Tool.Codex.CodexWireIdKind.ClientNumber, row.IdKind));
+            }
+            Assert.All(accepted.Capabilities, capability => Assert.Equal(AgentCapabilityStatus.Unverified, capability.Status));
+        }
         await Assert.ThrowsAsync<WorkerEnvelopeException>(() => frame.Port.ControlAsync(binding with { RuntimeRunIdentity = binding.RuntimeRunIdentity + "-foreign" }, AgentControlAction.Stop, frame.Original.Remaining, TestContext.Current.CancellationToken));
         var native = frame.Native ?? throw new IOException("Actual native original missing."); var live = native.ObserveActualNative(); Assert.True(live.Known); Assert.False(live.RootExited); Assert.True(live.ActiveProcesses > 0);
         _ = frame.Original.CleanupRemaining; var actual = frame.Port.ControlAsync(binding, AgentControlAction.Stop, frame.Original.CleanupRemaining, CancellationToken.None); frame.ActualCalls.Add(actual); var control = await actual.WaitAsync(frame.Original.CleanupRemaining, TestContext.Current.CancellationToken); Assert.Equal(binding, control.Binding); Assert.Equal(AgentActivityState.Quiescent, control.Activity);
         var retired = native.RetireAsync(true); frame.Retirement = await retired.WaitAsync(frame.Original.CleanupRemaining, TestContext.Current.CancellationToken); Assert.True(frame.Retirement.KnownClosed); Assert.True(frame.Retirement.RootExited); Assert.Equal(0u, frame.Retirement.ActiveProcesses); Assert.True(frame.Retirement.DispositionReturned); _ = frame.Original.CleanupRemaining;
+        if (frame.Selected.ObserveRuntimeTrustRoute)
+        {
+            Assert.Same(native, frame.Native);
+            Assert.Same(retired, native.OriginalRetirementTask);
+            Assert.True(frame.Retirement.OutputEof); Assert.True(frame.Retirement.ErrorEof);
+            Assert.True(frame.Retirement.InputCloseReturned); Assert.Empty(frame.Retirement.Failures);
+            Assert.False(native.HasUnknownIo);
+            Assert.All(frame.ActualCalls, call => Assert.True(call.IsCompleted));
+            Assert.All(Assert.IsType<DeliveryForge.Tool.Codex.CodexAppServerPort>(frame.Port).OriginalTasks, call => Assert.True(call.IsCompleted));
+            // RouteConformanceOnly=true; RuntimeCertified=false. This existing
+            // UNVERIFIED probe cannot construct Root trust or an accepted profile.
+            Assert.All(frame.Port.Profile.Capabilities, capability => Assert.Equal(AgentCapabilityStatus.Unverified, capability.Status));
+        }
         // A stop attempt is not a successful worker commit. Native kill/actual
         // protocol-control outcomes remain separately recorded by the port.
         frame.AcceptanceAssertionsReturned = true;

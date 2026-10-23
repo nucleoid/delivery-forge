@@ -28,7 +28,7 @@ internal sealed class LinuxScopeKernel
     void Check(bool cleanup) { if (cleanup) _ = original.CleanupRemaining; else original.CheckWork(); }
     long Native(string kind, Func<long> invoke, bool cleanup, byte[]? buffer = null)
     {
-        Check(cleanup); Call row; lock (gate) { if (calls.Count >= (cleanup ? TotalCallLimit : WorkCallLimit)) throw new IOException("Finite original Linux scope syscall ledger exhausted before invocation."); row = new() { Kind = kind, OriginalBuffer = buffer }; calls.Add(row); }
+        Check(cleanup); Call row; lock (gate) { if (calls.Count >= (cleanup || !exactImageEntered ? TotalCallLimit : WorkCallLimit)) throw new IOException("Finite original Linux scope syscall ledger exhausted before invocation."); row = new() { Kind = kind, OriginalBuffer = buffer }; calls.Add(row); }
         row.Entered = true; long result = 0; Exception? primary = null, post = null;
         try { result = invoke(); row.Result = result; row.Error = result < 0 ? Marshal.GetLastPInvokeError() : 0; row.Returned = true; if (result < 0) throw new Win32Exception(row.Error, "Actual original scope syscall refused: " + kind); }
         catch (Exception error) { primary = error; row.Primary = error; }
@@ -195,7 +195,25 @@ internal sealed class LinuxScopeKernel
                 Identity(); Same(false); Check(false);
             }
             catch (Exception failure) { primary = failure; }
-            try { Close(fd, primary is not null); } catch (Exception failure) { post = failure; }
+            var cleanupClose = primary is not null;
+            if (!cleanupClose)
+            {
+                try { Check(false); }
+                catch (Exception admission) { post = admission; cleanupClose = true; }
+            }
+            try { Close(fd, cleanupClose); }
+            catch (Exception failure)
+            {
+                post = post is null ? failure : new AggregateException("Original image close admission and first disposition.", post, failure);
+                // Close's own WORK precheck can lose the boundary after the
+                // admission above. Only an unentered first close may use SAME
+                // cleanup; an entered close is never retried, even if it failed.
+                if (!cleanupClose && !fd.CloseEntered)
+                {
+                    try { Close(fd, true); }
+                    catch (Exception cleanup) { post = new AggregateException("Original WORK close admission and SAME cleanup first-close.", post, cleanup); }
+                }
+            }
             if (primary is not null && post is not null) throw new AggregateException("Actual exact image and original first-close.", primary, post);
             if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
             if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();

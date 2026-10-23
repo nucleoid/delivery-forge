@@ -17,6 +17,18 @@ if (args.Length is >= 12 and <= 79 && args[0] == "--original")
     var workLimit = TimeSpan.FromTicks(workTicks);
     if (Stopwatch.GetElapsedTime(original) >= workLimit) return 125;
     void CheckOriginal() { if (Stopwatch.GetElapsedTime(original) < TimeSpan.Zero || Stopwatch.GetElapsedTime(original) >= workLimit) throw new TimeoutException("Original negative fixture WORK expired."); }
+    if (exact && args.Length == 20 && args[16] is "replace-before-ready" or "cancel-mid-copy")
+    {
+        using var control = FixtureExactCopyControl.Create(args[16], args[14], args[11], args[12], args[17], args[18], args[19], CheckOriginal);
+        CheckOriginal(); Console.Out.NewLine = "\n";
+        Console.Error.WriteLine(control.Diagnostic); Console.Error.Flush(); CheckOriginal();
+        Console.WriteLine(control.Ready is null ? "DF_SCOPE_NONREADY|COPY_CANCELLED" : "DF_SCOPE_READY|" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + "|" + original.ToString(CultureInfo.InvariantCulture) + "|" + args[9] + "|" + frequency.ToString(CultureInfo.InvariantCulture) + "|" + control.Ready);
+        Console.Out.Flush(); CheckOriginal();
+        // Same existing negative-purpose lifetime; never consume RELEASE/exec.
+        while (Stopwatch.GetElapsedTime(original) < workLimit) await Task.Delay(5);
+        return 125;
+    }
+    if (exact && args.Length != 16) return 64;
     using var image = exact ? FixtureUnsealedImage.Create(args[14], args[11], args[12], CheckOriginal) : null;
     CheckOriginal(); Console.Out.NewLine = "\n";
     Console.WriteLine(image is null ? "DF_SCOPE_READY|partial" : "DF_SCOPE_READY|" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + "|" + original.ToString(CultureInfo.InvariantCulture) + "|" + args[9] + "|" + frequency.ToString(CultureInfo.InvariantCulture) + "|" + image.Ready);
@@ -175,4 +187,113 @@ internal sealed class FixtureUnsealedImage : IDisposable
     [DllImport("libc", SetLastError = true)] static extern int statx(int fd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out Statx value);
     [DllImport("libc", SetLastError = true)] static extern nint read(int fd, [Out] byte[] buffer, nuint count);
     [DllImport("libc", SetLastError = true)] static extern nint write(int fd, byte[] buffer, nuint count);
+}
+
+// Bounded negative fixture calls the ACTUAL selected production Create routine.
+// No copied copier, target execution, production hook or Root/native issuer.
+internal sealed class FixtureExactCopyControl : IDisposable
+{
+    readonly IDisposable? actual;
+    internal string? Ready { get; }
+    internal string Diagnostic { get; }
+    FixtureExactCopyControl(IDisposable? owner, string? ready, string diagnostic) { actual = owner; Ready = ready; Diagnostic = diagnostic; }
+    static void Require(bool ok) { if (!ok) throw new IOException("Closed actual-copy fixture control refused."); }
+    static byte[] PlainBytes(string path, long length, string hash, Action clock)
+    {
+        clock(); Require(Path.IsPathFullyQualified(path) && length is > 0 and <= 16777216 && hash.Length == 64 && hash.All(char.IsAsciiHexDigitLower));
+        for (var p = path; p is not null; p = Path.GetDirectoryName(p)) { clock(); Require((File.GetAttributes(p) & FileAttributes.ReparsePoint) == 0); }
+        byte[] bytes;
+        using (var input = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            clock(); Require(input.Length == length); bytes = new byte[checked((int)length)]; var used = 0;
+            while (used < bytes.Length) { clock(); var count = input.Read(bytes, used, bytes.Length - used); clock(); Require(count > 0); used += count; }
+            clock(); Require(input.ReadByte() == -1); clock();
+        }
+        clock(); Require(Convert.ToHexStringLower(SHA256.HashData(bytes)) == hash); clock(); return bytes;
+    }
+    internal static FixtureExactCopyControl Create(string mode, string source, string extent, string expectedHash, string dll, string dllExtent, string dllHash, Action clock)
+    {
+        clock(); Require(mode is "replace-before-ready" or "cancel-mid-copy");
+        Require(long.TryParse(extent, NumberStyles.None, CultureInfo.InvariantCulture, out var length) && length is >= 64 and <= 11534336);
+        Require(long.TryParse(dllExtent, NumberStyles.None, CultureInfo.InvariantCulture, out var dllLength));
+        Require(Path.GetFileName(dll) == "DeliveryForge.LinuxScopeBirthGate.dll");
+        _ = PlainBytes(dll, dllLength, dllHash, clock);
+        var assembly = System.Reflection.Assembly.LoadFrom(dll); clock();
+        _ = PlainBytes(dll, dllLength, dllHash, clock);
+        Require(assembly.GetName().Name == "DeliveryForge.LinuxScopeBirthGate");
+        var type = assembly.GetType("DeliveryForge.LinuxScopeBirthGate.ExactNativeImage", throwOnError: true)!;
+        var flags = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static;
+        var create = type.GetMethod("Create", flags, null, [typeof(string), typeof(long), typeof(string), typeof(Action)], null);
+        var ready = type.GetProperty("Ready", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+        Require(create is not null && create.DeclaringType == type && create.IsStatic && create.ReturnType == type && typeof(IDisposable).IsAssignableFrom(type));
+        Require(ready is not null && ready.DeclaringType == type && ready.PropertyType == typeof(string) && ready.GetMethod is not null);
+        long partial = 0; using var cancellation = new CancellationTokenSource();
+        void OriginalCheck()
+        {
+            clock(); cancellation.Token.ThrowIfCancellationRequested();
+            if (mode == "cancel-mid-copy")
+            {
+                var observed = ActualOwnPartialExtent(length, clock);
+                if (observed > 0) { Require(partial == 0); partial = observed; cancellation.Cancel(); cancellation.Token.ThrowIfCancellationRequested(); }
+            }
+            clock();
+        }
+        object? value;
+        try { value = create!.Invoke(null, [source, length, expectedHash, (Action)OriginalCheck]); }
+        catch (System.Reflection.TargetInvocationException error)
+        {
+            // Create's cancellation plus its same check refusing first-close is
+            // preserved, not converted into a fictitious successful Dispose.
+            if (mode != "cancel-mid-copy" || partial <= 0 || partial >= length || !cancellation.IsCancellationRequested ||
+                error.InnerException is not AggregateException both || both.InnerExceptions.Count != 2 ||
+                both.InnerExceptions.Any(x => x is not OperationCanceledException canceled || canceled.CancellationToken != cancellation.Token)) throw;
+            clock();
+            return new(null, null, "DF_SCOPE_COPY_CANCELLED|" + partial.ToString(CultureInfo.InvariantCulture) + "|" + length.ToString(CultureInfo.InvariantCulture) + "|" + expectedHash + "|routine-callback");
+        }
+        Require(value is IDisposable);
+        var owner = (IDisposable)value!;
+        try
+        {
+            Require(mode == "replace-before-ready" && partial == 0 && !cancellation.IsCancellationRequested);
+            clock(); var actualReady = (string?)ready!.GetValue(value); clock(); Require(actualReady is not null && actualReady.StartsWith("ELF|", StringComparison.Ordinal));
+            // Effects are confined to this test-created private copy. Never
+            // replace the system cat, production gate or a retained fixture.
+            var directory = Path.GetDirectoryName(source)!; var leaf = Path.GetFileName(directory);
+            Require(Path.GetFileName(source) == "actual-cat" && Path.GetFullPath(directory) == Path.GetFullPath(Environment.CurrentDirectory) && Path.GetFullPath(Path.GetDirectoryName(directory)!) == Path.GetFullPath(Path.GetTempPath()).TrimEnd(Path.DirectorySeparatorChar));
+            Require(leaf.StartsWith("forge-exact-image-", StringComparison.Ordinal) && leaf.Length == 50 && leaf[18..].All(char.IsAsciiHexDigitLower));
+            for (var p = source; p is not null; p = Path.GetDirectoryName(p)) { clock(); Require((File.GetAttributes(p) & FileAttributes.ReparsePoint) == 0); }
+            clock(); File.WriteAllBytes(source, System.Text.Encoding.ASCII.GetBytes("private pre-release replacement\n")); clock();
+            return new(owner, actualReady, "DF_SCOPE_PRE_RELEASE_REPLACED|" + length.ToString(CultureInfo.InvariantCulture) + "|" + expectedHash);
+        }
+        catch (Exception primary)
+        {
+            try { owner.Dispose(); } catch (Exception disposition) { throw new AggregateException("Actual fixture observation and production first-close.", primary, disposition); }
+            throw;
+        }
+    }
+    static long ActualOwnPartialExtent(long length, Action clock)
+    {
+        long partial = 0; var matches = 0; var count = 0;
+        clock(); using var paths = Directory.EnumerateFileSystemEntries("/proc/self/fd").GetEnumerator(); clock();
+        while (true)
+        {
+            clock(); var moved = paths.MoveNext(); clock(); if (!moved) break;
+            Require(++count <= 256); var path = paths.Current;
+            Require(int.TryParse(Path.GetFileName(path), NumberStyles.None, CultureInfo.InvariantCulture, out var fd) && fd >= 0);
+            var bytes = new byte[4096]; clock(); var used = readlink(path, bytes, (nuint)bytes.Length); clock();
+            // An unrelated runtime descriptor can finish concurrently. It can
+            // never serve as the matching memfd/cancellation witness.
+            if (used < 0) continue;
+            Require(used < bytes.Length);
+            if (System.Text.Encoding.UTF8.GetString(bytes, 0, checked((int)used)) != "/memfd:delivery-forge-exact-native (deleted)") continue;
+            Require(++matches == 1); clock(); var result = statx(fd, "", 0x1000, 0x200, out var actual); clock();
+            Require(result == 0 && (actual.Mask & 0x200) != 0 && actual.Size <= (ulong)length);
+            if (actual.Size > 0 && actual.Size < (ulong)length) partial = checked((long)actual.Size);
+        }
+        clock(); return partial;
+    }
+    public void Dispose() => actual?.Dispose();
+    [StructLayout(LayoutKind.Explicit, Size = 256)] struct Statx { [FieldOffset(0)] public uint Mask; [FieldOffset(40)] public ulong Size; }
+    [DllImport("libc", SetLastError = true)] static extern nint readlink([MarshalAs(UnmanagedType.LPUTF8Str)] string path, [Out] byte[] bytes, nuint extent);
+    [DllImport("libc", SetLastError = true)] static extern int statx(int fd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out Statx value);
 }

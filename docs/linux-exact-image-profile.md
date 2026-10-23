@@ -27,12 +27,19 @@ counterpart works. The actual Linux CLI's size and compatibility must be checked
 The hash loop keeps one bounded read record with a finite syscall count and
 actual return facts for each read. A short-read plan refusal, deadline or failed
 hash does not create a successful image proof. Original open, identity, seal,
-first-close and cleanup records remain independently required. WORK admissions
-stop at 8,192 retained syscall rows; cleanup can use the remainder of the SAME
-16,384-row ceiling. The exact-image hash frame uses the WORK admission limit
-as well. These partitions preserve cleanup headroom, not a guarantee that an
-unknown native effect will settle or that cleanup is permitted after its original
-clock expires. No rows, bytes or time are refunded or added.
+first-close and cleanup records remain independently required. Once exact-image
+binding has entered, WORK admissions stop at 8,192 retained syscall rows; cleanup
+can use the remainder of the SAME 16,384-row ceiling. The exact-image hash frame
+uses that WORK admission limit as well. Ordinary scopes that never enter exact-image
+binding retain the original 16,384-row WORK ceiling; cleanup shares the remaining
+rows of that same counter. No row counter is reset when exact-image binding enters.
+Long exact-image work can still exceed its finite partition and must refuse.
+These partitions preserve cleanup headroom, not a guarantee that an unknown native
+effect will settle or that cleanup is permitted after its original clock expires.
+An exact-image descriptor whose first-close WORK admission expires can use SAME
+original cleanup before close entry; once close has entered, it is never retried.
+Admission, close and post failures remain retained. No rows, bytes or time are
+refunded or added.
 
 All memfd pages, source page cache, loader/runtime pages and descendants consume
 the same scope `MemoryMax=4294967296` and `MemorySwapMax=0`. This is a total scope
