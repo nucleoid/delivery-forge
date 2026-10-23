@@ -245,7 +245,7 @@ public sealed class InstalledNativeHostConformanceTests
         var retired = native.RetireAsync(true); frame.Retirement = await retired.WaitAsync(frame.Original.CleanupRemaining, TestContext.Current.CancellationToken); Assert.True(frame.Retirement.KnownClosed); Assert.True(frame.Retirement.RootExited); Assert.Equal(0u, frame.Retirement.ActiveProcesses); Assert.True(frame.Retirement.DispositionReturned); _ = frame.Original.CleanupRemaining;
         if (frame.Selected.ObserveRuntimeTrustRoute)
         {
-            Assert.True(control.Detail.EndsWith("InterruptFailure=", StringComparison.Ordinal), "Actual turn/interrupt must return successfully before same-original retirement.");
+            Assert.True(control.Limitation.EndsWith("InterruptFailure=", StringComparison.Ordinal), "Actual turn/interrupt must return successfully before same-original retirement.");
             var stopped = Assert.IsType<DeliveryForge.Tool.Codex.CodexAppServerPort>(frame.Port).SnapshotStartupDiagnostics();
             Assert.False(stopped.WireBoundExceeded);
             Assert.Empty(stopped.PendingIds);
