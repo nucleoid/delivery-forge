@@ -105,4 +105,70 @@ public sealed class CodexConfigReadDataTests
     {
         Assert.Throws<ToolUsageException>(() => CodexRuntimeRoute.RequireSubscriptionEnvironment(name => name == "CODEX_APP_SERVER_CHATGPT_BASE_URL" ? "https://private.invalid" : null));
     }
+
+    [Theory]
+    [InlineData("{\"id\":7}", "MissingResult")]
+    [InlineData("{\"id\":7,\"result\":{\"config\":null}}", "ConfigNotObject")]
+    [InlineData("{\"id\":7,\"result\":{\"config\":{},\"origins\":null}}", "OriginsNotObject")]
+    [InlineData("{\"id\":7,\"result\":{\"config\":{},\"origins\":{}}}", "LayersMissing")]
+    [InlineData("{\"id\":7,\"result\":{\"config\":{},\"origins\":{},\"layers\":null}}", "LayersNull")]
+    [InlineData("{\"id\":7,\"result\":{\"config\":{},\"origins\":{},\"layers\":{}}}", "LayersNotArray")]
+    [InlineData("{\"id\":7,\"result\":{\"config\":{},\"origins\":{},\"layers\":[]}}", "LayersEmpty")]
+    [InlineData("{\"id\":7,\"result\":{\"config\":{},\"origins\":{},\"layers\":[null]}}", "LayerNotObject")]
+    [InlineData("{\"id\":7,\"result\":{\"config\":{},\"origins\":{},\"layers\":[{\"config\":null,\"name\":{\"type\":\"sessionFlags\"},\"version\":\"1\"}]}}", "LayerConfigNotObject")]
+    [InlineData("{\"id\":7,\"result\":{\"config\":{},\"origins\":{},\"layers\":[{\"config\":{},\"name\":null,\"version\":\"1\"}]}}", "LayerNameNotObject")]
+    [InlineData("{\"id\":7,\"result\":{\"config\":{},\"origins\":{},\"layers\":[{\"config\":{},\"name\":{},\"version\":null}]}}", "LayerVersionNotString")]
+    public void Fixed_shape_diagnostic_does_not_turn_schema_optional_metadata_into_admission(string raw, string expected)
+    {
+        using var doc = JsonDocument.Parse(raw);
+        var projected = CodexConfigReadData.Redact(doc.RootElement, 7).GetProperty("result");
+        Assert.Equal(expected, CodexConfigReadData.Diagnostic(projected).ToString());
+        var refusal = Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(projected));
+        Assert.EndsWith("Diagnostic=" + expected, refusal.Message, StringComparison.Ordinal);
+    }
+    [Theory]
+    [InlineData("{\"openai_base_url\":\"secret-sentinel\"}", "KnownDestinationOverride")]
+    [InlineData("{\"model_providers\":{\"private-provider\":{\"base_url\":\"secret-sentinel\"}}}", "CustomProviderDefinitions")]
+    [InlineData("{\"model\":\"secret-sentinel\"}", "UnsupportedModelIdentity")]
+    [InlineData("{\"model_provider\":\"secret-sentinel\"}", "UnsupportedProviderIdentity")]
+    public void Fixed_route_diagnostic_never_retains_the_rejected_value(string config, string expected)
+    {
+        var projected = Project(config);
+        Assert.Equal(expected, CodexConfigReadData.Diagnostic(projected).ToString());
+        var refusal = Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(projected));
+        Assert.DoesNotContain("secret-sentinel", projected.GetRawText());
+        Assert.DoesNotContain("secret-sentinel", refusal.ToString());
+    }
+    [Fact]
+    public void Traversal_bound_remains_a_refusal_with_only_a_fixed_diagnostic()
+    {
+        var config = "{\"values\":[" + string.Join(",", Enumerable.Repeat("null", 4096)) + "]}";
+        var projected = Project(config);
+        Assert.Equal(CodexConfigReadDiagnostic.InspectionBoundExceeded, CodexConfigReadData.Diagnostic(projected));
+        Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(projected));
+    }
+    [Fact]
+    public void Too_many_layers_remains_a_refusal_with_only_a_fixed_diagnostic()
+    {
+        var layers = "[" + string.Join(",", Enumerable.Repeat("{\"config\":{},\"name\":{},\"version\":\"1\"}", 33)) + "]";
+        var projected = Project("{}", layers);
+        Assert.Equal(CodexConfigReadDiagnostic.LayersTooMany, CodexConfigReadData.Diagnostic(projected));
+        Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(projected));
+    }
+    [Fact]
+    public void Existing_snapshot_retains_only_the_closed_diagnostic_enum()
+    {
+        var journal = new CodexStartupJournal(System.Diagnostics.Stopwatch.GetTimestamp());
+        using var raw = JsonDocument.Parse("{\"id\":2,\"result\":{\"config\":{},\"origins\":{},\"layers\":null}}");
+        journal.Server(CodexConfigReadData.Redact(raw.RootElement, 2));
+        var snapshot = journal.Snapshot([], null, null, null, [], false, false);
+        Assert.Equal(CodexConfigReadDiagnostic.LayersNull, snapshot.ConfigurationDiagnostic);
+        using var forged = JsonDocument.Parse("{\"id\":2,\"result\":{\"routeStatus\":\"unsupported\",\"routeDiagnostic\":\"secret-sentinel\"}}");
+        journal.Server(forged.RootElement);
+        snapshot = journal.Snapshot([], null, null, null, [], false, false);
+        Assert.Equal(CodexConfigReadDiagnostic.Unrecognized, snapshot.ConfigurationDiagnostic);
+        Assert.DoesNotContain("secret-sentinel", JsonSerializer.Serialize(snapshot, BoundedFiles.Json));
+        var refusal = Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(forged.RootElement.GetProperty("result")));
+        Assert.DoesNotContain("secret-sentinel", refusal.ToString());
+    }
 }
