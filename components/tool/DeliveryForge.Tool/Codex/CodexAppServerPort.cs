@@ -166,8 +166,8 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             {
                 if (runtimeTrust is null)
                 {
-                startup.SetStage(CodexStartupStage.AccountRead); var account = await Rpc("account/read", new { refreshToken = false }, token).ConfigureAwait(false);
-                observedChatgptAccount = account.GetProperty("account") is { ValueKind: JsonValueKind.Object } actualAccount && actualAccount.GetProperty("type").GetString() == "chatgpt";
+                    startup.SetStage(CodexStartupStage.AccountRead); var account = await Rpc("account/read", new { refreshToken = false }, token).ConfigureAwait(false);
+                    observedChatgptAccount = account.GetProperty("account") is { ValueKind: JsonValueKind.Object } actualAccount && actualAccount.GetProperty("type").GetString() == "chatgpt";
                 }
             }
             catch (IOException) when (accountReadRefused && pumpFailure is null) { observedChatgptAccount = false; }
