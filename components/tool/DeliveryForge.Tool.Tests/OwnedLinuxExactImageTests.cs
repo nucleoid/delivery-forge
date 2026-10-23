@@ -84,7 +84,7 @@ public sealed class OwnedLinuxExactImageTests
             var retired = await session.RetireAsync(true); Assert.False(File.Exists(marker));
             var actualErrorDrain = session.OriginalErrorDrainTask;
             Assert.NotNull(actualErrorDrain);
-            await actualErrorDrain.WaitAsync(original.CleanupRemaining); Assert.False(session.ErrorQuotaExceeded);
+            await actualErrorDrain.WaitAsync(original.CleanupRemaining, TestContext.Current.CancellationToken); Assert.False(session.ErrorQuotaExceeded);
             var refusalRows = new UTF8Encoding(false, true).GetString(session.StandardError).Split('\n')
                 .Select(line => line.TrimEnd('\r')).Where(line => line.StartsWith("DF_SCOPE_EXACT_IMAGE_REFUSAL|", StringComparison.Ordinal)).ToArray();
             Assert.Equal(["DF_SCOPE_EXACT_IMAGE_REFUSAL|" + expectedCode], refusalRows);
