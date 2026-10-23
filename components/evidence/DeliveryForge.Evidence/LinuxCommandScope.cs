@@ -130,7 +130,6 @@ internal sealed class LinuxCommandScope
             // acceptance of a replaced deployment entry.
             library!.VerifyImage(selected.BirthGate with { Path = "/proc/" + process.Id.ToString(CultureInfo.InvariantCulture) + "/exe" });
             if (ProcStart(false) != procStart) throw new IOException("Actual gate executable generation changed during image observation.");
-            if (!productionGate) throw new IOException("Negative gate-build profile may never release a target.");
             if (exactImage is not null)
             {
                 if (ready[5] != "ELF" || !int.TryParse(ready[6], NumberStyles.None, CultureInfo.InvariantCulture, out var fd) || fd <= 2 || ready[7] != exactImage.Bytes.ToString(CultureInfo.InvariantCulture) || ready[8] != exactImage.Sha256 || !ulong.TryParse(ready[9], NumberStyles.None, CultureInfo.InvariantCulture, out var inode) || inode == 0 || !uint.TryParse(ready[10], NumberStyles.None, CultureInfo.InvariantCulture, out var major) || !uint.TryParse(ready[11], NumberStyles.None, CultureInfo.InvariantCulture, out var minor)) throw new IOException("Actual exact-image READY descriptor identity differs.");
@@ -139,6 +138,9 @@ internal sealed class LinuxCommandScope
                 if (ProcStart(false) != procStart || !invocation.AsSpan().SequenceEqual(bus.InvocationId(unitPath, false))) throw new IOException("Original generation/invocation changed after sealed image observation.");
                 exactImageObserved = true;
             }
+            // A genuine negative fixture may exercise the SAME kernel observations,
+            // but must NEVER earn release even if a kernel check regresses.
+            if (!productionGate) throw new IOException("Negative gate-build profile may never release a target.");
             var release = Encoding.ASCII.GetBytes("DF_SCOPE_RELEASE|" + ticket + "|" + original.OriginalStarted.ToString(CultureInfo.InvariantCulture) + "\n"); retained.Add(release); releaseEntered = true; Io("actual-private-release-write", () => input.WriteAsync(release, 0, release.Length, original.Token)); Io("actual-private-release-flush", () => input.FlushAsync(original.Token)); releaseReturned = true; Check(false);
         }
     }

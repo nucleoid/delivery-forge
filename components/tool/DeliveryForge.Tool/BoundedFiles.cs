@@ -150,7 +150,7 @@ public static class BoundedFiles
     // This does not grant image/scope/reviewer authority.
     internal static void ReserveExactLinuxImageReads(AdmissionFile pin, ToolLifetime life)
     {
-        life.Check(); if (pin.Bytes is < 64 or >= 16L * 1024 * 1024) throw new ToolUsageException("Exact Linux ELF image must fit the existing 16MiB kernel observation quota, including EOF and other observations.");
+        life.Check(); if (pin.Bytes < 64 || pin.Bytes > DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes) throw new ToolUsageException("Exact Linux ELF image must fit the eleven-MiB exact-image profile inside the existing kernel quota and cleanup reserve.");
         Credit(life, checked(2 * (pin.Bytes + 1)), false);
     }
     // Windows sharing denies writes and deletion for the entire retained native

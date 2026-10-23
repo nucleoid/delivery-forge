@@ -22,6 +22,8 @@ public sealed record DuplexRetirement(bool KnownClosed, bool RootExited, uint Ac
 // process, shell/model fallback, auth mutation or automatic restart is exposed.
 public sealed class OwnedDuplexProcess
 {
+    // DATA profile bound only; this constant grants no scope or native authority.
+    public const long MaximumExactLinuxImageBytes = 11L * 1024 * 1024;
     static readonly ConcurrentDictionary<OwnedDuplexProcess, byte> Retained = new();
     readonly IOwnedDuplexBudget budget; readonly bool commandCapture; readonly List<DuplexIoObservation> io = []; readonly object gate = new();
     Stream? input, output, error; Action<bool>? closeInput; readonly int errorLimit; bool errorQuotaExceeded; Func<bool, DuplexNativeObservation>? observe; Action<bool>? terminate; Func<bool, bool>? dispose;
@@ -53,9 +55,10 @@ public sealed class OwnedDuplexProcess
         ArgumentNullException.ThrowIfNull(original); original.CheckWork();
         if (exactNativeImage is not null && (!OperatingSystem.IsLinux() || linuxScope is null)) throw new PlatformNotSupportedException("Exact native ELF execution requires the actual selected Linux scope; no pathname fallback.");
         // Every public exact-mode entrant shares the kernel owner's EXISTING
-        // 16MiB observation quota. Refuse a known impossible extent before birth;
+        // 16MiB observation quota, with cleanup reserved inside that ceiling.
+        // Refuse a known impossible extent before birth;
         // the actual kernel owner still debits its remaining quota before open.
-        if (exactNativeImage is not null && (exactNativeImage.Bytes < 64 || exactNativeImage.Bytes >= 16L * 1024 * 1024)) throw new IOException("Exact native image cannot fit the existing Linux observation byte quota.");
+        if (exactNativeImage is not null && (exactNativeImage.Bytes < 64 || exactNativeImage.Bytes > MaximumExactLinuxImageBytes)) throw new IOException("Exact native image cannot fit the existing Linux observation byte quota.");
         if (original.WholeLimit <= TimeSpan.Zero || original.WholeLimit > TimeSpan.FromSeconds(1200) || original.WorkLimit <= TimeSpan.Zero || original.WorkLimit > TimeSpan.FromSeconds(1100) || original.WorkLimit >= original.WholeLimit || original.OriginalStarted <= 0 || Stopwatch.GetTimestamp() < original.OriginalStarted) throw new ArgumentOutOfRangeException(nameof(original));
         if (!Path.IsPathFullyQualified(invocation.FileName) || invocation.Arguments.Count > 64 || invocation.Arguments.Any(x => x.Length > 8192 || x.Contains('\0'))) throw new ArgumentException("Exact finite explicit duplex image/argv required.");
         if (errorLimit is <= 0 or > 16777216) throw new ArgumentOutOfRangeException(nameof(errorLimit)); var session = new OwnedDuplexProcess(original, errorLimit, commandCapture);

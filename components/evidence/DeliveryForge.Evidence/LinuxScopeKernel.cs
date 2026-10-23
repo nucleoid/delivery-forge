@@ -13,6 +13,9 @@ internal sealed class LinuxScopeKernel
 {
     const int DirectoryFlag = 0x10000, NoFollow = 0x20000, CloseOnExec = 0x80000;
     const long Cgroup2Magic = 0x63677270;
+    // Reserve within the EXISTING cumulative ceilings, never another allowance.
+    const long WorkReadByteLimit = 14L * 1024 * 1024, TotalReadByteLimit = 16L * 1024 * 1024;
+    const int WorkCallLimit = 8192, TotalCallLimit = 16384;
     readonly IOwnedDuplexBudget original; readonly object gate = new(); readonly List<Call> calls = []; readonly List<OwnedFd> descriptors = [];
     bool exactImageEntered;
     OwnedFd? group, procDescriptors; Identity identity; string? originalPath; long readBytes; bool bound, stopEntered, closeEntered;
@@ -25,7 +28,7 @@ internal sealed class LinuxScopeKernel
     void Check(bool cleanup) { if (cleanup) _ = original.CleanupRemaining; else original.CheckWork(); }
     long Native(string kind, Func<long> invoke, bool cleanup, byte[]? buffer = null)
     {
-        Check(cleanup); Call row; lock (gate) { if (calls.Count >= 16384) throw new IOException("Finite original Linux scope syscall ledger exhausted before invocation."); row = new() { Kind = kind, OriginalBuffer = buffer }; calls.Add(row); }
+        Check(cleanup); Call row; lock (gate) { if (calls.Count >= (cleanup ? TotalCallLimit : WorkCallLimit)) throw new IOException("Finite original Linux scope syscall ledger exhausted before invocation."); row = new() { Kind = kind, OriginalBuffer = buffer }; calls.Add(row); }
         row.Entered = true; long result = 0; Exception? primary = null, post = null;
         try { result = invoke(); row.Result = result; row.Error = result < 0 ? Marshal.GetLastPInvokeError() : 0; row.Returned = true; if (result < 0) throw new Win32Exception(row.Error, "Actual original scope syscall refused: " + kind); }
         catch (Exception error) { primary = error; row.Primary = error; }
@@ -104,7 +107,7 @@ internal sealed class LinuxScopeKernel
     byte[] Read(string name, bool cleanup, int maximum)
     {
         Check(cleanup); if (name is not ("cgroup.events" or "memory.max" or "memory.swap.max" or "cpuset.cpus.effective" or "cpu.max" or "pids.max")) throw new IOException("Unlisted original cgroup observation.");
-        if (readBytes > 16L * 1024 * 1024 - (maximum + 1)) throw new IOException("Complete cgroup observation byte quota exceeded before allocation."); readBytes += maximum + 1; var data = new byte[maximum + 1]; var fd = OpenFd(name, NoFollow | CloseOnExec, cleanup, group); var count = 0; Exception? primary = null, post = null;
+        if (readBytes > (cleanup ? TotalReadByteLimit : WorkReadByteLimit) - (maximum + 1)) throw new IOException("Complete cgroup observation byte quota exceeded before allocation."); readBytes += maximum + 1; var data = new byte[maximum + 1]; var fd = OpenFd(name, NoFollow | CloseOnExec, cleanup, group); var count = 0; Exception? primary = null, post = null;
         try { while (count < data.Length) { Check(cleanup); var chunk = new byte[data.Length - count]; var n = (int)Native("read:" + name, () => read(fd.Actual, chunk, (nuint)chunk.Length), cleanup, chunk); if (n == 0) break; Buffer.BlockCopy(chunk, 0, data, count, n); count += n; } if (count > maximum) throw new IOException("Complete cgroup file exceeded its finite profile."); }
         catch (Exception error) { primary = error; }
         try { Close(fd, cleanup); Check(cleanup); } catch (Exception error) { post = error; }
@@ -152,11 +155,11 @@ internal sealed class LinuxScopeKernel
     {
         lock (gate)
         {
-            Check(false); Same(false); if (exactImageEntered || actualPid <= 0 || actualFd <= 2 || selected.Bytes is < 64 or > 536870912) throw new IOException("One finite original exact-image descriptor observation required.");
+            Check(false); Same(false); if (exactImageEntered || actualPid <= 0 || actualFd <= 2 || selected.Bytes < 64 || selected.Bytes > OwnedDuplexProcess.MaximumExactLinuxImageBytes) throw new IOException("One finite original exact-image descriptor observation required.");
             // Charge complete content plus EOF against this SAME existing kernel
             // quota before opening the descriptor. No refund or image allowance.
             var byteLimit = selected.Bytes + 1;
-            if (byteLimit > 16L * 1024 * 1024 - readBytes) throw new IOException("Complete sealed-image observation exceeds remaining original kernel byte quota before open.");
+            if (byteLimit > WorkReadByteLimit - readBytes) throw new IOException("Complete sealed-image observation exceeds remaining original kernel byte quota before open.");
             readBytes += byteLimit; exactImageEntered = true; Check(false);
             var fd = OpenFd("/proc/" + actualPid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/fd/" + actualFd.ToString(System.Globalization.CultureInfo.InvariantCulture), CloseOnExec, false);
             Exception? primary = null, post = null;
@@ -171,7 +174,7 @@ internal sealed class LinuxScopeKernel
                     if ((seals & sealsRequired) != sealsRequired) throw new IOException("Complete actual immutable content/extent/exec/seal-set required.");
                 }
                 Identity(); using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
-                Check(false); if (calls.Count >= 16384) throw new IOException("Finite original Linux scope syscall ledger exhausted before invocation.");
+                Check(false); if (calls.Count >= WorkCallLimit) throw new IOException("Finite original Linux scope syscall ledger exhausted before invocation.");
                 var buffer = new byte[65536]; long consumed = 0;
                 var imageReads = new Call
                 {

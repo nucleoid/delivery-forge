@@ -273,7 +273,9 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             // or grants credit; preparation and racing use still charge normally.
             if (OperatingSystem.IsLinux())
             {
-                if (selection.Image.Bytes is < 64 or >= 16777216)
+                if (linuxScope is null) throw new ToolUsageException("Actual selected Linux reviewer scope required before evidence preparation.");
+                executor.RequireSelectedLinuxCaptureOwner(original, linuxScope);
+                if (selection.Image.Bytes < 64 || selection.Image.Bytes > OwnedDuplexProcess.MaximumExactLinuxImageBytes)
                     throw new ToolUsageException("Exact Linux reviewer image must fit the existing kernel read profile before evidence preparation.");
                 BoundedFiles.RequireReadCapacity(original, 15, checked(12 * (selection.Image.Bytes + 1)));
             }

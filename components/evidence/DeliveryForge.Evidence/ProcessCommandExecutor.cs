@@ -119,6 +119,18 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         return ScopedBoundedCapture.ExecuteAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing, linuxScope, exactNativeImage);
     }
 
+    // Admission only: positively match this configured original owner without
+    // starting a capture or accepting public selection DATA as native authority.
+    public void RequireSelectedLinuxCaptureOwner(IOwnedDuplexBudget actualOriginal, LinuxScopeSelection requestedScope)
+    {
+        ArgumentNullException.ThrowIfNull(actualOriginal); ArgumentNullException.ThrowIfNull(requestedScope);
+        actualOriginal.CheckWork();
+        if (!OperatingSystem.IsLinux() || !_creationOwnedWindows || _selectedLinuxScope is null || _selectedLinuxOriginal is null)
+            throw new PlatformNotSupportedException("Actual configured production Linux capture owner required before preparation.");
+        RequireSelectedLinuxCaptureOwner(_selectedLinuxScope, _selectedLinuxOriginal, actualOriginal, requestedScope);
+        actualOriginal.CheckWork();
+    }
+
     // These restrictive guards are shared by the actual pre-birth paths. They
     // cannot issue a scope, native owner or authority from selection DATA.
     internal static void RequireSelectedLinuxCaptureOwner(LinuxScopeSelection? selectedScope,
