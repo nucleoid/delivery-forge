@@ -16,7 +16,7 @@ internal sealed class Issue17HostInputs
     readonly KeyValuePair<string, string?>[] environment;
     static StringComparer Paths => OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
     internal static readonly string[] EnvironmentNames = ["HOME", "USERPROFILE", "CODEX_HOME", "CLAUDE_CONFIG_DIR",
-        "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", .. ClaudeIndependentReviewData.ProviderOverrides];
+        "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "CODEX_APP_SERVER_CHATGPT_BASE_URL", .. ClaudeIndependentReviewData.ProviderOverrides];
     Issue17HostInputs(ToolLifetime original, Issue17HostInput[] inputs, KeyValuePair<string, string?>[] environment)
     { this.original = original; this.inputs = inputs; this.environment = environment; }
     internal static Issue17HostInputs Capture(ToolLifetime original, IReadOnlyList<Issue17HostInput> selected)
@@ -141,6 +141,7 @@ public sealed partial class InstalledHostAdmission
             boundWorktree = worktree; boundResult = resultDirectory;
             Check(actual);
         }
+        internal void RevokeRoute() => original.BeginFailureCleanup();
         internal void CheckReviewer(ToolLifetime actual, IndependentClaudeReviewSelection reviewer)
         {
             if (!Matches(actual, reviewer)) throw new ToolUsageException("Independent reviewer trust differs from its accepted original selection.");

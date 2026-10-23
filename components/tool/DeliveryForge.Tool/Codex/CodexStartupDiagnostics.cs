@@ -75,6 +75,7 @@ internal sealed class CodexPendingReplies
             var reply = new TaskCompletionSource<JsonElement>(TaskCreationOptions.RunContinuationsAsynchronously); pending.Add(id, reply); return reply;
         }
     }
+    internal bool Contains(long id) { lock (gate) return pending.ContainsKey(id); }
     internal bool TryRemove(long id, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out TaskCompletionSource<JsonElement>? reply) { lock (gate) return pending.Remove(id, out reply); }
     internal void Fail(Exception error)
     {

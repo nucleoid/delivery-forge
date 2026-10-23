@@ -5,7 +5,7 @@ internal static class CodexRuntimeRoute
 {
     internal static void RequireSubscriptionEnvironment(Func<string, string?> read)
     {
-        foreach (var name in new[] { "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL" })
+        foreach (var name in new[] { "OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL", "CODEX_APP_SERVER_CHATGPT_BASE_URL" })
             if (!string.IsNullOrEmpty(read(name))) throw new ToolUsageException("The owner-trusted first-party route refuses a credential/endpoint override: " + name);
     }
     internal static void RequireObserved(bool chatgptAccount, string? provider, string? model)

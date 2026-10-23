@@ -27,7 +27,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     public HostObservationRealm Realm => HostObservationRealm.ActualHost;
     public IReadOnlyList<Task> OriginalTasks { get { lock (tasks) return tasks.ToArray(); } }
     public OwnedDuplexProcess? OriginalProcess => process; // reference only, never a PID adoption API.
-    string? observedModel, observedProvider; bool observedChatgptAccount; volatile bool accountReadRefused; long accountReadId;
+    string? observedModel, observedProvider; bool observedChatgptAccount; volatile bool accountReadRefused; long accountReadId; long configReadId; string? observedRoute; JsonElement routeProjection;
     internal string? CompletedImplementationFamily(AgentCompletionReceipt completion)
     {
         lock (gate)
@@ -64,6 +64,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         if (shutdown || pump is { IsCompleted: true }) pending.Fail(pumpFailure ?? new IOException("Original Codex pump has stopped; no new RPC."));
         var reply = pending.Register(id);
         if (method == "account/read") Volatile.Write(ref accountReadId, id);
+        if (method == "config/read") Volatile.Write(ref configReadId, id);
         try
         {
             startup!.Client(method, id, CodexWireState.WriteEntered);
@@ -80,8 +81,29 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         {
             while (true)
             {
-                using var doc = await protocol!.ReadAsync(token).ConfigureAwait(false); if (doc is null) { if (!shutdown) throw new IOException("Unexpected app-server EOF."); return; }
+                JsonDocument? read;
+                try { read = await protocol!.ReadAsync(token).ConfigureAwait(false); }
+                catch (Exception parser) when (pending.Contains(Volatile.Read(ref configReadId)) &&
+                    parser is DeliveryForge.Contracts.Serialization.ContractJsonException or JsonException)
+                {
+                    // The concrete JSON parser can include property/number text
+                    // in its message. Do not retain that config-bearing text or
+                    // an inner exception. Owner/IO/cancellation errors are intact.
+                    throw new IOException("Malformed runtime configuration frame; no parser payload is retained.");
+                }
+                using var doc = read; if (doc is null) { if (!shutdown) throw new IOException("Unexpected app-server EOF."); return; }
                 var message = doc.RootElement; CodexJsonlProtocol.RequireEnvelope(message);
+                // Reject unclaimed response IDs before ANY payload retention.
+                // The actual configuration reply is then projected before the
+                // journal, trace and pending Task result can observe it.
+                if (!message.TryGetProperty("method", out _) && (message.GetProperty("id").ValueKind != JsonValueKind.Number || !message.GetProperty("id").TryGetInt64(out var pendingId) || !pending.Contains(pendingId)))
+                    throw new IOException("Foreign/duplicate Codex response ID; no response payload is retained.");
+                if (!message.TryGetProperty("method", out _) && message.TryGetProperty("result", out var rawResult) && rawResult.ValueKind == JsonValueKind.Object &&
+                    (rawResult.TryGetProperty("config", out _) || rawResult.TryGetProperty("layers", out _) || rawResult.TryGetProperty("origins", out _)) &&
+                    (!message.GetProperty("id").TryGetInt64(out var configurationId) || configurationId != Volatile.Read(ref configReadId)))
+                    throw new IOException("Configuration-shaped response has a foreign correlation; no response payload is retained.");
+                if (!message.TryGetProperty("method", out _) && message.GetProperty("id").TryGetInt64(out var routingId) && routingId == Volatile.Read(ref configReadId))
+                    message = CodexConfigReadData.Redact(message, routingId);
                 if (!message.TryGetProperty("method", out _) && message.TryGetProperty("id", out var accountId) && accountId.ValueKind == JsonValueKind.Number && accountId.TryGetInt64(out var observedId) && observedId == Volatile.Read(ref accountReadId)) message = CodexAccountReadData.Redact(message);
                 startup!.Server(message);
                 lock (trace) { if (trace.Count >= 4096) throw new IOException("Codex event trace exceeded."); trace.Add(message.Clone()); }
@@ -127,6 +149,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             startup.Client("initialized", null, CodexWireState.WriteReturned);
             if (runtimeTrust is not null)
             {
+                await ObserveRoute(token).ConfigureAwait(false);
                 startup.SetStage(CodexStartupStage.AccountRead);
                 var account = await Rpc("account/read", new { refreshToken = false }, token).ConfigureAwait(false);
                 observedChatgptAccount = account.GetProperty("account") is { ValueKind: JsonValueKind.Object } actualAccount && actualAccount.GetProperty("type").GetString() == "chatgpt";
@@ -148,7 +171,12 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                 }
             }
             catch (IOException) when (accountReadRefused && pumpFailure is null) { observedChatgptAccount = false; }
-            if (runtimeTrust is not null) CodexRuntimeRoute.RequireObserved(observedChatgptAccount, observedProvider, observedModel);
+            if (runtimeTrust is not null)
+            {
+                await ObserveRoute(token).ConfigureAwait(false);
+                CodexConfigReadData.RequireThread(routeProjection, observedModel, observedProvider);
+                CodexRuntimeRoute.RequireObserved(observedChatgptAccount, observedProvider, observedModel);
+            }
             startup.SetStage(CodexStartupStage.TurnStart); var turn = await Rpc("turn/start", HostAssignmentPrompt.CodexTurnStart(actual, instructions!, threadId), token).ConfigureAwait(false); turnId = Text(turn.GetProperty("turn"), "id");
             lock (gate) { terminalWait = new(TaskCreationOptions.RunContinuationsAsynchronously); if (terminals.TryGetValue(turnId, out var early)) { if (Text(early.GetProperty("params"), "threadId") != threadId) throw new IOException("Early terminal has foreign actual thread."); terminalWait.TrySetResult(early); } binding = new(actual.AdapterId, actual.AdapterVersion, actual.RunId, actual.RequestIdentity, threadId, turnId); }
             original.Check(); startup.SetStage(CodexStartupStage.Accepted); return new(actual.SchemaVersion, actual.RunId, actual.RequestIdentity, actual.PlanIdentity, actual.BaseCommit, actual.Worktree, actual.AdapterId, actual.AdapterVersion, threadId, turnId, DateTimeOffset.UtcNow, Profile.Capabilities);
@@ -168,6 +196,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     public async Task<AgentCompletionReceipt> WaitAsync(AgentRunBinding actual, TimeSpan remaining, CancellationToken token)
     {
         Bound(actual); original.Check(); var completed = await Keep(terminalWait!.Task).WaitAsync(remaining < original.Remaining ? remaining : original.Remaining, token).ConfigureAwait(false); var status = Text(completed.GetProperty("params").GetProperty("turn"), "status"); if (status != "completed") throw new WorkerEnvelopeException("Actual Codex turn ended " + status + "; no successful completion inferred.");
+        if (runtimeTrust is not null) await ObserveRoute(token).ConfigureAwait(false);
         shutdown = true; var retired = await Keep(process!.RetireAsync(false)).ConfigureAwait(false); HostTransportRetirement.RequireSuccessful(retired);
         if (pump is not null) await pump.WaitAsync(original.Remaining, token).ConfigureAwait(false); if (pumpFailure is not null) throw new IOException("Actual app-server protocol failed; no successful completion.", pumpFailure);
         runtimeTrust?.Check(original); trustedImage?.Check(token); CloseTrustedImage(true, false);
@@ -188,6 +217,22 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     public Task<AgentControlResult> ObserveUnstartedAsync(AgentRunBinding actual, TimeSpan remaining, CancellationToken token)
     {
         original.Check(); lock (gate) { var absent = !startEntered && process is null; return Task.FromResult(new AgentControlResult(actual, AgentControlAction.Stop, absent ? AgentActivityState.Quiescent : AgentActivityState.Unknown, absent, absent ? "actual-private-port-never-entered" : "", "No process/session adoption from DATA.")); }
+    }
+    async Task ObserveRoute(CancellationToken token)
+    {
+        try
+        {
+            var projected = await Rpc("config/read", new { cwd = request!.Worktree, includeLayers = true }, token).ConfigureAwait(false);
+            var current = CodexConfigReadData.RequireSupported(projected);
+            CodexConfigReadData.RequireUnchanged(observedRoute, current);
+            observedRoute = current; routeProjection = projected;
+        }
+        catch (Exception primary)
+        {
+            try { runtimeTrust!.RevokeRoute(); }
+            catch (Exception cleanup) { throw new AggregateException("Runtime route refusal and same-original cleanup admission failure.", primary, cleanup); }
+            throw;
+        }
     }
     void CloseTrustedImage(bool knownNativeClosed, bool cleanup)
     {

@@ -69,7 +69,15 @@ actual `openai` provider with a `gpt-` model before the worker turn starts. Clau
 must observe its existing first-party subscription and actual `claude-` runtime
 model. No model, login, endpoint, settings or service is changed. Unobservable
 administrator/server inputs are the explicit owner trust assumption; redacted
-protocol metadata is not an exhaustive endpoint attestation. Cooperative selected
+protocol metadata is not an exhaustive endpoint attestation. The same original
+Codex transport reads effective configuration and layers before thread/turn
+dispatch and again before completion acceptance. Known `openai_base_url`,
+`chatgpt_base_url` or nonempty custom-provider tables refuse, including nested
+layer/profile definitions; this initial profile conservatively refuses inactive
+definitions too. Missing/malformed metadata and observed model/provider drift
+also refuse. Secret-bearing configuration/layers/errors are projected away before
+trace, startup diagnostics or pending reply storage. This checks known overrides;
+it does not manufacture a resolved-endpoint descriptor. Cooperative selected
 file checks do not exclude an arbitrary hostile same-user writer or remote
 policy change that the selected CLI does not expose.
 
