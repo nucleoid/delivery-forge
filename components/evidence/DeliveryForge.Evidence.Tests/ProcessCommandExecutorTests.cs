@@ -412,7 +412,23 @@ public sealed class ProcessCommandExecutorTests
         Assert.Same(killedProcess, observedProcess);
         Assert.False(result.Execution.OwnedProcessQuiescent);
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
-        Assert.Contains("identity could not be read after evaluation", result.Reason, StringComparison.OrdinalIgnoreCase);
+        var diagnostic = Assert.IsType<CommandLifecycleDiagnostics>(result.Execution.LifecycleDiagnostics);
+        Assert.True(diagnostic.KillAttempted);
+        Assert.False(diagnostic.KillSucceeded);
+        Assert.Equal(typeof(AggregateException).FullName, diagnostic.KillExceptionType);
+        Assert.Contains("simulated descendant kill failure", diagnostic.KillExceptionDetail!, StringComparison.Ordinal);
+        Assert.False(diagnostic.KillExceptionDetailTruncated);
+        Assert.True(diagnostic.RootExited);
+        Assert.True(diagnostic.ExitWaitCompleted);
+        Assert.Equal(250, diagnostic.CleanupWaitMilliseconds);
+        // The real timeout does not force the later fixed-identity read to miss
+        // the gate endpoint. Either branch must stay INCOMPLETE, while the
+        // actual injected partial-kill failure remains independently retained.
+        Assert.Contains(result.Reason, new[]
+        {
+            "Repository identity could not be read after evaluation.",
+            "Owned tool process did not become quiescent after interruption."
+        });
     }
 
     [Fact]
