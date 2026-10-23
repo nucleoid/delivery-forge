@@ -303,9 +303,10 @@ public sealed class ProductionBatchTests
     }
 
     [Theory(Timeout = 150000)]
-    [InlineData("implement", true)]
-    [InlineData("plan", false)]
-    public async Task Actual_CLI_plan_preserves_explicit_intent_and_only_implement_artifact_is_schedulable(string mode, bool schedulable)
+    [InlineData("implement", true, false)]
+    [InlineData("plan", false, false)]
+    [InlineData("plan", false, true)]
+    public async Task Actual_CLI_plan_preserves_explicit_intent_and_only_implement_artifact_is_schedulable(string mode, bool schedulable, bool fromIssue)
     {
         using var original = new ToolLifetime(TimeSpan.FromSeconds(120), TestContext.Current.CancellationToken);
         var root = Path.Combine(Path.GetTempPath(), "forge-cli-plan-mode-" + Guid.NewGuid().ToString("N"));
@@ -339,8 +340,11 @@ public sealed class ProductionBatchTests
         var configPath = Path.Combine(root, "config.json"); var intentPath = Path.Combine(root, "intent.json"); var outputPath = Path.Combine(root, "frozen-plan.json");
         await File.WriteAllBytesAsync(configPath, JsonSerializer.SerializeToUtf8Bytes(new TrustedConfiguration(request.Repository, repository, "refs/heads/main", git, MaximumCeiling: "implement", OperationSeconds: 120), BoundedFiles.Json), original.Token);
         await File.WriteAllBytesAsync(intentPath, JsonSerializer.SerializeToUtf8Bytes(intent, BoundedFiles.Json), original.Token);
-        var application = new ToolApplication(actualOriginal: original);
-        var result = await application.ExecuteAsync(CommandLine.Parse(["plan", "--repo", repository, "--intent-file", intentPath, "--config", configPath, "--plan-out", outputPath]), original.Token);
+        var issue = fromIssue ? new PlanIssueFixture(intent) : null;
+        var application = new ToolApplication(issues: issue, actualOriginal: original);
+        var selection = fromIssue ? new[] { "--issue", "fixture/cli-plan#1" } : new[] { "--intent-file", intentPath };
+        var result = await application.ExecuteAsync(CommandLine.Parse(new[] { "plan", "--repo", repository }.Concat(selection).Concat(["--config", configPath, "--plan-out", outputPath]).ToArray()), original.Token);
+        Assert.Equal(fromIssue ? 1 : 0, issue?.Calls ?? 0);
         Assert.Equal("COMPLETE", result.Outcome); Assert.Equal("PLAN_FROZEN", result.Code); Assert.False(result.RuntimeCertified);
         var bytes = await File.ReadAllBytesAsync(outputPath, original.Token);
         using var json = JsonDocument.Parse(bytes); var envelope = json.RootElement; var material = envelope.GetProperty("plan");
@@ -366,20 +370,68 @@ public sealed class ProductionBatchTests
     [Theory]
     [InlineData("implement", "plan", "implement")]
     [InlineData("implement", "implement", "plan")]
+    [InlineData("implement", "pr", "implement")]
     [InlineData("pr", "pr", "pr")]
     [InlineData("merge", "merge", "merge")]
     [InlineData("resume", "implement", "implement")]
     public async Task CLI_plan_invalid_or_untrusted_execution_intent_refuses_before_Git_or_output(string mode, string requested, string maximum)
     {
-        var root = Path.Combine(Path.GetTempPath(), "forge-cli-plan-refusal-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+        var root = Path.Combine(Path.GetTempPath(), "forge-cli-plan-refusal-" + Guid.NewGuid().ToString("N"));
+        var repository = Path.Combine(root, "parent"); Directory.CreateDirectory(repository);
         var request = new PlanningRequest("fixture/cli-plan", "#1", mode, "Refused intent", ["source.cs"], [], ["No effects"], requested);
         var intent = new PlanIntent(request, ["source.cs"], [], [], [], new("none", "none", "none", "none", "none", "none", "none", "none", []), [], "refused");
         var configPath = Path.Combine(root, "config.json"); var intentPath = Path.Combine(root, "intent.json"); var output = Path.Combine(root, "absent-output.json");
-        await File.WriteAllBytesAsync(configPath, JsonSerializer.SerializeToUtf8Bytes(new TrustedConfiguration(request.Repository, root, "refs/heads/main", Path.Combine(root, "absent-git"), MaximumCeiling: maximum), BoundedFiles.Json), TestContext.Current.CancellationToken);
+        await File.WriteAllBytesAsync(configPath, JsonSerializer.SerializeToUtf8Bytes(new TrustedConfiguration(request.Repository, repository, "refs/heads/main", Path.Combine(root, "absent-git"), MaximumCeiling: maximum), BoundedFiles.Json), TestContext.Current.CancellationToken);
         await File.WriteAllBytesAsync(intentPath, JsonSerializer.SerializeToUtf8Bytes(intent, BoundedFiles.Json), TestContext.Current.CancellationToken);
         var application = new ToolApplication();
-        await Assert.ThrowsAsync<ToolUsageException>(() => application.ExecuteAsync(CommandLine.Parse(["plan", "--repo", root, "--intent-file", intentPath, "--config", configPath, "--plan-out", output]), TestContext.Current.CancellationToken));
+        var refused = await Assert.ThrowsAsync<ToolUsageException>(() => application.ExecuteAsync(CommandLine.Parse(["plan", "--repo", repository, "--intent-file", intentPath, "--config", configPath, "--plan-out", output]), TestContext.Current.CancellationToken));
+        Assert.Equal("Intent identity/mode/ceiling differs from protected selection.", refused.Message);
         Assert.Empty(application.RetainedExternalCalls); Assert.False(File.Exists(output)); Assert.False(File.Exists(Path.Combine(root, "absent-git")));
+    }
+
+    [Fact]
+    public async Task CLI_plan_valid_explicit_implement_intent_reaches_selected_Git_before_output()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-cli-plan-guard-control-" + Guid.NewGuid().ToString("N"));
+        var repository = Path.Combine(root, "parent"); Directory.CreateDirectory(repository);
+        var git = Path.Combine(root, "absent-git"); var output = Path.Combine(root, "absent-output.json");
+        var intent = new PlanIntent(new("fixture/cli-plan", "#1", "implement", "Accepted guard control", ["source.cs"], [], ["No effects"], "implement"),
+            ["source.cs"], [], [], [], new("none", "none", "none", "none", "none", "none", "none", "none", []), [], "guard-control");
+        var config = Path.Combine(root, "config.json"); var input = Path.Combine(root, "intent.json");
+        await File.WriteAllBytesAsync(config, JsonSerializer.SerializeToUtf8Bytes(new TrustedConfiguration("fixture/cli-plan", repository, "refs/heads/main", git, MaximumCeiling: "implement"), BoundedFiles.Json), TestContext.Current.CancellationToken);
+        await File.WriteAllBytesAsync(input, JsonSerializer.SerializeToUtf8Bytes(intent, BoundedFiles.Json), TestContext.Current.CancellationToken);
+        var application = new ToolApplication();
+        var refused = await Assert.ThrowsAsync<PlanningException>(() => application.ExecuteAsync(CommandLine.Parse(["plan", "--repo", repository, "--intent-file", input, "--config", config, "--plan-out", output]), TestContext.Current.CancellationToken));
+        Assert.Equal($"The configured Git executable '{Path.GetFullPath(git)}' does not exist.", refused.Message);
+        Assert.Empty(application.RetainedExternalCalls); Assert.False(File.Exists(output));
+    }
+
+    [Fact]
+    public async Task CLI_issue_content_cannot_choose_implement_intent_even_under_implement_ceiling()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-cli-issue-mode-refusal-" + Guid.NewGuid().ToString("N"));
+        var repository = Path.Combine(root, "parent"); Directory.CreateDirectory(repository);
+        var output = Path.Combine(root, "absent-output.json"); var config = Path.Combine(root, "config.json");
+        var issue = new PlanIssueFixture(new(new("fixture/cli-plan", "#1", "implement", "Untrusted implement intent", ["source.cs"], [], ["No effects"], "implement"),
+            ["source.cs"], [], [], [], new("none", "none", "none", "none", "none", "none", "none", "none", []), [], "issue-refusal"));
+        await File.WriteAllBytesAsync(config, JsonSerializer.SerializeToUtf8Bytes(new TrustedConfiguration("fixture/cli-plan", repository, "refs/heads/main", Path.Combine(root, "absent-git"), MaximumCeiling: "implement"), BoundedFiles.Json), TestContext.Current.CancellationToken);
+        var application = new ToolApplication(issues: issue);
+        var refused = await Assert.ThrowsAsync<ToolUsageException>(() => application.ExecuteAsync(CommandLine.Parse(["plan", "--repo", repository, "--issue", "fixture/cli-plan#1", "--config", config, "--plan-out", output]), TestContext.Current.CancellationToken));
+        Assert.Equal("Intent identity/mode/ceiling differs from protected selection.", refused.Message);
+        Assert.Equal(1, issue.Calls); var actualIssue = Assert.Single(application.RetainedExternalCalls);
+        Assert.Equal("ActualIssueRead", actualIssue.Kind); Assert.True(actualIssue.InvocationReturned);
+        Assert.NotNull(actualIssue.ActualTask); Assert.True(actualIssue.ActualTask.IsCompletedSuccessfully);
+        Assert.False(File.Exists(output)); Assert.False(File.Exists(Path.Combine(root, "absent-git")));
+    }
+
+    sealed class PlanIssueFixture(PlanIntent content) : IIssueContentPort
+    {
+        internal int Calls { get; private set; }
+        public Task<PlanIntent> ReadPublicIssueAsync(string issue, TimeSpan remaining, CancellationToken token)
+        {
+            token.ThrowIfCancellationRequested(); Assert.Equal("fixture/cli-plan#1", issue); Assert.True(remaining > TimeSpan.Zero);
+            Calls++; return Task.FromResult(content);
+        }
     }
 
     sealed class ReaderParentFixture : ICoordinatedEffectAdmission
