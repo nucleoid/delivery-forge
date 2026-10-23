@@ -7,9 +7,9 @@ namespace DeliveryForge.Tool.Tests;
 // production authority is supplied by these fixtures.
 public sealed class CodexConfigReadDataTests
 {
-    static JsonElement Project(string config = "{}", string layers = "[{\"config\":{},\"name\":{\"type\":\"user\"},\"version\":\"1\"}]")
+    static JsonElement Project(string config = "{}", string layers = "[{\"config\":{},\"name\":{\"type\":\"user\"},\"version\":\"1\"}]", string origins = "{}")
     {
-        using var doc = JsonDocument.Parse("{\"id\":7,\"result\":{\"config\":" + config + ",\"origins\":{},\"layers\":" + layers + "}}");
+        using var doc = JsonDocument.Parse("{\"id\":7,\"result\":{\"config\":" + config + ",\"origins\":" + origins + ",\"layers\":" + layers + "}}");
         return CodexConfigReadData.Redact(doc.RootElement, 7).GetProperty("result");
     }
     [Theory]
@@ -203,7 +203,7 @@ public sealed class CodexConfigReadDataTests
     [InlineData(true, "chatgpt_base_url", "\"private-value-sentinel\"", "LayerChatGptOtherStringDestination")]
     [InlineData(false, "chatgpt_base_url", "false", "EffectiveChatGptNonStringDestination")]
     [InlineData(true, "chatgpt_base_url", "[]", "LayerChatGptNonStringDestination")]
-    public void Destination_classification_is_diagnostic_only_and_keeps_every_nonnull_value_refused(bool layer, string key, string value, string expected)
+    public void Explicit_origin_or_layer_destinations_remain_refused(bool layer, string key, string value, string expected)
     {
         var projected = DestinationProjection(layer, key, value);
         Assert.Equal(expected, CodexConfigReadData.Diagnostic(projected).ToString());
@@ -239,11 +239,8 @@ public sealed class CodexConfigReadDataTests
         Assert.DoesNotContain("private-profile-sentinel", projected.GetRawText());
     }
     [Fact]
-    public void Missing_or_unknown_origin_labels_are_not_promoted_or_retained()
+    public void Unknown_origin_labels_are_not_promoted_or_retained()
     {
-        var projected = Project("{\"chatgpt_base_url\":\"https://chatgpt.com/backend-api/\"}");
-        Assert.Equal(CodexConfigOriginClass.Missing, CodexConfigReadData.DestinationOrigin(projected));
-        Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(projected));
         using var forged = JsonDocument.Parse("{\"routeDiagnostic\":\"EffectiveChatGptDocumentedDefaultDestination\",\"routeStatus\":\"unsupported\",\"destinationOrigin\":\"private-origin-sentinel\"}");
         Assert.Equal(CodexConfigOriginClass.Unrecognized, CodexConfigReadData.DestinationOrigin(forged.RootElement));
         var journal = new CodexStartupJournal(System.Diagnostics.Stopwatch.GetTimestamp());
@@ -251,5 +248,67 @@ public sealed class CodexConfigReadDataTests
         var snapshot = journal.Snapshot([], null, null, null, [], false, false);
         Assert.Equal(CodexConfigOriginClass.Unrecognized, snapshot.ConfigurationDestinationOrigin);
         Assert.DoesNotContain("private-origin-sentinel", JsonSerializer.Serialize(snapshot, BoundedFiles.Json));
+    }
+
+    const string MaterializedDefault = "\"chatgpt_base_url\":\"https://chatgpt.com/backend-api/\"";
+    [Fact]
+    public void Observed_root_documented_default_without_origin_passes_only_the_private_route_projection()
+    {
+        var projected = Project("{" + MaterializedDefault + ",\"model\":\"gpt-observed\",\"model_provider\":\"openai\"}");
+        Assert.Equal("owner-trusted-no-known-override", projected.GetProperty("routeStatus").GetString());
+        Assert.Equal(CodexConfigReadDiagnostic.Supported, CodexConfigReadData.Diagnostic(projected));
+        Assert.Equal(64, CodexConfigReadData.RequireSupported(projected).Length);
+        CodexConfigReadData.RequireThread(projected, "gpt-observed", "openai");
+        Assert.DoesNotContain("https://", projected.GetRawText());
+        Assert.False(projected.TryGetProperty("endpoint", out _)); // No native capability or endpoint attestation.
+    }
+    [Theory]
+    [InlineData("{\"chatgpt_base_url\":\"https://chatgpt.com/backend-api/\"}")]
+    [InlineData("{\"openai_base_url\":\"private-destination-sentinel\"}")]
+    [InlineData("{\"model_providers\":{\"private-provider\":{\"base_url\":\"private-destination-sentinel\"}}}")]
+    public void Accepted_materialized_default_does_not_skip_any_later_layer(string secondConfig)
+    {
+        var layers = "[{\"config\":{},\"name\":{\"type\":\"sessionFlags\"},\"version\":\"1\"},{\"config\":" + secondConfig + ",\"name\":{\"type\":\"user\",\"file\":\"private-path-sentinel\"},\"version\":\"1\"}]";
+        var projected = Project("{" + MaterializedDefault + "}", layers);
+        Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(projected));
+        Assert.DoesNotContain("private-", projected.GetRawText());
+    }
+    [Theory]
+    [InlineData("\"openai_base_url\":\"private-destination-sentinel\"")]
+    [InlineData("\"model_providers\":{\"private-provider\":{\"base_url\":\"private-destination-sentinel\"}}")]
+    [InlineData("\"profiles\":{\"private-profile\":{\"chatgpt_base_url\":\"https://chatgpt.com/backend-api/\"}}")]
+    public void Accepted_materialized_default_does_not_skip_other_root_or_nested_checks(string other)
+    {
+        var projected = Project("{" + MaterializedDefault + "," + other + "}");
+        Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(projected));
+        Assert.DoesNotContain("private-", projected.GetRawText());
+    }
+    [Theory]
+    [InlineData("https://chatgpt.com.evil.invalid/backend-api/")]
+    [InlineData("https://chatgpt.com/backend-api/?private-sentinel")]
+    [InlineData("https://chatgpt.com/backend-api")]
+    public void Missing_origin_does_not_admit_any_other_literal(string value)
+    {
+        var projected = Project("{\"chatgpt_base_url\":" + JsonSerializer.Serialize(value) + "}");
+        Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(projected));
+        Assert.DoesNotContain(value, projected.GetRawText());
+    }
+    [Theory]
+    [InlineData("{\"name\":{\"type\":\"user\",\"file\":\"private-path-sentinel\"},\"version\":\"1\"}")]
+    [InlineData("null")]
+    public void Explicit_user_or_malformed_origin_is_not_the_observed_missing_origin(string origin)
+    {
+        var projected = Project("{" + MaterializedDefault + "}", origins: "{\"chatgpt_base_url\":" + origin + "}");
+        Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(projected));
+        Assert.DoesNotContain("private-path-sentinel", projected.GetRawText());
+    }
+    [Fact]
+    public void Materialized_default_value_still_consumes_the_original_shared_node_credit()
+    {
+        var values = "\"values\":[" + string.Join(",", Enumerable.Repeat("null", 4093)) + "]";
+        Assert.Equal(64, CodexConfigReadData.RequireSupported(Project("{" + values + "}")).Length);
+        var withDefault = Project("{" + MaterializedDefault + "," + values + "}");
+        Assert.Equal(CodexConfigReadDiagnostic.InspectionBoundExceeded, CodexConfigReadData.Diagnostic(withDefault));
+        Assert.Throws<ToolUsageException>(() => CodexConfigReadData.RequireSupported(withDefault));
     }
 }

@@ -12,7 +12,8 @@ internal enum CodexConfigReadDiagnostic
 internal enum CodexConfigOriginClass { NotObserved, Missing, Unrecognized, NestedNotResolved, PackagedDefaults, Mdm, System, EnterpriseManaged, User, Project, SessionFlags, LegacyManagedFile, LegacyManagedMdm }
 internal static class CodexConfigReadData
 {
-    // Exact public sample literal, not URL normalization or an admission allowlist.
+    // Exact public sample literal; only the root/missing-origin case below admits it.
+    // Never normalize URLs or match hosts/prefixes.
     // https://learn.chatgpt.com/docs/config-file/config-sample
     const string DocumentedStandardChatGptBaseUrl = "https://chatgpt.com/backend-api/";
     internal static JsonElement Redact(JsonElement message, long expectedId)
@@ -68,14 +69,19 @@ internal static class CodexConfigReadData
             {
                 if (property.Name is "openai_base_url" or "chatgpt_base_url")
                 {
-                    if (property.Value.ValueKind != JsonValueKind.Null)
+                    // The observed first-party default is materialized without an
+                    // origin entry. No layer, nested value or explicit origin is exempt.
+                    var materializedDefault = !inLayer && depth == 0 && property.Name == "chatgpt_base_url" &&
+                        property.Value.ValueKind == JsonValueKind.String && property.Value.GetString() == DocumentedStandardChatGptBaseUrl &&
+                        EffectiveOrigin(originContext, property.Name) == CodexConfigOriginClass.Missing;
+                    if (property.Value.ValueKind != JsonValueKind.Null && !materializedDefault)
                     {
                         if (diagnostic == CodexConfigReadDiagnostic.Supported)
                         {
                             diagnostic = DestinationDiagnostic(property.Name, property.Value, inLayer);
                             destinationOrigin = inLayer ? SourceClass(originContext) : depth == 0 ? EffectiveOrigin(originContext, property.Name) : CodexConfigOriginClass.NestedNotResolved;
                         }
-                        return false; // Including the documented literal: diagnosis never grants admission.
+                        return false;
                     }
                 }
                 else if (property.Name == "model_providers")
@@ -83,6 +89,7 @@ internal static class CodexConfigReadData
                     if (property.Value.ValueKind != JsonValueKind.Null &&
                         (property.Value.ValueKind != JsonValueKind.Object || property.Value.EnumerateObject().Any())) { if (diagnostic == CodexConfigReadDiagnostic.Supported) diagnostic = CodexConfigReadDiagnostic.CustomProviderDefinitions; return false; }
                 }
+                // An allowed default still consumes the same value/node/depth credit.
                 if (!Inspect(property.Value, ref nodes, depth + 1, ref diagnostic, ref destinationOrigin, inLayer, originContext)) return false;
             }
         }
