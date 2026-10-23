@@ -229,13 +229,39 @@ public sealed class InstalledNativeHostConformanceTests
                 Assert.All(new[] { entered, returned, received }, row => Assert.Equal(DeliveryForge.Tool.Codex.CodexWireIdKind.ClientNumber, row.IdKind));
             }
             Assert.All(accepted.Capabilities, capability => Assert.Equal(AgentCapabilityStatus.Unverified, capability.Status));
+            // This must still be a live turn before the actual Stop attempt.
+            // The correlated id7 reply below independently refuses the branch
+            // that skips interrupt because the turn has already finished.
+            Assert.DoesNotContain(startup.Wire, row => row.Method == DeliveryForge.Tool.Codex.CodexWireMethod.TurnCompleted);
         }
         await Assert.ThrowsAsync<WorkerEnvelopeException>(() => frame.Port.ControlAsync(binding with { RuntimeRunIdentity = binding.RuntimeRunIdentity + "-foreign" }, AgentControlAction.Stop, frame.Original.Remaining, TestContext.Current.CancellationToken));
         var native = frame.Native ?? throw new IOException("Actual native original missing."); var live = native.ObserveActualNative(); Assert.True(live.Known); Assert.False(live.RootExited); Assert.True(live.ActiveProcesses > 0);
-        _ = frame.Original.CleanupRemaining; var actual = frame.Port.ControlAsync(binding, AgentControlAction.Stop, frame.Original.CleanupRemaining, CancellationToken.None); frame.ActualCalls.Add(actual); var control = await actual.WaitAsync(frame.Original.CleanupRemaining, TestContext.Current.CancellationToken); Assert.Equal(binding, control.Binding); Assert.Equal(AgentActivityState.Quiescent, control.Activity);
+        // The true-route probe must enter turn/interrupt while SAME original
+        // WORK is still open. Reading CleanupRemaining here first closes WORK
+        // and makes Rpc refuse before send. ControlAsync owns subsequent native
+        // failure retirement; the legacy probe keeps its existing cleanup route.
+        var stopAllowance = frame.Selected.ObserveRuntimeTrustRoute ? frame.Original.Remaining : frame.Original.CleanupRemaining;
+        var actual = frame.Port.ControlAsync(binding, AgentControlAction.Stop, stopAllowance, CancellationToken.None); frame.ActualCalls.Add(actual); var control = await actual.WaitAsync(frame.Selected.ObserveRuntimeTrustRoute ? stopAllowance : frame.Original.CleanupRemaining, TestContext.Current.CancellationToken); Assert.Equal(binding, control.Binding); Assert.Equal(AgentActivityState.Quiescent, control.Activity);
         var retired = native.RetireAsync(true); frame.Retirement = await retired.WaitAsync(frame.Original.CleanupRemaining, TestContext.Current.CancellationToken); Assert.True(frame.Retirement.KnownClosed); Assert.True(frame.Retirement.RootExited); Assert.Equal(0u, frame.Retirement.ActiveProcesses); Assert.True(frame.Retirement.DispositionReturned); _ = frame.Original.CleanupRemaining;
         if (frame.Selected.ObserveRuntimeTrustRoute)
         {
+            Assert.True(control.Detail.EndsWith("InterruptFailure=", StringComparison.Ordinal), "Actual turn/interrupt must return successfully before same-original retirement.");
+            var stopped = Assert.IsType<DeliveryForge.Tool.Codex.CodexAppServerPort>(frame.Port).SnapshotStartupDiagnostics();
+            Assert.False(stopped.WireBoundExceeded);
+            Assert.Empty(stopped.PendingIds);
+            // ControlAsync deliberately closes the reply registry with this
+            // fixed terminal cause after retirement. This is not an RPC refusal.
+            Assert.Equal(typeof(OperationCanceledException).FullName, stopped.ReplyFailureType);
+            Assert.DoesNotContain(stopped.Wire, row => row.HasError || row.ErrorCode is not null);
+            var numbered = stopped.Wire.Where(row => row.ClientId is not null).ToArray();
+            Assert.Equal(21, numbered.Length);
+            var entered = Assert.Single(numbered, row => row.ClientId == 7 && row.Direction == DeliveryForge.Tool.Codex.CodexWireDirection.Client && row.State == DeliveryForge.Tool.Codex.CodexWireState.WriteEntered);
+            var returned = Assert.Single(numbered, row => row.ClientId == 7 && row.Direction == DeliveryForge.Tool.Codex.CodexWireDirection.Client && row.State == DeliveryForge.Tool.Codex.CodexWireState.WriteReturned);
+            var received = Assert.Single(numbered, row => row.ClientId == 7 && row.Direction == DeliveryForge.Tool.Codex.CodexWireDirection.Server && row.State == DeliveryForge.Tool.Codex.CodexWireState.Received);
+            Assert.Equal(DeliveryForge.Tool.Codex.CodexWireMethod.TurnInterrupt, entered.Method);
+            Assert.Equal(DeliveryForge.Tool.Codex.CodexWireMethod.TurnInterrupt, returned.Method);
+            Assert.Equal(DeliveryForge.Tool.Codex.CodexWireMethod.None, received.Method);
+            Assert.All(new[] { entered, returned, received }, row => Assert.Equal(DeliveryForge.Tool.Codex.CodexWireIdKind.ClientNumber, row.IdKind));
             Assert.Same(native, frame.Native);
             Assert.Same(retired, native.OriginalRetirementTask);
             Assert.True(frame.Retirement.OutputEof); Assert.True(frame.Retirement.ErrorEof);

@@ -20,7 +20,7 @@ internal sealed class LinuxScopeKernel
     bool exactImageEntered;
     OwnedFd? group, procDescriptors; Identity identity; string? originalPath; long readBytes; bool bound, stopEntered, closeEntered;
     internal sealed class Call { internal required string Kind; internal bool Entered, Returned; internal long Result, ByteLimit, BytesRead; internal int Error, NativeReads, NativeReadLimit; internal byte[]? OriginalBuffer; internal Exception? Primary, Post; }
-    sealed class OwnedFd(int actual) { internal readonly int Actual = actual; internal bool CloseEntered, CloseReturned, Closed; internal Exception? Failure; }
+    sealed class OwnedFd(int actual) { internal readonly int Actual = actual; internal bool CloseEntered, CloseInvoked, CloseReturned, Closed; internal Exception? Failure; }
     readonly record struct Identity(ulong Inode, uint Major, uint Minor, ulong Mount);
     internal IReadOnlyList<Call> ActualCalls { get { lock (gate) return calls.ToArray(); } }
     internal bool Unknown { get { lock (gate) return calls.Any(x => x.Entered && !x.Returned) || descriptors.Any(x => !x.Closed && (x.CloseEntered || (!ReferenceEquals(x, group) && !ReferenceEquals(x, procDescriptors)))); } }
@@ -67,10 +67,10 @@ internal sealed class LinuxScopeKernel
         Native("open:" + path, () => { var value = parent is null ? open(path, flags) : openat(parent.Actual, path, flags); if (value >= 0) { actual = new(value); lock (gate) descriptors.Add(actual); } return value; }, cleanup);
         return actual ?? throw new IOException("Original open returned no retained descriptor.");
     }
-    void Close(OwnedFd actual, bool cleanup)
+    void Close(OwnedFd actual, bool cleanup, bool continueUninvoked = false)
     {
-        Check(cleanup); lock (gate) { if (actual.CloseEntered) throw new IOException("Original scope descriptor first-close already entered; no retry."); actual.CloseEntered = true; }
-        try { Native("close-original-descriptor", () => { var result = close(actual.Actual); actual.CloseReturned = true; actual.Closed = result == 0; return result; }, cleanup); } catch (Exception failure) { actual.Failure = failure; throw; }
+        Check(cleanup); lock (gate) { if (actual.CloseEntered && (!continueUninvoked || actual.CloseInvoked)) throw new IOException("Original scope descriptor first-close already entered; no retry."); actual.CloseEntered = true; }
+        try { Native("close-original-descriptor", () => { actual.CloseInvoked = true; var result = close(actual.Actual); actual.CloseReturned = true; actual.Closed = result == 0; return result; }, cleanup); } catch (Exception failure) { actual.Failure = failure; throw; }
     }
     static void Relative(string path) { if (path.Length is 0 or > 4096 || path.Contains('\0') || path.Contains('\\') || path.Split('/').Any(x => x is "" or "." or ".." || x.Any(char.IsControl))) throw new IOException("Closed original cgroup path required."); }
     internal static LinuxScopeKernel Open(string actualControlGroup, string actualUnit, IOwnedDuplexBudget original)
@@ -201,16 +201,23 @@ internal sealed class LinuxScopeKernel
                 try { Check(false); }
                 catch (Exception admission) { post = admission; cleanupClose = true; }
             }
-            try { Close(fd, cleanupClose); }
+            void CloseImage(bool cleanup, bool continueUninvoked = false)
+            {
+                // Notify the same actual enclosing owner before its cleanup
+                // view: a successful subordinate disposal otherwise stays WORK.
+                if (cleanup && original is IOwnedFailureCleanup failure) failure.BeginFailureCleanup();
+                Close(fd, cleanup, continueUninvoked);
+            }
+            try { CloseImage(cleanupClose); }
             catch (Exception failure)
             {
                 post = post is null ? failure : new AggregateException("Original image close admission and first disposition.", post, failure);
-                // Close's own WORK precheck can lose the boundary after the
-                // admission above. Only an unentered first close may use SAME
-                // cleanup; an entered close is never retried, even if it failed.
-                if (!cleanupClose && !fd.CloseEntered)
+                // CloseEntered also records an attempt whose Native precheck or
+                // row admission refused. Only an uninvoked syscall may continue
+                // its SAME first close in cleanup; never retry a native effect.
+                if (!cleanupClose && !fd.CloseInvoked)
                 {
-                    try { Close(fd, true); }
+                    try { CloseImage(true, continueUninvoked: true); }
                     catch (Exception cleanup) { post = new AggregateException("Original WORK close admission and SAME cleanup first-close.", post, cleanup); }
                 }
             }

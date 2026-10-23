@@ -36,10 +36,17 @@ rows of that same counter. No row counter is reset when exact-image binding ente
 Long exact-image work can still exceed its finite partition and must refuse.
 These partitions preserve cleanup headroom, not a guarantee that an unknown native
 effect will settle or that cleanup is permitted after its original clock expires.
-An exact-image descriptor whose first-close WORK admission expires can use SAME
-original cleanup before close entry; once close has entered, it is never retried.
-Admission, close and post failures remain retained. No rows, bytes or time are
-refunded or added.
+An exact-image descriptor whose first-close WORK admission fails can continue
+that first close in SAME original cleanup only while the native close invocation
+has not entered. The close-attempt marker remains set; a separate invocation fact
+is set inside the retained syscall callback immediately before `close`. WORK or
+row admission refusal before that callback creates no native close to retry.
+Failure cleanup is first notified to the same enclosing owner, so a subordinate
+WORK view cannot silently prevent its actual failure disposition. Once the native
+close invocation enters, it is never retried, including failed returns or posts.
+If cleanup admission or native closure remains unknown, the descriptor stays
+retained and cannot count as disposed. Admission, close and post failures remain
+retained. No rows, bytes or time are refunded or added.
 
 All memfd pages, source page cache, loader/runtime pages and descendants consume
 the same scope `MemoryMax=4294967296` and `MemorySwapMax=0`. This is a total scope
