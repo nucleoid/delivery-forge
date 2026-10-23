@@ -160,13 +160,13 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             await Persist().ConfigureAwait(false); // Durable selected intent before any owner/lease/worker creation.
             if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
             if (control.Paused || control.Stopped) break;
-            var admission = InstalledHostAdmission.ReadRootAccepted(node.Root.InstalledHostAdmission, node.Configuration, original);
+            var admission = InstalledHostAdmission.ReadRootAccepted(node.Root.InstalledHostAdmission, node.Configuration, original, node.Selection.Configuration);
             // Acknowledged input fences owner/coordination construction itself,
             // not merely the later native adapter start.
             if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
             if (control.Paused || control.Stopped) break;
             var actualOwner = new StandaloneOwnerComposition(node.Configuration, node.Root.StoreRoot, node.Root.WorkerPaths, original, admission.Host, admission.Profile,
-                node.Scope, node.Selection.Configuration, resources, budget, node.Selection.NodeId);
+                node.Scope, node.Selection.Configuration, resources, budget, node.Selection.NodeId, admission.TrustedRuntime);
             lock (stateGate) { active = actualOwner; actualOwners.Add(actualOwner); }
             actualOwner.ActualBridge.BindBatchControl(control);
             await Observe(InitializeNode(actualOwner)).ConfigureAwait(false);

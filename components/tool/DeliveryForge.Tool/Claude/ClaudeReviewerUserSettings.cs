@@ -42,7 +42,7 @@ internal sealed class ClaudeReviewerUserSettings
         original.Check();
     }
     static string Normalize(string path) => System.IO.Path.TrimEndingDirectorySeparator(System.IO.Path.GetFullPath(path));
-    static string ActualDirectory()
+    internal static string ActualDirectory()
     {
         var selected = Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR");
         if (selected is not null)

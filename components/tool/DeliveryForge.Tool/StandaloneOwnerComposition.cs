@@ -18,7 +18,7 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
     public OwnerHostBridge ActualBridge => bridge;
     public StandaloneOwnerComposition(TrustedConfiguration config, string actualStoreRoot, LocalWorkerPaths workerPaths, ToolLifetime actualOriginal, StandaloneHostSelection selectedHost, AgentAdapterProfile actualConformedProfile, LinuxScopeSelection? selectedLinuxScope = null, AdmissionFile? actualConfigurationPin = null, StandaloneResources? actualResources = null)
         : this(config, actualStoreRoot, workerPaths, actualOriginal, selectedHost, actualConformedProfile, selectedLinuxScope, actualConfigurationPin, actualResources, null, null) { }
-    internal StandaloneOwnerComposition(TrustedConfiguration config, string actualStoreRoot, LocalWorkerPaths workerPaths, ToolLifetime actualOriginal, StandaloneHostSelection selectedHost, AgentAdapterProfile actualConformedProfile, LinuxScopeSelection? selectedLinuxScope, AdmissionFile? actualConfigurationPin, StandaloneResources? actualResources, DeliveryForge.Scheduling.ResourceBudget? aggregateBudget, string? batchNodeId)
+    internal StandaloneOwnerComposition(TrustedConfiguration config, string actualStoreRoot, LocalWorkerPaths workerPaths, ToolLifetime actualOriginal, StandaloneHostSelection selectedHost, AgentAdapterProfile actualConformedProfile, LinuxScopeSelection? selectedLinuxScope, AdmissionFile? actualConfigurationPin, StandaloneResources? actualResources, DeliveryForge.Scheduling.ResourceBudget? aggregateBudget, string? batchNodeId, InstalledHostAdmission.RuntimeTrust? runtimeTrust = null)
     {
         actualOriginal.Check(); original = actualOriginal; configuration = config;
         RequireFreshExecutionStore(actualStoreRoot, actualOriginal);
@@ -33,7 +33,7 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         // cannot be smuggled in through a port factory or session DTO.
         IHostToolSessionPort actualNativePort = config.Adapter switch
         {
-            "codex.cli" => new DeliveryForge.Tool.Codex.CodexAppServerPort(new(selectedHost.Executable, selectedHost.Bytes, selectedHost.Sha256, selectedHost.Version), worktrees, actualConformedProfile, selectedLinuxScope),
+            "codex.cli" => new DeliveryForge.Tool.Codex.CodexAppServerPort(new(selectedHost.Executable, selectedHost.Bytes, selectedHost.Sha256, selectedHost.Version), worktrees, actualConformedProfile, selectedLinuxScope, runtimeTrust),
             "claude-code.cli" => new DeliveryForge.Tool.Claude.ClaudeStreamPort(new(selectedHost.Executable, selectedHost.Bytes, selectedHost.Sha256, selectedHost.Version), worktrees, actualConformedProfile, selectedLinuxScope),
             "pi.cli" => new DeliveryForge.Tool.Pi.PiRpcPort(new(selectedHost.Executable, selectedHost.Bytes, selectedHost.Sha256, selectedHost.Version), worktrees, actualConformedProfile, selectedLinuxScope),
             _ => throw new ToolUsageException("Optional host has no actual standalone native transport.")
@@ -62,7 +62,7 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         if (config.LocalRealGolden is not null && config.LocalSingle is null) throw new ToolUsageException("Local-real requires an independently approved finite LocalSingle policy; no direct execution fallback.");
         if (config.InstalledQuality is not null) bridge.BindInstalledQuality(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing quality requires the actual pinned root configuration."), actualOriginal, worktrees, selectedLinuxScope));
         if (config.HistoricalQuality is not null) bridge.BindHistoricalQuality(new(config, actualConfigurationPin ?? throw new ToolUsageException("Historical gates require the actual pinned root configuration."), actualOriginal, selectedLinuxScope));
-        if (config.InstalledReview is not null) bridge.BindInstalledReview(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing review requires the actual pinned root configuration."), actualOriginal, executor, selectedLinuxScope));
+        if (config.InstalledReview is not null) bridge.BindInstalledReview(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing review requires the actual pinned root configuration."), actualOriginal, executor, selectedLinuxScope, runtimeTrust));
         if (config.LocalRealGolden is { } golden)
         {
             BoundedFiles.Separate(actualStoreRoot, golden.ArtifactRoot);

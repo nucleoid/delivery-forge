@@ -23,6 +23,7 @@ internal sealed class InstalledReviewHost : IDisposable
     readonly InstalledReviewSelection selection; readonly ToolLifetime original;
     readonly ProcessCommandExecutor executor;
     readonly LinuxScopeSelection? linuxScope;
+    readonly InstalledHostAdmission.RuntimeTrust? runtimeTrust;
     readonly List<BoundedCommandCaptureResult> captures = [];
     FrozenPlan? frozen; FrozenWorkerPlan? assignment; TrustedConfiguration? boundConfiguration;
     ProductionReviewSourceOwner? sourceOwner; ProductionReviewBootstrap? bootstrap;
@@ -40,11 +41,11 @@ internal sealed class InstalledReviewHost : IDisposable
     }
 
     internal InstalledReviewHost(TrustedConfiguration config, AdmissionFile actualConfigurationPin,
-        ToolLifetime actualOriginal, ProcessCommandExecutor actualExecutor, LinuxScopeSelection? selectedLinuxScope = null)
+        ToolLifetime actualOriginal, ProcessCommandExecutor actualExecutor, LinuxScopeSelection? selectedLinuxScope = null, InstalledHostAdmission.RuntimeTrust? runtimeTrust = null)
     {
         configuration = config; configurationPin = actualConfigurationPin;
         original = actualOriginal; executor = actualExecutor;
-        linuxScope = selectedLinuxScope;
+        linuxScope = selectedLinuxScope; this.runtimeTrust = runtimeTrust;
         selection = config.InstalledReview ?? throw new ToolUsageException("No trusted installed review selection.");
         ValidateSelection(selection);
         if (!Same(config.GitExecutable, selection.GitImage.Path))
@@ -107,7 +108,7 @@ internal sealed class InstalledReviewHost : IDisposable
         if (independentReviewer is not null) throw new ToolUsageException("Actual independent reviewer cannot replay.");
         // Refuse this unsupported production profile before source/settings/CWD I/O.
         // RunAsync keeps the same guard as defense at its own boundary.
-        if (ClaudeIndependentReviewer.UnsupportedProductionProfile() is { } profileRefusal) return profileRefusal;
+        if (ClaudeIndependentReviewer.UnsupportedProductionProfile(runtimeTrust, original, selection.IndependentReviewer) is { } profileRefusal) return profileRefusal;
         sourceOwner.Check();
         async Task<(PatchIdentity Patch, byte[] FrozenPlan)> PrepareEvidence(CancellationToken token)
         {
@@ -133,7 +134,7 @@ internal sealed class InstalledReviewHost : IDisposable
         }
         var userSettings = parent.EnterSynchronous(assignment.RunId, () =>
         {
-            sourceOwner.Check(); original.Check();
+            sourceOwner.Check(); original.Check(); runtimeTrust?.CheckReviewer(original, selection.IndependentReviewer);
             return ClaudeReviewerUserSettings.CaptureActual(original,
                 assignment.ParentCheckout, assignment.Worktree, assignment.ResultDirectory, selection.ArtifactRoot);
         });
@@ -147,7 +148,7 @@ internal sealed class InstalledReviewHost : IDisposable
         });
         independentReviewer = new(selection.IndependentReviewer, original, executor, parent, assignment.RunId, reviewerDirectory, userSettings, bootstrap,
             () => ReferenceEquals(frame.Completion, completion) && frame.OwnerCompleted && !frame.OwnerStopped && frame.Primary is null && frame.Post is null && actualNativeCompletedAndQuiet(),
-            () => parent.EnterSynchronous(assignment.RunId, () => { sourceOwner.Check(); _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536); return true; }), linuxScope);
+            () => parent.EnterSynchronous(assignment.RunId, () => { sourceOwner.Check(); _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536); return true; }), linuxScope, runtimeTrust);
         return await parent.EnterAsync(assignment.RunId, () => independentReviewer.RunAsync(actualAuthorFamily,
             Path.Combine(selection.ArtifactRoot, assignment.RunId), PrepareEvidence)).ConfigureAwait(false);
     }

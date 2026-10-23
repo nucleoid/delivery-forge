@@ -61,3 +61,43 @@ The review-source availability bounds are documented in
 admitted census and the complete archive, including headers, inside the selected
 MaximumEvidenceBytes (at most16MiB). These remain admission ceilings, not a promise
 that every repository completes under the original time/byte limits.
+
+
+### Explicit issue17 personal-host runtime trust
+
+The owner may select `Issue17OwnerTrustedPersonalHost-v1` in the independently
+pinned installed-host acceptance. This is a scoped trust decision about the
+selected personal Windows host's administrator/server-managed configuration,
+not evidence that safe mode inspected or disabled that policy. The containing
+root must still pass all five exact installed-host conformance cases and match
+the installed Tool image. Only that root can bind the selection to its same
+original lifetime, exact containing configuration and selected worker/reviewer.
+A DTO or flag passed to a port cannot enable the profile.
+
+The selection pins the explicit owner decision and complete selected host input
+files (including explicit absence): at most 16 files, 64 KiB each, 1 MiB total.
+The actual Codex-home `config.toml` and Claude configuration-directory
+`settings.json` must be among them, outside parent/worker/result/review roots.
+The existing restrictive Claude user-settings check remains. Repository/ancestor
+Codex configuration is unsupported by this host-only selection. Selected input,
+root/configuration decision or relevant environment drift revokes the same WORK
+admission without renewal. No credential/configuration values are exported.
+
+Known API/provider/endpoint environment overrides refuse before native birth.
+Codex must observe its existing ChatGPT account before thread creation and the
+actual `openai` provider with a `gpt-` model before the worker turn starts. Claude
+must observe its existing first-party subscription and actual `claude-` runtime
+model. No model, login, endpoint, settings or service is changed. Unobservable
+administrator/server inputs are the explicit owner trust assumption; redacted
+protocol metadata is not an exhaustive endpoint attestation. Cooperative selected
+file checks do not exclude an arbitrary hostile same-user writer or remote
+policy change that the selected CLI does not expose.
+
+Exact selected Windows executable handles remain held through their actual
+original native retirement; unknown disposition retains the same owner. Existing
+protected issuer, opposite-family check, budgets, source/evidence checks and
+recovery barriers remain mandatory. Default Windows review without this bound
+decision still returns INCOMPLETE. Linux independent review remains INCOMPLETE
+until a separate immutable exact-image primitive is implemented. This source
+profile is not a positive installed-worker, reviewer, golden or full-quality
+acceptance; those require actual execution under the existing limits.

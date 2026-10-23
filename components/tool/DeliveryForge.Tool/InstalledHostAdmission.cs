@@ -6,19 +6,20 @@ namespace DeliveryForge.Tool;
 public sealed record AdmissionFile(string Path, long Bytes, string Sha256);
 public sealed record InstalledHostCase(string Name, string Outcome, string ArtifactSha256);
 public sealed record InstalledHostRootAcceptance(string Kind, string Platform, string Adapter, string Version,
-    StandaloneHostSelection Host, AdmissionFile ToolAssembly, IReadOnlyList<AdmissionFile> Artifacts, IReadOnlyList<InstalledHostCase> Cases);
-public sealed class InstalledHostAdmission
+    StandaloneHostSelection Host, AdmissionFile ToolAssembly, IReadOnlyList<AdmissionFile> Artifacts, IReadOnlyList<InstalledHostCase> Cases, Issue17RuntimeTrustSelection? RuntimeTrust = null);
+public sealed partial class InstalledHostAdmission
 {
     readonly InstalledHostRootAcceptance actual; readonly AgentAdapterProfile profile;
+    readonly ToolLifetime actualOriginal; readonly TrustedConfiguration actualConfiguration; readonly AdmissionFile actualRoot;
     public StandaloneHostSelection Host => actual.Host;
     public AgentAdapterProfile Profile => profile;
-    InstalledHostAdmission(InstalledHostRootAcceptance actual, AgentAdapterProfile profile) { this.actual = actual; this.profile = profile; }
+    InstalledHostAdmission(InstalledHostRootAcceptance actual, AgentAdapterProfile profile, ToolLifetime original, TrustedConfiguration configuration, AdmissionFile root) { this.actual = actual; this.profile = profile; actualOriginal = original; actualConfiguration = configuration; actualRoot = root; }
     internal static byte[] ReadExact(AdmissionFile pin, ToolLifetime original, int maximum)
     {
         if (pin is null || pin.Path is null || pin.Bytes <= 0 || pin.Bytes > maximum || pin.Sha256 is null || pin.Sha256.Length != 64 || pin.Sha256.Any(c => !char.IsAsciiHexDigit(c) || char.IsAsciiLetterUpper(c))) throw new ToolUsageException("Finite exact independent lowercase admission pin required.");
         var bytes = BoundedFiles.Read(pin.Path, original, maximum); original.Check(); var digest = BoundedFiles.Sha(bytes); original.Check(); if (bytes.LongLength != pin.Bytes || digest != pin.Sha256) throw new IOException("Actual independently selected admission bytes changed."); return bytes;
     }
-    public static InstalledHostAdmission ReadRootAccepted(AdmissionFile rootPin, TrustedConfiguration config, ToolLifetime original)
+    public static InstalledHostAdmission ReadRootAccepted(AdmissionFile rootPin, TrustedConfiguration config, ToolLifetime original, AdmissionFile? actualConfigurationPin = null)
     {
         var bytes = ReadExact(rootPin, original, 1048576); _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(bytes); original.Check(); var receipt = System.Text.Json.JsonSerializer.Deserialize<InstalledHostRootAcceptance>(bytes, BoundedFiles.Json) ?? throw new IOException("Root host admission is null."); original.Check();
         var os = OperatingSystem.IsWindows() ? "windows" : OperatingSystem.IsLinux() ? "linux" : throw new PlatformNotSupportedException("Installed host profile is Windows/Linux only.");
@@ -39,6 +40,8 @@ public sealed class InstalledHostAdmission
             new AgentCapabilityEvidence(AgentCapability.EvidenceExport,AgentCapabilityStatus.Supported,"actual complete bounded protocol/native evidence",reference),
             new AgentCapabilityEvidence(AgentCapability.Pause,AgentCapabilityStatus.Unsupported,"No actual same-turn pause capability is issued.",reference),
             new AgentCapabilityEvidence(AgentCapability.Resume,AgentCapabilityStatus.Unsupported,"No actual same-turn resume capability is issued.",reference)};
-        original.Check(); return new(receipt, new(config.Adapter, config.AdapterVersion, Array.AsReadOnly(rows)));
+        original.Check(); var result = new InstalledHostAdmission(receipt, new(config.Adapter, config.AdapterVersion, Array.AsReadOnly(rows)), original, config, rootPin);
+        if (receipt.RuntimeTrust is not null) result.TrustedRuntime = RuntimeTrust.Bind(result, actualConfigurationPin ?? throw new ToolUsageException("Owner runtime trust requires the actual containing configuration pin."));
+        return result;
     }
 }

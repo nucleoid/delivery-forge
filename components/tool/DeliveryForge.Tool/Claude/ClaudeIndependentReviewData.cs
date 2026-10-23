@@ -23,7 +23,8 @@ internal static class ClaudeIndependentReviewData
     internal static void RequireSubscriptionEnvironment(Func<string, string?> read)
     {
         foreach (var name in ProviderOverrides)
-            if (read(name) is { } value && !string.IsNullOrWhiteSpace(value) && value is not ("0" or "false" or "False"))
+            if (read(name) is { Length: > 0 } value &&
+                (name is "ANTHROPIC_API_KEY" or "ANTHROPIC_AUTH_TOKEN" or "ANTHROPIC_BASE_URL" || value is not ("0" or "false" or "False")))
                 throw new ToolUsageException("First-party subscription route is not assured while an API/provider override is present: " + name);
     }
     internal static void RequireSubscription(byte[] bytes)

@@ -20,7 +20,7 @@ public sealed record IndependentClaudeReviewSelection(AdmissionFile Image, strin
 internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection selection, ToolLifetime original,
     ProcessCommandExecutor executor, ParentCoordinationHost parent, string runId, ClaudeReviewerWorkingDirectory actualWorkingDirectory,
     ClaudeReviewerUserSettings actualUserSettings,
-    ProductionReviewBootstrap bootstrap, Func<bool> sameCompletedWorker, Action verifyProtectedConfiguration, LinuxScopeSelection? linuxScope)
+    ProductionReviewBootstrap bootstrap, Func<bool> sameCompletedWorker, Action verifyProtectedConfiguration, LinuxScopeSelection? linuxScope, InstalledHostAdmission.RuntimeTrust? runtimeTrust = null)
 {
     // Created only after the existing private issuer accepted the exact genuine
     // execution. Saved receipt JSON cannot reconstruct this original binding.
@@ -115,7 +115,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
     }
     void VerifyImage() => parent.EnterSynchronous(runId, () =>
     {
-        Current(); actualUserSettings.CheckActual(); var token = phaseCancellation?.Token ?? original.Token;
+        Current(); runtimeTrust?.CheckReviewer(original, selection); actualUserSettings.CheckActual(); var token = phaseCancellation?.Token ?? original.Token;
         if (OperatingSystem.IsWindows())
         {
             heldImage ??= BoundedFiles.RetainVerifiedNativeImage(selection.Image, original, token);
@@ -137,8 +137,8 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
     // Safe mode leaves administrator-managed policy active. This selected CLI
     // exposes no authoritative complete effective-policy/code-effect contract.
     // File/registry absence, a DTO or a source reviewer cannot supply that proof.
-    internal static ToolResult? UnsupportedProductionProfile() => UnsupportedPlatform() ??
-        (OperatingSystem.IsWindows()
+    internal static ToolResult? UnsupportedProductionProfile(InstalledHostAdmission.RuntimeTrust? runtimeTrust = null, ToolLifetime? original = null, IndependentClaudeReviewSelection? selection = null) => UnsupportedPlatform() ??
+        (OperatingSystem.IsWindows() && runtimeTrust is not null && original is not null && selection is not null && runtimeTrust.Matches(original, selection) ? null : OperatingSystem.IsWindows()
             ? ToolResult.Incomplete("INDEPENDENT_REVIEW_MANAGED_POLICY_UNPROVEN",
                 "The selected Claude CLI does not expose authoritative complete effective managed-policy and code-effect provenance. Production independent review is unavailable until a supported contract or separately explicit owner trust-policy decision exists; no settings, authentication or models are changed.")
             : ToolResult.Incomplete("INDEPENDENT_REVIEW_PLATFORM_UNSUPPORTED",
@@ -251,7 +251,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         // Refuse unsupported production profiles before subscription checks,
         // budget reservation, evidence preparation or any native observation.
         // Linux image identity and Windows managed policy remain distinct gaps.
-        if (UnsupportedProductionProfile() is { } profileRefusal) return profileRefusal;
+        if (UnsupportedProductionProfile(runtimeTrust, original, selection) is { } profileRefusal) return profileRefusal;
         ClaudeIndependentReviewData.RequireSubscriptionEnvironment(Environment.GetEnvironmentVariable);
         var ledger = ReviewBudgetLedger.FromTrustedPolicy(bootstrap.Policy);
         if (!ledger.TryReserve(new(bootstrap.Policy.Budget.MaximumDuration, bootstrap.Policy.Budget.MaximumTokens, bootstrap.Policy.Budget.MaximumCost), out var reservation, out var decision))

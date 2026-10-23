@@ -12,6 +12,9 @@ public sealed record CodexAppServerSelection(string Executable, long Bytes, stri
 public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHostPort, IHostInstructionPort
 {
     readonly LinuxScopeSelection? linuxScope;
+    readonly InstalledHostAdmission.RuntimeTrust? runtimeTrust;
+    BoundedFiles.RetainedNativeImage? trustedImage;
+    bool trustedNativeCreationEntered, trustedNativeCreationReturned;
     HostInstructionContext? instructions;
     public void BindInstructions(HostInstructionContext context) { lock (gate) { if (startEntered || instructions is not null && !ReferenceEquals(instructions, context)) throw new WorkerEnvelopeException("Actual instructions cannot change after selection or dispatch."); instructions = context; } }
     readonly CodexAppServerSelection selection; ToolLifetime? boundOriginal; readonly WorktreeManager actualGit;
@@ -39,8 +42,10 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         }
     }
     public CodexAppServerPort(CodexAppServerSelection selection, WorktreeManager actualGit, AgentAdapterProfile acceptedProfile, LinuxScopeSelection? linuxScope = null)
+        : this(selection, actualGit, acceptedProfile, linuxScope, null) { }
+    internal CodexAppServerPort(CodexAppServerSelection selection, WorktreeManager actualGit, AgentAdapterProfile acceptedProfile, LinuxScopeSelection? linuxScope, InstalledHostAdmission.RuntimeTrust? runtimeTrust)
     {
-        this.linuxScope = linuxScope;
+        this.runtimeTrust = runtimeTrust; this.linuxScope = linuxScope;
         ArgumentNullException.ThrowIfNull(selection); ArgumentNullException.ThrowIfNull(acceptedProfile);
         if (acceptedProfile.Capabilities is null || acceptedProfile.Capabilities.Count is < 1 or > 6 || acceptedProfile.Capabilities.Any(row => row is null) || string.IsNullOrWhiteSpace(selection.Version) || selection.Version.Length > 256) throw new ToolUsageException("Finite complete actual native version/profile required BEFORE capability snapshot.");
         if (acceptedProfile.AdapterId != "codex.cli" || acceptedProfile.AdapterVersion != selection.Version || acceptedProfile.Capabilities.Any(x => (x.Capability is AgentCapability.Pause or AgentCapability.Resume) && x.Status == AgentCapabilityStatus.Supported)) throw new ToolUsageException("Stable app-server has interrupt, not same-turn pause/resume; exact accepted Codex version required.");
@@ -55,7 +60,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     Task Keep(Task actual) { lock (tasks) { if (tasks.Count >= 1024) throw new IOException("Finite actual Codex task ledger exhausted."); tasks.Add(actual); } return actual; }
     async Task<JsonElement> Rpc(string method, object parameters, CancellationToken token)
     {
-        original.Check(); var id = Interlocked.Increment(ref nextId); if (id > 64) throw new IOException("Fixed Codex RPC allowance exceeded.");
+        original.Check(); runtimeTrust?.Check(original); trustedImage?.Check(token); var id = Interlocked.Increment(ref nextId); if (id > 64) throw new IOException("Fixed Codex RPC allowance exceeded.");
         if (shutdown || pump is { IsCompleted: true }) pending.Fail(pumpFailure ?? new IOException("Original Codex pump has stopped; no new RPC."));
         var reply = pending.Register(id);
         if (method == "account/read") Volatile.Write(ref accountReadId, id);
@@ -108,14 +113,25 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         try
         {
             if (actual.AdapterId != "codex.cli" || actual.AdapterVersion != selection.Version || remaining <= TimeSpan.Zero || remaining > original.WorkLimit) throw new WorkerEnvelopeException("Actual request/version/deadline differs from containing original.");
-            startup!.SetStage(CodexStartupStage.NativeImageVerification); BoundedFiles.VerifyNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), original);
+            runtimeTrust?.BindWorker(original, selection, actual.Worktree, actual.ResultDirectory);
+            startup!.SetStage(CodexStartupStage.NativeImageVerification);
+            if (runtimeTrust is null) BoundedFiles.VerifyNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), original);
+            else trustedImage = BoundedFiles.RetainVerifiedNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), original, token);
             var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1" };
-            startup.SetStage(CodexStartupStage.NativeCreation); process = OwnedDuplexProcess.Open(new(selection.Executable, ["app-server"], actual.Worktree, environment), original, linuxScope); if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            runtimeTrust?.Check(original); trustedImage?.Check(token);
+            startup.SetStage(CodexStartupStage.NativeCreation); trustedNativeCreationEntered = true; process = OwnedDuplexProcess.Open(new(selection.Executable, ["app-server"], actual.Worktree, environment), original, linuxScope); trustedNativeCreationReturned = true; if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             protocol = new(process.Input, process.Output, original); pump = Pump(original.Token); process.AttachOriginalOutputConsumer(pump); lock (tasks) tasks.Add(pump);
             startup.SetStage(CodexStartupStage.Initialize); _ = await Rpc("initialize", new { clientInfo = new { name = "delivery_forge", title = "Delivery Forge", version = "0.1.0" }, capabilities = new { experimentalApi = false } }, token).ConfigureAwait(false);
             startup.SetStage(CodexStartupStage.InitializedNotification); startup.Client("initialized", null, CodexWireState.WriteEntered);
             await protocol.WriteAsync(new { method = "initialized", @params = new { } }, token).ConfigureAwait(false);
             startup.Client("initialized", null, CodexWireState.WriteReturned);
+            if (runtimeTrust is not null)
+            {
+                startup.SetStage(CodexStartupStage.AccountRead);
+                var account = await Rpc("account/read", new { refreshToken = false }, token).ConfigureAwait(false);
+                observedChatgptAccount = account.GetProperty("account") is { ValueKind: JsonValueKind.Object } actualAccount && actualAccount.GetProperty("type").GetString() == "chatgpt";
+                if (!observedChatgptAccount) throw new IOException("Actual existing ChatGPT subscription is required before worker thread creation.");
+            }
             // Omit model/provider/approval overrides: preserve actual configured
             // model, existing sign-in and host policy. No experimental fields.
             startup.SetStage(CodexStartupStage.ThreadStart); var started = await Rpc("thread/start", new { cwd = actual.Worktree }, token).ConfigureAwait(false); threadId = Text(started.GetProperty("thread"), "id");
@@ -125,15 +141,28 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             // metadata never becomes a family proof or changes worker dispatch.
             try
             {
+                if (runtimeTrust is null)
+                {
                 startup.SetStage(CodexStartupStage.AccountRead); var account = await Rpc("account/read", new { refreshToken = false }, token).ConfigureAwait(false);
                 observedChatgptAccount = account.GetProperty("account") is { ValueKind: JsonValueKind.Object } actualAccount && actualAccount.GetProperty("type").GetString() == "chatgpt";
+                }
             }
             catch (IOException) when (accountReadRefused && pumpFailure is null) { observedChatgptAccount = false; }
+            if (runtimeTrust is not null) CodexRuntimeRoute.RequireObserved(observedChatgptAccount, observedProvider, observedModel);
             startup.SetStage(CodexStartupStage.TurnStart); var turn = await Rpc("turn/start", HostAssignmentPrompt.CodexTurnStart(actual, instructions!, threadId), token).ConfigureAwait(false); turnId = Text(turn.GetProperty("turn"), "id");
             lock (gate) { terminalWait = new(TaskCreationOptions.RunContinuationsAsynchronously); if (terminals.TryGetValue(turnId, out var early)) { if (Text(early.GetProperty("params"), "threadId") != threadId) throw new IOException("Early terminal has foreign actual thread."); terminalWait.TrySetResult(early); } binding = new(actual.AdapterId, actual.AdapterVersion, actual.RunId, actual.RequestIdentity, threadId, turnId); }
             original.Check(); startup.SetStage(CodexStartupStage.Accepted); return new(actual.SchemaVersion, actual.RunId, actual.RequestIdentity, actual.PlanIdentity, actual.BaseCommit, actual.Worktree, actual.AdapterId, actual.AdapterVersion, threadId, turnId, DateTimeOffset.UtcNow, Profile.Capabilities);
         }
-        catch { if (process is not null) { var stop = process.RetireAsync(true); lock (tasks) tasks.Add(stop); await stop.ConfigureAwait(false); } throw; }
+        catch (Exception primary)
+        {
+            try
+            {
+                if (process is not null) { var stop = process.RetireAsync(true); lock (tasks) tasks.Add(stop); var closed = await stop.ConfigureAwait(false); CloseTrustedImage(closed.KnownClosed && !process.HasUnknownIo, true); }
+                else CloseTrustedImage(!trustedNativeCreationEntered || trustedNativeCreationReturned, true);
+            }
+            catch (Exception cleanup) { trustedImage?.RetainUnknown(); throw new AggregateException("Codex start and same-original retirement/image disposition failure.", primary, cleanup); }
+            throw;
+        }
     }
     void Bound(AgentRunBinding actual) { lock (gate) if (binding is null || binding != actual) throw new WorkerEnvelopeException("No exact privately accepted Codex thread/turn binding."); }
     public async Task<AgentCompletionReceipt> WaitAsync(AgentRunBinding actual, TimeSpan remaining, CancellationToken token)
@@ -141,6 +170,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         Bound(actual); original.Check(); var completed = await Keep(terminalWait!.Task).WaitAsync(remaining < original.Remaining ? remaining : original.Remaining, token).ConfigureAwait(false); var status = Text(completed.GetProperty("params").GetProperty("turn"), "status"); if (status != "completed") throw new WorkerEnvelopeException("Actual Codex turn ended " + status + "; no successful completion inferred.");
         shutdown = true; var retired = await Keep(process!.RetireAsync(false)).ConfigureAwait(false); HostTransportRetirement.RequireSuccessful(retired);
         if (pump is not null) await pump.WaitAsync(original.Remaining, token).ConfigureAwait(false); if (pumpFailure is not null) throw new IOException("Actual app-server protocol failed; no successful completion.", pumpFailure);
+        runtimeTrust?.Check(original); trustedImage?.Check(token); CloseTrustedImage(true, false);
         var snapshotTask = actualGit.ObserveAsync(request!.Worktree, token); var snapshot = await Keep(snapshotTask).WaitAsync(original.Remaining, token).ConfigureAwait(false); original.Check();
         original.Check(); var artifact = Path.Combine(request.ResultDirectory, "codex-app-server-events.json"); JsonElement[] rows; lock (trace) rows = trace.ToArray(); var raw = JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualCodexAppServerTrace-v1", actual.RunId, actual.RequestIdentity, ThreadId = threadId, TurnId = turnId, Events = rows, Retirement = retired, PumpFailure = pumpFailure?.GetType().FullName, RuntimeCertified = false }, BoundedFiles.Json); BoundedFiles.WriteNew(artifact, raw, original);
         return new(request.SchemaVersion, request.RunId, request.RequestIdentity, request.AdapterId, request.AdapterVersion, actual.RuntimeRunIdentity, actual.RuntimeTaskIdentity, "success", request.Worktree, snapshot.HeadCommit, snapshot.TreeId, DateTimeOffset.UtcNow, [artifact], ["Actual transport only; independent review, real quality/current-source and installed conformance remain separate."]);
@@ -152,12 +182,19 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         try { if (turnId is not null && terminalWait?.Task.IsCompleted != true) _ = await Rpc("turn/interrupt", new { threadId, turnId }, token).ConfigureAwait(false); } catch (Exception error) { interruptFailure = error; }
         // WORK may already be closed by the containing stop latch. Regardless of
         // interrupt availability, only this original owner can stop its own Job.
-        shutdown = true; var retired = await Keep(process!.RetireAsync(true)).ConfigureAwait(false); lock (gate) terminalWait?.TrySetException(new OperationCanceledException("Original owner stop settled or remains explicitly unknown.")); pending.Fail(new OperationCanceledException("Original app-server stopped; no RPC replay."));
+        shutdown = true; var retired = await Keep(process!.RetireAsync(true)).ConfigureAwait(false); CloseTrustedImage(retired.KnownClosed && !process.HasUnknownIo, true); lock (gate) terminalWait?.TrySetException(new OperationCanceledException("Original owner stop settled or remains explicitly unknown.")); pending.Fail(new OperationCanceledException("Original app-server stopped; no RPC replay."));
         return new(actual, action, retired.KnownClosed ? AgentActivityState.Quiescent : AgentActivityState.Unknown, retired.KnownClosed, "actual-private-original-app-server-retirement", "Interrupt response alone never proves quiescence; original root/Job/IO/disposition joined. InterruptFailure=" + interruptFailure?.GetType().FullName);
     }
     public Task<AgentControlResult> ObserveUnstartedAsync(AgentRunBinding actual, TimeSpan remaining, CancellationToken token)
     {
         original.Check(); lock (gate) { var absent = !startEntered && process is null; return Task.FromResult(new AgentControlResult(actual, AgentControlAction.Stop, absent ? AgentActivityState.Quiescent : AgentActivityState.Unknown, absent, absent ? "actual-private-port-never-entered" : "", "No process/session adoption from DATA.")); }
+    }
+    void CloseTrustedImage(bool knownNativeClosed, bool cleanup)
+    {
+        if (trustedImage is null || trustedImage.IsClosed) return;
+        if (!knownNativeClosed) { trustedImage.RetainUnknown(); return; }
+        try { trustedImage.Close(cleanup); }
+        catch { if (!trustedImage.IsClosed) trustedImage.RetainUnknown(); throw; }
     }
     static string Text(JsonElement value, string name) { var result = value.GetProperty(name); if (result.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(result.GetString()) || result.GetString()!.Length > 4096) throw new IOException("Invalid actual app-server " + name); return result.GetString()!; }
 }

@@ -101,8 +101,8 @@ internal sealed class StandaloneEntrypoint
                     if (inspection) application = new(actualExecutor: executor, actualOriginal: original, actualConfigurationPin: configPin);
                     else
                     {
-                        var admission = InstalledHostAdmission.ReadRootAccepted(root.InstalledHostAdmission, config, original);
-                        composition = new(config, root.StoreRoot, root.WorkerPaths, original, admission.Host, admission.Profile, scope, configPin, resources); actualReferences.Add(composition); await composition.InitializeCoordinationAsync().ConfigureAwait(false); application = composition.Application;
+                        var admission = InstalledHostAdmission.ReadRootAccepted(root.InstalledHostAdmission, config, original, configPin);
+                        composition = new(config, root.StoreRoot, root.WorkerPaths, original, admission.Host, admission.Profile, scope, configPin, resources, null, null, admission.TrustedRuntime); actualReferences.Add(composition); await composition.InitializeCoordinationAsync().ConfigureAwait(false); application = composition.Application;
                     }
                     actualReferences.Add(application); var actual = application.ExecuteAsync(command, original.Token); actualReferences.Add(actual);
                     try { result = await actual.WaitAsync(original.Remaining).ConfigureAwait(false); } finally { if (!actual.IsCompleted) original.RetainUnknown(); }
