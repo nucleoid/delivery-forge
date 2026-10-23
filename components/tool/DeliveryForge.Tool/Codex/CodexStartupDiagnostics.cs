@@ -5,7 +5,7 @@ namespace DeliveryForge.Tool.Codex;
 
 internal enum CodexStartupStage { NotStarted, NativeImageVerification, NativeCreation, Initialize, InitializedNotification, ThreadStart, AccountRead, TurnStart, Accepted }
 internal enum CodexWireDirection { Client, Server }
-internal enum CodexWireMethod { None, Initialize, Initialized, ThreadStart, ThreadStarted, AccountRead, TurnStart, TurnStarted, TurnCompleted, TurnInterrupt, Other }
+internal enum CodexWireMethod { None, Initialize, Initialized, ThreadStart, ThreadStarted, AccountRead, TurnStart, TurnStarted, TurnCompleted, TurnInterrupt, Other, ConfigRead }
 internal enum CodexWireState { WriteEntered, WriteReturned, Received }
 internal enum CodexWireIdKind { None, ClientNumber, OtherNumber, String }
 internal sealed record CodexWireObservation(long ElapsedTicks, CodexStartupStage Stage, CodexWireDirection Direction, CodexWireMethod Method, CodexWireState State, CodexWireIdKind IdKind, long? ClientId, bool HasError, int? ErrorCode);
@@ -22,6 +22,7 @@ internal sealed class CodexStartupJournal(long originalStarted)
         "initialize" => CodexWireMethod.Initialize,
         "initialized" => CodexWireMethod.Initialized,
         "account/read" => CodexWireMethod.AccountRead,
+        "config/read" => CodexWireMethod.ConfigRead,
         "thread/start" => CodexWireMethod.ThreadStart,
         "thread/started" => CodexWireMethod.ThreadStarted,
         "turn/start" => CodexWireMethod.TurnStart,

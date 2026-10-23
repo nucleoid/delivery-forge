@@ -98,7 +98,9 @@ public sealed partial class InstalledHostAdmission
         readonly AdmissionFile root, configurationPin, ownerDecision;
         readonly Issue17HostInputs inputs;
         readonly StandaloneHostSelection configurationHost;
-        string? boundWorktree, boundResult;
+        string? boundWorktree, boundResult; int checks;
+        // Existing RPC64 + bind/start/wait5 + reviewer entry/VerifyImage7.
+        internal const int MaximumChecks = 76;
         RuntimeTrust(ToolLifetime original, TrustedConfiguration configuration, AdmissionFile root,
             AdmissionFile configurationPin, AdmissionFile ownerDecision, Issue17HostInputs inputs, StandaloneHostSelection host)
         { this.original = original; this.configuration = configuration; this.root = root; this.configurationPin = configurationPin; this.ownerDecision = ownerDecision; this.inputs = inputs; configurationHost = host; }
@@ -110,6 +112,7 @@ public sealed partial class InstalledHostAdmission
             original.Check();
             try
             {
+                if (Interlocked.Increment(ref checks) > MaximumChecks) throw new ToolUsageException("Finite selected runtime-trust check profile exhausted before file reads.");
                 Codex.CodexRuntimeRoute.RequireSubscriptionEnvironment(Environment.GetEnvironmentVariable);
                 ClaudeIndependentReviewData.RequireSubscriptionEnvironment(Environment.GetEnvironmentVariable);
                 inputs.Check();
@@ -159,6 +162,57 @@ public sealed partial class InstalledHostAdmission
                 catch (DirectoryNotFoundException) { }
                 var parent = Path.GetDirectoryName(current); if (parent is null) return; current = parent;
             }
+        }
+        internal readonly record struct ReadRequirement(int Operations, long Bytes);
+        internal static ReadRequirement ReadCapacity(InstalledHostRootAcceptance accepted, AdmissionFile rootPin, AdmissionFile configPin, TrustedConfiguration config)
+        {
+            if (accepted.RuntimeTrust is not { } trust || config.InstalledReview?.IndependentReviewer is not { } reviewer)
+                throw new ToolUsageException("Exact selected runtime-trust reviewer profile required for read admission.");
+            if (trust.OwnerDecision is null || accepted.ToolAssembly is null || accepted.Host is null || trust.HostInputs is null || trust.HostInputs.Count is < 2 or > 16 || accepted.Artifacts is null || accepted.Artifacts.Count is < 1 or > 32)
+                throw new ToolUsageException("Finite complete runtime-trust read selection required.");
+            var operations = 0; var bytes = 0L;
+            void Read(long length, long maximum)
+            {
+                if (length is <= 0 || length > maximum) throw new ToolUsageException("Invalid declared runtime-trust input extent.");
+                operations = checked(operations + 2); bytes = checked(bytes + length + 1);
+            }
+            var selectedBytes = 0L;
+            foreach (var row in trust.HostInputs)
+            {
+                if (row is null || (row.Bytes is null) != (row.Sha256 is null) || row.Bytes is < 1 or > 65536)
+                    throw new ToolUsageException("Invalid selected host-file extent.");
+                selectedBytes = checked(selectedBytes + (row.Bytes ?? 0));
+            }
+            if (selectedBytes > 1048576) throw new ToolUsageException("Selected host inputs exceed their complete finite profile.");
+            // This includes the future root admission, image verification, capture,
+            // all bounded rechecks and extra settings/config reads. No new credit.
+            Read(rootPin.Bytes, 1048576); Read(accepted.ToolAssembly.Bytes, 16777216);
+            Read(accepted.Host.Bytes, BoundedFiles.MaximumNativeImageBytes); // root conformance rehash
+            Read(accepted.Host.Bytes, BoundedFiles.MaximumNativeImageBytes); // retained actual worker image
+            foreach (var artifact in accepted.Artifacts)
+            {
+                if (artifact is null) throw new ToolUsageException("Missing declared conformance artifact.");
+                Read(artifact.Bytes, 1048576);
+            }
+            Read(trust.OwnerDecision.Bytes, 65536); Read(configPin.Bytes, 65536); Read(configPin.Bytes, 65536);
+            foreach (var row in trust.HostInputs) if (row.Bytes is long present) Read(present, 65536);
+            for (var check = 0; check < MaximumChecks; check++)
+            {
+                Read(rootPin.Bytes, 1048576); Read(configPin.Bytes, 65536); Read(trust.OwnerDecision.Bytes, 65536);
+                foreach (var row in trust.HostInputs) if (row.Bytes is long present) Read(present, 65536);
+            }
+            // Six VerifyImage checks plus the original settings capture.
+            for (var settings = 0; settings < 7; settings++) Read(65536, 65536);
+            // The reviewer directory binding and three protected-config callbacks.
+            for (var configuration = 0; configuration < 4; configuration++) Read(configPin.Bytes, 65536);
+            Read(reviewer.Image.Bytes, BoundedFiles.MaximumNativeImageBytes);
+            operations = checked(operations + 4); // bounded worker/reviewer trace writes
+            return new(operations, bytes);
+        }
+        internal static void RequireReadCapacity(InstalledHostRootAcceptance accepted, AdmissionFile rootPin, AdmissionFile configPin, TrustedConfiguration config, ToolLifetime original)
+        {
+            original.Check(); var plan = ReadCapacity(accepted, rootPin, configPin, config);
+            BoundedFiles.RequireReadCapacity(original, plan.Operations, plan.Bytes);
         }
         internal static RuntimeTrust Bind(InstalledHostAdmission containing, AdmissionFile configPin)
         {

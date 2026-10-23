@@ -90,6 +90,18 @@ public static class BoundedFiles
         }
         life.Check();
     }
+    // Admission only: inspect this SAME existing credit, without reserving,
+    // refunding, increasing or creating a second read allowance.
+    internal static void RequireReadCapacity(ToolLifetime life, int operations, long bytes)
+    {
+        life.Check();
+        if (operations < 0 || bytes < 0) throw new ToolUsageException("Finite declared read requirement required.");
+        var credit = Credits.GetValue(life, _ => new());
+        lock (credit.Gate)
+            if (operations > 4096 - credit.Operations || bytes > 1073741824L - credit.Reads)
+                throw new ToolUsageException("Selected runtime-trust reads cannot fit the remaining SAME original file credit; no host is dispatched.");
+        life.Check();
+    }
     static void CloseFile(FileFrame frame)
     {
         var life = frame.Original; var cleanup = frame.Primary is not null || frame.CleanupRequested;

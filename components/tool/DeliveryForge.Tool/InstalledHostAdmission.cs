@@ -19,18 +19,34 @@ public sealed partial class InstalledHostAdmission
         if (pin is null || pin.Path is null || pin.Bytes <= 0 || pin.Bytes > maximum || pin.Sha256 is null || pin.Sha256.Length != 64 || pin.Sha256.Any(c => !char.IsAsciiHexDigit(c) || char.IsAsciiLetterUpper(c))) throw new ToolUsageException("Finite exact independent lowercase admission pin required.");
         var bytes = BoundedFiles.Read(pin.Path, original, maximum); original.Check(); var digest = BoundedFiles.Sha(bytes); original.Check(); if (bytes.LongLength != pin.Bytes || digest != pin.Sha256) throw new IOException("Actual independently selected admission bytes changed."); return bytes;
     }
+    internal static void RequireConformanceCases(IReadOnlyList<InstalledHostCase> cases, IReadOnlySet<string> artifacts, bool runtimeTrust)
+    {
+        var required = new HashSet<string>(new[] { "actual_launch_assignment", "actual_completion_commit", "actual_stop_same_original", "foreign_completion_refused", "malformed_protocol_refused" }, StringComparer.Ordinal);
+        // The independent Root must actually qualify config/read(includeLayers),
+        // experimentalApi=false, account-before-thread and all three route reads
+        // on this exact native version. A managed fixture is not that proof.
+        if (runtimeTrust) required.Add("actual_runtime_trust_route");
+        if (cases.Count != required.Count) throw new ToolUsageException("Complete selected installed conformance required.");
+        foreach (var row in cases)
+            if (row is null || row.Outcome != "PASS" || !required.Remove(row.Name) || !artifacts.Contains(row.ArtifactSha256))
+                throw new ToolUsageException("Actual independent host conformance case proof is missing, duplicated or incomplete.");
+        if (required.Count != 0) throw new ToolUsageException("Complete selected installed conformance required.");
+    }
     public static InstalledHostAdmission ReadRootAccepted(AdmissionFile rootPin, TrustedConfiguration config, ToolLifetime original, AdmissionFile? actualConfigurationPin = null)
     {
         var bytes = ReadExact(rootPin, original, 1048576); _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(bytes); original.Check(); var receipt = System.Text.Json.JsonSerializer.Deserialize<InstalledHostRootAcceptance>(bytes, BoundedFiles.Json) ?? throw new IOException("Root host admission is null."); original.Check();
         var os = OperatingSystem.IsWindows() ? "windows" : OperatingSystem.IsLinux() ? "linux" : throw new PlatformNotSupportedException("Installed host profile is Windows/Linux only.");
-        if (receipt.Host is null || receipt.ToolAssembly is null || receipt.Artifacts is null || receipt.Cases is null || receipt.Kind != "RootActualInstalledHostConformanceAcceptance-v1" || receipt.Platform != os || receipt.Adapter != config.Adapter || receipt.Version != config.AdapterVersion || receipt.Host.Version != config.AdapterVersion || receipt.Artifacts.Count is < 1 or > 32 || receipt.Cases.Count != 5) throw new ToolUsageException("Actual independent installed host admission does not bind this platform/profile.");
+        if (receipt.Host is null || receipt.ToolAssembly is null || receipt.Artifacts is null || receipt.Cases is null || receipt.Kind != "RootActualInstalledHostConformanceAcceptance-v1" || receipt.Platform != os || receipt.Adapter != config.Adapter || receipt.Version != config.AdapterVersion || receipt.Host.Version != config.AdapterVersion || receipt.Artifacts.Count is < 1 or > 32 || receipt.Cases.Count != (receipt.RuntimeTrust is null ? 5 : 6)) throw new ToolUsageException("Actual independent installed host admission does not bind this platform/profile.");
+        // Declared-cost refusal only, before image/artifact reads consume this
+        // same credit. No bytes, conformance case or runtime trust is accepted
+        // here; all exact content/proof checks below remain mandatory.
+        if (receipt.RuntimeTrust is not null)
+            RuntimeTrust.RequireReadCapacity(receipt, rootPin, actualConfigurationPin ?? throw new ToolUsageException("Owner runtime trust requires the containing configuration pin."), config, original);
         var self = System.Reflection.Assembly.GetExecutingAssembly().Location; if (Path.GetFullPath(receipt.ToolAssembly.Path) != Path.GetFullPath(self)) throw new ToolUsageException("Actual installed Tool assembly differs from independently accepted host conformance."); _ = ReadExact(receipt.ToolAssembly, original, 16777216);
         BoundedFiles.VerifyNativeImage(new(receipt.Host.Executable, receipt.Host.Bytes, receipt.Host.Sha256), original);
         var artifacts = new HashSet<string>(StringComparer.Ordinal); long total = 0;
         foreach (var pin in receipt.Artifacts) { if (pin is null) throw new ToolUsageException("Missing actual conformance artifact."); if (pin.Bytes <= 0 || pin.Bytes > 1048576 || total > 33554432 - pin.Bytes || !artifacts.Add(pin.Sha256)) throw new ToolUsageException("Actual conformance artifacts exceed finite complete profile or collide."); total += pin.Bytes; _ = ReadExact(pin, original, 1048576); }
-        var required = new HashSet<string>(new[] { "actual_launch_assignment", "actual_completion_commit", "actual_stop_same_original", "foreign_completion_refused", "malformed_protocol_refused" }, StringComparer.Ordinal);
-        foreach (var row in receipt.Cases) { if (row is null) throw new ToolUsageException("Missing actual conformance case."); if (row.Outcome != "PASS" || !required.Remove(row.Name) || !artifacts.Contains(row.ArtifactSha256)) throw new ToolUsageException("Actual independent host conformance case proof is missing, duplicated or incomplete."); }
-        if (required.Count != 0) throw new ToolUsageException("Complete selected installed conformance required.");
+        RequireConformanceCases(receipt.Cases, artifacts, receipt.RuntimeTrust is not null);
         // This derives version-specific capability EVIDENCE only from a pinned
         // independent Root decision. No live native/task/session is adopted.
         var reference = "sha256:" + rootPin.Sha256; var rows = new[]{

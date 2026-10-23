@@ -14,7 +14,7 @@ namespace DeliveryForge.Tool.Tests;
 // Missing bindings fail; no environment/capability skip produces a PASS.
 public sealed class InstalledNativeHostConformanceTests
 {
-    public sealed record Fixture(string Kind, string Adapter, StandaloneHostSelection Host, string Git, string ParentCheckout, string Worktree, string ResultDirectory, string BaseCommit, string Repository, string CaseKind, AdmissionFile PlanBundle, PlanImportExpectations Expectations, string MutableReference, string RelativePath, string ExpectedText, AdmissionFile? LinuxScopeProfile);
+    public sealed record Fixture(string Kind, string Adapter, StandaloneHostSelection Host, string Git, string ParentCheckout, string Worktree, string ResultDirectory, string BaseCommit, string Repository, string CaseKind, AdmissionFile PlanBundle, PlanImportExpectations Expectations, string MutableReference, string RelativePath, string ExpectedText, AdmissionFile? LinuxScopeProfile, bool ObserveRuntimeTrustRoute = false);
     sealed class Frame : IAsyncDisposable
     {
         static readonly List<Frame> Unknown = [];
@@ -36,6 +36,8 @@ public sealed class InstalledNativeHostConformanceTests
             var path = Environment.GetEnvironmentVariable(fixtureKey) ?? throw new IOException("Fresh Root-admitted real native conformance fixture required; no model/CLI fallback.");
             var rawFixture = BoundedFiles.Read(path, frame.Original, 65536); var expectedFixtureHash = Environment.GetEnvironmentVariable(fixtureKey + "_SHA256") ?? throw new IOException("Independent complete fixture hash required."); Assert.Equal(expectedFixtureHash, BoundedFiles.Sha(rawFixture)); _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(rawFixture); frame.Original.Check(); frame.Selected = JsonSerializer.Deserialize<Fixture>(rawFixture, BoundedFiles.Json) ?? throw new IOException("Actual probe fixture null."); var f = frame.Selected;
             if (f.Kind != "RootAdmittedNativeConformanceProvisioningFixture-v2" || f.CaseKind != (stop ? "stop" : "completion") || f.PlanBundle is null || f.Expectations is null || f.Adapter != adapter || f.Host is null || string.IsNullOrWhiteSpace(f.Host.Version) || f.Host.Version == "unverified" || f.Host.Version.Length > 256 || f.RelativePath is null || f.RelativePath.Length is < 1 or > 256 || f.RelativePath.Contains('\\') || Path.IsPathFullyQualified(f.RelativePath) || f.RelativePath.Split('/').Any(v => v is "" or "." or "..") || f.ExpectedText is null || f.ExpectedText.Length is < 1 or > 4096 || f.ExpectedText.Contains('\0')) throw new IOException("Exact finite independently prepared real-host task fixture required.");
+            if (f.ObserveRuntimeTrustRoute && (adapter != "codex.cli" || stop || !OperatingSystem.IsWindows()))
+                throw new IOException("Trust-route conformance selects only the existing Windows Codex completion producer; no authority is granted.");
             BoundedFiles.Plain(f.ParentCheckout, true); BoundedFiles.Plain(f.Worktree, true); BoundedFiles.Plain(f.ResultDirectory, true); BoundedFiles.Separate(f.ParentCheckout, f.Worktree); BoundedFiles.Separate(f.Worktree, f.ResultDirectory);
             if (Directory.Exists(f.Worktree) || File.Exists(f.Worktree))
                 throw new IOException("Native conformance v2 requires the exact independently admitted absent destination; existing metadata cannot be adopted.");
@@ -54,7 +56,7 @@ public sealed class InstalledNativeHostConformanceTests
             var profile = new AgentAdapterProfile(adapter, f.Host.Version, new[] { AgentCapability.Launch, AgentCapability.CompletionEvidence, AgentCapability.Stop, AgentCapability.EvidenceExport }.Select(c => new AgentCapabilityEvidence(c, AgentCapabilityStatus.Unverified, "actual installed transport UNDER TEST", "source-defined genuine probe, not conformance authority")).ToArray());
             frame.Port = adapter switch
             {
-                "codex.cli" => new DeliveryForge.Tool.Codex.CodexAppServerPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope),
+                "codex.cli" => new DeliveryForge.Tool.Codex.CodexAppServerPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope, null, f.ObserveRuntimeTrustRoute),
                 "claude-code.cli" => new DeliveryForge.Tool.Claude.ClaudeStreamPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope),
                 "pi.cli" => new DeliveryForge.Tool.Pi.PiRpcPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope),
                 _ => throw new IOException("No arbitrary protocol dispatch.")
@@ -173,6 +175,20 @@ public sealed class InstalledNativeHostConformanceTests
         using var affinity = new OwnedDuplexProcessTests.Affinity(); await using var frame = Frame.Prepare(adapter, false); var f = frame.Selected; var accepted = await frame.Start(false); var binding = Frame.Binding(accepted);
         await Assert.ThrowsAsync<WorkerEnvelopeException>(() => frame.Port.WaitAsync(binding with { RuntimeTaskIdentity = binding.RuntimeTaskIdentity + "-foreign" }, frame.Original.Remaining, TestContext.Current.CancellationToken));
         var completion = await frame.Call(() => frame.Port.WaitAsync(binding, frame.Original.Remaining, TestContext.Current.CancellationToken)); Assert.Equal(binding.RuntimeRunIdentity, completion.RuntimeRunIdentity); Assert.Equal(binding.RuntimeTaskIdentity, completion.RuntimeTaskIdentity); Assert.Equal(binding.RequestIdentity, completion.RequestIdentity); Assert.Equal("success", completion.Outcome); Assert.NotEqual(f.BaseCommit, completion.HeadCommit);
+        if (f.ObserveRuntimeTrustRoute)
+        {
+            var artifact = Assert.Single(completion.ArtifactPaths);
+            var traceBytes = BoundedFiles.Read(artifact, frame.Original);
+            using var trace = JsonDocument.Parse(traceBytes);
+            Assert.True(trace.RootElement.GetProperty("TrustRouteConformanceOnly").GetBoolean());
+            Assert.False(trace.RootElement.GetProperty("RuntimeCertified").GetBoolean());
+            var replies = trace.RootElement.GetProperty("Events").EnumerateArray().Where(row => row.TryGetProperty("TrustRpcMethod", out _)).ToArray();
+            Assert.Equal(new[] { "initialize", "config/read", "account/read", "thread/start", "config/read", "turn/start", "config/read" },
+                replies.Select(row => row.GetProperty("TrustRpcMethod").GetString()));
+            Assert.Equal(Enumerable.Range(1, 7).Select(id => (long)id), replies.Select(row => row.GetProperty("Message").GetProperty("id").GetInt64()));
+            Assert.Equal(3, replies.Count(row => row.GetProperty("TrustRpcMethod").GetString() == "config/read" &&
+                row.GetProperty("Message").GetProperty("result").GetProperty("routeStatus").GetString() == "owner-trusted-no-known-override"));
+        }
         var native = frame.Native ?? throw new IOException("Actual original process reference missing."); var sameRetirement = native.RetireAsync(false); frame.Retirement = await sameRetirement.WaitAsync(frame.Original.Remaining, TestContext.Current.CancellationToken); HostTransportRetirement.RequireSuccessful(frame.Retirement);
         var after = await frame.Call(() => frame.Git.ObserveAsync(f.Worktree, TestContext.Current.CancellationToken)); Assert.True(after.IsClean); Assert.Equal(after.HeadCommit, completion.HeadCommit); Assert.Equal(after.TreeId, completion.TreeId); Assert.Equal(Encoding.UTF8.GetBytes(f.ExpectedText), BoundedFiles.Read(Path.Combine(f.Worktree, f.RelativePath.Replace('/', Path.DirectorySeparatorChar)), frame.Original));
         Assert.NotEmpty(completion.ArtifactPaths); foreach (var artifact in completion.ArtifactPaths) { var bytes = BoundedFiles.Read(artifact, frame.Original); Assert.DoesNotContain(frame.Request.WriterToken, Encoding.UTF8.GetString(bytes), StringComparison.Ordinal); }

@@ -97,6 +97,7 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
         var budget = ResourceBudget.Measure(measured, selected.Policy);
         if (selected.Policy.MaximumTime > original.WorkLimit) throw new ToolUsageException("Aggregate policy exceeds the same original WORK endpoint.");
         var nodes = new List<Node>();
+        var trustedReadOperations = 0; var trustedReadBytes = 0L;
         foreach (var selection in selected.Nodes)
         {
             _ = InstalledHostAdmission.ReadExact(containingPin, original, 65536);
@@ -104,6 +105,18 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             ValidateLeaf(containing, selected, selection, config, original);
             var root = Read<StandaloneRootSelection>(config.StandaloneRoot!, 65536);
             StandaloneEntrypoint.SeparateSelection(config, selection.Configuration.Path, root);
+            // Inspect the exact already selected root DATA while all nodes are
+            // still preflight; aggregate trust reads before any host is created.
+            if (config.InstalledReview?.IndependentReviewer is not null)
+            {
+                var host = Read<InstalledHostRootAcceptance>(root.InstalledHostAdmission, 1048576);
+                if (host.RuntimeTrust is not null)
+                {
+                    var readPlan = InstalledHostAdmission.RuntimeTrust.ReadCapacity(host, root.InstalledHostAdmission, selection.Configuration, config);
+                    trustedReadOperations = checked(trustedReadOperations + readPlan.Operations);
+                    trustedReadBytes = checked(trustedReadBytes + readPlan.Bytes);
+                }
+            }
             if (!command.Has("dry-run")) StandaloneOwnerComposition.RequireFreshExecutionStore(root.StoreRoot, original);
             LinuxScopeSelection? scope = OperatingSystem.IsLinux()
                 ? Read<LinuxScopeSelection>(root.LinuxScopeProfile ?? throw new ToolUsageException("Actual pinned Linux scope required for every batch node."), 65536) : null;
@@ -117,6 +130,7 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
                 return ToolResult.Incomplete("BATCH_PLAN_RECONCILIATION_INCOMPLETE", "Every selected plan must freshly reconcile before batch creation; no host was created.", imported.Diagnostics);
             nodes.Add(new(selection, config, root, scope, imported.Plan, ReadFrozenPrerequisites(imported.Plan, selection.NodeId)));
         }
+        if (trustedReadOperations != 0) BoundedFiles.RequireReadCapacity(original, trustedReadOperations, trustedReadBytes);
         var anchorNode = nodes.Single(node => ReferenceEquals(node.Selection, anchor));
         if (containing.ExpectedBundleIdentity != anchorNode.Plan.Identity || containing.ExpectedContractIdentity != anchorNode.Plan.ContractIdentity ||
             containing.ExpectedWorkItem != anchorNode.Plan.WorkItem || containing.ExpectedPlanCeiling != anchorNode.Configuration.ExpectedPlanCeiling)

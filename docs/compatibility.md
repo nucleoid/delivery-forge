@@ -49,8 +49,14 @@ The owner may select `Issue17OwnerTrustedPersonalHost-v1` in the independently
 pinned installed-host acceptance. This is a scoped trust decision about the
 selected personal Windows host's administrator/server-managed configuration,
 not evidence that safe mode inspected or disabled that policy. The containing
-root must still pass all five exact installed-host conformance cases and match
-the installed Tool image. Only that root can bind the selection to its same
+root must still pass the five legacy installed-host cases plus a sixth
+`actual_runtime_trust_route` case for the exact selected binary and version, and
+match the installed Tool image. The sixth case must actually exercise
+`experimentalApi=false`, `config/read(includeLayers=true)` three times, existing
+account observation before thread creation, and the actual thread model/provider.
+The existing native conformance producer can observe this sequence only with an
+UNVERIFIED profile; it cannot bootstrap a production admission. Schema output or
+managed fixtures do not satisfy the actual route case. Only that root can bind the selection to its same
 original lifetime, exact containing configuration and selected worker/reviewer.
 A DTO or flag passed to a port cannot enable the profile.
 
@@ -75,11 +81,26 @@ dispatch and again before completion acceptance. Known `openai_base_url`,
 `chatgpt_base_url` or nonempty custom-provider tables refuse, including nested
 layer/profile definitions; this initial profile conservatively refuses inactive
 definitions too. Missing/malformed metadata and observed model/provider drift
-also refuse. Secret-bearing configuration/layers/errors are projected away before
-trace, startup diagnostics or pending reply storage. This checks known overrides;
+also refuse. In this trust mode, configuration/account replies and other RPC
+errors are projected before retention; errors keep only a numeric code and fixed
+text. Required thread/turn IDs, terminal status and admitted model/provider labels
+remain for protocol binding. Unknown notifications and unsupported server
+requests keep fixed metadata; the actual request ID is used only for its
+unsupported wire reply. Raw params, config/layers, arbitrary methods and error
+payloads are not copied to the trace or pending results. This checks known overrides;
 it does not manufacture a resolved-endpoint descriptor. Cooperative selected
 file checks do not exclude an arbitrary hostile same-user writer or remote
 policy change that the selected CLI does not expose.
+
+Trust-read feasibility is checked against the SAME original remaining4096 file
+operations and1GiB read credit before host creation. Batch preflight sums all
+selected trust nodes. The conservative plan uses the existing64-RPC bound plus
+fixed bind/reviewer calls, and counts image, selected-file and settings reads.
+No credit is reserved, refunded or increased; other pipeline file effects still
+consume the same original allowance and remain independently bounded. An
+infeasible trust selection refuses before host creation instead of starting a
+known-overcommitted trust batch. The default non-trust protocol does not use
+these trust-only projections or the foreign-configuration-shape heuristic.
 
 Exact selected Windows executable handles remain held through their actual
 original native retirement; unknown disposition retains the same owner. Existing
