@@ -93,6 +93,13 @@ internal sealed class StandaloneEntrypoint
                         StandaloneOwnerComposition.RequireFreshExecutionStore(root.StoreRoot, original);
                         if (command.Mode == ToolMode.Implement && config.LocalSingle is null)
                             throw new ToolUsageException("Standalone implementation requires the explicit finite LocalSingle provisioning policy. Precreated worker paths cannot be adopted; no host or coordination owner was created.");
+                        if (command.Mode == ToolMode.Implement && OperatingSystem.IsLinux())
+                        {
+                            // Refusal-only selected DATA, before image hashing or any
+                            // durable store/owner effect. Retained history still wins.
+                            var selected = ReadPinned<InstalledHostRootAcceptance>(root.InstalledHostAdmission, 1048576);
+                            RequireLinuxWorkerDispatchExtent(selected.Host);
+                        }
                     }
                     LinuxScopeSelection? scope = null;
                     if (OperatingSystem.IsLinux()) scope = ReadPinned<LinuxScopeSelection>(root.LinuxScopeProfile ?? throw new ToolUsageException("Exact Linux owner profile required before Git or host birth."), 65536);
@@ -130,6 +137,13 @@ internal sealed class StandaloneEntrypoint
         catch (Exception error) { secondary.Add(error); original.RetainUnknown(); }
         if (original.HasRetainedUnknown || deliveryEntered && !deliveryReturned) return await HoldUnknown().ConfigureAwait(false);
         original.Dispose(); lock (Retained) Retained.Remove(this); return primary is null ? exit : 1;
+    }
+    internal static void RequireLinuxWorkerDispatchExtent(StandaloneHostSelection? selectedHost)
+    {
+        if (!OperatingSystem.IsLinux()) return;
+        if (selectedHost is null) throw new ToolUsageException("Selected Linux worker admission has no image selection.");
+        if (selectedHost.Bytes < 64 || selectedHost.Bytes > OwnedDuplexProcess.MaximumExactLinuxImageBytes)
+            throw new ToolUsageException("INCOMPLETE: Selected Linux worker image must fit the 64-byte through eleven-MiB exact-image profile before dispatch.");
     }
     internal static async Task SettleBatchTaskAfterWorkFailureAsync(Task actual, ToolLifetime original, Exception primary)
     {

@@ -180,6 +180,62 @@ public sealed class ProductionBatchTests
         finally { Console.SetOut(beforeOut); Console.SetError(beforeError); }
     }
 
+    public static bool IsLinux => OperatingSystem.IsLinux();
+
+    // Actual default batch route. Both leaf admissions are selected before
+    // reading either absent plan; no valid host/scope or Root authority exists.
+    [Theory(Timeout = 30000, Skip = "Linux batch extent admission requires Linux.", SkipUnless = nameof(IsLinux))]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(-1)]
+    public async Task Linux_batch_admits_all_worker_extents_before_any_plan_or_durable_selection(int unsupportedNode)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-batch-extent-" + Guid.NewGuid().ToString("N"));
+        var repository = Path.Combine(root, "repo"); Directory.CreateDirectory(repository);
+        AdmissionFile Write<T>(string name, T value)
+        {
+            var path = Path.Combine(root, name); var raw = JsonSerializer.SerializeToUtf8Bytes(value, BoundedFiles.Json);
+            File.WriteAllBytes(path, raw); return new(path, raw.LongLength, BoundedFiles.Sha(raw));
+        }
+        var policy = Policy() with { MaximumTime = TimeSpan.FromSeconds(15) };
+        var demand = Demand with { TimeLimit = TimeSpan.FromSeconds(15) };
+        var nodes = new List<ProductionBatchNodeSelection>(); var stores = new List<string>();
+        for (var index = 0; index < 2; index++)
+        {
+            var prefix = "node" + index.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            var absent = Path.Combine(root, prefix + "-absent-worker");
+            var host = Write(prefix + "-host.json", new InstalledHostRootAcceptance("UNVERIFIED-REFUSAL-DATA", "linux", "codex.cli", "fixture",
+                new(absent, index == unsupportedNode ? OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1 : 64, new string('a', 64), "fixture"),
+                new(absent + "-tool", 1, new string('b', 64)), [], []));
+            var store = Path.Combine(root, prefix + "-store"); stores.Add(store);
+            var selectedRoot = Write(prefix + "-root.json", new StandaloneRootSelection("DeliveryForgeStandaloneRoot-v1", store,
+                new(Path.Combine(root, prefix + "-work"), Path.Combine(root, prefix + "-results"), ["source.cs"], []), host));
+            var leaf = new TrustedConfiguration("fixture/repo", repository, "refs/heads/main", Path.Combine(root, "absent-git"),
+                AdapterVersion: "fixture", MaximumCeiling: "implement", OperationSeconds: 20,
+                ExpectedBundleIdentity: "sha256:" + new string('b', 64), ExpectedContractIdentity: "sha256:" + new string('c', 64), ExpectedWorkItem: "#" + (index + 1).ToString(System.Globalization.CultureInfo.InvariantCulture), ExpectedPlanCeiling: "implement",
+                StandaloneRoot: selectedRoot, Coordination: new(new Uri("https://example.invalid/mcp"), "fixture", "principal", Path.Combine(root, "absent-key"), Path.Combine(root, prefix + "-checkpoint"), Pin("absent-deployment")), LocalSingle: new(policy, demand));
+            nodes.Add(new(prefix, new(Path.Combine(root, prefix + "-absent-plan"), 1, new string('a', 64)), Write(prefix + "-config.json", leaf), demand));
+        }
+        var storeRoot = Path.Combine(root, "batch-store");
+        var batch = new ProductionBatchSelection(storeRoot, policy, Fairness, nodes);
+        var containing = Write("containing.json", new TrustedConfiguration("fixture/repo", repository, "refs/heads/main", Path.Combine(root, "absent-git"),
+            MaximumCeiling: "implement", OperationSeconds: 20, ProductionBatch: batch));
+        var beforeOut = Console.Out; var beforeError = Console.Error; using var output = new StringWriter(); using var errors = new StringWriter();
+        Console.SetOut(output); Console.SetError(errors);
+        try
+        {
+            Assert.Equal(1, await Program.Main(["implement", "--plan", nodes[0].Plan.Path, "--config", containing.Path, "--json"])
+                .WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken));
+            Assert.Empty(output.ToString());
+            var expected = unsupportedNode < 0 ? "Actual pinned Linux scope required for every batch node." : "Selected Linux worker image must fit the 64-byte through eleven-MiB exact-image profile before dispatch.";
+            Assert.Contains(expected, errors.ToString(), StringComparison.Ordinal);
+            Assert.False(Directory.Exists(storeRoot)); Assert.All(stores, store => Assert.False(Directory.Exists(store)));
+            Assert.All(nodes, node => Assert.False(File.Exists(node.Plan.Path)));
+            Assert.False(File.Exists(Path.Combine(storeRoot, "batch-selection.json")));
+        }
+        finally { Console.SetOut(beforeOut); Console.SetError(beforeError); }
+    }
+
     [Fact(Timeout = 150000)]
     public async Task Actual_Git_issued_frozen_plan_uses_pinned_arbitrary_root_and_only_its_semantic_prerequisites()
     {

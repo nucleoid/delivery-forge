@@ -16,15 +16,21 @@ images and scripts refuse; there is no ordinary-image fallback. This enforces
 image binding, not authentication, installed CLI compatibility, runtime-trust
 admission, independent review acceptance or protected Root/Parent authority.
 
-Composition rejects a selected Linux worker extent below 64 bytes or above the
-shared 11 MiB maximum before inspecting the execution store or constructing any
-coordinator/native port. This is refusal-only DATA admission: it debits no file
-credit and does not establish ELF validity or compatibility. The in-port reserve
-and actual image/scope proof remain mandatory. The fixed message identifies an
-INCOMPLETE capability; the existing standalone failure wire remains ERROR, not a
-new outcome mapping. The measured 296,885,960-byte Linux Codex image is unavailable
-under this unchanged profile. No positive installed Linux CLI compatibility or
-protected Linux runtime policy is enabled by an in-range extent.
+Standalone non-dry-run `implement` admission rejects a selected Linux worker
+extent below 64 bytes or above the shared 11 MiB maximum before image hashing,
+composition, or durable store/owner effects. Existing read-only retained-history
+and namespace checks keep their earlier priority. Every production-batch node is
+checked during the common selected-input preflight, before any plan import,
+batch marker, durable selected intent or node dispatch. Shared composition and
+non-dispatch `quality-baseline`, `pr` and `merge` do not apply this worker extent
+policy. Dry-run inspection does not admit a worker or enforce its dispatch size.
+This is refusal-only DATA admission, not ELF validity, conformance or authority;
+the in-port read reservation and actual same-owner image/scope proof remain
+mandatory. The fixed message identifies an INCOMPLETE capability; the existing
+standalone failure wire remains ERROR, not a new outcome mapping. The measured
+296,885,960-byte Linux Codex image is unavailable for worker dispatch under the
+unchanged profile. An in-range extent enables no positive installed Linux CLI
+compatibility or protected Linux runtime policy.
 
 The child copies the selected executable into a sealed executable memfd. The
 original parent independently verifies the same descriptor, its kernel identity,

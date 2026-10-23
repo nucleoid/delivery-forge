@@ -147,6 +147,7 @@ public sealed class InstalledNativeHostConformanceTests
         public async ValueTask DisposeAsync()
         {
             if (DispositionEntered) throw new IOException("Original native conformance disposition already entered; no retry."); DispositionEntered = true;
+            Exception? snapshotFailure = null;
             try
             {
                 if (Native is not null) { var actual = Native.RetireAsync(Retirement is null); ActualCalls.Add(actual); Retirement = await actual.WaitAsync(Original.CleanupRemaining); }
@@ -158,13 +159,33 @@ public sealed class InstalledNativeHostConformanceTests
                     try { await StartupCall.WaitAsync(Original.CleanupRemaining); }
                     catch (Exception error) { if (!StartupCall.IsCompleted) throw; Failure ??= error; }
                 }
-                if (!AcceptanceAssertionsReturned && Native is not null) CaptureFailureAfterNativeSettlement();
-                if (Retirement is { KnownClosed: false } || ActualCalls.Any(t => !t.IsCompleted)) throw new IOException("Actual native conformance remains UNKNOWN; original graph retained, no passing cleanup.");
+                if (!AcceptanceAssertionsReturned)
+                {
+                    if (FailureSnapshot is { Unknown: true }) throw new IOException("Original snapshot acquisition or close remains UNKNOWN; original graph retained.");
+                    if (FailureSnapshot is not null)
+                        snapshotFailure = new IOException("Original snapshot attempt remains retained; no replacement or second artifact attempt.");
+                    else if (Native is not null)
+                    {
+                        try { CaptureFailureAfterNativeSettlement(); }
+                        catch (Exception error) when (FailureSnapshot is { Unknown: false }) { snapshotFailure = error; }
+                    }
+                }
+                if (Retirement is { KnownClosed: false }
+                    || Native is { } retainedNative && (Retirement is not { KnownClosed: true, RootExited: true, ActiveProcesses: 0, DispositionReturned: true } || retainedNative.HasUnknownIo)
+                    || ActualCalls.Any(t => !t.IsCompleted)) throw new IOException("Actual native conformance remains UNKNOWN; original graph retained, no passing cleanup.");
                 if (StartupPhase is not null) { _ = Original.CleanupRemaining; StartupPhaseCloseEntered = true; StartupPhase.Dispose(); StartupPhaseClosed = true; _ = Original.CleanupRemaining; }
                 if (Lease is not null) { _ = Original.CleanupRemaining; LeaseCloseEntered = true; Lease.Dispose(); LeaseClosed = true; _ = Original.CleanupRemaining; }
                 Original.Dispose(); lock (Unknown) Unknown.Remove(this);
+                if (snapshotFailure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(snapshotFailure).Throw();
             }
-            catch (Exception error) { Post = error; if (Failure is not null && !ReferenceEquals(Failure, error)) throw new AggregateException("Actual native primary and same-original failure disposition.", Failure, error); throw; } // original frame remains strongly retained, no retry/recursive cleanup.
+            catch (Exception error)
+            {
+                Post = snapshotFailure is not null && !ReferenceEquals(snapshotFailure, error)
+                    ? new AggregateException("Original snapshot and same-original disposition failures.", snapshotFailure, error) : error;
+                if (Failure is not null && !ReferenceEquals(Failure, Post)) throw new AggregateException("Actual native primary and same-original failure disposition.", Failure, Post);
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(Post).Throw();
+                throw;
+            } // Unknown/incomplete disposition remains retained; settled owners can still report a snapshot failure. No retry.
         }
     }
     [Fact(Timeout = 30000)]
@@ -194,6 +215,67 @@ public sealed class InstalledNativeHostConformanceTests
         }
         finally { frame.Original.Dispose(); }
         // Retain this tiny test-owned artifact, including on assertion failure.
+    }
+    [Theory(Timeout = 30000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Dispose_preserves_first_snapshot_and_primary_but_releases_known_managed_owners(bool existingSnapshotRefused)
+    {
+        var frame = new Frame();
+        var root = Directory.CreateTempSubdirectory("forge-native-snapshot-dispose-").FullName;
+        var path = Path.Combine(root, "codex-contract-stop-disposition.json");
+        var writerPath = Path.Combine(root, "original-writer.lock");
+        var bytes = Encoding.UTF8.GetBytes("{\"Kind\":\"TestOriginalSnapshotBeforeDisposition\"}");
+        var stream = new FileStream(writerPath, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+        frame.Lease = new WriterLease(writerPath, stream, frame.RunId, "test-owned-writer");
+        frame.StartupPhase = CancellationTokenSource.CreateLinkedTokenSource(frame.Original.Token);
+        try
+        {
+            var first = new NativeFailureSnapshotWriter(frame.Original);
+            frame.FailureSnapshot = first;
+            Exception primary;
+            if (existingSnapshotRefused)
+            {
+                File.WriteAllBytes(path, bytes);
+                primary = Assert.Throws<IOException>(() => first.Write(path, bytes));
+                Assert.False(first.AcquisitionEntered);
+            }
+            else
+            {
+                first.Write(path, bytes);
+                Assert.True(first.CloseReturned); Assert.True(first.PostReturned);
+                primary = Assert.Throws<FileNotFoundException>(() => File.ReadAllBytes(Path.Combine(root, "missing-original-phase-input")));
+            }
+            Assert.False(first.Unknown);
+            frame.Failure = primary;
+            frame.StartupCall = Task.FromException<AgentAcceptedReceipt>(primary);
+            frame.ActualCalls.Add(frame.StartupCall);
+            // Release-only control: no Native or retirement proof is fabricated.
+            // Real first-writer/lease streams and CTS exercise DisposeAsync itself.
+            Assert.Null(frame.Native); Assert.Null(frame.Retirement);
+            var failure = await Assert.ThrowsAsync<AggregateException>(async () => await frame.DisposeAsync());
+            Assert.Equal(2, failure.InnerExceptions.Count);
+            Assert.Same(primary, failure.InnerExceptions[0]);
+            var refusal = Assert.IsType<IOException>(failure.InnerExceptions[1]);
+            Assert.Equal("Original snapshot attempt remains retained; no replacement or second artifact attempt.", refusal.Message);
+            Assert.Same(refusal, frame.Post); Assert.Same(first, frame.FailureSnapshot);
+            Assert.True(frame.DispositionEntered); Assert.True(frame.StartupPhaseCloseEntered); Assert.True(frame.StartupPhaseClosed);
+            Assert.True(frame.LeaseCloseEntered); Assert.True(frame.LeaseClosed); Assert.True(frame.Lease.FirstCloseReturned);
+            Assert.False(stream.CanRead);
+            Assert.Throws<ObjectDisposedException>(frame.Original.Check);
+            Assert.Throws<ObjectDisposedException>(() => { _ = frame.StartupPhase.Token; });
+            Assert.Equal(bytes, File.ReadAllBytes(path));
+            Assert.False(File.Exists(Path.Combine(root, "native-host-failure.json")));
+            Assert.Equal(2, Directory.EnumerateFiles(root).Count());
+        }
+        finally
+        {
+            if (!frame.DispositionEntered)
+            {
+                frame.StartupPhase.Dispose(); frame.Lease.Dispose(); frame.Original.Dispose();
+            }
+        }
+        // Retain the tiny original artifact and writer DATA on success or failure.
     }
     [Theory(Timeout = 700000)]
     [InlineData("codex.cli")]

@@ -97,6 +97,7 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
         var budget = ResourceBudget.Measure(measured, selected.Policy);
         if (selected.Policy.MaximumTime > original.WorkLimit) throw new ToolUsageException("Aggregate policy exceeds the same original WORK endpoint.");
         var nodes = new List<Node>();
+        var selections = new List<(ProductionBatchNodeSelection Selection, TrustedConfiguration Configuration, StandaloneRootSelection Root)>();
         var trustedReadOperations = 0; var trustedReadBytes = 0L;
         foreach (var selection in selected.Nodes)
         {
@@ -109,12 +110,19 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             // still preflight; aggregate trust reads before any host is created.
             var host = Read<InstalledHostRootAcceptance>(root.InstalledHostAdmission, 1048576);
             InstalledHostAdmission.RuntimeTrust.RequireSelectedProfile(host, config, OperatingSystem.IsWindows() ? "windows" : OperatingSystem.IsLinux() ? "linux" : "unsupported");
+            if (!command.Has("dry-run")) StandaloneEntrypoint.RequireLinuxWorkerDispatchExtent(host.Host);
             if (host.RuntimeTrust is not null)
             {
                 var readPlan = InstalledHostAdmission.RuntimeTrust.ReadCapacity(host, root.InstalledHostAdmission, selection.Configuration, config);
                 trustedReadOperations = checked(trustedReadOperations + readPlan.Operations);
                 trustedReadBytes = checked(trustedReadBytes + readPlan.Bytes);
             }
+            selections.Add((selection, config, root));
+        }
+        // All selected dispatch extents are admitted before any plan's Git
+        // import, durable marker, selected intent, or node owner can be entered.
+        foreach (var (selection, config, root) in selections)
+        {
             if (!command.Has("dry-run")) StandaloneOwnerComposition.RequireFreshExecutionStore(root.StoreRoot, original);
             LinuxScopeSelection? scope = OperatingSystem.IsLinux()
                 ? Read<LinuxScopeSelection>(root.LinuxScopeProfile ?? throw new ToolUsageException("Actual pinned Linux scope required for every batch node."), 65536) : null;

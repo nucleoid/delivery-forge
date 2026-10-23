@@ -57,56 +57,71 @@ public sealed class StandaloneEntrypointTests
 
     public static bool IsLinux => OperatingSystem.IsLinux();
 
-    // These are actual composition constructor calls with no scope/native owner.
-    // Empty profile DATA cannot promote capabilities; rejection must precede dispatch.
-    [Theory(Timeout = 30000, Skip = "Linux composition extent admission requires Linux.", SkipUnless = nameof(IsLinux))]
-    [InlineData("codex.cli", 63L)]
-    [InlineData("claude-code.cli", 63L)]
-    [InlineData("pi.cli", 63L)]
-    [InlineData("codex.cli", (long)DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1)]
-    [InlineData("claude-code.cli", (long)DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1)]
-    [InlineData("pi.cli", (long)DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1)]
-    public void Linux_composition_refuses_known_unsupported_extent_before_store_or_dispatch(string adapter, long bytes)
+    // Actual default implement route, with deliberately UNVERIFIED admission
+    // DATA. An absent image cannot be hashed/born, and no authority is issued.
+    [Theory(Timeout = 30000, Skip = "Linux dispatch extent admission requires Linux.", SkipUnless = nameof(IsLinux))]
+    [InlineData(63L)]
+    [InlineData((long)DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1)]
+    public async Task Linux_implement_refuses_known_unsupported_extent_before_image_read_or_store_effect(long bytes)
     {
-        var root = Path.Combine(Path.GetTempPath(), "forge-composition-extent-" + Guid.NewGuid().ToString("N"));
-        var sentinel = new byte[] { 17, 29, 43 }; File.WriteAllBytes(root, sentinel);
-        using var original = new ToolLifetime(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        var root = Path.Combine(Path.GetTempPath(), "forge-implement-extent-" + Guid.NewGuid().ToString("N"));
+        var repository = Path.Combine(root, "repo"); Directory.CreateDirectory(repository);
+        var hostPath = Path.Combine(root, "absent-worker"); var store = Path.Combine(root, "store");
+        var worker = new LocalWorkerPaths(Path.Combine(root, "work"), Path.Combine(root, "results"), ["source.cs"], []);
+        AdmissionFile Write<T>(string name, T value)
+        {
+            var path = Path.Combine(root, name); var raw = JsonSerializer.SerializeToUtf8Bytes(value, BoundedFiles.Json);
+            File.WriteAllBytes(path, raw); return new(path, raw.LongLength, BoundedFiles.Sha(raw));
+        }
+        var host = Write("host.json", new InstalledHostRootAcceptance("UNVERIFIED-REFUSAL-DATA", "linux", "codex.cli", "fixture",
+            new(hostPath, bytes, new string('a', 64), "fixture"), new(hostPath + "-tool", 1, new string('b', 64)), [], []));
+        var selectedRoot = Write("root.json", new StandaloneRootSelection("DeliveryForgeStandaloneRoot-v1", store, worker, host));
+        var slots = new DeliveryForge.Scheduling.ResourceSlots(1, 1, 64, 1, 1, 1);
+        var policy = new DeliveryForge.Scheduling.BudgetPolicy("refusal-only", true, slots, TimeSpan.FromSeconds(15), 1, 0);
+        var demand = new DeliveryForge.Scheduling.RunDemand(slots, [], TimeSpan.FromSeconds(15), 1, 0);
+        var config = Write("config.json", new TrustedConfiguration("fixture/repo", repository, "refs/heads/main", hostPath + "-git",
+            AdapterVersion: "fixture", MaximumCeiling: "implement", OperationSeconds: 20, StandaloneRoot: selectedRoot, LocalSingle: new(policy, demand)));
+        var beforeOut = Console.Out; var beforeError = Console.Error; using var output = new StringWriter(); using var errors = new StringWriter();
+        Console.SetOut(output); Console.SetError(errors);
         try
         {
-            var config = new TrustedConfiguration("fixture/repo", Path.GetTempPath(), "HEAD", root + "-git", Adapter: adapter, AdapterVersion: "extent-fixture");
-            var selected = new StandaloneHostSelection(root + "-absent-host", bytes, new string('a', 64), "extent-fixture");
-            var profile = new DeliveryForge.Execution.Host.AgentAdapterProfile(adapter, "extent-fixture", []);
-            var worker = new LocalWorkerPaths(root + "-worker", root + "-results", ["source.cs"], []);
-            // The store is deliberately a file: a later store inspection cannot
-            // accidentally satisfy the exact selected-extent refusal assertion.
-            var refusal = Assert.Throws<ToolUsageException>(() => new StandaloneOwnerComposition(config, root, worker, original, selected, profile));
-            Assert.Equal("INCOMPLETE: Selected Linux worker image must fit the 64-byte through eleven-MiB exact-image profile before dispatch.", refusal.Message);
-            Assert.Equal(sentinel, File.ReadAllBytes(root)); Assert.False(File.Exists(selected.Executable));
+            Assert.Equal(1, await Program.Main(["implement", "--plan", Path.Combine(root, "absent-plan"), "--config", config.Path, "--json"])
+                .WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken));
+            Assert.Empty(output.ToString()); Assert.Contains("Selected Linux worker image must fit the 64-byte through eleven-MiB exact-image profile before dispatch.", errors.ToString(), StringComparison.Ordinal);
+            Assert.False(File.Exists(hostPath)); Assert.False(Directory.Exists(store));
             Assert.False(Directory.Exists(worker.Worktree)); Assert.False(Directory.Exists(worker.ResultDirectory));
-            Assert.False(original.HasRetainedUnknown); original.Check();
         }
-        finally { File.Delete(root); }
+        finally { Console.SetOut(beforeOut); Console.SetError(beforeError); }
     }
 
-    [Theory(Timeout = 30000, Skip = "Linux composition extent admission requires Linux.", SkipUnless = nameof(IsLinux))]
-    [InlineData("codex.cli", 64L)]
-    [InlineData("claude-code.cli", 64L)]
-    [InlineData("pi.cli", 64L)]
-    [InlineData("codex.cli", (long)DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes)]
-    [InlineData("claude-code.cli", (long)DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes)]
-    [InlineData("pi.cli", (long)DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes)]
-    public void Linux_composition_inclusive_extent_boundaries_still_require_actual_scope(string adapter, long bytes)
+    // Shared composition also serves quality-baseline/pr/merge. Constructing
+    // UNVERIFIED ports is not worker dispatch, actual scope proof or admission.
+    [Theory(Timeout = 30000, Skip = "Linux non-dispatch composition requires Linux.", SkipUnless = nameof(IsLinux))]
+    [InlineData("codex.cli")]
+    [InlineData("claude-code.cli")]
+    [InlineData("pi.cli")]
+    public async Task Linux_shared_non_dispatch_composition_does_not_apply_worker_extent_policy(string adapter)
     {
-        var root = Path.Combine(Path.GetTempPath(), "forge-composition-boundary-" + Guid.NewGuid().ToString("N"));
+        var root = Path.Combine(Path.GetTempPath(), "forge-nondispatch-extent-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
         using var original = new ToolLifetime(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
-        var config = new TrustedConfiguration("fixture/repo", Path.GetTempPath(), "HEAD", root + "-absent-git", Adapter: adapter, AdapterVersion: "extent-fixture");
-        var selected = new StandaloneHostSelection(root + "-absent-host", bytes, new string('a', 64), "extent-fixture");
-        var profile = new DeliveryForge.Execution.Host.AgentAdapterProfile(adapter, "extent-fixture", []);
-        var worker = new LocalWorkerPaths(root + "-worker", root + "-results", ["source.cs"], []);
-        var refusal = Assert.Throws<ToolUsageException>(() => new StandaloneOwnerComposition(config, root, worker, original, selected, profile));
-        Assert.Equal("Actual selected Linux scope profile required before native use.", refusal.Message);
-        Assert.False(File.Exists(selected.Executable)); Assert.False(Directory.Exists(root));
-        Assert.False(Directory.Exists(worker.Worktree)); Assert.False(Directory.Exists(worker.ResultDirectory));
-        Assert.False(original.HasRetainedUnknown); original.Check();
+        var absent = Path.Combine(root, "absent-image");
+        var image = new DeliveryForge.Evidence.LinuxScopeImage(absent, 1, new string('a', 64));
+        var scope = new DeliveryForge.Evidence.LinuxScopeSelection(image, image, "unexecuted-DATA", "unexecuted-DATA", image, [], image);
+        var config = new TrustedConfiguration("fixture/repo", root, "refs/heads/main", absent + "-git", Adapter: adapter, AdapterVersion: "unverified-fixture");
+        var host = new StandaloneHostSelection(absent, DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1, new string('b', 64), "unverified-fixture");
+        var profile = new DeliveryForge.Execution.Host.AgentAdapterProfile(adapter, host.Version,
+            Enum.GetValues<DeliveryForge.Execution.Host.AgentCapability>().Select(capability => new DeliveryForge.Execution.Host.AgentCapabilityEvidence(capability,
+                DeliveryForge.Execution.Host.AgentCapabilityStatus.Unverified, "non-dispatch fixture DATA", "fixture:not-conformance")).ToArray());
+        var worker = new LocalWorkerPaths(root + "-work", root + "-results", ["source.cs"], []);
+        var actual = new StandaloneOwnerComposition(config, root + "-store", worker, original, host, profile, scope);
+        try
+        {
+            Assert.Empty(actual.ActualBridge.RetainedFrames); Assert.Empty(actual.Application.RetainedExternalCalls);
+            Assert.All(actual.ActualBridge.AdapterProfile.Capabilities, row => Assert.Equal(DeliveryForge.Execution.Host.AgentCapabilityStatus.Unverified, row.Status));
+            Assert.False(File.Exists(absent)); Assert.False(Directory.Exists(worker.Worktree)); Assert.False(Directory.Exists(worker.ResultDirectory));
+            original.Check();
+        }
+        finally { await actual.DisposeAsync(); }
+        Assert.False(original.HasRetainedUnknown);
     }
 }
