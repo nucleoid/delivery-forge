@@ -7,6 +7,15 @@ budget before evidence preparation; this admission check launches nothing. The
 managed birth gate, its runtime, the ELF interpreter and dynamically loaded
 libraries remain a separate trust boundary.
 
+Ordinary command scopes may still omit exact-image mode. Linux Codex, Claude
+stream-json and Pi RPC worker ports require a selected scope and the exact sealed
+main ELF image before protocol startup. They reserve the existing complete-read
+credit before pathname hashing or native birth and require their retained owner's
+actual exact-image proof before any protocol work. Missing scopes, oversized
+images and scripts refuse; there is no ordinary-image fallback. This enforces
+image binding, not authentication, installed CLI compatibility, runtime-trust
+admission, independent review acceptance or protected Root/Parent authority.
+
 The child copies the selected executable into a sealed executable memfd. The
 original parent independently verifies the same descriptor, its kernel identity,
 complete bytes and seals before RELEASE. The child executes that descriptor with

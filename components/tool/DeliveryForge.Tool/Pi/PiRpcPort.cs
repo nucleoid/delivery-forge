@@ -70,9 +70,18 @@ public sealed class PiRpcPort : IHostToolSessionPort, IOriginalBoundHostPort, IH
         try
         {
             if (actual.AdapterId != "pi.cli" || actual.AdapterVersion != selection.Version || remaining <= TimeSpan.Zero || remaining > Original.WorkLimit) throw new WorkerEnvelopeException("Pi request/version/deadline differs from containing original.");
+            // Reserve both actual exact-image reads before pathname hashing or birth.
+            LinuxScopeImage? exactImage = null;
+            if (OperatingSystem.IsLinux())
+            {
+                if (linuxScope is null) throw new PlatformNotSupportedException("Actual selected Linux scope required before Pi native image admission.");
+                BoundedFiles.ReserveExactLinuxImageReads(new(selection.Executable, selection.Bytes, selection.Sha256), Original);
+                exactImage = new(selection.Executable, selection.Bytes, selection.Sha256);
+            }
             BoundedFiles.VerifyNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), Original);
             var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1" };
-            process = OwnedDuplexProcess.Open(new(selection.Executable, ["--mode", "rpc", "--no-session"], actual.Worktree, environment), Original, linuxScope); if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            process = OwnedDuplexProcess.Open(new(selection.Executable, ["--mode", "rpc", "--no-session"], actual.Worktree, environment), Original, linuxScope, exactImage); if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            if (exactImage is not null && !process.HasCreationOwnedExactLinuxImage) throw new IOException("Actual creation-owned exact Linux image proof required before Pi protocol startup.");
             framing = new(process.Input, process.Output, Original); pump = Begin(() => Pump(Original.Token)); process.AttachOriginalOutputConsumer(pump);
             var before = await Command("get_state", id => new { id, type = "get_state" }, token).ConfigureAwait(false); sessionId = PiRpcProtocol.RequireIdleSession(before);
             var acknowledgement = await Command("prompt", id => { promptId = id; lock (gate) state.AdmitPrompt(); return HostAssignmentPrompt.PiPrompt(actual, instructions!, id); }, token).ConfigureAwait(false); PiRpcProtocol.RequireStarted(acknowledgement);

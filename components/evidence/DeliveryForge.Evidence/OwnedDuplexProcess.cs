@@ -29,7 +29,8 @@ public sealed class OwnedDuplexProcess
     Stream? input, output, error; Action<bool>? closeInput; readonly int errorLimit; bool errorQuotaExceeded; Func<bool, DuplexNativeObservation>? observe; Action<bool>? terminate; Func<bool, bool>? dispose;
     DuplexNativeObservation lastObservation = new(false, false, uint.MaxValue, null, "No actual native observation returned.");
     Func<bool>? creationOwnedScope, creationOwnedExactImage;
-    internal bool HasCreationOwnedExactLinuxImage => creationOwnedExactImage?.Invoke() == true;
+    // Read-only observation of this retained owner; no DTO, adoption or issuer.
+    public bool HasCreationOwnedExactLinuxImage => creationOwnedExactImage?.Invoke() == true;
     internal bool HasCreationOwnedLinuxScope => creationOwnedScope?.Invoke() == true;
     internal void AttachScopeProof(Func<bool> actualProof, Func<bool>? actualExactImage = null) { if (creationOwnedScope is not null) throw new InvalidOperationException("Original scope proof already attached."); creationOwnedScope = actualProof; creationOwnedExactImage = actualExactImage; }
     object? actualOwner; bool inputCloseEntered, inputCloseReturned, outputEof, errorEof, disposeEntered, disposeReturned;

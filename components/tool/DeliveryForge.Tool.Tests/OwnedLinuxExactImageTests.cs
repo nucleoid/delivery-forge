@@ -13,6 +13,60 @@ namespace DeliveryForge.Tool.Tests;
 public sealed class OwnedLinuxExactImageTests
 {
     public static bool IsLinux => OperatingSystem.IsLinux();
+    [Theory(Timeout = 90000, Skip = "Exact Linux worker admission requires Linux.", SkipUnless = nameof(IsLinux))]
+    [InlineData("codex.cli")]
+    [InlineData("claude-code.cli")]
+    [InlineData("pi.cli")]
+    public async Task Actual_worker_port_refuses_oversize_before_path_hash_native_birth_or_protocol(string adapter)
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var scope = Scope(original);
+        var absent = Path.Combine(Path.GetTempPath(), "forge-worker-oversize-" + Guid.NewGuid().ToString("N"));
+        Assert.False(File.Exists(absent)); Assert.False(Directory.Exists(absent));
+        var request = DeliveryForge.Execution.WorkerEnvelope.PrepareWorker(new(
+            "oversize-fixture", "sha256:" + new string('1', 64), new string('a', 40), "fixture/repo",
+            Path.GetFullPath("."), absent + "-worktree", absent + "-results", "fixture-writer-token",
+            ["source.cs"], [], adapter, "fixture-v1",
+            [DeliveryForge.Execution.Host.AgentCapability.Launch, DeliveryForge.Execution.Host.AgentCapability.CompletionEvidence]));
+        var profile = new DeliveryForge.Execution.Host.AgentAdapterProfile(adapter, "fixture-v1",
+            new[] { DeliveryForge.Execution.Host.AgentCapability.Launch }.Select(capability =>
+                new DeliveryForge.Execution.Host.AgentCapabilityEvidence(capability,
+                    DeliveryForge.Execution.Host.AgentCapabilityStatus.Unverified, "negative fixture DATA only", "no authority")).ToArray());
+        var git = new DeliveryForge.Execution.Git.WorktreeManager();
+        DeliveryForge.Tool.IHostToolSessionPort port = adapter switch
+        {
+            "codex.cli" => new DeliveryForge.Tool.Codex.CodexAppServerPort(new(absent, OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1, new string('b', 64), "fixture-v1"), git, profile, scope),
+            "claude-code.cli" => new DeliveryForge.Tool.Claude.ClaudeStreamPort(new(absent, OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1, new string('b', 64), "fixture-v1"), git, profile, scope),
+            "pi.cli" => new DeliveryForge.Tool.Pi.PiRpcPort(new(absent, OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1, new string('b', 64), "fixture-v1"), git, profile, scope),
+            _ => throw new InvalidOperationException("Closed worker test selection required.")
+        };
+        ((IOriginalBoundHostPort)port).BindOriginal(original);
+        ((IHostInstructionPort)port).BindInstructions(HostInstructionContext.FromParentSelection(request, "sha256:" + new string('c', 64),
+            "Never dispatch this oversized negative fixture.", ["Refuse before image acquisition."], ["No native work."]));
+        var refusal = await Assert.ThrowsAsync<ToolUsageException>(() => port.StartAsync(request, original.Remaining, original.Token));
+        Assert.Equal("Exact Linux ELF image must fit the eleven-MiB exact-image profile inside the existing kernel quota and cleanup reserve.", refusal.Message);
+        switch (port)
+        {
+            case DeliveryForge.Tool.Codex.CodexAppServerPort codex:
+                Assert.Null(codex.OriginalProcess); Assert.Empty(codex.OriginalTasks);
+                var startup = codex.SnapshotStartupDiagnostics();
+                Assert.Equal(DeliveryForge.Tool.Codex.CodexStartupStage.NativeImageVerification, startup.Stage);
+                Assert.Empty(startup.Wire); Assert.Empty(startup.PendingIds); Assert.Null(startup.PumpStatus);
+                Assert.False(startup.ThreadReceived); Assert.False(startup.TurnReceived);
+                break;
+            case DeliveryForge.Tool.Claude.ClaudeStreamPort claude:
+                Assert.Null(claude.OriginalProcess); Assert.Empty(claude.OriginalTasks);
+                break;
+            case DeliveryForge.Tool.Pi.PiRpcPort pi:
+                Assert.Null(pi.OriginalProcess); Assert.Empty(pi.ActualOperations);
+                Assert.Same(refusal, pi.Primary); Assert.Null(pi.CleanupFailure);
+                break;
+        }
+        Assert.All(port.Profile.Capabilities, capability => Assert.Equal(DeliveryForge.Execution.Host.AgentCapabilityStatus.Unverified, capability.Status));
+        // The pathname never existed: this exact extent refusal, rather than a
+        // missing-file error, proves the actual Port did not enter pathname hashing.
+        Assert.False(File.Exists(absent)); Assert.False(Directory.Exists(absent));
+    }
     static LinuxScopeSelection Scope(ToolLifetime original)
     {
         var path = Environment.GetEnvironmentVariable("DELIVERY_FORGE_LINUX_SCOPE_PROFILE") ?? throw new IOException("Actual current compiled Linux scope/gate profile required.");

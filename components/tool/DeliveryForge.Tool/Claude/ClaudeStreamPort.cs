@@ -60,11 +60,20 @@ public sealed class ClaudeStreamPort : IHostToolSessionPort, IOriginalBoundHostP
         try
         {
             if (actual.AdapterId != "claude-code.cli" || actual.AdapterVersion != selection.Version || remaining <= TimeSpan.Zero || remaining > Original.WorkLimit) throw new WorkerEnvelopeException("Actual Claude request/version/deadline differs.");
+            // Reserve both actual exact-image reads before pathname hashing or birth.
+            LinuxScopeImage? exactImage = null;
+            if (OperatingSystem.IsLinux())
+            {
+                if (linuxScope is null) throw new PlatformNotSupportedException("Actual selected Linux scope required before Claude native image admission.");
+                BoundedFiles.ReserveExactLinuxImageReads(new(selection.Executable, selection.Bytes, selection.Sha256), Original);
+                exactImage = new(selection.Executable, selection.Bytes, selection.Sha256);
+            }
             BoundedFiles.VerifyNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), Original);
             var prompt = HostAssignmentPrompt.Create(actual, instructions); promptId = Guid.NewGuid().ToString(); state = new(promptId, prompt);
             var inherited = Environment.GetEnvironmentVariable("CLAUDE_CODE_SDK_READS_SESSION_STATE"); if (inherited is not null && inherited != "1") throw new ToolUsageException("Existing session-state selection differs; no configuration override.");
             var env = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1", ["CLAUDE_CODE_SDK_READS_SESSION_STATE"] = "1" };
-            process = OwnedDuplexProcess.Open(new(selection.Executable, ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages"], actual.Worktree, env), Original, linuxScope); if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            process = OwnedDuplexProcess.Open(new(selection.Executable, ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages"], actual.Worktree, env), Original, linuxScope, exactImage); if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            if (exactImage is not null && !process.HasCreationOwnedExactLinuxImage) throw new IOException("Actual creation-owned exact Linux image proof required before Claude protocol startup.");
             framing = new(process.Input, process.Output, Original); pump = Pump(Original.Token); _ = Keep(pump); process.AttachOriginalOutputConsumer(pump);
             _ = await Control("initialize", token).ConfigureAwait(false); lock (gate) state.AdmitPrompt();
             await Keep(framing.WriteAsync(new { type = "user", session_id = "", message = new { role = "user", content = prompt }, parent_tool_use_id = (string?)null, uuid = promptId, origin = new { kind = "human" }, client_composed = true }, token)).ConfigureAwait(false);

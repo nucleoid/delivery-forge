@@ -170,11 +170,21 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             if (actual.AdapterId != "codex.cli" || actual.AdapterVersion != selection.Version || remaining <= TimeSpan.Zero || remaining > original.WorkLimit) throw new WorkerEnvelopeException("Actual request/version/deadline differs from containing original.");
             runtimeTrust?.BindWorker(original, selection, actual.Worktree, actual.ResultDirectory);
             startup!.SetStage(CodexStartupStage.NativeImageVerification);
+            // Reserve the actual gate copy and independent sealed-fd verification
+            // before pathname hashing or native birth; no ordinary Linux fallback.
+            LinuxScopeImage? exactImage = null;
+            if (OperatingSystem.IsLinux())
+            {
+                if (linuxScope is null) throw new PlatformNotSupportedException("Actual selected Linux scope required before Codex native image admission.");
+                BoundedFiles.ReserveExactLinuxImageReads(new(selection.Executable, selection.Bytes, selection.Sha256), original);
+                exactImage = new(selection.Executable, selection.Bytes, selection.Sha256);
+            }
             if (!TrustProtocol) BoundedFiles.VerifyNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), original);
             else trustedImage = BoundedFiles.RetainVerifiedNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), original, token);
             var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1" };
             runtimeTrust?.Check(original); trustedImage?.Check(token);
-            startup.SetStage(CodexStartupStage.NativeCreation); trustedNativeCreationEntered = true; process = OwnedDuplexProcess.Open(new(selection.Executable, ["app-server"], actual.Worktree, environment), original, linuxScope); trustedNativeCreationReturned = true; if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            startup.SetStage(CodexStartupStage.NativeCreation); trustedNativeCreationEntered = true; process = OwnedDuplexProcess.Open(new(selection.Executable, ["app-server"], actual.Worktree, environment), original, linuxScope, exactImage); trustedNativeCreationReturned = true; if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            if (exactImage is not null && !process.HasCreationOwnedExactLinuxImage) throw new IOException("Actual creation-owned exact Linux image proof required before Codex protocol startup.");
             protocol = new(process.Input, process.Output, original); pump = Pump(original.Token); process.AttachOriginalOutputConsumer(pump); lock (tasks) tasks.Add(pump);
             startup.SetStage(CodexStartupStage.Initialize); _ = await Rpc("initialize", new { clientInfo = new { name = "delivery_forge", title = "Delivery Forge", version = "0.1.0" }, capabilities = new { experimentalApi = false } }, token).ConfigureAwait(false);
             startup.SetStage(CodexStartupStage.InitializedNotification); startup.Client("initialized", null, CodexWireState.WriteEntered);
