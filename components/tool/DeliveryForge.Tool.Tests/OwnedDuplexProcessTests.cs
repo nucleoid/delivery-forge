@@ -144,13 +144,6 @@ public sealed class OwnedDuplexProcessTests
         Assert.True(closed.InputCloseReturned && closed.OutputEof && closed.ErrorEof); Assert.False(run.Session.HasUnknownIo);
         Assert.All(run.Session.ActualIo, row => Assert.False(row.Unknown)); run.Original.Check();
         Assert.Equal(originalStarted, run.Original.OriginalStarted); Assert.Equal(whole, run.Original.WholeLimit); Assert.Equal(work, run.Original.WorkLimit);
-        // The child's timer was started before its complete acknowledgement.
-        // Observe more than four real seconds AFTER that acknowledgement;
-        // root exit/EOF alone cannot pass while it still has this future effect.
-        var markerWindow = TimeSpan.FromSeconds(4.5) - Stopwatch.GetElapsedTime(armedObserved);
-        if (markerWindow > TimeSpan.Zero) await Task.Delay(markerWindow, run.Original.Token);
-        run.Original.Check(); Assert.True(Stopwatch.GetElapsedTime(armedObserved) > TimeSpan.FromSeconds(4));
-        Assert.False(File.Exists(Path.Combine(run.DirectoryPath, run.Nonce + "-child-returned")));
         var repository = Path.Combine(run.DirectoryPath, "post-retirement-git"); run.Original.Check(); Directory.CreateDirectory(repository); run.Original.Check();
         var executor = ActualOrdinaryCapture.Select(run.Original);
         async Task<string> Git(params string[] arguments)
@@ -184,6 +177,15 @@ public sealed class OwnedDuplexProcessTests
         Assert.True(manager.ActualOwnedGitInvocations > beforeObserve);
         Assert.InRange(parent.EnteredCount, 1, 1023); Assert.True(parent.AllKnownSettled);
         Assert.False(run.Original.HasExplicitUnknown);
+        // Git remains serial under the same original WORK while the already-armed
+        // child's observation window elapses. Its paths cannot remove the marker.
+        // The child's timer was started before its complete acknowledgement.
+        // Observe more than four real seconds AFTER that acknowledgement;
+        // root exit/EOF alone cannot pass while it still has this future effect.
+        var markerWindow = TimeSpan.FromSeconds(4.5) - Stopwatch.GetElapsedTime(armedObserved);
+        if (markerWindow > TimeSpan.Zero) await Task.Delay(markerWindow, run.Original.Token);
+        run.Original.Check(); Assert.True(Stopwatch.GetElapsedTime(armedObserved) > TimeSpan.FromSeconds(4));
+        Assert.False(File.Exists(Path.Combine(run.DirectoryPath, run.Nonce + "-child-returned")));
         Assert.Equal(originalStarted, run.Original.OriginalStarted); Assert.Equal(whole, run.Original.WholeLimit); Assert.Equal(work, run.Original.WorkLimit);
         run.Preserve(closed);
     }
