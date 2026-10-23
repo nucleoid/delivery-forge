@@ -276,6 +276,7 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
     InstalledReviewHost? installedReview;
     LocalRealGoldenOwner? localRealGolden;
     Func<FrozenPlan, FrozenWorkerPlan, ParentCoordinationHost, LocalSingleScheduler>? localSingleFactory;
+    ParentNativeContractComposition? contractFixtureProvisioning;
     FrozenPlan? schedulingPlan;
     ProductionBatchControl? batchControl;
     internal void BindBatchControl(ProductionBatchControl actual)
@@ -284,7 +285,19 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
     }
     internal void BindLocalSingleFactory(Func<FrozenPlan, FrozenWorkerPlan, ParentCoordinationHost, LocalSingleScheduler> factory)
     {
-        lock (registration) { if (localSingleFactory is not null || frames.Count != 0) throw new ToolUsageException("LocalSingle binds once before dispatch."); localSingleFactory = factory; }
+        lock (registration) { if (localSingleFactory is not null || contractFixtureProvisioning is not null || frames.Count != 0) throw new ToolUsageException("LocalSingle binds once before dispatch."); localSingleFactory = factory; }
+    }
+    // Only the closed native fixture owner can use this provisioning route.
+    // Production dispatch retains its actual LocalSingle reservation path.
+    internal void BindContractFixtureProvisioning(ParentNativeContractComposition actual)
+    {
+        lock (registration)
+        {
+            if (adapter is not ParentNativeContractAdapter || adapter.Realm != HostObservationRealm.ContractFixture ||
+                !ReferenceEquals(actual.Bridge, this) || contractFixtureProvisioning is not null || localSingleFactory is not null || frames.Count != 0)
+                throw new ToolUsageException("The same idle concrete native fixture owner is required for provisioning.");
+            contractFixtureProvisioning = actual;
+        }
     }
     internal bool HasInstalledQuality => installedQuality is not null;
     // Additional forward-review restriction. ToolResult text/labels do not
@@ -592,6 +605,8 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
         try
         {
             if (coordination is not null) await coordination.AcquireAsync(plan.RunId).ConfigureAwait(false);
+            if (contractFixtureProvisioning is { } fixture)
+                await frame.Enter(() => fixture.ProvisionAsync(plan, coordination ?? throw new ToolUsageException("Actual acquired fixture parent required."))).ConfigureAwait(false);
             AgentRequest request;
             if (localSingleFactory is not null)
             {

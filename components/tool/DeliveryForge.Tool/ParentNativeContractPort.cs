@@ -19,6 +19,7 @@ internal sealed class ParentNativeContractPort : IHostToolSessionPort, IOriginal
     internal Task<int>? ActiveRead { get; private set; }
     internal Exception? InterruptedWaitFailure { get; private set; }
     internal AgentRunBinding? ActualBinding => binding;
+    internal WorktreeObservation? BeforeStart { get; private set; }
     readonly StandaloneHostSelection image; readonly IReadOnlyList<AdmissionFile> closure;
     readonly WorktreeManager git; readonly ProcessCommandExecutor executor; readonly string gitImage; readonly LinuxScopeSelection? linux;
     ToolLifetime? original; HostInstructionContext? instructions; AgentRequest? request; AgentRunBinding? binding;
@@ -45,6 +46,8 @@ internal sealed class ParentNativeContractPort : IHostToolSessionPort, IOriginal
         if (!Directory.EnumerateFileSystemEntries(directory).Take(6).Select(Path.GetFullPath).Order(StringComparer.Ordinal).SequenceEqual(closure.Select(pin => Path.GetFullPath(pin.Path)).Order(StringComparer.Ordinal), StringComparer.Ordinal)) throw new IOException("Fixture output membership changed.");
         foreach (var pin in closure) _ = InstalledHostAdmission.ReadExact(pin, Life, 268435456);
         if (!closure.Any(pin => Path.GetFullPath(pin.Path) == Path.GetFullPath(image.Executable) && pin.Bytes == image.Bytes && pin.Sha256 == image.Sha256)) throw new IOException("Fixture image not in pinned closure.");
+        BeforeStart = await Keep(git.ObserveAsync(actual.Worktree, token)).ConfigureAwait(false);
+        if (!BeforeStart.IsClean || BeforeStart.HeadCommit != actual.BaseCommit) throw new IOException("Actual provisioned fixture base is not clean before native birth.");
         var nonce = Guid.NewGuid().ToString("N"); var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1" };
         process = OwnedDuplexProcess.Open(new(image.Executable, [mode == ParentNativeContractMode.Complete ? "parent-contract" : "parent-contract-hold", actual.Worktree, nonce], actual.Worktree, environment), Life, linux);
         if (process.StartupFailure is Exception error) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
@@ -156,6 +159,18 @@ internal sealed class ParentNativeContractComposition : IAsyncDisposable
         mode = selectedMode; config = actual; original = life; Executor = OperatingSystem.IsLinux() ? new ProcessCommandExecutor(linux ?? throw new IOException("Actual Linux scope required."), life) : new ProcessCommandExecutor();
         var git = new WorktreeManager(actual.GitExecutable, Executor, life); actualGit = git; var port = new ParentNativeContractPort(image, closure, git, Executor, actual.GitExecutable, linux, selectedMode); Native = port; var adapter = new ParentNativeContractAdapter(port); Adapter = adapter;
         processes = new ProcessControl(); coordinator = new(new RunStore(store), git, processes, adapter); Bridge = new(coordinator, adapter, requireCoordination: true);
+        Bridge.BindContractFixtureProvisioning(this);
+    }
+    bool provisioningEntered;
+    internal async Task<bool> ProvisionAsync(FrozenWorkerPlan assignment, ParentCoordinationHost actualParent)
+    {
+        original.Check();
+        if (provisioningEntered || !ReferenceEquals(actualParent, Parent)) throw new IOException("The same acquired fixture parent provisions a fresh worktree once.");
+        provisioningEntered = true;
+        var admitted = actualGit.WithParentAdmission(actualParent, assignment.RunId);
+        _ = coordinator.BindOriginalScheduling(original, actualParent, assignment.RunId, admitted);
+        await Keep(admitted.PrepareAsync(assignment.ParentCheckout, assignment.Worktree, assignment.BaseCommit, original.Token)).WaitAsync(original.Remaining).ConfigureAwait(false);
+        original.Check(); return true;
     }
     static readonly List<ParentNativeContractComposition> Retained = []; bool disposeEntered; readonly List<Task> lifecycle = [];
     internal Task<ToolResult>? InterruptedBridgeCall { get; private set; }
@@ -168,6 +183,8 @@ internal sealed class ParentNativeContractComposition : IAsyncDisposable
     }
     internal async Task<(ToolResult Result, FrozenWorkerPlan Assignment)> ImplementAsync(FrozenPlan plan, LocalWorkerPaths paths)
     {
+        original.Check(); actualGit.ValidateDestination(config.RepositoryRoot, paths.Worktree);
+        if (Directory.Exists(paths.Worktree) || File.Exists(paths.Worktree)) throw new IOException("Fresh absent native fixture destination required before acquiring leases.");
         var assignment = await Keep(new LocalWorkerAssignmentPort(original, paths).SelectAsync(new(plan, config, null, null), original.Remaining, original.Token)).WaitAsync(original.Remaining).ConfigureAwait(false); original.Check();
         Bridge.BindCoordinationSelection(plan, assignment, config, original);
         var actualBridge = Keep(Bridge.ImplementAsync(assignment, HostInstructionContext.FromFrozenPlan(plan, assignment), original, original.Token));

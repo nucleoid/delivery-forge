@@ -36,6 +36,7 @@ public sealed class ParentNativeContinuumLiveTests
             foreach (var protectedPath in new[] { p.RunStore, p.EvidenceOutput, p.Configuration.Coordination.CheckpointRoot, p.Configuration.Coordination.PrivateKeyPath, p.Configuration.Coordination.DeploymentEvidence.Path, p.OtherPrincipal.PrivateKeyPath, p.OtherPrincipal.DeploymentEvidence.Path }) BoundedFiles.Separate(p.Configuration.RepositoryRoot, protectedPath);
             var workerRoots = new[] { p.Configuration.RepositoryRoot, p.Paths.Worktree, p.Paths.ResultDirectory };
             foreach (var worker in workerRoots) BoundedFiles.Plain(worker, true);
+            if (Directory.Exists(p.Paths.Worktree) || File.Exists(p.Paths.Worktree)) throw new IOException("Native fixture requires a fresh absent destination for same-parent provisioning.");
             BoundedFiles.Separate(p.Configuration.RepositoryRoot, p.Paths.Worktree); BoundedFiles.Separate(p.Configuration.RepositoryRoot, p.Paths.ResultDirectory); BoundedFiles.Separate(p.Paths.Worktree, p.Paths.ResultDirectory);
             var privatePaths = new[] { path, p.RunStore, p.EvidenceOutput, p.PlanBundle.Path, p.Configuration.Coordination.CheckpointRoot, p.Configuration.Coordination.PrivateKeyPath, p.Configuration.Coordination.DeploymentEvidence.Path, p.OtherPrincipal.PrivateKeyPath, p.OtherPrincipal.DeploymentEvidence.Path };
             foreach (var worker in workerRoots) foreach (var protectedPath in privatePaths) BoundedFiles.Separate(worker, protectedPath);
@@ -53,7 +54,10 @@ public sealed class ParentNativeContinuumLiveTests
         internal ContinuumMcpTransport Wire(ParentCoordinationConfiguration c) => new(c.Endpoint, c.Project, c.PrincipalId, new ContinuumApiKeyFile(c.PrivateKeyPath), new Evidence(c.DeploymentEvidence, ObserverOriginal), TimeSpan.FromSeconds(10));
         internal async Task<(string Run, IReadOnlyList<LeaseEvidence> Leases)> CompleteWorker()
         {
-            var result = await Keep(Owner.ImplementAsync(Plan, Selected.Paths)).WaitAsync(Original.Remaining, TestContext.Current.CancellationToken); Assert.Equal("COMPLETE", result.Result.Outcome); Assert.Equal("CONTRACT_FIXTURE_COMPLETE", result.Result.Code);
+            var result = await Keep(Owner.ImplementAsync(Plan, Selected.Paths)).WaitAsync(Original.Remaining, TestContext.Current.CancellationToken);
+            var observedFrame = Owner.Bridge.RetainedFrames.SingleOrDefault();
+            Assert.True(result.Result.Outcome == "COMPLETE", $"Actual fixture result {result.Result.Outcome}/{result.Result.Code}; original failure {observedFrame?.Primary?.GetType().FullName}: {observedFrame?.Primary?.Message}");
+            Assert.Equal("CONTRACT_FIXTURE_COMPLETE", result.Result.Code);
             Assert.Equal(HostObservationRealm.ContractFixture, Owner.Bridge.Realm); Assert.Equal(ParentNativeContractPort.AdapterId, Owner.Bridge.AdapterProfile.AdapterId);
             Assert.True(Owner.Bridge.ObserveCoordinationWorkSettled(result.Assignment.RunId)); var frame = Assert.Single(Owner.Bridge.RetainedFrames); Assert.True(frame.OwnerCompleted); Assert.False(frame.Unknown);
             var data = Owner.Parent.ObserveContractFixtureData(); Assert.False(data.Revoked); Assert.Equal(result.Assignment.RunId, data.RunId); Assert.Equal(4, data.Leases.Count); Assert.Equal(4, data.Leases.Select(lease => lease.Resource.ResourceKey).Distinct().Count());
@@ -62,7 +66,6 @@ public sealed class ParentNativeContinuumLiveTests
         }
         internal async Task<(string Run, IReadOnlyList<LeaseEvidence> Leases, Task<(ToolResult Result, FrozenWorkerPlan Assignment)> Implementation, DeliveryForge.Execution.Git.WorktreeObservation Before)> StartHeldWorker()
         {
-            var before = await Keep(Owner.ObserveWorkAsync(Selected.Paths.Worktree)).WaitAsync(Original.Remaining, TestContext.Current.CancellationToken); Assert.True(before.IsClean); Assert.Equal(Plan.BaseCommit, before.HeadCommit);
             var implementation = Keep(Owner.ImplementAsync(Plan, Selected.Paths)); var started = System.Diagnostics.Stopwatch.GetTimestamp();
             while (true)
             {
@@ -70,6 +73,7 @@ public sealed class ParentNativeContinuumLiveTests
                 var frame = Owner.Bridge.RetainedFrames.SingleOrDefault(); var native = Owner.Native.OriginalProcess; var wait = Owner.Adapter.ActualCalls.SingleOrDefault(call => call.Kind == "Wait");
                 if (frame?.Accepted is not null && wait?.ActualTask is { IsCompleted: false } && Owner.Native.ActiveRead is { IsCompleted: false } && native is not null && native.StartupFailure is null && native.HasRetainedOriginalOwner && native.OriginalRetirementTask is null && native.ActualIo.Any(row => row.Kind == "stdout-read" && row.InvocationReturned && row.ActualTask is { IsCompleted: false }))
                 {
+                    var before = Owner.Native.BeforeStart ?? throw new IOException("Actual prebirth provisioned worktree observation missing."); Assert.True(before.IsClean); Assert.Equal(Plan.BaseCommit, before.HeadCommit);
                     Assert.False(frame.OwnerCompleted); Assert.False(frame.OwnerStopped); var binding = Owner.Native.ActualBinding; Assert.NotNull(binding); Assert.Equal(frame.Accepted.RequestIdentity, binding.RequestIdentity); Assert.Equal(frame.Accepted.RuntimeRunIdentity, binding.RuntimeRunIdentity); Assert.Equal(frame.Accepted.RuntimeTaskIdentity, binding.RuntimeTaskIdentity);
                     var data = Owner.Parent.ObserveContractFixtureData(); Assert.False(data.Revoked); Assert.Equal(frame.RunId, data.RunId); Assert.Equal(4, data.Leases.Count); return (data.RunId, data.Leases, implementation, before);
                 }
