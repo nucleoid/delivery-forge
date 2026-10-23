@@ -26,9 +26,10 @@ public sealed class OwnedDuplexProcess
     readonly IOwnedDuplexBudget budget; readonly bool commandCapture; readonly List<DuplexIoObservation> io = []; readonly object gate = new();
     Stream? input, output, error; Action<bool>? closeInput; readonly int errorLimit; bool errorQuotaExceeded; Func<bool, DuplexNativeObservation>? observe; Action<bool>? terminate; Func<bool, bool>? dispose;
     DuplexNativeObservation lastObservation = new(false, false, uint.MaxValue, null, "No actual native observation returned.");
-    Func<bool>? creationOwnedScope;
+    Func<bool>? creationOwnedScope, creationOwnedExactImage;
+    internal bool HasCreationOwnedExactLinuxImage => creationOwnedExactImage?.Invoke() == true;
     internal bool HasCreationOwnedLinuxScope => creationOwnedScope?.Invoke() == true;
-    internal void AttachScopeProof(Func<bool> actualProof) { if (creationOwnedScope is not null) throw new InvalidOperationException("Original scope proof already attached."); creationOwnedScope = actualProof; }
+    internal void AttachScopeProof(Func<bool> actualProof, Func<bool>? actualExactImage = null) { if (creationOwnedScope is not null) throw new InvalidOperationException("Original scope proof already attached."); creationOwnedScope = actualProof; creationOwnedExactImage = actualExactImage; }
     object? actualOwner; bool inputCloseEntered, inputCloseReturned, outputEof, errorEof, disposeEntered, disposeReturned;
     bool opening = true, creationUnknown; long bytesRead, bytesWritten; int readerBusy, writerBusy; Task? errorDrain, outputConsumer; Task<DuplexRetirement>? retirement;
     readonly List<Exception> failures = []; readonly MemoryStream errorBytes = new();
@@ -42,24 +43,45 @@ public sealed class OwnedDuplexProcess
     public Stream Output { get; }
     public byte[] StandardError { get { lock (errorBytes) return errorBytes.ToArray(); } }
     OwnedDuplexProcess(IOwnedDuplexBudget budget, int errorLimit, bool commandCapture) { this.budget = budget; this.errorLimit = errorLimit; this.commandCapture = commandCapture; Input = new Facade(this, false); Output = new Facade(this, true); Retained.TryAdd(this, 0); }
-    public static OwnedDuplexProcess Open(CommandInvocation invocation, IOwnedDuplexBudget original, LinuxScopeSelection? linuxScope = null) => OpenCore(invocation, original, linuxScope, 1048576, commandCapture: false);
+    public static OwnedDuplexProcess Open(CommandInvocation invocation, IOwnedDuplexBudget original, LinuxScopeSelection? linuxScope = null) => Open(invocation, original, linuxScope, null);
+    public static OwnedDuplexProcess Open(CommandInvocation invocation, IOwnedDuplexBudget original, LinuxScopeSelection? linuxScope, LinuxScopeImage? exactNativeImage) => OpenCore(invocation, original, linuxScope, 1048576, commandCapture: false, exactNativeImage);
     // Only the ordinary capture consumer treats a fully quiescent child exit as
     // command outcome DATA. Public duplex workers/reviewers retain failure semantics.
-    internal static OwnedDuplexProcess OpenCapture(CommandInvocation invocation, IOwnedDuplexBudget original, LinuxScopeSelection? linuxScope, int quota) => OpenCore(invocation, original, linuxScope, quota, commandCapture: true);
-    static OwnedDuplexProcess OpenCore(CommandInvocation invocation, IOwnedDuplexBudget original, LinuxScopeSelection? linuxScope, int errorLimit, bool commandCapture)
+    internal static OwnedDuplexProcess OpenCapture(CommandInvocation invocation, IOwnedDuplexBudget original, LinuxScopeSelection? linuxScope, int quota, LinuxScopeImage? exactNativeImage = null) => OpenCore(invocation, original, linuxScope, quota, commandCapture: true, exactNativeImage);
+    static OwnedDuplexProcess OpenCore(CommandInvocation invocation, IOwnedDuplexBudget original, LinuxScopeSelection? linuxScope, int errorLimit, bool commandCapture, LinuxScopeImage? exactNativeImage)
     {
         ArgumentNullException.ThrowIfNull(original); original.CheckWork();
+        if (exactNativeImage is not null && (!OperatingSystem.IsLinux() || linuxScope is null)) throw new PlatformNotSupportedException("Exact native ELF execution requires the actual selected Linux scope; no pathname fallback.");
+        // Every public exact-mode entrant shares the kernel owner's EXISTING
+        // 16MiB observation quota. Refuse a known impossible extent before birth;
+        // the actual kernel owner still debits its remaining quota before open.
+        if (exactNativeImage is not null && (exactNativeImage.Bytes < 64 || exactNativeImage.Bytes >= 16L * 1024 * 1024)) throw new IOException("Exact native image cannot fit the existing Linux observation byte quota.");
         if (original.WholeLimit <= TimeSpan.Zero || original.WholeLimit > TimeSpan.FromSeconds(1200) || original.WorkLimit <= TimeSpan.Zero || original.WorkLimit > TimeSpan.FromSeconds(1100) || original.WorkLimit >= original.WholeLimit || original.OriginalStarted <= 0 || Stopwatch.GetTimestamp() < original.OriginalStarted) throw new ArgumentOutOfRangeException(nameof(original));
         if (!Path.IsPathFullyQualified(invocation.FileName) || invocation.Arguments.Count > 64 || invocation.Arguments.Any(x => x.Length > 8192 || x.Contains('\0'))) throw new ArgumentException("Exact finite explicit duplex image/argv required.");
         if (errorLimit is <= 0 or > 16777216) throw new ArgumentOutOfRangeException(nameof(errorLimit)); var session = new OwnedDuplexProcess(original, errorLimit, commandCapture);
         try
         {
             if (OperatingSystem.IsWindows()) WindowsCommandLifetime.OpenDuplex(invocation, original, session);
-            else if (OperatingSystem.IsLinux()) BoundedProcessCapture.OpenDuplex(invocation, original, session, linuxScope);
+            else if (OperatingSystem.IsLinux()) BoundedProcessCapture.OpenDuplex(invocation, original, session, linuxScope, exactNativeImage);
             else throw new PlatformNotSupportedException("Duplex owner supports Linux/Windows only.");
             session.opening = false; original.CheckWork(); session.errorDrain = session.DrainErrorAsync();
         }
-        catch (Exception failure) { session.StartupFailure = failure; session.failures.Add(failure); session.opening = false; }
+        catch (Exception failure)
+        {
+            session.StartupFailure = failure; session.failures.Add(failure); session.opening = false;
+            // Linux may have real attached stderr even when its birth barrier
+            // refused. Retain the existing bounded reader under SAME failure
+            // cleanup; do not replace the creator failure or invent closure.
+            if (OperatingSystem.IsLinux() && session.error is not null && session.errorDrain is null)
+            {
+                try
+                {
+                    if (original is IOwnedFailureCleanup cleanup) cleanup.BeginFailureCleanup();
+                    session.errorDrain = session.DrainErrorAsync(cleanup: true);
+                }
+                catch (Exception observationFailure) { session.failures.Add(observationFailure); }
+            }
+        }
         return session; // Includes failed creator frame; callers must retire it, never retry.
     }
     internal void AttachOwner(object owner, Func<bool, DuplexNativeObservation> observation, Action<bool> stop, Func<bool, bool> disposition) { actualOwner = owner; observe = observation; terminate = stop; dispose = disposition; }
@@ -113,7 +135,7 @@ public sealed class OwnedDuplexProcess
         finally { Volatile.Write(ref writerBusy, 0); }
     }
     async Task FlushInput(CancellationToken token) { await InvokeTask("stdin-flush", null, () => (input ?? throw new IOException("Original stdin unavailable.")).FlushAsync(token), false).ConfigureAwait(false); }
-    async Task DrainErrorAsync() { try { var buffer = new byte[4096]; while (true) { var n = await Read(error ?? throw new IOException("Original stderr unavailable."), buffer, 0, buffer.Length, true, false, budget.Token).ConfigureAwait(false); if (n == 0) return; lock (errorBytes) { if (errorBytes.Length > errorLimit - n) { errorBytes.Write(buffer, 0, errorLimit - (int)errorBytes.Length); errorQuotaExceeded = true; throw new IOException("Complete stderr profile exceeded; original retained, no truncation acceptance."); } errorBytes.Write(buffer, 0, n); } } } catch (Exception failure) { lock (failures) if (!failures.Contains(failure)) failures.Add(failure); throw; } }
+    async Task DrainErrorAsync(bool cleanup = false) { try { var buffer = new byte[4096]; while (true) { var n = await Read(error ?? throw new IOException("Original stderr unavailable."), buffer, 0, buffer.Length, true, cleanup, cleanup ? CancellationToken.None : budget.Token).ConfigureAwait(false); if (n == 0) return; lock (errorBytes) { if (errorBytes.Length > errorLimit - n) { errorBytes.Write(buffer, 0, errorLimit - (int)errorBytes.Length); errorQuotaExceeded = true; throw new IOException("Complete stderr profile exceeded; original retained, no truncation acceptance."); } errorBytes.Write(buffer, 0, n); } } } catch (Exception failure) { lock (failures) if (!failures.Contains(failure)) failures.Add(failure); throw; } }
     public Task<DuplexRetirement> RetireAsync(bool failureCleanup = true) { lock (gate) return retirement ??= RetireCoreAsync(failureCleanup); }
     async Task<DuplexRetirement> RetireCoreAsync(bool cleanup)
     {

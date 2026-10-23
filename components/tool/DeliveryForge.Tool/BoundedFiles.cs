@@ -145,6 +145,14 @@ public static class BoundedFiles
     internal static void VerifyNativeImage(AdmissionFile pin, ToolLifetime life, CancellationToken token = default)
         => _ = VerifyNativeImageCore(pin, life, token, false);
 
+    // Reserve BOTH the gate's complete copy and the parent's complete sealed-fd
+    // verification against the SAME original cumulative file credit before birth.
+    // This does not grant image/scope/reviewer authority.
+    internal static void ReserveExactLinuxImageReads(AdmissionFile pin, ToolLifetime life)
+    {
+        life.Check(); if (pin.Bytes is < 64 or >= 16L * 1024 * 1024) throw new ToolUsageException("Exact Linux ELF image must fit the existing 16MiB kernel observation quota, including EOF and other observations.");
+        Credit(life, checked(2 * (pin.Bytes + 1)), false);
+    }
     // Windows sharing denies writes and deletion for the entire retained native
     // phase. The hash and every fresh volume/full-file-ID check use this SAME
     // original held file; public pin DATA cannot manufacture such an owner.

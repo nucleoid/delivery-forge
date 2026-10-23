@@ -12,7 +12,7 @@ internal static partial class BoundedProcessCapture
         CommandEnvironment.Complete(info, invocation); foreach (var argument in invocation.Arguments) info.ArgumentList.Add(argument); foreach (var pair in invocation.Environment ?? new Dictionary<string, string>()) info.Environment[pair.Key] = pair.Value; return info;
     }
     [System.Runtime.Versioning.SupportedOSPlatform("linux")]
-    internal static void OpenDuplex(CommandInvocation invocation, IOwnedDuplexBudget budget, OwnedDuplexProcess session, LinuxScopeSelection? selection)
+    internal static void OpenDuplex(CommandInvocation invocation, IOwnedDuplexBudget budget, OwnedDuplexProcess session, LinuxScopeSelection? selection, LinuxScopeImage? exactNativeImage = null)
     {
         budget.CheckWork(); var process = new Process(); var retention = new BoundedCaptureRetention(); retention.Add(process); retention.Add(session);
         LinuxCommandScope? scope = null; StreamWriter? input = null; StreamReader? output = null, error = null; var inputCloseEntered = false; var inputClosed = false; var lastFailure = 0;
@@ -40,7 +40,7 @@ internal static partial class BoundedProcessCapture
         try
         {
             if (selection is null) throw new PlatformNotSupportedException("A real selected creation-owned Linux scope profile is required; root-only fallback cannot establish duplex support.");
-            scope = new LinuxCommandScope(process, budget, selection); session.AttachScopeProof(() => scope.HasCreationOwnedScope); retention.Add(scope); process.StartInfo = DuplexStartInfo(invocation); scope.Prepare(process.StartInfo);
+            scope = new LinuxCommandScope(process, budget, selection, exactNativeImage); session.AttachScopeProof(() => scope.HasCreationOwnedScope, () => scope.HasCreationOwnedExactImage); retention.Add(scope); process.StartInfo = DuplexStartInfo(invocation); scope.Prepare(process.StartInfo);
             scope.BeforeCreation(); var created = process.Start(); scope.CreationReturned(created); if (!created) throw new IOException("Original scoped process did not start.");
             input = process.StandardInput; retention.Add(input); budget.CheckWork(); output = process.StandardOutput; retention.Add(output); budget.CheckWork(); error = process.StandardError; retention.Add(error); budget.CheckWork();
             // The SAME root is held at the genuine compiled birth barrier until

@@ -159,10 +159,11 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             {
                 var left = Remaining(phaseStarted); if (left > TimeSpan.FromSeconds(30)) left = TimeSpan.FromSeconds(30);
                 actualWorkingDirectory.Check();
+                if (OperatingSystem.IsLinux()) BoundedFiles.ReserveExactLinuxImageReads(selection.Image, original);
                 lock (tasks) { Current(); row.Entered = true; }
                 var actual = executor.ExecuteBoundedCaptureAsync(new(selection.Image.Path,
                     ClaudeIndependentReviewData.IsolatedObservationArguments(arguments), actualWorkingDirectory.Path),
-                    left, 65536, phaseCancellation!.Token, new OwnedWorkPhaseBudget(original));
+                    left, 65536, phaseCancellation!.Token, new OwnedWorkPhaseBudget(original), linuxScope, OperatingSystem.IsLinux() ? new LinuxScopeImage(selection.Image.Path, selection.Image.Bytes, selection.Image.Sha256) : null);
                 lock (tasks) { row.Actual = Keep(actual); row.Returned = true; }
                 return actual;
             }).ConfigureAwait(false);
@@ -266,6 +267,16 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         IReadOnlyList<ReviewFinding>? parsedFindings = null;
         try
         {
+            // Six complete path verifications plus both exact-image reads for
+            // each of three native entries: twelve image extents, fifteen file
+            // operations on the SAME existing credit. Admission never reserves
+            // or grants credit; preparation and racing use still charge normally.
+            if (OperatingSystem.IsLinux())
+            {
+                if (selection.Image.Bytes is < 64 or >= 16777216)
+                    throw new ToolUsageException("Exact Linux reviewer image must fit the existing kernel read profile before evidence preparation.");
+                BoundedFiles.RequireReadCapacity(original, 15, checked(12 * (selection.Image.Bytes + 1)));
+            }
             verifyProtectedConfiguration();
             var evidence = await prepareEvidence(phaseStop.Token).ConfigureAwait(false);
             _ = Remaining(started); var patch = evidence.Patch; var frozenPlan = evidence.FrozenPlan;
@@ -302,9 +313,10 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             process = parent.EnterSynchronous(runId, () =>
             {
                 actualWorkingDirectory.Check();
+                if (OperatingSystem.IsLinux()) BoundedFiles.ReserveExactLinuxImageReads(selection.Image, original);
                 lock (tasks) { _ = Remaining(started); nativeBirthEntered = true; }
                 var actual = OwnedDuplexProcess.Open(new(selection.Image.Path,
-                    ClaudeIndependentReviewData.IsolatedReviewArguments(bootstrap.Policy.Budget.MaximumCost), actualWorkingDirectory.Path, environment), original, linuxScope);
+                    ClaudeIndependentReviewData.IsolatedReviewArguments(bootstrap.Policy.Budget.MaximumCost), actualWorkingDirectory.Path, environment), original, linuxScope, OperatingSystem.IsLinux() ? new LinuxScopeImage(selection.Image.Path, selection.Image.Bytes, selection.Image.Sha256) : null);
                 lock (tasks) { process = actual; nativeBirthReturned = true; }
                 return actual;
             });

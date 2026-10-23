@@ -13,19 +13,48 @@ public static class Program
     public static int Main(string[] args)
     {
         if (!OperatingSystem.IsLinux() || RuntimeInformation.ProcessArchitecture != Architecture.X64) return 125;
-        var allocations = new List<IntPtr>();
+        var allocations = new List<IntPtr>(); ExactNativeImage? exactImage = null;
         try
         {
-            if (args.Length is < 12 or > 76 || args[0] != "--original" || args[2] != "--frequency" || args[4] != "--work-ticks" || args[6] != "--parent" || args[8] != "--ticket" || args[10] != "--") throw new IOException("Exact private birth-gate grammar required.");
+            if (args.Length is < 12 or > 79 || args[0] != "--original" || args[2] != "--frequency" || args[4] != "--work-ticks" || args[6] != "--parent" || args[8] != "--ticket" || args[10] is not ("--" or "--exact-native-elf")) throw new IOException("Exact private birth-gate grammar required.");
             var original = long.Parse(args[1], NumberStyles.None, CultureInfo.InvariantCulture); var frequency = long.Parse(args[3], NumberStyles.None, CultureInfo.InvariantCulture); var workTicks = long.Parse(args[5], NumberStyles.None, CultureInfo.InvariantCulture); var parent = int.Parse(args[7], NumberStyles.None, CultureInfo.InvariantCulture); var ticket = args[9];
             if (original <= 0 || frequency != Stopwatch.Frequency || workTicks <= 0 || workTicks > TimeSpan.FromSeconds(1100).Ticks || parent <= 0 || ticket.Length != 32 || ticket.Any(c => c is not (>= 'a' and <= 'f') and not (>= '0' and <= '9'))) throw new IOException("Actual original birth identity/budget differs.");
             void Check() { var elapsed = Stopwatch.GetElapsedTime(original); if (elapsed < TimeSpan.Zero || elapsed >= TimeSpan.FromTicks(workTicks)) throw new TimeoutException("SAME original birth work endpoint expired."); }
             Check(); if (getpid() != Environment.ProcessId || gettid() != getpid() || getppid() != parent) throw new IOException("Actual original parent/leader differs.");
             // Actual parent death cannot promote a stranded gate to success.
             if (prctl(1, 9, 0, 0, 0) != 0 || getppid() != parent) throw new IOException("Actual original parent-death guard unavailable."); Check();
-            var target = args[11]; var arguments = args.Skip(11).ToArray(); if (arguments.Length > MaximumArguments || !Path.IsPathFullyQualified(target) || arguments.Any(x => x.Length > 8192 || x.Contains('\0'))) throw new IOException("Finite exact target argv required.");
+            var exact = args[10] == "--exact-native-elf";
+            if (exact && (args.Length < 15 || args[13] != "--")) throw new IOException("Exact native ELF birth grammar required.");
+            var targetIndex = exact ? 14 : 11;
+            var target = args[targetIndex]; var arguments = args.Skip(targetIndex).ToArray(); if (arguments.Length > MaximumArguments || !Path.IsPathFullyQualified(target) || arguments.Any(x => x.Length > 8192 || x.Contains('\0'))) throw new IOException("Finite exact target argv required.");
             for (var fd = 0; fd < 3; fd++) { var flags = fcntl(fd, 1, 0); if (flags < 0 || fcntl(fd, 2, flags & ~1) != 0) throw new IOException("Original stdio CLOEXEC observation/set failed."); Check(); }
-            var ready = Encoding.ASCII.GetBytes("DF_SCOPE_READY|" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + "|" + original.ToString(CultureInfo.InvariantCulture) + "|" + ticket + "|" + frequency.ToString(CultureInfo.InvariantCulture) + "\n");
+            if (exact)
+            {
+                try { exactImage = ExactNativeImage.Create(target, long.Parse(args[11], NumberStyles.None, CultureInfo.InvariantCulture), args[12], Check); }
+                catch (ExactNativeImage.Refusal refused)
+                {
+                    // A known preparation refusal stays alive only long enough
+                    // for this original parent to bind/retire its actual group.
+                    // No READY, RELEASE interpretation, retry or target entry.
+                    Console.Error.WriteLine("DF_SCOPE_EXACT_IMAGE_REFUSAL|" + refused.Code);
+                    var nonready = Encoding.ASCII.GetBytes("DF_SCOPE_NONREADY|EXACT_IMAGE_REFUSED\n");
+                    Check(); if (write(1, nonready, (nuint)nonready.Length) != nonready.Length) throw new IOException("Complete fixed refusal delivery failed."); Check();
+                    while (true)
+                    {
+                        Check(); if (getppid() != parent) throw new IOException("Original parent left during refused preparation.");
+                        var left = TimeSpan.FromTicks(workTicks) - Stopwatch.GetElapsedTime(original);
+                        var milliseconds = (int)Math.Min(1000, Math.Floor(left.TotalMilliseconds));
+                        if (milliseconds <= 0) throw new TimeoutException("SAME original refused-preparation endpoint expired.");
+                        var row = new PollFd { Fd = 0, Events = 1 }; var polled = poll(ref row, 1, milliseconds); Check();
+                        if (polled < 0 || (row.Returned & ~(1 | 16)) != 0) throw new IOException("Original refused-preparation poll failed.");
+                        if (polled == 0) continue;
+                        var one = new byte[1]; var count = read(0, one, 1); Check();
+                        if (count == 0) return 125;
+                        throw new IOException("Refused preparation cannot consume a release or execute a target.");
+                    }
+                }
+            }
+            var ready = Encoding.ASCII.GetBytes("DF_SCOPE_READY|" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + "|" + original.ToString(CultureInfo.InvariantCulture) + "|" + ticket + "|" + frequency.ToString(CultureInfo.InvariantCulture) + (exactImage is null ? "" : "|" + exactImage.Ready) + "\n");
             Check(); if (write(1, ready, (nuint)ready.Length) != ready.Length) throw new IOException("Complete actual birth READY delivery failed; no replay."); Check();
             var expected = Encoding.ASCII.GetBytes("DF_SCOPE_RELEASE|" + ticket + "|" + original.ToString(CultureInfo.InvariantCulture) + "\n"); var actual = new byte[expected.Length]; var offset = 0;
             while (offset < actual.Length) { Check(); var left = TimeSpan.FromTicks(workTicks) - Stopwatch.GetElapsedTime(original); var milliseconds = (int)Math.Min(1000, Math.Floor(left.TotalMilliseconds)); if (milliseconds <= 0) throw new TimeoutException("Original birth release endpoint expired."); var row = new PollFd { Fd = 0, Events = 1 }; var polled = poll(ref row, 1, milliseconds); Check(); if (polled < 0) throw new IOException("Actual original release poll failed."); if (polled == 0) continue; if ((row.Returned & ~(1 | 16)) != 0) throw new IOException("Actual release descriptor error."); var chunk = new byte[actual.Length - offset]; var count = (int)read(0, chunk, (nuint)chunk.Length); Check(); if (count <= 0) throw new IOException("Actual original release missing/truncated; target never entered."); Buffer.BlockCopy(chunk, 0, actual, offset, count); offset += count; }
@@ -37,10 +66,16 @@ public static class Program
             Check(); if (getppid() != parent || gettid() != getpid()) throw new IOException("Original parent/leader left before synchronous exec.");
             // execv preserves the actual environment and stdio; success never
             // returns. No fork, shell interpolation or Process.Start exists here.
+            if (exactImage is not null) { exactImage.Execute(vector); throw new IOException("Exact native ELF exec unexpectedly returned."); }
             var returned = execv(target, vector); throw new IOException("Original synchronous target exec returned failure: " + returned.ToString(CultureInfo.InvariantCulture) + " errno=" + Marshal.GetLastPInvokeError().ToString(CultureInfo.InvariantCulture));
         }
-        catch (Exception error) { Console.Error.WriteLine("DF_SCOPE_BIRTH_NONPASS|" + error.GetType().Name); return 125; }
-        finally { foreach (var pointer in allocations) Marshal.FreeCoTaskMem(pointer); }
+        catch (Exception error)
+        {
+            Console.Error.WriteLine("DF_SCOPE_BIRTH_NONPASS|" + error.GetType().Name);
+            if (ExactNativeImage.RefusalCode(error) is { } code) Console.Error.WriteLine("DF_SCOPE_EXACT_IMAGE_REFUSAL|" + code);
+            return 125;
+        }
+        finally { try { exactImage?.Dispose(); } catch (Exception failure) { Console.Error.WriteLine("DF_SCOPE_BIRTH_DISPOSITION_NONPASS|" + failure.GetType().Name); } foreach (var pointer in allocations) Marshal.FreeCoTaskMem(pointer); }
     }
     [StructLayout(LayoutKind.Sequential)] struct PollFd { public int Fd; public short Events; public short Returned; }
     [DllImport("libc", SetLastError = true)] static extern nint read(int fd, [Out] byte[] buffer, nuint count);

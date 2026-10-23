@@ -92,7 +92,15 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
     public Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
         CommandInvocation invocation, TimeSpan entireBudget, int maximumBytesPerStream,
         CancellationToken cancellationToken, IOwnedDuplexBudget? enclosing, LinuxScopeSelection? linuxScope)
+        => ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing, linuxScope, null);
+
+    // Exact-image DATA selects extra physical checks on the SAME original scope.
+    // It cannot issue protected reviewer/host admission or an execution lease.
+    public Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+        CommandInvocation invocation, TimeSpan entireBudget, int maximumBytesPerStream,
+        CancellationToken cancellationToken, IOwnedDuplexBudget? enclosing, LinuxScopeSelection? linuxScope, LinuxScopeImage? exactNativeImage)
     {
+        if (exactNativeImage is not null && linuxScope is null) throw new PlatformNotSupportedException("Exact image requires the original selected Linux scope.");
         if (linuxScope is null)
             return ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing);
         RequireSelectedLinuxCaptureOwner(_selectedLinuxScope, _selectedLinuxOriginal, enclosing, linuxScope);
@@ -108,7 +116,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             enclosing.WorkLimit <= TimeSpan.Zero || enclosing.WorkLimit > TimeSpan.FromSeconds(1100) || enclosing.WorkLimit >= enclosing.WholeLimit)
             throw new ArgumentOutOfRangeException(nameof(enclosing));
         enclosing.CheckWork();
-        return ScopedBoundedCapture.ExecuteAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing, linuxScope);
+        return ScopedBoundedCapture.ExecuteAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing, linuxScope, exactNativeImage);
     }
 
     // These restrictive guards are shared by the actual pre-birth paths. They

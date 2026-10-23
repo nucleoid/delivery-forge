@@ -14,8 +14,9 @@ internal sealed class LinuxScopeKernel
     const int DirectoryFlag = 0x10000, NoFollow = 0x20000, CloseOnExec = 0x80000;
     const long Cgroup2Magic = 0x63677270;
     readonly IOwnedDuplexBudget original; readonly object gate = new(); readonly List<Call> calls = []; readonly List<OwnedFd> descriptors = [];
+    bool exactImageEntered;
     OwnedFd? group, procDescriptors; Identity identity; string? originalPath; long readBytes; bool bound, stopEntered, closeEntered;
-    internal sealed class Call { internal required string Kind; internal bool Entered, Returned; internal long Result; internal int Error; internal byte[]? OriginalBuffer; internal Exception? Primary, Post; }
+    internal sealed class Call { internal required string Kind; internal bool Entered, Returned; internal long Result, ByteLimit, BytesRead; internal int Error, NativeReads, NativeReadLimit; internal byte[]? OriginalBuffer; internal Exception? Primary, Post; }
     sealed class OwnedFd(int actual) { internal readonly int Actual = actual; internal bool CloseEntered, CloseReturned, Closed; internal Exception? Failure; }
     readonly record struct Identity(ulong Inode, uint Major, uint Minor, ulong Mount);
     internal IReadOnlyList<Call> ActualCalls { get { lock (gate) return calls.ToArray(); } }
@@ -30,6 +31,31 @@ internal sealed class LinuxScopeKernel
         catch (Exception error) { primary = error; row.Primary = error; }
         try { Check(cleanup); } catch (Exception error) { post = error; row.Post = error; }
         if (primary is not null && post is not null) throw new AggregateException("Original scope syscall and independent endpoint post.", primary, post); if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw(); return result;
+    }
+    // One logical content-read frame, with actual return facts for every bounded
+    // syscall. Managed/precheck refusal after a known return is not native UNKNOWN.
+    long ExactImageRead(Call row, OwnedFd fd, byte[] buffer, int requested)
+    {
+        Check(false);
+        if (requested <= 0 || requested > buffer.Length || row.NativeReads >= row.NativeReadLimit ||
+            requested > row.ByteLimit - row.BytesRead || row.Entered && !row.Returned)
+            throw new IOException("Finite original sealed-image read plan exhausted before invocation.");
+        row.NativeReads++; row.Entered = true; row.Returned = false;
+        long result = 0; Exception? primary = null, post = null;
+        try
+        {
+            result = read(fd.Actual, buffer, (nuint)requested);
+            row.Result = result; row.Error = result < 0 ? Marshal.GetLastPInvokeError() : 0; row.Returned = true;
+            if (result < 0) throw new Win32Exception(row.Error, "Actual original sealed-image read refused.");
+            if (result > requested) throw new IOException("Actual original sealed-image read exceeded its request.");
+            row.BytesRead += result;
+        }
+        catch (Exception error) { primary = error; row.Primary ??= error; }
+        try { Check(false); } catch (Exception error) { post = error; row.Post ??= error; }
+        if (primary is not null && post is not null) throw new AggregateException("Original sealed-image read and independent endpoint post.", primary, post);
+        if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+        if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+        return result;
     }
     OwnedFd OpenFd(string path, int flags, bool cleanup, OwnedFd? parent = null)
     {
@@ -119,6 +145,59 @@ internal sealed class LinuxScopeKernel
         // cgroup_destroy_locked rejects populated/live children before disabling
         // migration and removing kernfs (Linuxv6.8 cgroup.c5536..5568).
     }
+    // Called only after the private original creator/generation/group binding.
+    // Following THIS retained process's numbered proc descriptor is deliberate;
+    // no caller-supplied PID/path or resource name can issue ownership here.
+    internal void RequireExactImage(int actualPid, int actualFd, LinuxScopeImage selected, ulong inode, uint major, uint minor)
+    {
+        lock (gate)
+        {
+            Check(false); Same(false); if (exactImageEntered || actualPid <= 0 || actualFd <= 2 || selected.Bytes is < 64 or > 536870912) throw new IOException("One finite original exact-image descriptor observation required.");
+            // Charge complete content plus EOF against this SAME existing kernel
+            // quota before opening the descriptor. No refund or image allowance.
+            var byteLimit = selected.Bytes + 1;
+            if (byteLimit > 16L * 1024 * 1024 - readBytes) throw new IOException("Complete sealed-image observation exceeds remaining original kernel byte quota before open.");
+            readBytes += byteLimit; exactImageEntered = true; Check(false);
+            var fd = OpenFd("/proc/" + actualPid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/fd/" + actualFd.ToString(System.Globalization.CultureInfo.InvariantCulture), CloseOnExec, false);
+            Exception? primary = null, post = null;
+            try
+            {
+                const int sealsRequired = 0x2f;
+                void Identity()
+                {
+                    Statx actual = default; Native("statx-original-sealed-native-image", () => statx(fd.Actual, "", 0x1000, 0x7ff, out actual), false);
+                    if ((actual.Mask & 0x303) != 0x303 || (actual.Mode & 0xf000) != 0x8000 || (actual.Mode & 0x1ff) != 0x140 || actual.Size != (ulong)selected.Bytes || actual.Inode != inode || actual.Major != major || actual.Minor != minor) throw new IOException("Actual sealed image identity/extent/mode differs.");
+                    var seals = Native("fcntl-original-image-seals", () => fcntl(fd.Actual, 1034, 0), false);
+                    if ((seals & sealsRequired) != sealsRequired) throw new IOException("Complete actual immutable content/extent/exec/seal-set required.");
+                }
+                Identity(); using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+                Check(false); if (calls.Count >= 16384) throw new IOException("Finite original Linux scope syscall ledger exhausted before invocation.");
+                var buffer = new byte[65536]; long consumed = 0;
+                var imageReads = new Call
+                {
+                    Kind = "bounded-read-original-sealed-native-image",
+                    OriginalBuffer = buffer,
+                    ByteLimit = byteLimit,
+                    NativeReadLimit = checked((int)((selected.Bytes + 65535) / 65536 + 1))
+                };
+                calls.Add(imageReads);
+                while (consumed < selected.Bytes)
+                {
+                    var requested = (int)Math.Min(buffer.Length, selected.Bytes - consumed);
+                    var n = ExactImageRead(imageReads, fd, buffer, requested);
+                    if (n <= 0 || n > requested) throw new IOException("Actual complete sealed image ended early.");
+                    hash.AppendData(buffer, 0, (int)n); consumed += n; Check(false);
+                }
+                if (ExactImageRead(imageReads, fd, buffer, 1) != 0 || Convert.ToHexStringLower(hash.GetHashAndReset()) != selected.Sha256) throw new IOException("Actual complete sealed image hash/EOF differs.");
+                Identity(); Same(false); Check(false);
+            }
+            catch (Exception failure) { primary = failure; }
+            try { Close(fd, primary is not null); } catch (Exception failure) { post = failure; }
+            if (primary is not null && post is not null) throw new AggregateException("Actual exact image and original first-close.", primary, post);
+            if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+            if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+        }
+    }
     internal void RequireLimits(string expectedCpus, bool cleanup) { lock (gate) RequireLimitsCore(expectedCpus, cleanup); }
     void RequireLimitsCore(string expectedCpus, bool cleanup)
     {
@@ -148,10 +227,11 @@ internal sealed class LinuxScopeKernel
         if (primary is not null && post is not null) throw new AggregateException(primary, post); if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
     }
     [StructLayout(LayoutKind.Explicit, Size = 256)] struct StatFs { [FieldOffset(0)] public long Type; }
-    [StructLayout(LayoutKind.Explicit, Size = 256)] struct Statx { [FieldOffset(0)] public uint Mask; [FieldOffset(28)] public ushort Mode; [FieldOffset(32)] public ulong Inode; [FieldOffset(136)] public uint Major; [FieldOffset(140)] public uint Minor; [FieldOffset(144)] public ulong Mount; }
+    [StructLayout(LayoutKind.Explicit, Size = 256)] struct Statx { [FieldOffset(0)] public uint Mask; [FieldOffset(28)] public ushort Mode; [FieldOffset(32)] public ulong Inode; [FieldOffset(40)] public ulong Size; [FieldOffset(136)] public uint Major; [FieldOffset(140)] public uint Minor; [FieldOffset(144)] public ulong Mount; }
     [DllImport("libc", SetLastError = true)] static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
     [DllImport("libc", SetLastError = true)] static extern int openat(int fd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
     [DllImport("libc", SetLastError = true)] static extern int close(int fd);
+    [DllImport("libc", SetLastError = true)] static extern int fcntl(int fd, int command, int value);
     [DllImport("libc", SetLastError = true)] static extern nint read(int fd, [Out] byte[] buffer, nuint count);
     [DllImport("libc", SetLastError = true)] static extern nint write(int fd, byte[] buffer, nuint count);
     [DllImport("libc", SetLastError = true)] static extern nint readlinkat(int fd, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, [Out] byte[] buffer, nuint maximum);

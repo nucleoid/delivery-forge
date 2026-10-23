@@ -8,7 +8,7 @@ internal static class ScopedBoundedCapture
 {
     sealed class Frame { internal required ScopedCaptureBudget Budget; internal OwnedDuplexProcess? Session; internal Task? Output; internal readonly List<Exception> Failures = []; internal DuplexRetirement? Retirement; }
     static readonly List<Frame> Retained = [];
-    internal static async Task<BoundedCommandCaptureResult> ExecuteAsync(CommandInvocation invocation, TimeSpan localGrant, int quota, CancellationToken caller, IOwnedDuplexBudget actualParent, LinuxScopeSelection scope)
+    internal static async Task<BoundedCommandCaptureResult> ExecuteAsync(CommandInvocation invocation, TimeSpan localGrant, int quota, CancellationToken caller, IOwnedDuplexBudget actualParent, LinuxScopeSelection scope, LinuxScopeImage? exactNativeImage = null)
     {
         if (invocation.StandardInput is not null)
         {
@@ -22,7 +22,7 @@ internal static class ScopedBoundedCapture
         var began = DateTimeOffset.UtcNow; var budget = new ScopedCaptureBudget(actualParent, localGrant, caller); var frame = new Frame { Budget = budget }; lock (Retained) Retained.Add(frame); var stdout = new BoundedCaptureStream(quota); bool timedOut = false, cancelled = false; Exception? primary = null; DuplexNativeObservation native = new(false, false, uint.MaxValue, null, "Not entered.");
         try
         {
-            budget.CheckWork(); frame.Session = OwnedDuplexProcess.OpenCapture(invocation, budget, scope, quota); if (frame.Session.StartupFailure is Exception startup) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(startup).Throw();
+            budget.CheckWork(); frame.Session = OwnedDuplexProcess.OpenCapture(invocation, budget, scope, quota, exactNativeImage); if (frame.Session.StartupFailure is Exception startup) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(startup).Throw();
             frame.Session.CloseInputForCapture(); budget.CheckWork();
             // DrainAsync starts on these actual original streams and retains each
             // underlying operation in the SAME owner; no read-all/string parser.
