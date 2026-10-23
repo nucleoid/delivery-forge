@@ -21,6 +21,11 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
     internal StandaloneOwnerComposition(TrustedConfiguration config, string actualStoreRoot, LocalWorkerPaths workerPaths, ToolLifetime actualOriginal, StandaloneHostSelection selectedHost, AgentAdapterProfile actualConformedProfile, LinuxScopeSelection? selectedLinuxScope, AdmissionFile? actualConfigurationPin, StandaloneResources? actualResources, DeliveryForge.Scheduling.ResourceBudget? aggregateBudget, string? batchNodeId, InstalledHostAdmission.RuntimeTrust? runtimeTrust = null)
     {
         actualOriginal.Check(); original = actualOriginal; configuration = config;
+        // Refusal-only DATA admission, before store inspection or any owner/dispatch.
+        // The port still reserves and verifies the actual selected image at birth.
+        if (OperatingSystem.IsLinux() && selectedHost is { } linuxHost &&
+            (linuxHost.Bytes < 64 || linuxHost.Bytes > OwnedDuplexProcess.MaximumExactLinuxImageBytes))
+            throw new ToolUsageException("INCOMPLETE: Selected Linux worker image must fit the 64-byte through eleven-MiB exact-image profile before dispatch.");
         RequireFreshExecutionStore(actualStoreRoot, actualOriginal);
         if ((aggregateBudget is null) != (batchNodeId is null)) throw new ToolUsageException("Batch node binding and shared budget must be supplied together.");
         ArgumentNullException.ThrowIfNull(actualConformedProfile); ArgumentNullException.ThrowIfNull(selectedHost); ArgumentNullException.ThrowIfNull(config);

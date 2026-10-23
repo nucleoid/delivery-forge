@@ -16,6 +16,16 @@ images and scripts refuse; there is no ordinary-image fallback. This enforces
 image binding, not authentication, installed CLI compatibility, runtime-trust
 admission, independent review acceptance or protected Root/Parent authority.
 
+Composition rejects a selected Linux worker extent below 64 bytes or above the
+shared 11 MiB maximum before inspecting the execution store or constructing any
+coordinator/native port. This is refusal-only DATA admission: it debits no file
+credit and does not establish ELF validity or compatibility. The in-port reserve
+and actual image/scope proof remain mandatory. The fixed message identifies an
+INCOMPLETE capability; the existing standalone failure wire remains ERROR, not a
+new outcome mapping. The measured 296,885,960-byte Linux Codex image is unavailable
+under this unchanged profile. No positive installed Linux CLI compatibility or
+protected Linux runtime policy is enabled by an in-range extent.
+
 The child copies the selected executable into a sealed executable memfd. The
 original parent independently verifies the same descriptor, its kernel identity,
 complete bytes and seals before RELEASE. The child executes that descriptor with

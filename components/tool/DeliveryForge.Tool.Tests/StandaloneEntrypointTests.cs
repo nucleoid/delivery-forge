@@ -54,4 +54,59 @@ public sealed class StandaloneEntrypointTests
         }
         finally { File.Delete(path); }
     }
+
+    public static bool IsLinux => OperatingSystem.IsLinux();
+
+    // These are actual composition constructor calls with no scope/native owner.
+    // Empty profile DATA cannot promote capabilities; rejection must precede dispatch.
+    [Theory(Timeout = 30000, Skip = "Linux composition extent admission requires Linux.", SkipUnless = nameof(IsLinux))]
+    [InlineData("codex.cli", 63L)]
+    [InlineData("claude-code.cli", 63L)]
+    [InlineData("pi.cli", 63L)]
+    [InlineData("codex.cli", (long)DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1)]
+    [InlineData("claude-code.cli", (long)DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1)]
+    [InlineData("pi.cli", (long)DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1)]
+    public void Linux_composition_refuses_known_unsupported_extent_before_store_or_dispatch(string adapter, long bytes)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-composition-extent-" + Guid.NewGuid().ToString("N"));
+        var sentinel = new byte[] { 17, 29, 43 }; File.WriteAllBytes(root, sentinel);
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        try
+        {
+            var config = new TrustedConfiguration("fixture/repo", Path.GetTempPath(), "HEAD", root + "-git", Adapter: adapter, AdapterVersion: "extent-fixture");
+            var selected = new StandaloneHostSelection(root + "-absent-host", bytes, new string('a', 64), "extent-fixture");
+            var profile = new DeliveryForge.Execution.Host.AgentAdapterProfile(adapter, "extent-fixture", []);
+            var worker = new LocalWorkerPaths(root + "-worker", root + "-results", ["source.cs"], []);
+            // The store is deliberately a file: a later store inspection cannot
+            // accidentally satisfy the exact selected-extent refusal assertion.
+            var refusal = Assert.Throws<ToolUsageException>(() => new StandaloneOwnerComposition(config, root, worker, original, selected, profile));
+            Assert.Equal("INCOMPLETE: Selected Linux worker image must fit the 64-byte through eleven-MiB exact-image profile before dispatch.", refusal.Message);
+            Assert.Equal(sentinel, File.ReadAllBytes(root)); Assert.False(File.Exists(selected.Executable));
+            Assert.False(Directory.Exists(worker.Worktree)); Assert.False(Directory.Exists(worker.ResultDirectory));
+            Assert.False(original.HasRetainedUnknown); original.Check();
+        }
+        finally { File.Delete(root); }
+    }
+
+    [Theory(Timeout = 30000, Skip = "Linux composition extent admission requires Linux.", SkipUnless = nameof(IsLinux))]
+    [InlineData("codex.cli", 64L)]
+    [InlineData("claude-code.cli", 64L)]
+    [InlineData("pi.cli", 64L)]
+    [InlineData("codex.cli", (long)DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes)]
+    [InlineData("claude-code.cli", (long)DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes)]
+    [InlineData("pi.cli", (long)DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes)]
+    public void Linux_composition_inclusive_extent_boundaries_still_require_actual_scope(string adapter, long bytes)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-composition-boundary-" + Guid.NewGuid().ToString("N"));
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken);
+        var config = new TrustedConfiguration("fixture/repo", Path.GetTempPath(), "HEAD", root + "-absent-git", Adapter: adapter, AdapterVersion: "extent-fixture");
+        var selected = new StandaloneHostSelection(root + "-absent-host", bytes, new string('a', 64), "extent-fixture");
+        var profile = new DeliveryForge.Execution.Host.AgentAdapterProfile(adapter, "extent-fixture", []);
+        var worker = new LocalWorkerPaths(root + "-worker", root + "-results", ["source.cs"], []);
+        var refusal = Assert.Throws<ToolUsageException>(() => new StandaloneOwnerComposition(config, root, worker, original, selected, profile));
+        Assert.Equal("Actual selected Linux scope profile required before native use.", refusal.Message);
+        Assert.False(File.Exists(selected.Executable)); Assert.False(Directory.Exists(root));
+        Assert.False(Directory.Exists(worker.Worktree)); Assert.False(Directory.Exists(worker.ResultDirectory));
+        Assert.False(original.HasRetainedUnknown); original.Check();
+    }
 }

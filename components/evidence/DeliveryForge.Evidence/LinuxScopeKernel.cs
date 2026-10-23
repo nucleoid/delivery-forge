@@ -72,6 +72,31 @@ internal sealed class LinuxScopeKernel
         Check(cleanup); lock (gate) { if (actual.CloseEntered && (!continueUninvoked || actual.CloseInvoked)) throw new IOException("Original scope descriptor first-close already entered; no retry."); actual.CloseEntered = true; }
         try { Native("close-original-descriptor", () => { actual.CloseInvoked = true; var result = close(actual.Actual); actual.CloseReturned = true; actual.Closed = result == 0; return result; }, cleanup); } catch (Exception failure) { actual.Failure = failure; throw; }
     }
+    // Same original private first-close sequence; no descriptor or scope adoption.
+    Exception? CloseExactImage(OwnedFd fd, bool cleanupClose, Exception? post)
+    {
+        void CloseImage(bool cleanup, bool continueUninvoked = false)
+        {
+            // Notify the same actual enclosing owner before its cleanup
+            // view: a successful subordinate disposal otherwise stays WORK.
+            if (cleanup && original is IOwnedFailureCleanup failure) failure.BeginFailureCleanup();
+            Close(fd, cleanup, continueUninvoked);
+        }
+        try { CloseImage(cleanupClose); }
+        catch (Exception failure)
+        {
+            post = post is null ? failure : new AggregateException("Original image close admission and first disposition.", post, failure);
+            // CloseEntered also records an attempt whose Native precheck or
+            // row admission refused. Only an uninvoked syscall may continue
+            // its SAME first close in cleanup; never retry a native effect.
+            if (!cleanupClose && !fd.CloseInvoked)
+            {
+                try { CloseImage(true, continueUninvoked: true); }
+                catch (Exception cleanup) { post = new AggregateException("Original WORK close admission and SAME cleanup first-close.", post, cleanup); }
+            }
+        }
+        return post;
+    }
     static void Relative(string path) { if (path.Length is 0 or > 4096 || path.Contains('\0') || path.Contains('\\') || path.Split('/').Any(x => x is "" or "." or ".." || x.Any(char.IsControl))) throw new IOException("Closed original cgroup path required."); }
     internal static LinuxScopeKernel Open(string actualControlGroup, string actualUnit, IOwnedDuplexBudget original)
     {
@@ -201,26 +226,7 @@ internal sealed class LinuxScopeKernel
                 try { Check(false); }
                 catch (Exception admission) { post = admission; cleanupClose = true; }
             }
-            void CloseImage(bool cleanup, bool continueUninvoked = false)
-            {
-                // Notify the same actual enclosing owner before its cleanup
-                // view: a successful subordinate disposal otherwise stays WORK.
-                if (cleanup && original is IOwnedFailureCleanup failure) failure.BeginFailureCleanup();
-                Close(fd, cleanup, continueUninvoked);
-            }
-            try { CloseImage(cleanupClose); }
-            catch (Exception failure)
-            {
-                post = post is null ? failure : new AggregateException("Original image close admission and first disposition.", post, failure);
-                // CloseEntered also records an attempt whose Native precheck or
-                // row admission refused. Only an uninvoked syscall may continue
-                // its SAME first close in cleanup; never retry a native effect.
-                if (!cleanupClose && !fd.CloseInvoked)
-                {
-                    try { CloseImage(true, continueUninvoked: true); }
-                    catch (Exception cleanup) { post = new AggregateException("Original WORK close admission and SAME cleanup first-close.", post, cleanup); }
-                }
-            }
+            post = CloseExactImage(fd, cleanupClose, post);
             if (primary is not null && post is not null) throw new AggregateException("Actual exact image and original first-close.", primary, post);
             if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
             if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();

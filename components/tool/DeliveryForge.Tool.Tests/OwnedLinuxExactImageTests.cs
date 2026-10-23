@@ -67,6 +67,174 @@ public sealed class OwnedLinuxExactImageTests
         // missing-file error, proves the actual Port did not enter pathname hashing.
         Assert.False(File.Exists(absent)); Assert.False(Directory.Exists(absent));
     }
+    // Private-method controls over a descriptor opened BY the real kernel owner.
+    // No cgroup is bound, no process/descriptor is adopted, and KnownDisposed
+    // must remain false: these are first-close facts, never scope authority.
+    sealed class CloseFaultBudget(ToolLifetime parent) : DeliveryForge.Evidence.IOwnedDuplexBudget, DeliveryForge.Evidence.IOwnedFailureCleanup
+    {
+        int workTarget, workChecks;
+        internal readonly TimeoutException WorkRefusal = new("Injected actual close-admission WORK refusal.");
+        internal readonly IOException NotifyRefusal = new("Injected actual failure-cleanup notification refusal.");
+        internal bool ThrowNotification;
+        internal int Notifications;
+        internal Action? BeforeWorkRefusal;
+        internal void Arm(int target, Action witness) { workTarget = target; workChecks = 0; BeforeWorkRefusal = witness; }
+        public long OriginalStarted => parent.OriginalStarted;
+        public TimeSpan WholeLimit => parent.WholeLimit;
+        public TimeSpan WorkLimit => parent.WorkLimit;
+        public CancellationToken Token => parent.Token;
+        public TimeSpan CleanupRemaining => parent.CleanupRemaining;
+        public void CheckWork()
+        {
+            parent.CheckWork();
+            if (workTarget > 0 && ++workChecks == workTarget)
+            {
+                workTarget = 0; BeforeWorkRefusal?.Invoke(); throw WorkRefusal;
+            }
+        }
+        public void BeginFailureCleanup()
+        {
+            Notifications++;
+            if (ThrowNotification) throw NotifyRefusal; // deterministic BEFORE forwarding/effect.
+            parent.BeginFailureCleanup();
+        }
+    }
+    sealed class ActualCloseFrame : IDisposable
+    {
+        static readonly List<ActualCloseFrame> Retained = [];
+        const System.Reflection.BindingFlags Instance = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
+        static readonly Type KernelType = typeof(DeliveryForge.Evidence.OwnedDuplexProcess).Assembly.GetType("DeliveryForge.Evidence.LinuxScopeKernel", throwOnError: true)!;
+        static readonly Type FdType = KernelType.GetNestedType("OwnedFd", System.Reflection.BindingFlags.NonPublic)!;
+        static readonly System.Reflection.ConstructorInfo Constructor = KernelType.GetConstructor(Instance, null, [typeof(DeliveryForge.Evidence.IOwnedDuplexBudget)], null)!;
+        static readonly System.Reflection.MethodInfo OpenFd = KernelType.GetMethod("OpenFd", Instance, null, [typeof(string), typeof(int), typeof(bool), FdType], null)!;
+        static readonly System.Reflection.MethodInfo CloseTail = KernelType.GetMethod("CloseExactImage", Instance, null, [FdType, typeof(bool), typeof(Exception)], null)!;
+        static readonly System.Reflection.MethodInfo FirstClose = KernelType.GetMethod("Close", Instance, null, [FdType, typeof(bool), typeof(bool)], null)!;
+        internal readonly ToolLifetime Original = new(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        internal readonly CloseFaultBudget Budget;
+        internal readonly DeliveryForge.Evidence.IOwnedDuplexBudget ActualBudget;
+        readonly object kernel;
+        readonly object descriptor;
+        internal ActualCloseFrame(bool subordinate = false)
+        {
+            Budget = new(Original);
+            ActualBudget = subordinate ? new DeliveryForge.Evidence.OwnedWorkPhaseBudget(Budget) : Budget;
+            Assert.NotNull(Constructor); Assert.NotNull(OpenFd); Assert.NotNull(CloseTail); Assert.NotNull(FirstClose);
+            Assert.Equal(typeof(Exception), CloseTail.ReturnType);
+            kernel = Constructor.Invoke([ActualBudget]);
+            lock (Retained) Retained.Add(this);
+            try
+            {
+                // Actual open/register/pre/post path, not an incoming fd or
+                // manufactured cgroup/root identity. No namespace is modified.
+                descriptor = Invoke(OpenFd, "/dev/null", 0x20000 | 0x80000, false, null)!;
+                Assert.NotNull(descriptor); Assert.True(Unknown); Assert.False(KnownDisposed);
+            }
+            catch { Original.RetainUnknown(); throw; }
+        }
+        object? Invoke(System.Reflection.MethodInfo method, params object?[] arguments)
+        {
+            try { return method.Invoke(kernel, arguments); }
+            catch (System.Reflection.TargetInvocationException failure) when (failure.InnerException is not null)
+            {
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure.InnerException).Throw(); throw;
+            }
+        }
+        internal static object? Field(object actual, string name) => actual.GetType().GetField(name, Instance)!.GetValue(actual);
+        internal bool Entered => (bool)Field(descriptor, "CloseEntered")!;
+        internal bool Invoked => (bool)Field(descriptor, "CloseInvoked")!;
+        internal bool Closed => (bool)Field(descriptor, "Closed")!;
+        internal bool Unknown => (bool)KernelType.GetProperty("Unknown", Instance)!.GetValue(kernel)!;
+        internal bool KnownDisposed => (bool)KernelType.GetProperty("KnownDisposed", Instance)!.GetValue(kernel)!;
+        internal object[] CloseCalls => ((System.Collections.IEnumerable)KernelType.GetProperty("ActualCalls", Instance)!.GetValue(kernel)!).Cast<object>().Where(row => (string)Field(row, "Kind")! == "close-original-descriptor").ToArray();
+        internal Exception? Finish(bool cleanup) => (Exception?)Invoke(CloseTail, descriptor, cleanup, null);
+        internal void RefuseSecondClose() => _ = Invoke(FirstClose, descriptor, true, true);
+        public void Dispose()
+        {
+            try
+            {
+                // Only a test-injected notification BEFORE any native close
+                // may be disabled to finish this test's own first close. An
+                // entered close is NEVER resent, even if it failed/was unknown.
+                if (!Closed && !Invoked)
+                {
+                    Budget.ThrowNotification = false;
+                    var post = Finish(true);
+                    if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+                }
+                if (!Closed || Unknown) throw new IOException("Actual test-owned descriptor remains UNKNOWN; retain original.");
+                Original.Dispose(); lock (Retained) Retained.Remove(this);
+            }
+            catch { Original.RetainUnknown(); throw; }
+        }
+    }
+    [Theory(Timeout = 90000, Skip = "Actual kernel first-close controls require Linux.", SkipUnless = nameof(IsLinux))]
+    [InlineData(1)] // Close's check, BEFORE its attempt marker.
+    [InlineData(2)] // Native's precheck, AFTER attempt marker, BEFORE row/syscall.
+    public void Actual_kernel_uninvoked_first_close_continues_once_in_same_cleanup(int workCheck)
+    {
+        using var frame = new ActualCloseFrame();
+        var originalStarted = frame.Original.OriginalStarted;
+        bool? enteredAtRefusal = null, invokedAtRefusal = null;
+        frame.Budget.Arm(workCheck, () => { enteredAtRefusal = frame.Entered; invokedAtRefusal = frame.Invoked; });
+        var post = frame.Finish(false);
+        Assert.Same(frame.Budget.WorkRefusal, post);
+        Assert.Equal(workCheck == 2, enteredAtRefusal); Assert.False(invokedAtRefusal);
+        Assert.True(frame.Entered); Assert.True(frame.Invoked); Assert.True(frame.Closed);
+        Assert.False(frame.Unknown); Assert.False(frame.KnownDisposed);
+        Assert.Equal(1, frame.Budget.Notifications);
+        var close = Assert.Single(frame.CloseCalls);
+        Assert.True((bool)ActualCloseFrame.Field(close, "Entered")!); Assert.True((bool)ActualCloseFrame.Field(close, "Returned")!);
+        Assert.Equal(0L, ActualCloseFrame.Field(close, "Result"));
+        Assert.Null(ActualCloseFrame.Field(close, "Primary")); Assert.Null(ActualCloseFrame.Field(close, "Post"));
+        Assert.Throws<TimeoutException>(() => frame.Original.CheckWork());
+        Assert.Equal(originalStarted, frame.Original.OriginalStarted);
+        var repeat = Assert.Throws<IOException>(() => frame.RefuseSecondClose());
+        Assert.Equal("Original scope descriptor first-close already entered; no retry.", repeat.Message);
+        Assert.Single(frame.CloseCalls);
+    }
+    [Fact(Timeout = 90000, Skip = "Actual kernel first-close controls require Linux.", SkipUnless = nameof(IsLinux))]
+    public void Actual_kernel_invoked_close_post_failure_never_retries_the_syscall()
+    {
+        using var frame = new ActualCloseFrame();
+        bool? invokedAtRefusal = null, closedAtRefusal = null;
+        frame.Budget.Arm(3, () => { invokedAtRefusal = frame.Invoked; closedAtRefusal = frame.Closed; });
+        var post = frame.Finish(false);
+        Assert.Same(frame.Budget.WorkRefusal, post);
+        Assert.True(invokedAtRefusal); Assert.True(closedAtRefusal);
+        Assert.True(frame.Closed); Assert.False(frame.Unknown); Assert.False(frame.KnownDisposed);
+        Assert.Equal(0, frame.Budget.Notifications); // no fallback once close() entered.
+        var close = Assert.Single(frame.CloseCalls);
+        Assert.True((bool)ActualCloseFrame.Field(close, "Returned")!); Assert.Equal(0L, ActualCloseFrame.Field(close, "Result"));
+        Assert.Same(frame.Budget.WorkRefusal, ActualCloseFrame.Field(close, "Post"));
+        Assert.Equal("Original scope descriptor first-close already entered; no retry.", Assert.Throws<IOException>(() => frame.RefuseSecondClose()).Message);
+        Assert.Single(frame.CloseCalls);
+    }
+    [Fact(Timeout = 90000, Skip = "Actual kernel first-close controls require Linux.", SkipUnless = nameof(IsLinux))]
+    public void Actual_kernel_cleanup_notification_failure_retains_fd_and_subordinate_work_latch()
+    {
+        using var frame = new ActualCloseFrame(subordinate: true);
+        var phase = Assert.IsType<DeliveryForge.Evidence.OwnedWorkPhaseBudget>(frame.ActualBudget);
+        var started = phase.OriginalStarted;
+        frame.Budget.ThrowNotification = true;
+        var notification = frame.Finish(true);
+        Assert.Same(frame.Budget.NotifyRefusal, notification);
+        Assert.Equal(1, frame.Budget.Notifications); Assert.Empty(frame.CloseCalls);
+        Assert.False(frame.Entered); Assert.False(frame.Invoked); Assert.False(frame.Closed);
+        Assert.True(frame.Unknown); Assert.False(frame.KnownDisposed);
+        Assert.Equal("Actual subordinate failure closed enclosing work.", Assert.Throws<IOException>(() => phase.CheckWork()).Message);
+        Assert.Equal(frame.Original.OriginalStarted, phase.OriginalStarted);
+        Assert.Equal(frame.Original.WholeLimit, phase.WholeLimit); Assert.Equal(frame.Original.WorkLimit, phase.WorkLimit);
+        // Explicit test-only recovery of its OWN still-uninvoked first close;
+        // preserve the first failure above and never assert disposed scope.
+        frame.Budget.ThrowNotification = false;
+        Assert.Null(frame.Finish(true)); Assert.Same(frame.Budget.NotifyRefusal, notification);
+        Assert.True(frame.Closed); Assert.False(frame.Unknown); Assert.False(frame.KnownDisposed);
+        Assert.Equal(2, frame.Budget.Notifications); Assert.Single(frame.CloseCalls);
+        Assert.Equal(started, phase.OriginalStarted);
+        Assert.InRange(phase.CleanupRemaining, TimeSpan.FromTicks(1), phase.WholeLimit);
+        Assert.Equal("Actual subordinate failure closed enclosing work.", Assert.Throws<IOException>(() => phase.CheckWork()).Message);
+        Assert.Throws<TimeoutException>(() => frame.Original.CheckWork());
+    }
     static LinuxScopeSelection Scope(ToolLifetime original)
     {
         var path = Environment.GetEnvironmentVariable("DELIVERY_FORGE_LINUX_SCOPE_PROFILE") ?? throw new IOException("Actual current compiled Linux scope/gate profile required.");

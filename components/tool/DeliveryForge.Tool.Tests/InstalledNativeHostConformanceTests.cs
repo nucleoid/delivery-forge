@@ -103,7 +103,7 @@ public sealed class InstalledNativeHostConformanceTests
         internal void CaptureFailureAfterNativeSettlement()
         {
             _ = Original.CleanupRemaining;
-            if (FailureSnapshot is { Unknown: true }) throw new IOException("Original snapshot remains UNKNOWN; no replacement or second artifact attempt.");
+            if (FailureSnapshot is not null) throw new IOException("Original snapshot attempt remains retained; no replacement or second artifact attempt.");
             var native = Native ?? throw new IOException("No retained actual native owner for failure snapshot.");
             if (Retirement is not { KnownClosed: true, RootExited: true, ActiveProcesses: 0, DispositionReturned: true } || native.HasUnknownIo) throw new IOException("No failure snapshot before actual same-original native settlement.");
             var stderr = native.StandardError; _ = Original.CleanupRemaining;
@@ -166,6 +166,34 @@ public sealed class InstalledNativeHostConformanceTests
             }
             catch (Exception error) { Post = error; if (Failure is not null && !ReferenceEquals(Failure, error)) throw new AggregateException("Actual native primary and same-original failure disposition.", Failure, error); throw; } // original frame remains strongly retained, no retry/recursive cleanup.
         }
+    }
+    [Fact(Timeout = 30000)]
+    public void Failure_snapshot_retains_completed_first_writer_without_second_artifact_attempt()
+    {
+        var frame = new Frame();
+        var root = Directory.CreateTempSubdirectory("forge-native-first-snapshot-").FullName;
+        var path = Path.Combine(root, "codex-contract-stop-disposition.json");
+        var bytes = Encoding.UTF8.GetBytes("{\"Kind\":\"TestCompletedFirstSnapshot-v1\"}");
+        try
+        {
+            var first = new NativeFailureSnapshotWriter(frame.Original);
+            frame.FailureSnapshot = first;
+            first.Write(path, bytes);
+            Assert.True(first.AttemptEntered); Assert.True(first.AcquisitionReturned);
+            Assert.True(first.WriteReturned); Assert.True(first.FlushReturned);
+            Assert.True(first.CloseReturned); Assert.True(first.PostReturned); Assert.False(first.Unknown);
+            // Exercise the real capture boundary after a fully settled first
+            // writer. No native owner is needed: a second attempt must refuse
+            // before touching any native snapshot dependency or new artifact.
+            var refusal = Assert.Throws<IOException>(frame.CaptureFailureAfterNativeSettlement);
+            Assert.Equal("Original snapshot attempt remains retained; no replacement or second artifact attempt.", refusal.Message);
+            Assert.Same(first, frame.FailureSnapshot);
+            Assert.Equal(bytes, File.ReadAllBytes(path));
+            Assert.False(File.Exists(Path.Combine(root, "native-host-failure.json")));
+            Assert.Single(Directory.EnumerateFiles(root));
+        }
+        finally { frame.Original.Dispose(); }
+        // Retain this tiny test-owned artifact, including on assertion failure.
     }
     [Theory(Timeout = 700000)]
     [InlineData("codex.cli")]
