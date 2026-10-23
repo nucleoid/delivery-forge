@@ -472,6 +472,37 @@ public sealed class CompilerOfficialRecipeTests
     }
 
     [Theory]
+    [InlineData("command-host-exec")]
+    [InlineData("command-windows-apphost")]
+    [InlineData("command-unix-apphost")]
+    public void Closed_command_profile_DATA_preserves_existing_and_Unix_launcher_contracts(string profile)
+    {
+        using var fixture = new Fixture(); fixture.Change(profile);
+        var value = fixture.Decode();
+        Assert.Single(value.Request.Sources); Assert.Single(value.Request.References);
+        Assert.Equal(fixture.SourceBytes, value.Request.Sources[0].Bytes);
+        // Synthetic metadata and deliberately noncompiler bytes prove decoder
+        // compatibility only. Neither the new tag nor its launcher hash creates
+        // current task/loaded-image or exact-reemit authority.
+        Assert.False(CompilerExactReemit.Supports(value.Request, value.Common, value.CSharp, value.Assembly, value.Pdb, fixture.Files));
+    }
+
+    [Theory]
+    [InlineData("command-unknown", "producer-declared task/command profile")]
+    [InlineData("command-unproven", "producer-declared task/command profile")]
+    [InlineData("command-unix-no-launcher", "Unix apphost launcher identity")]
+    [InlineData("command-unix-foreign-launcher", "observed image roles")]
+    [InlineData("command-unix-duplicate-launcher", "observed image roles")]
+    public void Unknown_or_unbound_Unix_command_DATA_refuses_before_compiler_reads(string fault, string reason)
+    {
+        using var fixture = new Fixture(); _ = fixture.Decode(); fixture.Reads.Clear(); fixture.Change(fault);
+        var error = Assert.Throws<EvidenceWriteException>(() => fixture.Decode());
+        Assert.Contains(reason, error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(fixture.CommonLocator, fixture.Reads);
+        Assert.DoesNotContain(fixture.CSharpLocator, fixture.Reads);
+    }
+
+    [Theory]
     [InlineData("context", "selected context/build")]
     [InlineData("build", "foreign build context")]
     [InlineData("role", "typed argument role")]
@@ -674,6 +705,25 @@ public sealed class CompilerOfficialRecipeTests
         }
         internal void Change(string fault)
         {
+            if (fault.StartsWith("command-", StringComparison.Ordinal))
+            {
+                recipe["commandBinding"] = fault switch
+                {
+                    "command-host-exec" => "selected-host-exec-csc-arguments-match",
+                    "command-windows-apphost" => "selected-sdk-csc-exe-arguments-match",
+                    "command-unknown" => "selected-sdk-csc-foreign-arguments-match",
+                    "command-unproven" => "unproven",
+                    _ => "selected-sdk-csc-unix-apphost-arguments-match"
+                };
+                if (fault is "command-windows-apphost" or "command-unix-apphost" or "command-unix-foreign-launcher" or "command-unix-duplicate-launcher")
+                {
+                    var role = fault == "command-unix-foreign-launcher" ? "foreign-launcher" : "csc-launcher";
+                    recipe["images"]!.AsArray().Add(new JsonObject { ["role"] = role, ["length"] = 1, ["sha256"] = new string('b', 64) });
+                    if (fault == "command-unix-duplicate-launcher")
+                        recipe["images"]!.AsArray().Add(new JsonObject { ["role"] = role, ["length"] = 1, ["sha256"] = new string('b', 64) });
+                }
+            }
+
             if (fault == "context") selectedContext = "foreign";
             if (fault == "build") manifest["builds"]![0]!["contextId"] = "foreign";
             if (fault == "role") recipe["argumentRoles"]![2]!["inputOrdinal"] = 1;

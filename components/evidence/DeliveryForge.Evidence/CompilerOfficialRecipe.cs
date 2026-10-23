@@ -58,8 +58,10 @@ internal static class CompilerOfficialRecipe
         // The recipe has no independent task key or original non-scalar argv
         // spelling; these labels do not attest an actual task or currentness.
         _ = RawHash(recipe, "taskAssociationSha256");
-        Require(Text(recipe, "taskBinding") == "selected-sdk-core-target" && Text(recipe, "commandBinding") is
-            "selected-host-exec-csc-arguments-match" or "selected-sdk-csc-exe-arguments-match", "producer-declared task/command profile");
+        var commandBinding = Text(recipe, "commandBinding");
+        Require(Text(recipe, "taskBinding") == "selected-sdk-core-target" && commandBinding is
+            "selected-host-exec-csc-arguments-match" or "selected-sdk-csc-exe-arguments-match" or
+            "selected-sdk-csc-unix-apphost-arguments-match", "producer-declared task/command profile");
         Require(Strings(recipe, "unsupportedAttestations").SequenceEqual(new[]
         { "recipe.loadedCompilerAndTaskImageNotAttested", "recipe.runtimeLoadedImageNotAttested" }), "unsupported attestations");
         var baseDirectory = Absolute(recipe, "baseDirectory");
@@ -239,6 +241,8 @@ internal static class CompilerOfficialRecipe
         var imageRoles = new[] { "dotnet-host", "csc", "compiler-common", "compiler-csharp", "compiler-deps", "compiler-runtimeconfig", "sdk-csc-target", "sdk-csc-task" };
         Require(images.Select(i => Text(i, "role")).SequenceEqual(imageRoles) ||
             images.Select(i => Text(i, "role")).SequenceEqual(imageRoles.Append("csc-launcher")), "observed image roles");
+        Require(commandBinding != "selected-sdk-csc-unix-apphost-arguments-match" || images.Length == imageRoles.Length + 1,
+            "Unix apphost launcher identity");
         foreach (var image in images)
         {
             Shape(image, "role", "length", "sha256"); Require(Integer(image, "length") is > 0 and <= MaximumBytes, "observed image extent"); _ = RawHash(image, "sha256");
