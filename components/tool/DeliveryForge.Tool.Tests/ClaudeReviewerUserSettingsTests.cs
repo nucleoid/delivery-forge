@@ -1,4 +1,6 @@
 using System.Text;
+using System.Diagnostics;
+using DeliveryForge.Evidence;
 using System.Text.Json;
 using DeliveryForge.Tool.Claude;
 
@@ -219,13 +221,8 @@ public sealed class ClaudeReviewerUserSettingsTests
     [InlineData("resource")]
     public void Pinned_profile_actual_child_environment_refuses_missing_or_tampered_restrictions(string mutation)
     {
-        var environment = new Dictionary<string, string>(StringComparer.Ordinal)
-        {
-            ["DOTNET_PROCESSOR_COUNT"] = "2",
-            ["DOTNET_GCHeapHardLimit"] = "0x100000000",
-            ["CLAUDE_CODE_SDK_READS_SESSION_STATE"] = "1",
-            ["DISABLE_COMPACT"] = "1"
-        };
+        var environment = new Dictionary<string, string>(
+            ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(_ => "synthetic-os-value"), StringComparer.Ordinal);
         ClaudeIndependentReviewData.RequirePinnedSettingsReviewEnvironment(environment);
         switch (mutation)
         {
@@ -267,6 +264,10 @@ public sealed class ClaudeReviewerUserSettingsTests
         Assert.Equal(ClaudeIndependentReviewData.IsolatedObservationArguments(["--version"]), captured.ObservationArguments(["--version"]));
         Assert.Equal(ClaudeIndependentReviewData.IsolatedReviewArguments(5), captured.ReviewArguments(5));
         Assert.DoesNotContain("--restricted", captured.ReviewArguments(5));
+        var ordinary = new Dictionary<string, string> { ["ordinary-existing-key"] = "unchanged" };
+        var invocation = captured.Invocation("fixture-image", captured.ReviewArguments(5), root, ordinary);
+        Assert.True(invocation.InheritEnvironment); Assert.False(invocation.EnvironmentIsComplete);
+        Assert.Same(ordinary, invocation.Environment);
         Assert.Equal("{\"model\":\"configured-existing-default\"}", File.ReadAllText(Path.Combine(root, "settings.json")));
     }
     [Fact]
@@ -278,4 +279,57 @@ public sealed class ClaudeReviewerUserSettingsTests
         Assert.DoesNotContain("--bare", arguments); Assert.DoesNotContain("--model", arguments); Assert.DoesNotContain("--fallback-model", arguments);
         Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(ClaudeIndependentReviewData.IsolatedReviewArguments(5), observation: false));
     }
+    [Theory]
+    [InlineData("version")]
+    [InlineData("auth")]
+    [InlineData("review")]
+    public void Owner_observations_and_review_use_complete_actual_child_block_without_ambient_injection(string purpose)
+    {
+        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(_ => "synthetic-os-value");
+        var arguments = purpose == "review" ? ClaudeIndependentReviewData.RestrictedReviewArguments(5)
+            : ClaudeIndependentReviewData.RestrictedObservationArguments(purpose == "auth" ? ["auth", "status"] : ["--version"]);
+        var invocation = ClaudeIndependentReviewData.PinnedSettingsInvocation("fixture-image", arguments, "fixture-cwd", selected);
+        ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(invocation.Arguments, purpose != "review");
+        ClaudeIndependentReviewData.RequirePinnedSettingsInvocation(invocation, selected);
+        Assert.False(invocation.InheritEnvironment); Assert.True(invocation.EnvironmentIsComplete);
+        Assert.Same(selected, invocation.Environment);
+        // Exercise the real environment application on an unstarted child.
+        // No RuntimeTrust factory, global variable mutation or CLI is involved.
+        var child = new ProcessStartInfo(); child.Environment.Clear();
+        string[] ambient = ["ANTHROPIC_MODEL", "ANTHROPIC_CUSTOM_HEADERS", "CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CODE_SUBAGENT_MODEL", "NODE_OPTIONS", "BUN_OPTIONS", "HTTPS_PROXY", "MAX_THINKING_TOKENS", "CLAUDE_CONFIG_DIR", "PATH"];
+        foreach (var name in ambient) child.Environment[name] = "synthetic-must-not-reach-child";
+        CommandEnvironment.Complete(child, invocation);
+        Assert.Equal(selected.Count, child.Environment.Count);
+        foreach (var row in selected) Assert.Equal(row.Value, child.Environment[row.Key]);
+        foreach (var name in ambient) Assert.False(child.Environment.ContainsKey(name));
+        Assert.Equal("2", child.Environment["DOTNET_PROCESSOR_COUNT"]);
+        Assert.Equal("1", child.Environment["DISABLE_COMPACT"]);
+        var mutable = Assert.IsAssignableFrom<IDictionary<string, string>>(selected);
+        Assert.Throws<NotSupportedException>(() => mutable.Add("ANTHROPIC_MODEL", "synthetic"));
+    }
+    [Theory]
+    [InlineData("inherit")]
+    [InlineData("incomplete")]
+    [InlineData("replacement")]
+    public void Owner_actual_invocation_refuses_inheritance_flags_and_rebuilt_environment(string fault)
+    {
+        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(_ => "synthetic-os-value");
+        var actual = ClaudeIndependentReviewData.PinnedSettingsInvocation("fixture-image", ["--version"], "fixture-cwd", selected);
+        actual = fault switch
+        {
+            "inherit" => actual with { InheritEnvironment = true },
+            "incomplete" => actual with { EnvironmentIsComplete = false },
+            _ => actual with { Environment = new Dictionary<string, string>(selected, StringComparer.Ordinal) }
+        };
+        Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsInvocation(actual, selected));
+    }
+    [Fact]
+    public void Captured_owner_OS_values_cannot_drift_between_observations_and_review_birth()
+    {
+        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(_ => "synthetic-os-value");
+        ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(selected, _ => "synthetic-os-value");
+        var error = Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(selected, _ => "secret-sentinel-drift"));
+        Assert.DoesNotContain("secret-sentinel", error.ToString());
+    }
+
 }

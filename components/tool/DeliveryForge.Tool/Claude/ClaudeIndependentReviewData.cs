@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text.Json;
 using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Review;
+using DeliveryForge.Evidence;
 
 namespace DeliveryForge.Tool.Claude;
 
@@ -48,17 +49,66 @@ internal static class ClaudeIndependentReviewData
         throw new ToolUsageException("Selected reviewer settings require the exact isolated native invocation.");
     }
 
-    // Compare the actual explicit child overrides, not ambient/profile DATA.
-    // Compaction is disabled for the complete bounded review rather than
-    // assuming any model/context-dependent percentage is universally safe.
+    // The owner profile uses one complete, immutable OS-only child snapshot.
+    // Do not inherit PATH, shell/runtime injection, provider/model/auth, proxy or
+    // other CLI behaviour variables. Ordinary strict invocation is unchanged.
+    static readonly string[] PinnedOsNames = OperatingSystem.IsWindows()
+        ? ["SystemRoot", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "ALLUSERSPROFILE"]
+        : ["HOME", "TMPDIR", "TMP", "TEMP"];
+    static readonly string[] RequiredPinnedOsNames = OperatingSystem.IsWindows()
+        ? ["SystemRoot", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"] : ["HOME"];
+    const string EnvironmentRefusal = "Selected reviewer settings require the same complete bounded OS-only process environment.";
+    internal static IReadOnlyDictionary<string, string> CapturePinnedSettingsEnvironment(Func<string, string?> read)
+    {
+        var selected = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var name in PinnedOsNames)
+            if (read(name) is { } value) selected.Add(name, value);
+        selected.Add("DOTNET_PROCESSOR_COUNT", "2"); selected.Add("DOTNET_GCHeapHardLimit", "0x100000000");
+        selected.Add("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1"); selected.Add("DISABLE_COMPACT", "1");
+        RequirePinnedSettingsReviewEnvironment(selected);
+        return new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(selected);
+    }
     internal static void RequirePinnedSettingsReviewEnvironment(IReadOnlyDictionary<string, string>? environment)
     {
-        if (environment is null || environment.Count != 4 ||
-            !environment.TryGetValue("DOTNET_PROCESSOR_COUNT", out var processors) || processors != "2" ||
-            !environment.TryGetValue("DOTNET_GCHeapHardLimit", out var heap) || heap != "0x100000000" ||
-            !environment.TryGetValue("CLAUDE_CODE_SDK_READS_SESSION_STATE", out var session) || session != "1" ||
-            !environment.TryGetValue("DISABLE_COMPACT", out var compact) || compact != "1")
-            throw new ToolUsageException("Selected reviewer settings require the exact bounded noncompacting process environment.");
+        if (environment is null || environment.Count > PinnedOsNames.Length + 4) throw new ToolUsageException(EnvironmentRefusal);
+        var selected = new Dictionary<string, string>(StringComparer.Ordinal); var total = 0;
+        foreach (var row in environment)
+        {
+            if (row.Key is null || row.Value is null || row.Value.Length is < 1 or > 4096 || row.Value.Any(char.IsControl) ||
+                row.Key is not ("DOTNET_PROCESSOR_COUNT" or "DOTNET_GCHeapHardLimit" or "CLAUDE_CODE_SDK_READS_SESSION_STATE" or "DISABLE_COMPACT") && !PinnedOsNames.Contains(row.Key, StringComparer.Ordinal) ||
+                !selected.TryAdd(row.Key, row.Value) || total > 16384 - row.Key.Length - row.Value.Length)
+                throw new ToolUsageException(EnvironmentRefusal);
+            total += row.Key.Length + row.Value.Length;
+        }
+        if (selected.Count != environment.Count || RequiredPinnedOsNames.Any(name => !selected.ContainsKey(name)) ||
+            !selected.TryGetValue("DOTNET_PROCESSOR_COUNT", out var processors) || processors != "2" ||
+            !selected.TryGetValue("DOTNET_GCHeapHardLimit", out var heap) || heap != "0x100000000" ||
+            !selected.TryGetValue("CLAUDE_CODE_SDK_READS_SESSION_STATE", out var session) || session != "1" ||
+            !selected.TryGetValue("DISABLE_COMPACT", out var compact) || compact != "1")
+            throw new ToolUsageException(EnvironmentRefusal);
+    }
+    internal static CommandInvocation PinnedSettingsInvocation(string image, IReadOnlyList<string> arguments,
+        string workingDirectory, IReadOnlyDictionary<string, string> selected)
+    {
+        RequirePinnedSettingsReviewEnvironment(selected);
+        return new(image, Array.AsReadOnly(arguments.ToArray()), workingDirectory, selected, InheritEnvironment: false)
+        { EnvironmentIsComplete = true };
+    }
+    internal static void RequirePinnedSettingsInvocation(CommandInvocation actual, IReadOnlyDictionary<string, string> selected)
+    {
+        if (actual.InheritEnvironment || !actual.EnvironmentIsComplete || !ReferenceEquals(actual.Environment, selected))
+            throw new ToolUsageException(EnvironmentRefusal);
+        RequirePinnedSettingsReviewEnvironment(actual.Environment);
+    }
+    internal static void RequirePinnedSettingsEnvironmentCurrent(IReadOnlyDictionary<string, string> selected, Func<string, string?> read)
+    {
+        RequirePinnedSettingsReviewEnvironment(selected);
+        foreach (var name in PinnedOsNames)
+        {
+            var present = selected.TryGetValue(name, out var captured); var current = read(name);
+            if (present != (current is not null) || present && !string.Equals(captured, current, StringComparison.Ordinal))
+                throw new ToolUsageException(EnvironmentRefusal);
+        }
     }
 
     internal static readonly string[] ProviderOverrides = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_SIMPLE"];

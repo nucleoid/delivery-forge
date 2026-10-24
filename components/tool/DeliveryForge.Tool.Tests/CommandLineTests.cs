@@ -130,4 +130,36 @@ public sealed class CommandLineTests
         }
         System.Collections.IEnumerator System.Collections.IEnumerable.GetEnumerator() => GetEnumerator();
     }
+    [Theory]
+    [InlineData(1200, 30, 22.5)]
+    [InlineData(15, 15, 11.25)]
+    public async Task Execute_preserves_an_already_narrower_original_and_still_applies_a_lower_configured_limit(int configuredSeconds, int expectedWholeSeconds, double expectedWorkSeconds)
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "forge-owned-limit-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory); var configPath = Path.Combine(directory, "config.json");
+        var git = Path.Combine(directory, "must-not-start-git.exe");
+        var config = new TrustedConfiguration("owner/repo", directory, "main", git, OperationSeconds: configuredSeconds);
+        File.WriteAllBytes(configPath, System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(config, BoundedFiles.Json));
+        try
+        {
+            using var original = new ToolLifetime(TimeSpan.FromSeconds(1200), TestContext.Current.CancellationToken);
+            var started = original.OriginalStarted; var token = original.Token;
+            original.Restrict(TimeSpan.FromSeconds(30)); // a containing owner's earlier proof endpoint
+            var priorWhole = original.WholeLimit; var priorWork = original.WorkLimit;
+            var application = new ToolApplication(actualOriginal: original);
+            var result = await application.ExecuteAsync(CommandLine.Parse(["plan", "--config", configPath,
+                "--repo", directory, "--issue", "owner/repo#17"]), original.Token);
+            // The intended local no-connector result occurs before Git/native
+            // dispatch. No fake RuntimeTrust or live owner is constructed.
+            Assert.Equal("INCOMPLETE", result.Outcome); Assert.Equal("ISSUE_CONNECTOR_UNAVAILABLE", result.Code);
+            Assert.Equal(started, original.OriginalStarted); Assert.Equal(token, original.Token);
+            Assert.Equal(TimeSpan.FromSeconds(expectedWholeSeconds), original.WholeLimit);
+            Assert.Equal(TimeSpan.FromSeconds(expectedWorkSeconds), original.WorkLimit);
+            Assert.True(original.WholeLimit <= priorWhole); Assert.True(original.WorkLimit <= priorWork);
+            Assert.False(original.HasRetainedUnknown); Assert.False(original.HasExplicitUnknown); original.Check();
+            Assert.Empty(application.RetainedExternalCalls); Assert.False(File.Exists(git));
+            Assert.Equal(new[] { configPath }, Directory.GetFileSystemEntries(directory));
+        }
+        finally { File.Delete(configPath); Directory.Delete(directory); }
+    }
 }

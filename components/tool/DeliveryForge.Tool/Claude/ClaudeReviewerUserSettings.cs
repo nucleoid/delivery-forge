@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using DeliveryForge.Contracts.Serialization;
+using DeliveryForge.Evidence;
 
 namespace DeliveryForge.Tool.Claude;
 
@@ -16,6 +17,7 @@ internal sealed class ClaudeReviewerUserSettings
     readonly long bytes;
     readonly string? digest;
     readonly bool ownerSelected;
+    readonly IReadOnlyDictionary<string, string>? childEnvironment;
     const int MaximumBytes = 65536;
     // Exact known personal profile only. --restricted does not read this user
     // settings source; retain its complete pin without importing arbitrary new
@@ -43,6 +45,15 @@ internal sealed class ClaudeReviewerUserSettings
         {
             if (ownerSelected) RequireOwnerSelectedSettings(current); else RequireSafeSettings(current);
             bytes = current.LongLength; digest = BoundedFiles.Sha(current);
+        }
+        if (ownerSelected)
+        {
+            // No CLAUDE_CONFIG_DIR is inherited. Refuse a custom auth/config
+            // selection instead of silently switching its existing store.
+            var standard = Normalize(System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude"));
+            if (!string.Equals(directory, standard, PathComparison))
+                throw new ToolUsageException("Owner-selected reviewer requires its existing standard configuration directory; no authentication selection is changed.");
+            childEnvironment = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(Environment.GetEnvironmentVariable);
         }
         original.Check();
     }
@@ -197,13 +208,18 @@ internal sealed class ClaudeReviewerUserSettings
     internal string[] ReviewArguments(decimal maximumCost) => ownerSelected
         ? ClaudeIndependentReviewData.RestrictedReviewArguments(maximumCost)
         : ClaudeIndependentReviewData.IsolatedReviewArguments(maximumCost);
-    internal void RequireIsolationArguments(IReadOnlyList<string> arguments, bool observation, IReadOnlyDictionary<string, string>? actualEnvironment = null)
+    internal CommandInvocation Invocation(string image, IReadOnlyList<string> arguments, string workingDirectory,
+        IReadOnlyDictionary<string, string>? ordinaryEnvironment = null) => childEnvironment is not null
+            ? ClaudeIndependentReviewData.PinnedSettingsInvocation(image, arguments, workingDirectory, childEnvironment)
+            : new(image, arguments, workingDirectory, ordinaryEnvironment);
+    internal void RequireIsolationArguments(CommandInvocation actual, bool observation)
     {
         original.Check();
         if (ownerSelected)
         {
-            ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(arguments, observation);
-            if (!observation) ClaudeIndependentReviewData.RequirePinnedSettingsReviewEnvironment(actualEnvironment);
+            ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(actual.Arguments, observation);
+            ClaudeIndependentReviewData.RequirePinnedSettingsInvocation(actual, childEnvironment!);
+            ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(childEnvironment!, Environment.GetEnvironmentVariable);
         }
         original.Check();
     }

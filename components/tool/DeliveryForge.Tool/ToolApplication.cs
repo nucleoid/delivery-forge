@@ -58,7 +58,8 @@ public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssue
                 config = retainedQualityConfiguration;
             }
         }
-        life.Restrict(TimeSpan.FromSeconds(config.OperationSeconds));
+        var operationLimit = TimeSpan.FromSeconds(config.OperationSeconds);
+        if (operationLimit < life.WholeLimit) life.Restrict(operationLimit);
         if (config.PolicyFile is string policyPath)
         {
             var policy = ContractValidator.ParseAndValidate(BoundedFiles.Read(policyPath, life)); life.Check();

@@ -147,25 +147,27 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         ToolResult.Incomplete("INDEPENDENT_REVIEW_BUDGET", decision.Reason, new { runId, decision.Findings });
     async Task<BoundedCommandCaptureResult> Observe(string[] arguments)
     {
-        Current(); VerifyImage(); var row = new Observation(); BoundedCommandCaptureResult capture;
+        Current(); VerifyImage();
+        var nativeArguments = actualUserSettings.ObservationArguments(arguments);
+        var nativeInvocation = actualUserSettings.Invocation(selection.Image.Path, nativeArguments, actualWorkingDirectory.Path);
+        actualUserSettings.RequireIsolationArguments(nativeInvocation, observation: true);
+        var row = new Observation(); BoundedCommandCaptureResult capture;
         lock (tasks) { if (stopping) throw new OperationCanceledException(); observations.Add(row); }
         try
         {
             // Deterministic no-birth refusals happen before asynchronous effect
             // enrollment. Keep the same checks inside the atomic birth delegate:
             // a racing refusal there remains conservatively uncertain.
-            var nativeArguments = actualUserSettings.ObservationArguments(arguments);
-            actualUserSettings.RequireIsolationArguments(nativeArguments, observation: true);
+            actualUserSettings.RequireIsolationArguments(nativeInvocation, observation: true);
             PrecheckObservationInputs(parent, runId, actualWorkingDirectory, Remaining(phaseStarted));
             capture = await parent.EnterAsync(runId, () =>
             {
                 var left = Remaining(phaseStarted); if (left > TimeSpan.FromSeconds(30)) left = TimeSpan.FromSeconds(30);
-                actualUserSettings.RequireIsolationArguments(nativeArguments, observation: true);
+                actualUserSettings.RequireIsolationArguments(nativeInvocation, observation: true);
                 actualWorkingDirectory.Check();
                 if (OperatingSystem.IsLinux()) BoundedFiles.ReserveExactLinuxImageReads(selection.Image, original);
                 lock (tasks) { Current(); row.Entered = true; }
-                var actual = executor.ExecuteBoundedCaptureAsync(new(selection.Image.Path,
-                    nativeArguments, actualWorkingDirectory.Path),
+                var actual = executor.ExecuteBoundedCaptureAsync(nativeInvocation,
                     left, 65536, phaseCancellation!.Token, new OwnedWorkPhaseBudget(original), linuxScope, OperatingSystem.IsLinux() ? new LinuxScopeImage(selection.Image.Path, selection.Image.Bytes, selection.Image.Sha256) : null);
                 lock (tasks) { row.Actual = Keep(actual); row.Returned = true; }
                 return actual;
@@ -309,22 +311,22 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             var acceptance = new ReviewAcceptanceContext(root.RunIdentity, requestId, root.PlanIdentity, root.EvidencePolicyIdentity,
                 root.ReviewPolicyContentIdentity, root.ReviewPolicySourceRevision, root.ReviewPolicyAuthorityKind, root.SourceAuthorityIdentity,
                 root.SourceRoot, root.ProtectedBaseCommit, root.ProtectedObjectViewIdentity);
-            var registration = bootstrap.Host.RegisterRequest(requestId, request, acceptance);
-            var promptId = Guid.NewGuid().ToString(); state = new(promptId, prompt);
             var inherited = Environment.GetEnvironmentVariable("CLAUDE_CODE_SDK_READS_SESSION_STATE");
             if (inherited is not null && inherited != "1") throw new ToolUsageException("Existing session-state selection differs; no settings override.");
             var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["CLAUDE_CODE_SDK_READS_SESSION_STATE"] = "1", ["DISABLE_COMPACT"] = "1" };
             var nativeArguments = actualUserSettings.ReviewArguments(bootstrap.Policy.Budget.MaximumCost);
-            actualUserSettings.RequireIsolationArguments(nativeArguments, observation: false, actualEnvironment: environment);
+            var nativeInvocation = actualUserSettings.Invocation(selection.Image.Path, nativeArguments, actualWorkingDirectory.Path, environment);
+            actualUserSettings.RequireIsolationArguments(nativeInvocation, observation: false);
+            var registration = bootstrap.Host.RegisterRequest(requestId, request, acceptance);
+            var promptId = Guid.NewGuid().ToString(); state = new(promptId, prompt);
             VerifyImage(); verifyProtectedConfiguration();
             process = parent.EnterSynchronous(runId, () =>
             {
-                actualUserSettings.RequireIsolationArguments(nativeArguments, observation: false, actualEnvironment: environment);
+                actualUserSettings.RequireIsolationArguments(nativeInvocation, observation: false);
                 actualWorkingDirectory.Check();
                 if (OperatingSystem.IsLinux()) BoundedFiles.ReserveExactLinuxImageReads(selection.Image, original);
                 lock (tasks) { _ = Remaining(started); nativeBirthEntered = true; }
-                var actual = OwnedDuplexProcess.Open(new(selection.Image.Path,
-                    nativeArguments, actualWorkingDirectory.Path, environment), original, linuxScope, OperatingSystem.IsLinux() ? new LinuxScopeImage(selection.Image.Path, selection.Image.Bytes, selection.Image.Sha256) : null);
+                var actual = OwnedDuplexProcess.Open(nativeInvocation, original, linuxScope, OperatingSystem.IsLinux() ? new LinuxScopeImage(selection.Image.Path, selection.Image.Bytes, selection.Image.Sha256) : null);
                 lock (tasks) { process = actual; nativeBirthReturned = true; }
                 return actual;
             });
