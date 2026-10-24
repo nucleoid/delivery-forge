@@ -73,6 +73,18 @@ internal sealed class LinuxCommandScope
             var available = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
             if (Environment.ProcessorCount != 2 || available <= 0 || available > 4294967296L)
                 throw new IOException("Actual prebirth managed CPU/heap resource profile is not established.");
+            if (selected.RestrictiveChildPolicy is not null)
+            {
+                // The selected ancestor must contain descendants, not their
+                // owner. Observe only this caller before any library/bus/birth.
+                if (selected.RestrictiveChildPolicy != "nnp-user1000-ancestor-v3") throw new IOException("Only explicit exact-image unprivileged child policy is supported.");
+                var membership = ReadText("/proc/self/cgroup", 8192, false);
+                if (!membership.StartsWith("0::/", StringComparison.Ordinal) || !membership.EndsWith('\n') || membership.Count(c => c == '\n') != 1 || membership[..^1].Any(char.IsControl)) throw new IOException("Complete actual owner unified-cgroup membership required before selected-policy birth.");
+                var ownerGroup = membership[3..^1];
+                if (ownerGroup != "/" && ownerGroup[1..].Split('/').Any(component => component is "" or "." or "..")) throw new IOException("Canonical actual owner unified-cgroup membership required.");
+                const string ancestor = "/user.slice/user-1000.slice";
+                if (ownerGroup == ancestor || ownerGroup.StartsWith(ancestor + "/", StringComparison.Ordinal)) throw new IOException("Selected-policy owner must be outside the constrained user-1000.slice ancestor; an independently selected outside-owner launch is required.");
+            }
             // The original caller already owns this process wrapper. It is not
             // an adopted child; observe its real inherited two-bit CPU mask.
             Process? caller = null; var borrowed = Enroll("actual-parent-affinity", false);
@@ -120,9 +132,12 @@ internal sealed class LinuxCommandScope
             // https://www.freedesktop.org/software/systemd/man/255/org.freedesktop.systemd1.html#Scope%20Unit%20Objects
             controlGroup = bus.StringProperty(unitPath, "org.freedesktop.systemd1.Scope", "ControlGroup", false);
             if (controlGroup != observedGroup || ProcStart(false) != procStart) throw new IOException("Actual private group/generation does not join the original creator.");
-            referenceEntered = true; bus.RefUnit(unit); referenceReturned = true; kernel = LinuxScopeKernel.Open(controlGroup, unit, original); kernel.RequireLimits(cpus!, false, selected.RestrictiveChildPolicy is not null && exactImage is not null); if (selected.RestrictiveChildPolicy is not null) kernel.RequireConformanceAncestor(cpus!);
+            referenceEntered = true; bus.RefUnit(unit); referenceReturned = true; kernel = LinuxScopeKernel.Open(controlGroup, unit, original);
+            // The returned kernel owner controls this exact group even when a
+            // subsequent policy/READY check refuses. Release remains separate.
+            bound = true;
+            kernel.RequireLimits(cpus!, false, selected.RestrictiveChildPolicy is not null && exactImage is not null); if (selected.RestrictiveChildPolicy is not null) kernel.RequireConformanceAncestor(cpus!);
             if (!invocation.AsSpan().SequenceEqual(bus.InvocationId(unitPath, false)) || ProcStart(false) != procStart || Observe("actual-root-exit-at-binding", () => process.HasExited) || Observe("actual-original-root-affinity", () => process.ProcessorAffinity.ToInt64()) != actualMask) throw new IOException("Actual private unit/root generation/affinity changed.");
-            bound = true; // Actual group is controlled even if READY later refuses.
             var bytes = new List<byte>(); var one = new byte[1]; while (true) { if (bytes.Count >= 512) throw new IOException("Complete private birth READY exceeded fixed width."); var n = Io("actual-birth-ready-read", () => output.ReadAsync(one, 0, 1, original.Token)); if (n == 0) throw new IOException("Actual birth ended before complete READY."); if (one[0] == 10) break; bytes.Add(one[0]); }
             var ready = Encoding.ASCII.GetString(bytes.ToArray()).Split('|'); if (ready.Length != (exactImage is null ? 5 : 12) || ready[0] != "DF_SCOPE_READY" || ready[1] != process.Id.ToString(CultureInfo.InvariantCulture) || ready[2] != original.OriginalStarted.ToString(CultureInfo.InvariantCulture) || ready[3] != ticket || ready[4] != Stopwatch.Frequency.ToString(CultureInfo.InvariantCulture)) throw new IOException("Actual private birth identity/clock differs.");
             // The birth barrier keeps this actual kernel process on the gate

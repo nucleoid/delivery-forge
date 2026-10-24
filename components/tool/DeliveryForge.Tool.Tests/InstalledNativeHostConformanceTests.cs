@@ -15,6 +15,7 @@ namespace DeliveryForge.Tool.Tests;
 // Missing bindings fail; no environment/capability skip produces a PASS.
 public sealed class InstalledNativeHostConformanceTests
 {
+    public static bool IsLinux => OperatingSystem.IsLinux();
     [Theory]
     [InlineData(null)]
     [InlineData("nnp-user1000-ancestor-v3")]
@@ -36,6 +37,28 @@ public sealed class InstalledNativeHostConformanceTests
         Assert.NotNull(legacyRoundTrip); Assert.Null(legacyRoundTrip.RestrictiveChildPolicy);
     }
 
+    [Theory(Timeout = 30000, Skip = "Actual no-follow statx guard requires Linux.", SkipUnless = nameof(IsLinux))]
+    [InlineData("absent")]
+    [InlineData("helper")]
+    [InlineData("policy")]
+    [InlineData("dangling-helper")]
+    [InlineData("dangling-policy")]
+    public void Non_helper_guard_refuses_actual_ambient_entries_without_following_links(string entry)
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var root = Directory.CreateTempSubdirectory("forge-helper-absence-").FullName;
+        var helper = Path.Combine(root, "helper"); var policy = Path.Combine(root, "policy");
+        var selected = entry.Contains("policy", StringComparison.Ordinal) ? policy : helper;
+        if (entry.StartsWith("dangling-", StringComparison.Ordinal)) File.CreateSymbolicLink(selected, Path.Combine(root, "missing-target"));
+        else if (entry != "absent") File.WriteAllText(selected, "retained guard DATA");
+        if (entry == "absent") HelperGuard.RequireAbsent(original, helper, policy);
+        else
+        {
+            var refusal = Assert.Throws<IOException>(() => HelperGuard.RequireAbsent(original, helper, policy));
+            Assert.Contains("requires absent helper and ancestor policy", refusal.Message);
+        }
+        // Retain entries/links on success and failure; no installed root mutation.
+    }
     public sealed record Fixture(string Kind, string Adapter, StandaloneHostSelection Host, string Git, string ParentCheckout, string Worktree, string ResultDirectory, string BaseCommit, string Repository, string CaseKind, AdmissionFile PlanBundle, PlanImportExpectations Expectations, string MutableReference, string RelativePath, string ExpectedText, AdmissionFile? LinuxScopeProfile, bool ObserveRuntimeTrustRoute = false, OwnerTrustedLinuxHelper? LinuxOwnerTrustedHelper = null);
     // Explicit conformance-only DATA selection; never a RuntimeTrust/native authority issuer.
     public sealed record OwnerTrustedLinuxHelper(AdmissionFile OwnerDecision, AdmissionFile CompletedReceipt, string PreparedBootId, AdmissionFile FinalDisposition);
@@ -67,6 +90,20 @@ public sealed class InstalledNativeHostConformanceTests
             if (returned != 0 || (row.Mask & 0x3df) != 0x3df) throw new IOException("Complete actual no-follow helper/policy metadata unavailable.");
             return row;
         }
+        internal static void RequireAbsent(ToolLifetime original, string helperPath, string policyPath)
+        {
+            // Two no-follow observations only: existing files, dangling links
+            // and unexpected lookup errors all refuse before any image birth.
+            foreach (var path in new[] { helperPath, policyPath })
+            {
+                original.Check();
+                var returned = statx(-100, path, 0x100, 0x7ff, out _);
+                var error = Marshal.GetLastPInvokeError();
+                original.Check();
+                if (returned != -1 || error != 2) throw new IOException("Non-helper Linux fixture requires absent helper and ancestor policy; rollback is required before this fixture.");
+            }
+        }
+        internal static void RequireAmbientAbsent(ToolLifetime original) => RequireAbsent(original, PathName, PolicyPath);
         static void RootDirectory(Statx row)
         {
             if ((row.Mode & 0xf000) != 0x4000 || row.Uid != 0 || row.Gid != 0 || (row.Mode & 0x12) != 0) throw new IOException("Root-owned non-writable selected ancestor required.");
@@ -104,13 +141,24 @@ public sealed class InstalledNativeHostConformanceTests
             if (provision.Kind != "ActualRootOwnedLinuxCodexHelperProvision-v1" || provision.VmId != Vm || provision.HelperPath != PathName || provision.HelperBytes != Extent || provision.HelperSha256 != Hash || provision.Uid != 0 || provision.Gid != 0 || provision.Mode != 365 || provision.Inode == 0 || provision.Links != 2) throw new IOException("Exact selected actual helper provision DATA required.");
             if (!Guid.TryParseExact(selectedHelper.PreparedBootId, "D", out _)) throw new IOException("Fresh actual prepared guest boot required.");
             var buffer = new byte[65]; var count = 0;
+            Exception? primary = null, close = null, post = null;
             try
             {
                 original.Check(); bootStream = new("/proc/sys/kernel/random/boot_id", FileMode.Open, FileAccess.Read, FileShare.Read); original.Check();
                 while (count < buffer.Length) { original.Check(); var n = bootStream.Read(buffer, count, buffer.Length - count); original.Check(); if (n == 0) break; count += n; }
                 if (count != 37 || Encoding.ASCII.GetString(buffer, 0, count) != selectedHelper.PreparedBootId + "\n") throw new IOException("Actual current guest boot differs from prepared helper selection.");
             }
-            finally { if (bootStream is not null) { bootCloseEntered = true; bootStream.Dispose(); bootClosed = true; original.Check(); } }
+            catch (Exception error) { primary = error; }
+            if (bootStream is not null)
+            {
+                // First-close is attempted despite a primary failure and never retried.
+                try { bootCloseEntered = true; bootStream.Dispose(); bootClosed = true; }
+                catch (Exception error) { close = error; }
+            }
+            try { original.Check(); } catch (Exception error) { post = error; }
+            var failures = new[] { primary, close, post }.OfType<Exception>().ToArray();
+            if (failures.Length > 1) throw new AggregateException("Original boot observation, first-close and post-check failures.", failures);
+            if (failures.Length == 1) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failures[0]).Throw();
             CheckPolicy(); CheckMetadata();
             // Exactly ONE prelaunch helper pass; successful completion adds the
             // second pass below, both on the SAME original file credit.
@@ -188,6 +236,7 @@ public sealed class InstalledNativeHostConformanceTests
                 frame.helper = new(frame.Original);
             }
             else if (f.LinuxOwnerTrustedHelper is not null) throw new IOException("Helper trust selection is only the explicit measured Linux Codex fixture.");
+            if (OperatingSystem.IsLinux() && frame.helper is null) HelperGuard.RequireAmbientAbsent(frame.Original);
             BoundedFiles.Plain(f.ParentCheckout, true); BoundedFiles.Plain(f.Worktree, true); BoundedFiles.Plain(f.ResultDirectory, true); BoundedFiles.Separate(f.ParentCheckout, f.Worktree); BoundedFiles.Separate(f.Worktree, f.ResultDirectory);
             if (Directory.Exists(f.Worktree) || File.Exists(f.Worktree))
                 throw new IOException("Native conformance v2 requires the exact independently admitted absent destination; existing metadata cannot be adopted.");

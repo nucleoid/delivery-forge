@@ -67,8 +67,12 @@ image therefore debits 1,187,543,844 bytes and five operations before nonimage
 inputs. Actual selected inputs and remaining credit must still fit; this is no
 universal pipeline or batch-fit guarantee. No new quality-receipt count limit is
 introduced. Native memfd writes and private operator fixture/provisioning writes
-are separate explicitly bounded domains, not Tool WriteNew credit. Source cache,
-memfd, loader and descendants all remain under the same 4 GiB scope memory cap.
+are separate explicitly bounded domains, not Tool WriteNew credit. For the
+default/null policy, source cache, memfd, loader and descendants share the 4 GiB
+scope memory cap. For the selected restrictive exact child, the same components
+share its total 2 GiB cap, including the 296,885,960-byte memfd and its page cache.
+Non-helper Linux fixtures, including STOP, refuse an ambient root helper or
+ancestor drop-in; they require the separately selected rollback first.
 
 The measured official Linux Claude Code 2.1.306 image is 290,532,720 bytes,
 SHA-256 `520bc6c1f40af466bd03a278b5ae1af1a2938bc7de5b9e5cb15526da20d71cfe`.
@@ -191,3 +195,15 @@ original indexed HostExchangeItems bytes must match exactly afterward. Foreign
 values stay opaque and are not exported. A failed/missing FINAL, unknown Add or
 Remove job, or changed host frame blocks acceptance and preserves uncertainty.
 Existing daemon refresh latency and actual guest fit remain unproved.
+
+For the optional restrictive policy, the actual owner must be outside
+`/user.slice/user-1000.slice` and its descendants. Before loading the library,
+opening the bus or creating the birth root, the parent reads its own complete
+unified-cgroup membership under the original bounded 8 KiB read and refuses an
+in-ancestor, malformed or unknown membership. The default/null policy is unchanged.
+This check establishes a refusal boundary, not owner placement. The current
+prepared operator does not provide the required privileged outside-ancestor owner
+launch; that remains a concrete owner-policy and implementation dependency.
+No separate CPU, memory or process domains are summed into a claimed global
+128-task guarantee. This proposal changes no resource limit, service, account,
+authentication or VM configuration.
