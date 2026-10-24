@@ -31,7 +31,7 @@ internal sealed class InstalledReviewHost : IDisposable
     DeliveryForge.Contracts.Validation.ValidatedContract? protectedEvidencePolicy;
     bool entered, disposed, uncertain, dispositionEntered;
     enum SourceGitOperation { Head, Tree, FilterConfig, Status, BaseEvidence, Other }
-    enum SourceGitFailure { CountBound, AdmissionThrow, DispatchThrow, Unsettled, OutputBound, TimedOut, Cancelled, UnexpectedExit }
+    enum SourceGitFailure { CountBound, AdmissionThrow, DispatchThrow, Unsettled, OutputBound, TimedOut, Cancelled, UnexpectedExit, Decode }
     internal bool DispositionEntered => dispositionEntered;
     internal bool DispositionReturned => disposed && (bootstrap is null || bootstrap.ActualDispositionReturned);
     internal bool Unknown => uncertain || sourceOwner?.Uncertain == true || independentReviewer?.Unknown == true;
@@ -298,7 +298,8 @@ internal sealed class InstalledReviewHost : IDisposable
                 RecordGitFailure(operation, reason, error); throw error;
             }
             Current();
-            return new UTF8Encoding(false, true).GetString(capture.StandardOutputBytes);
+            try { return new UTF8Encoding(false, true).GetString(capture.StandardOutputBytes); }
+            catch (Exception error) { RecordGitFailure(operation, SourceGitFailure.Decode, error); throw; }
         }
 
         Current();
@@ -310,11 +311,19 @@ internal sealed class InstalledReviewHost : IDisposable
         var tree = (await Git("rev-parse", "HEAD^{tree}").ConfigureAwait(false)).Trim();
         if (head != completion.HeadCommit || tree != completion.TreeId ||
             (await Git("status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching").ConfigureAwait(false)).Length != 0)
-            throw new WorkerEnvelopeException("Actual completed worker source changed before immutable review preparation.");
+        {
+            var error = new WorkerEnvelopeException("Actual completed worker source changed before immutable review preparation.");
+            original.RecordFirstCaught("review-source-identity-mismatch", error); throw error;
+        }
         var evidenceBytes = Encoding.UTF8.GetBytes(await Git("show", run.BaseCommit + ":" + selection.EvidencePolicyRelativePath).ConfigureAwait(false));
-        var evidence = DeliveryForge.Contracts.Validation.ContractValidator.ParseAndValidate(evidenceBytes);
-        if (evidence.SchemaName != "evidence-policy" || evidence.Identity != selection.EvidencePolicyIdentity)
-            throw new ToolUsageException("Actual protected-base evidence policy differs from the selected identity.");
+        DeliveryForge.Contracts.Validation.ValidatedContract evidence;
+        try
+        {
+            evidence = DeliveryForge.Contracts.Validation.ContractValidator.ParseAndValidate(evidenceBytes);
+            if (evidence.SchemaName != "evidence-policy" || evidence.Identity != selection.EvidencePolicyIdentity)
+                throw new ToolUsageException("Actual protected-base evidence policy differs from the selected identity.");
+        }
+        catch (Exception error) { original.RecordFirstCaught("review-source-evidence-validate", error); throw; }
         protectedEvidencePolicy = evidence;
         try
         {

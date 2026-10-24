@@ -214,7 +214,17 @@ canonical non-root path alone does not prove the initial cgroup namespace. For
 the selected Linux6.8 profile, prebirth admission checks the actual calling
 thread through its procfs thread-self magic link and held nsfs object, type and
 reserved initial inode. Unknown or redirected observations refuse before birth.
-This relies on the current synchronous owning OpenDuplex call path. Actual
+The same managed calling Thread is retained only after successful namespace
+proof and first disposition; BeforeCreation refuses a different Thread before
+creation enters. Membership is read from cgroup opened relative to the held
+verified procfs task, with procfs type and same-mount regular-file checks.
+The successful explicit metadata path has23 original ledger rows:5 openat,
+3 fstatfs,9 statx,1 ioctl and5 first-close. The existing bounded membership
+stream/read rows and8193-byte buffer reservation are unchanged.
+Namespace descriptors deliberately retain UNKNOWN if their first-close WORK
+admission refuses, even before native close enters. They do not use the
+exact-image descriptor continuation described above: no retry or cleanup
+continuation is added, and no descriptor disposition is falsely accepted. Actual
 Linux initial/nested namespace and close-disposition acceptance remain unrun;
 the check supplies neither an outside-ancestor launcher nor resource-fit proof.
 The default/null policy is unchanged.

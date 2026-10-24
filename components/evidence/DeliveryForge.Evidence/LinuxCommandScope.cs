@@ -16,6 +16,7 @@ internal sealed class LinuxCommandScope
     readonly List<Operation> operations = []; readonly List<object> retained = []; readonly List<Exception> failures = [];
     LinuxSystemdLibrary? library; LinuxScopeBus? bus; LinuxScopeKernel? kernel; string? unitPath, controlGroup, cpus; byte[]? invocation; ulong procStart; long actualMask;
     DuplexNativeObservation? finalObservation;
+    System.Threading.Thread? namespaceThread;
     bool productionGate; bool prepared, creationEntered, creationReturned, created, bound, referenceEntered, referenceReturned, releaseEntered, releaseReturned, stopEntered, stopFailureCleanup, dispositionEntered, disposed;
     internal sealed class Operation { internal required string Kind; internal bool Entered, Returned; internal Task? ActualTask; internal object? Resource; internal bool CloseEntered, Closed; internal Exception? Primary, Post, CloseFailure; internal bool Unknown => Entered && (!Returned || ActualTask is not null && !ActualTask.IsCompleted) || CloseEntered && !Closed; }
     static readonly List<LinuxCommandScope> Retained = [];
@@ -26,12 +27,21 @@ internal sealed class LinuxCommandScope
     static void Throw(Exception? primary, Exception? post) { if (primary is not null && post is not null) throw new AggregateException("Original Linux scope operation and independent post.", primary, post); if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw(); }
     T Io<T>(string kind, Func<Task<T>> action) { var row = Enroll(kind, false); T result = default!; try { Check(false); row.Entered = true; var actual = action(); row.ActualTask = actual; row.Returned = true; if (actual is null) throw new IOException("Original birth operation returned no actual Task."); var left = original.WorkLimit - Stopwatch.GetElapsedTime(original.OriginalStarted); result = actual.WaitAsync(left, original.Token).GetAwaiter().GetResult(); } catch (Exception error) { row.Primary = error; failures.Add(error); } try { Check(false); } catch (Exception error) { row.Post = error; failures.Add(error); } Throw(row.Primary, row.Post); return result; }
     void Io(string kind, Func<Task> action) { var row = Enroll(kind, false); try { Check(false); row.Entered = true; var actual = action(); row.ActualTask = actual; row.Returned = true; if (actual is null) throw new IOException("Original birth operation returned no actual Task."); actual.WaitAsync(original.WorkLimit - Stopwatch.GetElapsedTime(original.OriginalStarted), original.Token).GetAwaiter().GetResult(); } catch (Exception error) { row.Primary = error; failures.Add(error); } try { Check(false); } catch (Exception error) { row.Post = error; failures.Add(error); } Throw(row.Primary, row.Post); }
-    string ReadText(string path, int maximum, bool cleanup)
+    string ReadText(string path, int maximum, bool cleanup, int? ownedDescriptor = null)
     {
         var row = Enroll("actual-kernel-text:" + path, cleanup); FileStream? stream = null; byte[] data = new byte[maximum + 1]; retained.Add(data); string result = "";
         try
         {
-            Check(cleanup); row.Entered = true; stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read); row.Resource = stream; row.Returned = true; Check(cleanup); var used = 0;
+            Check(cleanup); row.Entered = true;
+            if (ownedDescriptor is int descriptor)
+            {
+                // Borrow only the already journal-owned descriptor. The stream
+                // never closes it; its original open row owns the first close.
+                var handle = new Microsoft.Win32.SafeHandles.SafeFileHandle((nint)descriptor, ownsHandle: false);
+                retained.Add(handle); row.Resource = handle; stream = new FileStream(handle, FileAccess.Read);
+            }
+            else stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            row.Resource = stream; row.Returned = true; Check(cleanup); var used = 0;
             while (used < data.Length) { var n = Observe("actual-kernel-read", () => stream.Read(data, used, data.Length - used), cleanup); if (n == 0) break; used += n; }
             if (used > maximum) throw new IOException("Complete original kernel text exceeded finite quota."); result = new UTF8Encoding(false, true).GetString(data, 0, used); Check(cleanup);
         }
@@ -40,11 +50,11 @@ internal sealed class LinuxCommandScope
         try { Check(cleanup || row.Primary is not null); } catch (Exception error) { row.Post = error; failures.Add(error); }
         Exception? disposition = row.CloseFailure; if (row.Post is not null) disposition = disposition is null ? row.Post : new AggregateException(disposition, row.Post); Throw(row.Primary, disposition); return result;
     }
-    void RequireInitialCgroupNamespace()
+    string RequireInitialCgroupNamespace()
     {
         // Linux6.8 source-profile observation, not a caller-issued capability.
         // Keep returned descriptors on the SAME original journal before any post.
-        var opened = new List<(int Fd, Operation Row)>(4); Exception? primary = null;
+        var opened = new List<(int Fd, Operation Row)>(5); Exception? primary = null; string membership = "";
         int Native(string kind, Func<int> invoke, bool cleanup = false)
         {
             var error = 0;
@@ -83,8 +93,8 @@ internal sealed class LinuxCommandScope
             var selfBefore = Identity(proc, "thread-self", 0x100);
             if ((root.Mode & 0xf000) != 0x4000 || (selfBefore.Mode & 0xf000) != 0xa000 || !SameMount(root, selfBefore)) throw new IOException("Actual procfs thread-self magic-link provenance unavailable.");
             // Follow the verified calling-thread magic link, not the TGID leader.
-            // The closed OpenDuplex callsite synchronously reaches Process.Start
-            // on this caller after Prepare; no cross-thread preparation token.
+            // The exact managed calling Thread is retained after successful
+            // proof/disposition and rechecked immediately before creation.
             var self = Open(proc, "thread-self", Directory | CloseOnExec);
             var selfIdentity = Identity(self, "", 0x1000);
             var selfAfter = Identity(proc, "thread-self", 0x100);
@@ -100,6 +110,14 @@ internal sealed class LinuxCommandScope
             var identity = Identity(actual, "", 0x1000);
             var linkAfter = Identity(directory, "cgroup", 0x100);
             if (!SameLink(linkBefore, linkAfter) || identity.Inode != 0xeffffffbUL) throw new IOException("Selected Linux6.8 policy requires the actual initial cgroup namespace before birth.");
+            // Placement must come from this held verified procfs task, not a
+            // later pathname lookup through a potentially different mount view.
+            var member = Open(self, "cgroup", NoFollow | CloseOnExec);
+            Native("actual-owner-membership-procfs", () => NamespaceFileSystem(member, out fs));
+            var memberIdentity = Identity(member, "", 0x1000);
+            if (fs.Type != 0x9fa0 || (memberIdentity.Mode & 0xf000) != 0x8000 || !SameMount(root, memberIdentity))
+                throw new IOException("Actual owner membership must be a regular file on the verified procfs mount.");
+            membership = ReadText("verified-owner-cgroup-membership", 8192, false, member);
         }
         catch (Exception caught) { primary = caught; failures.Add(caught); }
         // Every actual returned descriptor gets at most its first close. Mark
@@ -116,6 +134,8 @@ internal sealed class LinuxCommandScope
             catch (Exception caught) { actual.Row.CloseFailure = caught; failures.Add(caught); primary = primary is null ? caught : new AggregateException("Actual owner namespace observation and independent first disposition.", primary, caught); }
         }
         Throw(primary, null);
+        namespaceThread = System.Threading.Thread.CurrentThread;
+        return membership;
     }
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit, Size = 256)] struct NamespaceStatFs { [System.Runtime.InteropServices.FieldOffset(0)] public long Type; }
     [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit, Size = 256)]
@@ -172,13 +192,7 @@ internal sealed class LinuxCommandScope
                 // The selected ancestor must contain descendants, not their
                 // owner. Observe only this caller before any library/bus/birth.
                 if (selected.RestrictiveChildPolicy != "nnp-user1000-ancestor-v3") throw new IOException("Only explicit exact-image unprivileged child policy is supported.");
-                RequireInitialCgroupNamespace();
-                var membership = ReadText("/proc/thread-self/cgroup", 8192, false);
-                if (!membership.StartsWith("0::/", StringComparison.Ordinal) || !membership.EndsWith('\n') || membership.Count(c => c == '\n') != 1 || membership[..^1].Any(char.IsControl)) throw new IOException("Complete actual owner unified-cgroup membership required before selected-policy birth.");
-                var ownerGroup = membership[3..^1];
-                if (ownerGroup == "/" || ownerGroup[1..].Split('/').Any(component => component is "" or "." or "..")) throw new IOException("Canonical non-root actual owner unified-cgroup membership required; a namespace-relative root cannot establish outside-ancestor placement.");
-                const string ancestor = "/user.slice/user-1000.slice";
-                if (ownerGroup == ancestor || ownerGroup.StartsWith(ancestor + "/", StringComparison.Ordinal)) throw new IOException("Selected-policy owner must be outside the constrained user-1000.slice ancestor; an independently selected outside-owner launch is required.");
+                LinuxScopeOwnerBoundary.RequireOutsideAncestorMembership(RequireInitialCgroupNamespace());
             }
             // The original caller already owns this process wrapper. It is not
             // an adopted child; observe its real inherited two-bit CPU mask.
@@ -201,7 +215,7 @@ internal sealed class LinuxCommandScope
             Check(false); prepared = true;
         }
     }
-    internal void BeforeCreation() { lock (gate) { Check(false); if (!prepared || creationEntered) throw new IOException("One privately prepared original creation required."); creationEntered = true; } }
+    internal void BeforeCreation() { lock (gate) { Check(false); if (!prepared || creationEntered) throw new IOException("One privately prepared original creation required."); if (selected.RestrictiveChildPolicy is not null) LinuxScopeOwnerBoundary.RequireCallingThread(namespaceThread); creationEntered = true; } }
     internal void CreationReturned(bool actualCreated) { lock (gate) { if (!creationEntered || creationReturned) throw new IOException("Actual original creation return cannot be synthesized/repeated."); created = actualCreated; creationReturned = true; Check(false); } }
     ulong ProcStart(bool cleanup) { var stat = ReadText("/proc/" + process.Id.ToString(CultureInfo.InvariantCulture) + "/stat", 8192, cleanup); var end = stat.LastIndexOf(')'); if (end < 0) throw new IOException("Complete original proc stat malformed."); var fields = stat[(end + 2)..].Split(' ', StringSplitOptions.RemoveEmptyEntries); if (fields.Length < 20 || !ulong.TryParse(fields[19], NumberStyles.None, CultureInfo.InvariantCulture, out var start) || start == 0) throw new IOException("Actual original kernel process generation unavailable."); return start; }
     internal void BindAndRelease(Stream input, Stream output)
@@ -289,4 +303,23 @@ internal sealed class LinuxCommandScope
     }
     internal bool KnownDisposed => disposed;
     internal IReadOnlyList<Exception> Failures => failures.AsReadOnly();
+}
+
+// Pure refusal predicates shared by the actual prebirth path and DATA controls.
+// They issue no prepared scope, runtime authority or caller-supplied proof.
+internal static class LinuxScopeOwnerBoundary
+{
+    internal static void RequireCallingThread(System.Threading.Thread? expected)
+    {
+        if (expected is null || !ReferenceEquals(expected, System.Threading.Thread.CurrentThread))
+            throw new IOException("Selected-policy birth must remain on the actual namespace-proved calling thread.");
+    }
+    internal static void RequireOutsideAncestorMembership(string membership)
+    {
+        if (!membership.StartsWith("0::/", StringComparison.Ordinal) || !membership.EndsWith('\n') || membership.Count(c => c == '\n') != 1 || membership[..^1].Any(char.IsControl)) throw new IOException("Complete actual owner unified-cgroup membership required before selected-policy birth.");
+        var ownerGroup = membership[3..^1];
+        if (ownerGroup == "/" || ownerGroup[1..].Split('/').Any(component => component is "" or "." or "..")) throw new IOException("Canonical non-root actual owner unified-cgroup membership required; a namespace-relative root cannot establish outside-ancestor placement.");
+        const string ancestor = "/user.slice/user-1000.slice";
+        if (ownerGroup == ancestor || ownerGroup.StartsWith(ancestor + "/", StringComparison.Ordinal)) throw new IOException("Selected-policy owner must be outside the constrained user-1000.slice ancestor; an independently selected outside-owner launch is required.");
+    }
 }
