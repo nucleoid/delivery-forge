@@ -33,7 +33,17 @@ internal sealed class ToolFailureAttention
             static string TypeOf(Exception actual)
             {
                 var name = actual.GetType().FullName ?? "Exception";
-                return name.Length <= 256 ? name : "ExceptionTypeUnavailable";
+                var encodedBytes = 0;
+                foreach (var character in name)
+                {
+                    // Default JSON encoding escapes nested/generic separators.
+                    // Only admit names whose encoded value is bounded by construction.
+                    if (character is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '.' or '_') encodedBytes++;
+                    else if (character is '+' or '`') encodedBytes += 6;
+                    else return "ExceptionTypeUnavailable";
+                    if (encodedBytes > 256) return "ExceptionTypeUnavailable";
+                }
+                return name;
             }
             // No Message/Stack/Data/path/config/worker content is read or emitted.
             var line = "DFCLI_FIRST_CAUGHT|" + System.Text.Json.JsonSerializer.Serialize(new

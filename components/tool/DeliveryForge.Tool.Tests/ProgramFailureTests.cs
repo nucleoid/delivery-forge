@@ -5,6 +5,63 @@ namespace DeliveryForge.Tool.Tests;
 
 public sealed class ProgramFailureTests
 {
+    sealed class NestedDiagnosticException(Exception? inner) : Exception("must-not-export", inner);
+    sealed class GenericDiagnosticException<T>(Exception? inner) : Exception("must-not-export", inner);
+    sealed class ÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉ(Exception? inner) : Exception("must-not-export", inner);
+    sealed class BoundaryABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
+    {
+        internal sealed class LayerAABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
+        {
+            internal sealed class LayerBABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
+            {
+                internal sealed class LayerCABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789
+                {
+                    internal sealed class EscapingBudgetException(Exception? inner) : Exception("must-not-export", inner);
+                }
+            }
+        }
+    }
+    [Fact]
+    public void First_caught_type_names_bound_actual_JSON_escaping_without_output_uncertainty()
+    {
+        static Exception EscapingBudget(Exception? inner) => new BoundaryABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.LayerAABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.LayerBABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.LayerCABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.EscapingBudgetException(inner);
+        var escaping = EscapingBudget(EscapingBudget(null)); var escapingName = escaping.GetType().FullName!;
+        var nonAscii = new ÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉ(new ÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉ(null)); var nonAsciiName = nonAscii.GetType().FullName!;
+        Assert.True(nonAsciiName.Length <= 256);
+        var oldLine = "DFCLI_FIRST_CAUGHT|" + JsonSerializer.Serialize(new
+        {
+            Stage = "review-source-preparation",
+            Type = nonAsciiName,
+            nonAscii.HResult,
+            InnerType = nonAscii.InnerException!.GetType().FullName,
+            CleanupAlreadyBegun = false,
+            MarkerAlreadyEntered = false
+        });
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(oldLine) > 1024);
+        Assert.True(escapingName.Length <= 256); Assert.True(JsonSerializer.Serialize(escapingName).Length - 2 > 256);
+        (Exception Error, string Expected)[] cases =
+        [
+            (new NestedDiagnosticException(new NestedDiagnosticException(null)), typeof(NestedDiagnosticException).FullName!),
+            (new GenericDiagnosticException<int>(new GenericDiagnosticException<int>(null)), "ExceptionTypeUnavailable"),
+            (nonAscii, "ExceptionTypeUnavailable"),
+            (escaping, "ExceptionTypeUnavailable")
+        ];
+        foreach (var item in cases)
+        {
+            using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var errors = new StringWriter();
+            var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention);
+            life.RecordFirstCaught("review-source-preparation", item.Error); life.BeginFailureCleanup();
+            attention.EmitFirstCaughtOnce(); attention.EmitFirstCaughtOnce();
+            var lines = errors.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => line.TrimEnd('\r')).ToArray();
+            Assert.Equal(2, lines.Length); Assert.StartsWith("DFCLI_FAILURE|", lines[0], StringComparison.Ordinal);
+            const string prefix = "DFCLI_FIRST_CAUGHT|"; Assert.StartsWith(prefix, lines[1], StringComparison.Ordinal);
+            Assert.True(System.Text.Encoding.UTF8.GetByteCount(lines[1]) <= 1024);
+            using var json = JsonDocument.Parse(lines[1][prefix.Length..]); var diagnostic = json.RootElement;
+            Assert.Equal(item.Expected, diagnostic.GetProperty("Type").GetString()); Assert.Equal(item.Expected, diagnostic.GetProperty("InnerType").GetString());
+            Assert.DoesNotContain("must-not-export", errors.ToString(), StringComparison.Ordinal);
+            Assert.False(attention.Unknown); Assert.False(life.HasExplicitUnknown);
+        }
+    }
     [Fact]
     public void First_caught_capture_does_not_enter_cleanup_or_output_and_is_nonsecret_once_only()
     {
