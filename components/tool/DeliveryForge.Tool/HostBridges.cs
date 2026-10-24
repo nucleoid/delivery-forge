@@ -625,7 +625,23 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
         }
         catch (Exception error) { frame.Primary ??= error; frame.Lifetime.RetainBridgeUnknown(frame); }
     }
-    Task<bool> PrepareWorkerResultDirectoryAsync(HostBridgeFrame frame, AgentRequest request)
+    static string ValidateWorkerResultDirectory(FrozenWorkerPlan plan, ToolLifetime original)
+    {
+        original.Check();
+        var path = BoundedFiles.Plain(plan.ResultDirectory, true);
+        BoundedFiles.Separate(plan.ParentCheckout, path);
+        BoundedFiles.Separate(plan.Worktree, path);
+        original.Check();
+        if (Directory.Exists(path))
+        {
+            var populated = Directory.EnumerateFileSystemEntries(path).Take(1).Any();
+            original.Check();
+            if (populated) throw new IOException("Worker result directory must be absent or empty; retained evidence cannot be adopted.");
+        }
+        original.Check();
+        return path;
+    }
+    Task<bool> PrepareWorkerResultDirectoryAsync(HostBridgeFrame frame, AgentRequest request, FrozenWorkerPlan plan)
     {
         return frame.Enter(() =>
         {
@@ -634,25 +650,38 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
             {
                 bool Prepare()
                 {
-                    frame.Lifetime.Check();
-                    var path = BoundedFiles.Plain(request.ResultDirectory, true);
-                    if (!Directory.Exists(path))
+                    try
                     {
-                        creationEntered = true;
-                        Directory.CreateDirectory(path);
+                        var path = ValidateWorkerResultDirectory(plan, frame.Lifetime);
+                        if (!Directory.Exists(path))
+                        {
+                            creationEntered = true;
+                            Directory.CreateDirectory(path);
+                        }
+                        frame.Lifetime.Check();
+                        _ = BoundedFiles.Plain(path, true);
+                        return true;
                     }
-                    frame.Lifetime.Check();
-                    _ = BoundedFiles.Plain(path, true);
-                    return true;
+                    catch
+                    {
+                        // The actual parent's finally must observe uncertainty
+                        // before its synchronous effect invocation returns.
+                        if (creationEntered) frame.Lifetime.RetainUnknown();
+                        throw;
+                    }
                 }
-                // The selected directory may already contain retained evidence.
-                // Preserve it; each actual completion artifact still uses CreateNew.
                 return Task.FromResult(coordination is null ? Prepare() :
                     coordination.EnterSynchronous(request.RunId, Prepare));
             }
             catch (Exception error)
             {
-                if (creationEntered) frame.Lifetime.RetainUnknown();
+                // Also retain a failed parent postcheck after Prepare returned.
+                if (creationEntered)
+                {
+                    frame.Lifetime.RetainUnknown();
+                    try { coordination?.RetainUncertain(request.RunId, "Worker result directory creation or its original postcheck did not settle."); }
+                    catch (Exception retention) { return Task.FromException<bool>(new AggregateException("Result directory preparation and parent uncertainty retention failed.", error, retention)); }
+                }
                 return Task.FromException<bool>(error);
             }
         });
@@ -661,6 +690,12 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
     {
         try
         {
+            // Known path refusals precede lease, reservation, provisioning and writer effects.
+            await frame.Enter(() =>
+            {
+                try { _ = ValidateWorkerResultDirectory(plan, frame.Lifetime); return Task.FromResult(true); }
+                catch (Exception error) { return Task.FromException<bool>(error); }
+            }).ConfigureAwait(false);
             if (coordination is not null) await coordination.AcquireAsync(plan.RunId).ConfigureAwait(false);
             if (contractFixtureProvisioning is { } fixture)
                 await frame.Enter(() => fixture.ProvisionAsync(plan, coordination ?? throw new ToolUsageException("Actual acquired fixture parent required."))).ConfigureAwait(false);
@@ -675,7 +710,7 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
             }
             else request = (await frame.Enter(() => coordinator.PrepareWorkerAsync(plan, frame.Lifetime.Token)).ConfigureAwait(false)).Request;
             frame.Request = request;
-            await PrepareWorkerResultDirectoryAsync(frame, request).ConfigureAwait(false);
+            await PrepareWorkerResultDirectoryAsync(frame, request, plan).ConfigureAwait(false);
             frame.Accepted = await frame.Enter(() => batchControl is null
                 ? adapter.StartAsync(request, frame.Lifetime.Remaining, frame.Lifetime.Token)
                 : batchControl.EnterNodeStart(() => adapter.StartAsync(request, frame.Lifetime.Remaining, frame.Lifetime.Token))).ConfigureAwait(false);

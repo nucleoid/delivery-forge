@@ -232,14 +232,11 @@ public sealed class ProvisionedGitBindingTests
     [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
     [InlineData("absent")]
     [InlineData("empty")]
-    [InlineData("retained-evidence")]
-    public async Task Actual_owner_prepares_results_before_start_and_preserves_existing_evidence(string initial)
+    public async Task Actual_owner_prepares_empty_results_before_start(string initial)
     {
         using var fixture = await Fixture.CreateAsync();
         var result = Path.Combine(fixture.Root, "worker-results");
-        var sentinel = Path.Combine(result, "retained.txt");
-        if (initial != "absent") Directory.CreateDirectory(result);
-        if (initial == "retained-evidence") File.WriteAllText(sentinel, "preserved");
+        if (initial == "empty") Directory.CreateDirectory(result);
         var port = new ResultDirectoryPort(fixture); var adapter = new CodexHostAdapter(port);
         await using var processes = new ProcessControl();
         using var coordinator = new ExecutionCoordinator(new RunStore(Path.Combine(fixture.Root, "run-store")), fixture.Manager, processes, adapter);
@@ -250,24 +247,40 @@ public sealed class ProvisionedGitBindingTests
         var completed = await bridge.ImplementAsync(assignment.Plan, assignment.Instructions, fixture.Original, fixture.Original.Token);
         Assert.Equal("COMPLETE", completed.Outcome); Assert.Equal(1, port.Starts);
         Assert.Equal("result namespace reached by actual completion", File.ReadAllText(Path.Combine(result, "actual-completion.json")));
-        if (initial == "retained-evidence") Assert.Equal("preserved", File.ReadAllText(sentinel));
         Assert.Equal(origin, fixture.Original.OriginalStarted); Assert.Equal(whole, fixture.Original.WholeLimit); Assert.Equal(work, fixture.Original.WorkLimit);
         Assert.True(Assert.Single(bridge.RetainedFrames).OwnerCompleted);
     }
-    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
-    public async Task Actual_owner_rejects_result_file_before_start_without_replacing_its_bytes()
+    [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    [InlineData("file")]
+    [InlineData("retained-evidence")]
+    [InlineData("worktree")]
+    [InlineData("parent-checkout")]
+    public async Task Actual_owner_refuses_unsafe_or_populated_results_before_preparation(string fault)
     {
         using var fixture = await Fixture.CreateAsync();
-        var result = Path.Combine(fixture.Root, "worker-results"); File.WriteAllText(result, "preserved file");
+        var result = fault switch { "worktree" => fixture.Worker, "parent-checkout" => fixture.Repository, _ => Path.Combine(fixture.Root, "worker-results") };
+        var sentinel = Path.Combine(result, "retained.txt");
+        if (fault == "file") File.WriteAllText(result, "preserved file");
+        if (fault == "retained-evidence") { Directory.CreateDirectory(result); File.WriteAllText(sentinel, "retained original evidence"); }
         var port = new ResultDirectoryPort(fixture); var adapter = new CodexHostAdapter(port);
+        var store = new RunStore(Path.Combine(fixture.Root, "run-store"));
         await using var processes = new ProcessControl();
-        using var coordinator = new ExecutionCoordinator(new RunStore(Path.Combine(fixture.Root, "run-store")), fixture.Manager, processes, adapter);
+        using var coordinator = new ExecutionCoordinator(store, fixture.Manager, processes, adapter);
         var bridge = new OwnerHostBridge(coordinator, adapter);
         var head = (await fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token)).HeadCommit;
         var assignment = ResultAssignment(fixture, head, result, port.Profile.AdapterVersion);
+        var nativeBefore = fixture.Manager.ActualOwnedGitInvocations;
+        var origin = fixture.Original.OriginalStarted; var whole = fixture.Original.WholeLimit; var work = fixture.Original.WorkLimit;
         var refused = await bridge.ImplementAsync(assignment.Plan, assignment.Instructions, fixture.Original, fixture.Original.Token);
-        Assert.Equal("INCOMPLETE", refused.Outcome); Assert.Equal(0, port.Starts);
-        Assert.Empty(adapter.ActualCalls); Assert.Equal("preserved file", File.ReadAllText(result));
+        Assert.Equal("INCOMPLETE", refused.Outcome); Assert.Equal(0, port.Starts); Assert.Empty(adapter.ActualCalls);
+        Assert.Equal(nativeBefore, fixture.Manager.ActualOwnedGitInvocations); Assert.Null(fixture.Parent.ActualWriter);
+        Assert.Empty((await store.RecoverAsync(assignment.Plan.RunId, fixture.Original.Token)).Records);
+        Assert.False(fixture.Original.HasExplicitUnknown); Assert.False(fixture.Original.HasRetainedUnknown);
+        Assert.Equal(origin, fixture.Original.OriginalStarted); Assert.Equal(whole, fixture.Original.WholeLimit); Assert.Equal(work, fixture.Original.WorkLimit);
+        if (fault == "file") Assert.Equal("preserved file", File.ReadAllText(result));
+        if (fault == "retained-evidence") Assert.Equal("retained original evidence", File.ReadAllText(sentinel));
+        Assert.Equal("original\n", File.ReadAllText(Path.Combine(fixture.Worker, "subject.txt")));
+        Assert.Equal("original\n", File.ReadAllText(Path.Combine(fixture.Repository, "subject.txt")));
     }
     sealed class PostBirthParent : ICoordinatedSynchronousEffectAdmission
     {
