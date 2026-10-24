@@ -585,6 +585,7 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
         finally
         {
             if (!frame.Worker.Started) frame.LeaveRoute();
+            var priorFailure = frame.Primary;
             try
             {
                 // The existing parent stop can still be finishing its checkpoint
@@ -595,7 +596,7 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
             }
             catch (Exception error)
             {
-                var primary = pendingFailure ?? frame.Primary;
+                var primary = pendingFailure ?? priorFailure;
                 frame.Primary ??= primary ?? error;
                 original.RetainUnknown();
                 if (primary is not null && !ReferenceEquals(primary, error))
