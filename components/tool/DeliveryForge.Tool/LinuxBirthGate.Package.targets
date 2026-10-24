@@ -9,7 +9,7 @@
   <Target Name="_ForgeReadBuiltLinuxBirthGate">
     <!-- GetLinuxBirthGateOutput deliberately has NO Build dependency. The no-build
          pack requires existing complete outputs, never a hidden compiler call. -->
-    <MSBuild Projects="$(MSBuildThisFileDirectory)../DeliveryForge.LinuxScopeBirthGate/DeliveryForge.LinuxScopeBirthGate.csproj" Targets="GetLinuxBirthGateOutput" BuildInParallel="false" Properties="Configuration=$(Configuration);RuntimeIdentifier=linux-x64;SelfContained=false;UseSharedCompilation=false;BuildProjectReferences=false">
+    <MSBuild Projects="$(MSBuildThisFileDirectory)../DeliveryForge.LinuxScopeBirthGate/DeliveryForge.LinuxScopeBirthGate.csproj" Targets="GetLinuxBirthGateOutput" BuildInParallel="false" Properties="RuntimeIdentifier=linux-x64;SelfContained=false;UseSharedCompilation=false;BuildProjectReferences=false">
       <Output TaskParameter="TargetOutputs" ItemName="_ForgeGateBuiltFile" />
     </MSBuild>
     <Error Condition="'@(_ForgeGateBuiltFile-&gt;Count())' != '5'" Text="Exact compiled five-file Linux gate closure required; build it before no-build pack." />
