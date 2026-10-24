@@ -14,12 +14,38 @@ public sealed class InitialBaselineCaptureTests
     public void Failed_binding_retains_only_noncontinuable_error_DATA_and_the_report_identity()
     {
         var result = InitialBaselineCapture.Failed("crap4csharp", TestEvidence.Identity('d'), new IOException("private failure message"));
-        Assert.Equal(GateOutcome.Error, result.RawOutcome);
+        Assert.Equal(GateOutcome.Error, result.RawOutcome); Assert.True(result.BindingFailed); Assert.False(result.ArtifactPublicationComplete);
         Assert.False(result.Complete); Assert.False(result.MayCollectNextGate); Assert.False(result.ProductionAuthority);
         Assert.Equal(TestEvidence.Identity('d'), result.ReportIdentity);
         Assert.Empty(result.Sources); Assert.Empty(result.Callables); Assert.Null(result.Lines); Assert.Null(result.Mutation);
         Assert.Equal(["PRODUCER_BINDING_FAILED", typeof(IOException).FullName!], result.Diagnostics);
         Assert.DoesNotContain("private failure message", JsonSerializer.Serialize(result));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public void Actual_publication_and_gate_postvalidation_both_bound_capture_completeness(bool published, bool gateAccepted)
+    {
+        var measured = ReadMutation(Mutation());
+        Assert.True(measured.Complete); Assert.True(measured.MayCollectNextGate); Assert.False(measured.BindingFailed);
+        var result = InitialBaselineCapture.RetainAfterGate(measured, published, gateAccepted);
+        Assert.Equal(published, result.ArtifactPublicationComplete); Assert.False(result.BindingFailed);
+        Assert.Equal(published && gateAccepted, result.Complete); Assert.Equal(published && gateAccepted, result.MayCollectNextGate);
+        Assert.Equal(measured.RawOutcome, result.RawOutcome); Assert.Equal(measured.Mutation, result.Mutation); Assert.False(result.ProductionAuthority);
+    }
+
+    [Fact]
+    public void Raw_error_DATA_is_not_binding_failure_and_partial_publication_does_not_invent_one()
+    {
+        var measured = new InitialBaselineCaptureData("crap4csharp", GateOutcome.Error, false, false,
+            TestEvidence.Identity('d'), [], [], null, null, []);
+        var retained = InitialBaselineCapture.RetainAfterGate(measured, false, false);
+        Assert.False(retained.BindingFailed); Assert.False(retained.ArtifactPublicationComplete);
+        Assert.False(retained.Complete); Assert.False(retained.MayCollectNextGate);
+        Assert.Contains("ARTIFACT_PUBLICATION_INCOMPLETE", retained.Diagnostics);
     }
 
     [Theory]

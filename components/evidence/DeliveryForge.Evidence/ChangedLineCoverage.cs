@@ -126,6 +126,12 @@ internal static partial class ChangedLineCoverage
                 files.Check();
                 if (!context.Value.Values.Any(source => fullCurrent || !source.Generated && source.RepositoryPath is { } path && changes.ContainsKey(path))) continue;
                 var selected = builds.Values.Where(build => Text(build, "contextId") == context.Key).Take(2).ToArray();
+                if (fullCurrent && selected.Length == 0 && context.Value.Values.All(source => source.RepositoryPath is null))
+                {
+                    censusComplete = false;
+                    censusReason ??= "Full-current nonrepository source context has no actual compiler build; its executable census is incomplete.";
+                    continue;
+                }
                 if (selected.Length != 1) throw Refuse("Changed compiler context lacks one exact actual build.");
                 var build = selected[0]; var buildId = Text(build, "id");
                 byte[] ReadBuildArtifact(string role, string hashField)

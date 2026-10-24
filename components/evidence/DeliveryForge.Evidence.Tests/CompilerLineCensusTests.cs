@@ -92,11 +92,26 @@ public sealed class CompilerLineCensusTests
         _ = fixture.Read(omitReport: true, fullCurrentCapture: true, emptyDiff: true, nonRepositoryContext: true);
         var full = Assert.IsType<InitialBaselineLineCoverage>(fixture.FullCurrent);
         Assert.False(full.CompilerCensusComplete);
-        Assert.Contains("source", full.Reason, StringComparison.Ordinal);
+        Assert.Contains("authored executable compiler source lacks a repository mapping", full.Reason, StringComparison.Ordinal);
         Assert.Equal(0, full.ExecutableLines); Assert.Null(full.Percent);
-        // This actual standard-build PDB needs the removed repository roles to map
-        // its source documents. The existing compiler census refuses that missing
-        // mapping; all-nonrepository contexts must reach it, not be skipped as empty.
+        // Same actual compiler/PDB census is complete through relative logical
+        // roles alone; only the full-current repository membership is incomplete.
+        var inventory = CompilerLineCensus.Inspect(fixture.Pe, fixture.Pdb, fixture.Build,
+            [fixture.Document with { RepositoryPath = null, PhysicalPath = null },
+             fixture.DeclarationDocument with { RepositoryPath = null, PhysicalPath = null }], fixture.Files);
+        Assert.True(inventory.Complete, inventory.Reason); Assert.NotEmpty(inventory.Points);
+    }
+
+    [Fact]
+    public void Full_current_nonrepository_context_without_a_build_is_explicitly_incomplete()
+    {
+        using var fixture = new Fixture();
+        _ = fixture.Read(omitReport: true, fullCurrentCapture: true, emptyDiff: true,
+            nonRepositoryContext: true, noCompilerBuild: true);
+        var full = Assert.IsType<InitialBaselineLineCoverage>(fixture.FullCurrent);
+        Assert.False(full.CompilerCensusComplete);
+        Assert.Contains("nonrepository source context has no actual compiler build", full.Reason, StringComparison.Ordinal);
+        Assert.Equal(0, full.ExecutableLines); Assert.Null(full.Percent);
     }
 
     [Fact]
@@ -108,7 +123,7 @@ public sealed class CompilerLineCensusTests
         Assert.Empty(inventory.Limitations);
         Assert.Equal(3, inventory.Points.Select(point => point.StartLine).Distinct().Count());
         foreach (var marker in new[] { "CENSUS_FIRST", "CENSUS_EXCLUDED", "CENSUS_LAST" })
-            Assert.Contains(inventory.Points, point => point.StartLine == fixture.Line(marker) && point.LogicalPath == "Subject.cs");
+            Assert.Contains(inventory.Points, point => point.StartLine == fixture.Line(marker) && point.LogicalPath == "census/Subject.cs");
         var result = fixture.Read();
         Assert.True(result.CompilerCensusComplete);
         Assert.Equal(GateOutcome.Pass, result.Outcome); Assert.Equal(3, result.ChangedExecutableLines);
@@ -454,9 +469,9 @@ public sealed class CompilerLineCensusTests
         internal readonly string Repository, SourcePath, DeclarationPath;
         internal readonly byte[] Source, DeclarationSource, Pe, Pdb;
         internal readonly CompilerLineCensus.Build Build;
-        internal CompilerLineCensus.Document Document => new("Subject.cs", ProjectRole + "/Subject.cs", SourcePath,
+        internal CompilerLineCensus.Document Document => new("census/Subject.cs", ProjectRole + "/Subject.cs", SourcePath,
             InstalledToolFiles.Identity(Source)[7..], new UTF8Encoding(false, true).GetString(Source), false);
-        internal CompilerLineCensus.Document DeclarationDocument => new("Declarations.cs", ProjectRole + "/Declarations.cs", DeclarationPath,
+        internal CompilerLineCensus.Document DeclarationDocument => new("census/Declarations.cs", ProjectRole + "/Declarations.cs", DeclarationPath,
             InstalledToolFiles.Identity(DeclarationSource)[7..], new UTF8Encoding(false, true).GetString(DeclarationSource), false);
         internal Fixture(CancellationToken token = default)
         {
@@ -489,7 +504,7 @@ public sealed class CompilerLineCensusTests
             bool declarationCompilerSource = false, bool extraCompilerConstructor = false, bool compilerSourceHashDrift = false,
             bool generatedChangedContext = false, string generatedChangedRole = "source", bool generatedChangedSourceDrift = false,
             bool generatedDeclaration = false, string? unreadRecipeContext = null, string? extraCompilerConstructorContext = null,
-            bool fullCurrentCapture = false, bool emptyDiff = false, bool nonRepositoryContext = false)
+            bool fullCurrentCapture = false, bool emptyDiff = false, bool nonRepositoryContext = false, bool noCompilerBuild = false)
         {
             var rawSource = fault == "checksum" ? Source.Concat(" "u8.ToArray()).ToArray() : Source;
             // Only the checksum-negative uses a separate logical copy. Physical source
@@ -519,9 +534,9 @@ public sealed class CompilerLineCensusTests
                 {
                     id = context,
                     project = ProjectRole + "/DeliveryForge.Evidence.CensusFixture.csproj",
-                    inputs = new[] { new { role = generatedContext ? generatedChangedRole : "source", logicalPath = "Subject.cs", repositoryPath = nonRepositoryContext ? null : ProjectRole + "/Subject.cs", locator = generatedContext ? "generated-context-source" : "source",
+                    inputs = new[] { new { role = generatedContext ? generatedChangedRole : "source", logicalPath = "census/Subject.cs", repositoryPath = nonRepositoryContext ? null : ProjectRole + "/Subject.cs", locator = generatedContext ? "generated-context-source" : "source",
                         length = contextSource.Length, sha256 = InstalledToolFiles.Identity(contextSource)[7..], generated = generatedContext, encoding = "utf-8" },
-                        new { role = declarationCompilerSource ? "compiler-source" : "source", logicalPath = "Declarations.cs", repositoryPath = nonRepositoryContext ? null : ProjectRole + "/Declarations.cs", locator = "declaration",
+                        new { role = declarationCompilerSource ? "compiler-source" : "source", logicalPath = "census/Declarations.cs", repositoryPath = nonRepositoryContext ? null : ProjectRole + "/Declarations.cs", locator = "declaration",
                         length = DeclarationSource.Length, sha256 = InstalledToolFiles.Identity(DeclarationSource)[7..], generated = generatedDeclaration, encoding = "utf-8" } }
                 })!;
                 if (extraCompilerConstructor && (extraCompilerConstructorContext is null || extraCompilerConstructorContext == context))
@@ -537,7 +552,7 @@ public sealed class CompilerLineCensusTests
                     }));
                 contexts.Add(contextNode);
                 var build = context + "b";
-                builds.Add(JsonSerializer.SerializeToNode(new
+                if (!noCompilerBuild) builds.Add(JsonSerializer.SerializeToNode(new
                 {
                     id = build,
                     contextId = context,

@@ -15,6 +15,8 @@ internal sealed class InstalledToolInvocation(
 {
     private bool _entered;
     private bool _returned;
+    private bool _artifactsPublished;
+    private NormalizedEvidence? _normalization;
     private CommandResult? _actual;
     private byte[]? _report;
     private byte[]? _proof;
@@ -120,7 +122,7 @@ internal sealed class InstalledToolInvocation(
             if (_proof.Length > ProducerJson.MaximumBytes) throw new EvidenceWriteException("Complete current-binding projection exceeds the named receipt bound.");
             files.Check(); _returned = true;
         }
-        catch (Exception error) { _failure = error; }
+        catch (Exception error) { _capture = null; _failure = error; }
     }
 
     private InitialBaselineCaptureData? JoinMutation(JsonElement root, byte[] approvedConfiguration)
@@ -254,11 +256,17 @@ internal sealed class InstalledToolInvocation(
             !ReferenceEquals(actual.Execution, _actual) || !owner.Known(actual.Execution))
             throw new EvidenceWriteException("Same actual known closed initial capture invocation required.");
         if (_failure is not null)
-            return InitialBaselineCapture.Failed(profile.Tool, _report is null ? "unavailable" : InstalledToolFiles.Identity(_report), _failure);
-        if (!_returned || _capture is null ||
-            actual.SourceChanged || actual.Before != request.ExpectedRepository || actual.After != request.ExpectedRepository)
-            throw new EvidenceWriteException("Same actual current completed initial capture required.");
-        return _capture;
+            return InitialBaselineCapture.RetainAfterGate(
+                InitialBaselineCapture.Failed(profile.Tool, _report is null ? "unavailable" : InstalledToolFiles.Identity(_report), _failure),
+                _artifactsPublished, actualGateAccepted: false);
+        if (!_returned || _capture is null)
+            throw new EvidenceWriteException("Same actual completed initial capture required.");
+        // GateRunner may replace normalization after repository/capability or
+        // publication checks. Compare the retained actual normalization, not
+        // a reason prefix or the shared advisory INCOMPLETE outcome alone.
+        var accepted = !actual.SourceChanged && actual.Before == request.ExpectedRepository && actual.After == request.ExpectedRepository &&
+            _normalization is not null && actual.Outcome == _normalization.Outcome && actual.Reason == _normalization.Reason;
+        return InitialBaselineCapture.RetainAfterGate(_capture, _artifactsPublished, accepted);
     }
     internal NormalizedEvidence CompareApprovedBaseline(GateRunResult actual, ProtectedBaselineRegistry registry, ResolvedEvidencePolicy policy) => files.Effect(() =>
     {
@@ -305,13 +313,18 @@ internal sealed class InstalledToolInvocation(
         // retained on failure and never adopted/retried as a complete receipt.
         files.WriteNew(path, validated.CanonicalBytes.ToArray()); files.Check(); return path;
     }
-    internal void Append(string directory, IDictionary<string, string> hashes) => files.Effect(() => AppendCore(directory, hashes));
+    internal void Append(string directory, IDictionary<string, string> hashes)
+    {
+        _artifactsPublished = false;
+        files.Effect(() => AppendCore(directory, hashes));
+        // Includes the original admission's final post-check, not only body return.
+        _artifactsPublished = true;
+    }
     private void AppendCore(string directory, IDictionary<string, string> hashes)
     {
         if (_report is not null) Save("producer-report.json", _report);
         if (changedDiff is not null) Save("producer-changed-lines.diff", changedDiff);
         if (_lines is not null) Save("producer-changed-line-coverage.json", JsonSerializer.SerializeToUtf8Bytes(_lines));
-        if (_capture is not null) Save("producer-initial-baseline-capture.json", JsonSerializer.SerializeToUtf8Bytes(_capture));
         for (var index = 0; index < owner.Calls.Count; index++)
         {
             var call = owner.Calls[index];
@@ -356,6 +369,8 @@ internal sealed class InstalledToolInvocation(
         for (var index = 0; index < _artifacts.Count; index++) Save($"producer-artifact-{index:D2}.bin", _artifacts[index]);
         if (_failure is not null)
             Save("producer-binding-failure.json", FailureArtifact(_failure, _entered, _returned, _actual?.ExitCode));
+        // Last: an earlier export failure must not publish a misleading complete capture.
+        if (_capture is not null) Save("producer-initial-baseline-capture.json", JsonSerializer.SerializeToUtf8Bytes(_capture));
         void Save(string leaf, byte[] bytes)
         {
             files.WriteNew(Path.Combine(directory, leaf), bytes);
@@ -378,7 +393,10 @@ internal sealed class InstalledToolInvocation(
             InventoryMismatchUnavailable = InstalledToolFiles.MismatchDiagnosticFailure(failure) is not null
         });
 
-    internal NormalizedEvidence Normalize(CommandResult execution, ToolCapability capability) => files.Effect(() => NormalizeCore(execution, capability));
+    internal NormalizedEvidence Normalize(CommandResult execution, ToolCapability capability) => files.Effect(() =>
+    {
+        var normalized = NormalizeCore(execution, capability); _normalization = normalized; return normalized;
+    });
     private NormalizedEvidence NormalizeCore(CommandResult execution, ToolCapability capability)
     {
         if (!_entered || !_returned || _failure is not null || !ReferenceEquals(_actual, execution) || _report is null)

@@ -11,39 +11,70 @@ namespace DeliveryForge.Tool.Tests;
 public sealed class HistoricalQualityTests
 {
     [Theory]
-    [InlineData(false, false, GateOutcome.Error, true)]
-    [InlineData(true, false, GateOutcome.Error, false)]
-    [InlineData(false, true, GateOutcome.Error, false)]
-    [InlineData(false, false, GateOutcome.Pass, false)]
-    public void Error_receipt_requires_noncontinuable_failure_DATA(bool complete, bool mayContinue, GateOutcome raw, bool accepted)
+    [InlineData(GateOutcome.Error)]
+    [InlineData(GateOutcome.Incomplete)]
+    public void Explicit_binding_failure_retains_failure_reference_even_when_gate_runner_overrides_to_incomplete(GateOutcome receiptOutcome)
     {
-        var tuple = AdvisoryTuple(raw);
-        var receipt = tuple.Receipt with { Outcome = GateOutcome.Error };
-        var capture = new InitialBaselineCaptureData("crap4csharp", raw, complete, mayContinue,
-            tuple.Capture.ReportIdentity, [], [], null, null, ["PRODUCER_BINDING_FAILED"]);
-        if (accepted) HistoricalQualityHost.RequireInitialCaptureTuple("crap4csharp", receipt, capture);
-        else Assert.Throws<IOException>(() => HistoricalQualityHost.RequireInitialCaptureTuple("crap4csharp", receipt, capture));
-    }
-
-    [Fact]
-    public void Failed_capture_summary_retains_actual_binding_failure_reference_without_requiring_a_capture_sidecar()
-    {
-        var tuple = AdvisoryTuple(GateOutcome.Error);
-        var root = Path.Combine(Path.GetTempPath(), "capture-failure-data");
+        var tuple = AdvisoryTuple(GateOutcome.Error); var root = Path.Combine(Path.GetTempPath(), "capture-failure-data");
         var receipt = tuple.Receipt with
         {
-            Outcome = GateOutcome.Error,
+            Outcome = receiptOutcome,
             ReceiptPath = Path.Combine(root, "receipts", "gate.json"),
             ArtifactHashes = new Dictionary<string, string> { ["producer-binding-failure.json"] = "sha256:" + new string('f', 64) }
         };
-        var capture = new InitialBaselineCaptureData("crap4csharp", GateOutcome.Error, false, false,
-            tuple.Capture.ReportIdentity, [], [], null, null, ["PRODUCER_BINDING_FAILED"]);
+        var failed = InitialBaselineCapture.Failed("crap4csharp", tuple.Capture.ReportIdentity, new IOException("DATA failure"));
+        var capture = InitialBaselineCapture.RetainAfterGate(failed, true, false);
         HistoricalQualityHost.RequireInitialCaptureTuple("crap4csharp", receipt, capture);
         var summary = JsonSerializer.SerializeToElement(HistoricalQualityHost.SummarizeInitialCapture(receipt, capture));
+        Assert.True(summary.GetProperty("BindingFailed").GetBoolean()); Assert.True(summary.GetProperty("ArtifactPublicationComplete").GetBoolean());
         Assert.Equal(JsonValueKind.Null, summary.GetProperty("CaptureArtifact").ValueKind);
         Assert.Equal(Path.Combine(root, "producer-binding-failure.json"), summary.GetProperty("BindingFailureArtifact").GetProperty("Path").GetString());
-        Assert.Equal(receipt.ArtifactHashes["producer-binding-failure.json"], summary.GetProperty("BindingFailureArtifact").GetProperty("Identity").GetString());
         Assert.Throws<IOException>(() => HistoricalQualityHost.SummarizeInitialCapture(receipt with { ArtifactHashes = new Dictionary<string, string>() }, capture));
+    }
+
+    [Theory]
+    [InlineData(GateOutcome.Incomplete)]
+    [InlineData(GateOutcome.Error)]
+    public void Bound_raw_error_uses_real_capture_sidecar_without_fabricating_a_binding_failure(GateOutcome receiptOutcome)
+    {
+        var tuple = AdvisoryTuple(GateOutcome.Error); var root = Path.Combine(Path.GetTempPath(), "capture-raw-error-data");
+        var receipt = tuple.Receipt with
+        {
+            Outcome = receiptOutcome,
+            ReceiptPath = Path.Combine(root, "receipts", "gate.json"),
+            ArtifactHashes = new Dictionary<string, string> { ["producer-initial-baseline-capture.json"] = "sha256:" + new string('e', 64) }
+        };
+        var measured = new InitialBaselineCaptureData("crap4csharp", GateOutcome.Error, false, false,
+            tuple.Capture.ReportIdentity, [], [], null, null, []);
+        var capture = InitialBaselineCapture.RetainAfterGate(measured, true, receiptOutcome == GateOutcome.Incomplete);
+        HistoricalQualityHost.RequireInitialCaptureTuple("crap4csharp", receipt, capture);
+        var summary = JsonSerializer.SerializeToElement(HistoricalQualityHost.SummarizeInitialCapture(receipt, capture));
+        Assert.False(summary.GetProperty("BindingFailed").GetBoolean()); Assert.Equal(JsonValueKind.Null, summary.GetProperty("BindingFailureArtifact").ValueKind);
+        Assert.Equal(Path.Combine(root, "producer-initial-baseline-capture.json"), summary.GetProperty("CaptureArtifact").GetProperty("Path").GetString());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Partial_publication_stops_with_only_real_available_artifact_references(bool bindingFailed)
+    {
+        var tuple = AdvisoryTuple(GateOutcome.Pass); var root = Path.Combine(Path.GetTempPath(), "capture-partial-data");
+        var receipt = tuple.Receipt with { ReceiptPath = Path.Combine(root, "receipts", "gate.json") };
+        var measured = bindingFailed ? InitialBaselineCapture.Failed("crap4csharp", tuple.Capture.ReportIdentity, new IOException("DATA")) : tuple.Capture;
+        var capture = InitialBaselineCapture.RetainAfterGate(measured, false, false);
+        HistoricalQualityHost.RequireInitialCaptureTuple("crap4csharp", receipt, capture);
+        var summary = JsonSerializer.SerializeToElement(HistoricalQualityHost.SummarizeInitialCapture(receipt, capture));
+        Assert.False(summary.GetProperty("ArtifactPublicationComplete").GetBoolean());
+        Assert.False(summary.GetProperty("Complete").GetBoolean()); Assert.False(summary.GetProperty("MayCollectNextGate").GetBoolean());
+        Assert.Equal(JsonValueKind.Null, summary.GetProperty("CaptureArtifact").ValueKind);
+        Assert.Equal(JsonValueKind.Null, summary.GetProperty("BindingFailureArtifact").ValueKind);
+    }
+
+    [Fact]
+    public void Error_receipt_cannot_continue_even_with_a_published_measurement()
+    {
+        var tuple = AdvisoryTuple(GateOutcome.Pass);
+        Assert.Throws<IOException>(() => HistoricalQualityHost.RequireInitialCaptureTuple("crap4csharp", tuple.Receipt with { Outcome = GateOutcome.Error }, tuple.Capture));
     }
 
     static TrustedConfiguration Configuration()
@@ -230,7 +261,7 @@ public sealed class HistoricalQualityTests
             repository, repository, "sha256:" + new string('a', 64), "sha256:" + new string('b', 64), "sha256:" + new string('c', 64),
             "all", new Dictionary<string, string>(), "unused", null);
         var capture = new InitialBaselineCaptureData("crap4csharp", rawOutcome, true, true,
-            "sha256:" + new string('d', 64), [], [], null, null, []);
+            "sha256:" + new string('d', 64), [], [], null, null, [], artifactPublicationComplete: true);
         return (receipt, capture);
     }
 
@@ -284,7 +315,7 @@ public sealed class HistoricalQualityTests
         var capture = new InitialBaselineCaptureData("crap4csharp", GateOutcome.Fail, true, true,
             "sha256:" + new string('d', 64), Enumerable.Repeat(source, count), Enumerable.Repeat(callable, count),
             new(12, 3, 25m, 0, true, "sha256:" + new string('c', 64), new string('x', 100000)), null,
-            Enumerable.Repeat(new string('z', 1024), count));
+            Enumerable.Repeat(new string('z', 1024), count), artifactPublicationComplete: true);
         var bytes = JsonSerializer.SerializeToUtf8Bytes(HistoricalQualityHost.SummarizeInitialCapture(receipt, capture), BoundedFiles.Json);
         Assert.True(bytes.Length < 8192, $"Summary unexpectedly expanded to {bytes.Length} bytes.");
         using var document = JsonDocument.Parse(bytes);
@@ -300,8 +331,7 @@ public sealed class HistoricalQualityTests
         Assert.Equal(8, excerpts.Length); Assert.All(excerpts, value => Assert.Equal(256, value.GetString()!.Length));
         Assert.Equal(Path.Combine(gateRoot, "producer-initial-baseline-capture.json"), summary.GetProperty("CaptureArtifact").GetProperty("Path").GetString());
         Assert.Equal(captureHash, summary.GetProperty("CaptureArtifact").GetProperty("Identity").GetString());
-        Assert.Equal(Path.Combine(gateRoot, "producer-binding-failure.json"), summary.GetProperty("BindingFailureArtifact").GetProperty("Path").GetString());
-        Assert.Equal(failureHash, summary.GetProperty("BindingFailureArtifact").GetProperty("Identity").GetString());
+        Assert.Equal(JsonValueKind.Null, summary.GetProperty("BindingFailureArtifact").ValueKind); // Outcome/foreign hash never classifies binding failure.
         Assert.False(summary.GetProperty("ProductionAuthority").GetBoolean());
         Assert.Equal(count, capture.Sources.Count); Assert.Equal(count, capture.Callables.Count);
     }

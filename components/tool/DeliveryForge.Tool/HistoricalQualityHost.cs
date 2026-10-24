@@ -71,9 +71,11 @@ internal sealed class HistoricalQualityHost
     // Capture receipts are always advisory INCOMPLETE while RawOutcome independently retains PASS/FAIL.
     internal static void RequireInitialCaptureTuple(string expectedTool, GateRunResult result, InitialBaselineCaptureData capture)
     {
-        var failedBinding = capture.RawOutcome == GateOutcome.Error && !capture.Complete && !capture.MayCollectNextGate;
-        if ((result.Outcome != GateOutcome.Incomplete && !(result.Outcome == GateOutcome.Error && failedBinding)) || result.ProductionCapable || result.Fixture ||
-            capture.Tool != expectedTool || capture.ProductionAuthority)
+        if ((result.Outcome is not (GateOutcome.Incomplete or GateOutcome.Error)) ||
+            result.Outcome == GateOutcome.Error && (capture.Complete || capture.MayCollectNextGate) ||
+            !capture.ArtifactPublicationComplete && (capture.Complete || capture.MayCollectNextGate) ||
+            capture.BindingFailed && (capture.RawOutcome != GateOutcome.Error || capture.Complete || capture.MayCollectNextGate) ||
+            result.ProductionCapable || result.Fixture || capture.Tool != expectedTool || capture.ProductionAuthority)
             throw new IOException("Actual initial capture requires its nonfixture advisory receipt and matching observation DATA.");
     }
 
@@ -94,11 +96,13 @@ internal sealed class HistoricalQualityHost
             return null;
         }
         var lines = capture.Lines;
-        var failedBinding = result.Outcome == GateOutcome.Error && capture.RawOutcome == GateOutcome.Error && !capture.Complete && !capture.MayCollectNextGate;
+        var failedBinding = capture.BindingFailed;
         return new
         {
             capture.Tool,
             capture.RawOutcome,
+            capture.BindingFailed,
+            capture.ArtifactPublicationComplete,
             capture.Complete,
             capture.MayCollectNextGate,
             capture.ReportIdentity,
@@ -116,8 +120,8 @@ internal sealed class HistoricalQualityHost
             },
             capture.Mutation,
             DiagnosticExcerpts = capture.Diagnostics.Take(8).Select(text => text.Length <= 256 ? text : text[..256]).ToArray(),
-            CaptureArtifact = Artifact("producer-initial-baseline-capture.json", required: !failedBinding),
-            BindingFailureArtifact = Artifact("producer-binding-failure.json", required: failedBinding),
+            CaptureArtifact = failedBinding ? null : Artifact("producer-initial-baseline-capture.json", required: capture.ArtifactPublicationComplete),
+            BindingFailureArtifact = failedBinding ? Artifact("producer-binding-failure.json", required: capture.ArtifactPublicationComplete) : null,
             ProductionAuthority = false
         };
     }

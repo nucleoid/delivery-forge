@@ -6,5 +6,7 @@
     <ImplicitUsings>disable</ImplicitUsings>
     <DebugType>portable</DebugType>
     <DebugSymbols>true</DebugSymbols>
+    <!-- A real compiler-emitted relative logical role also maps without a repository role. -->
+    <PathMap>$(MSBuildProjectDirectory)=census</PathMap>
   </PropertyGroup>
 </Project>

@@ -25,14 +25,18 @@ public sealed class InitialBaselineCaptureData
 {
     internal InitialBaselineCaptureData(string tool, GateOutcome rawOutcome, bool complete, bool mayCollectNextGate,
         string reportIdentity, IEnumerable<InitialBaselineSource> sources, IEnumerable<InitialBaselineCallable> callables,
-        InitialBaselineLineCoverage? lines, InitialBaselineMutation? mutation, IEnumerable<string> diagnostics)
+        InitialBaselineLineCoverage? lines, InitialBaselineMutation? mutation, IEnumerable<string> diagnostics,
+        bool bindingFailed = false, bool artifactPublicationComplete = false)
     {
         Tool = tool; RawOutcome = rawOutcome; Complete = complete; MayCollectNextGate = mayCollectNextGate;
+        BindingFailed = bindingFailed; ArtifactPublicationComplete = artifactPublicationComplete;
         ReportIdentity = reportIdentity; Sources = Array.AsReadOnly(sources.ToArray());
         Callables = Array.AsReadOnly(callables.ToArray()); Lines = lines; Mutation = mutation;
         Diagnostics = Array.AsReadOnly(diagnostics.ToArray());
     }
     public string Tool { get; }
+    public bool BindingFailed { get; }
+    public bool ArtifactPublicationComplete { get; }
     public GateOutcome RawOutcome { get; }
     public bool Complete { get; }
     // Observation of a known completed capture, not an admission or new budget.
@@ -56,7 +60,22 @@ internal static class InitialBaselineCapture
         var type = failure.GetType().FullName;
         if (type is null || type.Length > 256) type = "ExceptionTypeUnavailable";
         return new(tool, GateOutcome.Error, false, false, reportIdentity, [], [], null, null,
-            ["PRODUCER_BINDING_FAILED", type]);
+            ["PRODUCER_BINDING_FAILED", type], bindingFailed: true);
+    }
+
+    // These booleans are supplied only by the actual private invocation after
+    // observing publication and the final gate tuple. Copies remain DATA.
+    internal static InitialBaselineCaptureData RetainAfterGate(InitialBaselineCaptureData capture,
+        bool artifactPublicationComplete, bool actualGateAccepted)
+    {
+        var diagnostics = capture.Diagnostics.AsEnumerable();
+        if (!artifactPublicationComplete) diagnostics = diagnostics.Append("ARTIFACT_PUBLICATION_INCOMPLETE");
+        if (!actualGateAccepted) diagnostics = diagnostics.Append("ACTUAL_GATE_NOT_ACCEPTED_FOR_CONTINUATION");
+        return new(capture.Tool, capture.RawOutcome,
+            capture.Complete && artifactPublicationComplete && actualGateAccepted,
+            capture.MayCollectNextGate && artifactPublicationComplete && actualGateAccepted,
+            capture.ReportIdentity, capture.Sources, capture.Callables, capture.Lines, capture.Mutation, diagnostics,
+            bindingFailed: capture.BindingFailed, artifactPublicationComplete: artifactPublicationComplete);
     }
 
     internal static void RequirePurpose(InstalledToolPurpose purpose)
