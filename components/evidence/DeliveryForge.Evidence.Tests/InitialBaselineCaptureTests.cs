@@ -235,10 +235,13 @@ public sealed class InitialBaselineCaptureTests
         { kind = "TOOL_INTERNAL_SDK", summary = "Explicit DATA join fixture only.", diagnostics = new[] { "dotnet-sdk=fixture-sdk;dependencies=fixture" } }));
         return new JsonObject
         {
-            ["version"] = 2, ["semanticProfile"] = "resolved-project-graph-v1", ["exclusions"] = new JsonArray(),
+            ["version"] = 2,
+            ["semanticProfile"] = "resolved-project-graph-v1",
+            ["exclusions"] = new JsonArray(),
             ["projects"] = new JsonArray(JsonSerializer.SerializeToNode(new
             { project = "src/App/App.csproj", testSuites = new[] { id } })),
-            ["testSuites"] = new JsonArray(suite), ["policy"] = root["policy"]!.DeepClone()
+            ["testSuites"] = new JsonArray(suite),
+            ["policy"] = root["policy"]!.DeepClone()
         };
     }
 
