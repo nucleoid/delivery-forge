@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../contracts/DeliveryForge.Contracts/DeliveryForge.Contracts.csproj" />
+    <ProjectReference Include="../../evidence/DeliveryForge.Evidence/DeliveryForge.Evidence.csproj" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="DeliveryForge.Planning.Tests" />

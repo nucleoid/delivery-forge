@@ -108,6 +108,48 @@ public sealed class GateRunnerTests
     }
 
     [Fact]
+    public async Task Advisory_tool_pass_retains_fixture_without_granting_gate_authority()
+    {
+        using var temp = new TempDirectory();
+        var original = TestEvidence.GateRequest(temp.Path);
+        var capability = ToolCapability.FromDetection(
+            "crap4csharp", "1.2.0", "1.2", true, [],
+            original.Capability.ExecutablePath!, original.Capability.ExecutableIdentity!, ["check"],
+            original.Invocation.WorkingDirectory);
+        var report = TestEvidence.CrapReport(true, "pass", 0);
+        var normalized = new DeliveryForge.Evidence.Adapters.Crap4CSharpAdapter().Normalize(
+            System.Text.Encoding.UTF8.GetBytes(report), capability);
+        Assert.Equal(GateOutcome.Pass, normalized.Outcome);
+        Assert.True(normalized.Fixture);
+        Assert.False(normalized.ProductionCapable);
+        Assert.False(normalized.ProducerVerified);
+        var execution = TestEvidence.CommandResult() with { StandardOutput = report };
+        var request = original with
+        {
+            Capability = capability,
+            Adapter = EvidenceAdapterKind.Crap4CSharp,
+            Invocation = original.Invocation with { Arguments = ["check"] }
+        };
+        var runner = new GateRunner(
+            new StubCommandExecutor(execution),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
+            original.Invocation.WorkingDirectory, TestEvidence.Commit('a'));
+
+        var result = await runner.RunAsync(request, TestContext.Current.CancellationToken);
+
+        Assert.False(result.SourceChanged);
+        Assert.True(result.Execution.OwnedProcessQuiescent);
+        Assert.Equal(0, result.Execution.ExitCode);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.True(result.Fixture);
+        Assert.False(result.ProductionCapable);
+        Assert.Contains("advisory", result.Reason, StringComparison.OrdinalIgnoreCase);
+        using var receipt = System.Text.Json.JsonDocument.Parse(await File.ReadAllBytesAsync(
+            result.ReceiptPath, TestContext.Current.CancellationToken));
+        Assert.Equal("INCOMPLETE", receipt.RootElement.GetProperty("outcome").GetString());
+    }
+
+    [Fact]
     public async Task Captures_immutable_argv_artifacts_and_source_identity()
     {
         using var temp = new TempDirectory();

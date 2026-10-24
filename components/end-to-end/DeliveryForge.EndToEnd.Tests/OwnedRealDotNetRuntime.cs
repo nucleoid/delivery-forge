@@ -7,6 +7,7 @@ namespace DeliveryForge.EndToEnd.Tests;
 // Separate retained actual-tool leaf; existing native-worktree cleanup guards are untouched.
 internal sealed class OwnedRealDotNetRuntime : ICommandExecutor
 {
+    private static readonly List<OwnedRealDotNetRuntime> RetainedDiagnosticFailures = [];
     private readonly OwnedScenarioRun _artifacts;
     private readonly RealDotNetFixtureClock _clock;
     private readonly CancellationToken _outer;
@@ -16,6 +17,11 @@ internal sealed class OwnedRealDotNetRuntime : ICommandExecutor
     private long _stageStarted;
     private TimeSpan _stageLimit;
     private int _command;
+    private readonly List<Task> _diagnosticWrites = [];
+    internal CommandInvocation? LastActualInvocation { get; private set; }
+    internal CommandResult? LastActualResult { get; private set; }
+    internal Exception? DiagnosticFailure { get; private set; }
+    internal bool DiagnosticWritesUnsettled => _diagnosticWrites.Any(task => !task.IsCompleted);
     public string Root { get; }
     public string Repository { get; }
     public string Dotnet { get; }
@@ -57,6 +63,8 @@ internal sealed class OwnedRealDotNetRuntime : ICommandExecutor
     }
     public TimeSpan CommandBudget(TimeSpan requested)
     {
+        if (DiagnosticFailure is not null) throw new InvalidOperationException("Prior actual command diagnostic failed; no additional native work is permitted. " +
+            (LastActualResult is { } actual ? DescribeActualResult(actual) : "No returned native result exists."), DiagnosticFailure);
         _outer.ThrowIfCancellationRequested(); _clock.WallToken.ThrowIfCancellationRequested();
         var stage = _stageLimit - System.Diagnostics.Stopwatch.GetElapsedTime(_stageStarted);
         var global = _clock.Remaining - TimeSpan.FromSeconds(_clock.Profile.CleanupReserveSeconds);
@@ -148,8 +156,40 @@ internal sealed class OwnedRealDotNetRuntime : ICommandExecutor
         try { result = await _actual.ExecuteAsync(invocation, allowed, deadline.Token); }
         catch { AllCommandsQuiescent = false; throw; }
         AllCommandsQuiescent &= result.OwnedProcessQuiescent;
-        await _artifacts.WriteNewJsonAsync($"real-tool-command-{++_command:D4}.json", new { fixture = true, invocation, allowedSeconds = allowed.TotalSeconds, result }, deadline.Token);
+        LastActualInvocation = invocation; LastActualResult = result;
+        await WriteDiagnosticAsync($"real-tool-command-{++_command:D4}.json", new { fixture = true, invocation, allowedSeconds = allowed.TotalSeconds, result });
         return result;
+    }
+    internal async Task WriteDiagnosticAsync(string name, object value)
+    {
+        try
+        {
+            // The already-returned native result is not governed by its expired
+            // command token. Only this SAME original540s wall allowance remains;
+            // no new timer, work allowance, native retry or writer retry exists.
+            _clock.WallToken.ThrowIfCancellationRequested();
+            if (_clock.Remaining <= TimeSpan.Zero) throw new TimeoutException("Original real-tool diagnostic allowance is exhausted.");
+            var actual = _artifacts.WriteNewJsonAsync(name, value, _clock.WallToken);
+            _diagnosticWrites.Add(actual);
+            await actual.WaitAsync(_clock.WallToken);
+            if (_clock.Remaining <= TimeSpan.Zero) throw new TimeoutException("Original real-tool diagnostic write exceeded its same endpoint.");
+        }
+        catch (Exception error)
+        {
+            DiagnosticFailure = DiagnosticFailure is null ? error : new AggregateException("Independent actual diagnostic failures.", DiagnosticFailure, error);
+            _artifacts.RetainArtifacts("Actual returned command and independent diagnostic failure retained; no further native work. Runtime: " + Root);
+            // Keep actual result, original clock, stream-owning Task and failure
+            // reachable even if the same wall token wins before write settlement.
+            lock (RetainedDiagnosticFailures)
+                if (!RetainedDiagnosticFailures.Contains(this)) RetainedDiagnosticFailures.Add(this);
+        }
+    }
+    internal static string DescribeActualResult(CommandResult result)
+    {
+        static string Clip(string value) => value.Length <= 4096 ? value : value[..4096] + "\n<diagnostic excerpt truncated>";
+        return $"exit={result.ExitCode?.ToString() ?? "unknown"}; timedOut={result.TimedOut}; cancelled={result.Cancelled}; " +
+            $"quiescent={result.OwnedProcessQuiescent}; started={result.StartedAt:O}; completed={result.CompletedAt:O}" +
+            $"\nstdout:\n{Clip(result.StandardOutput)}\nstderr:\n{Clip(result.StandardError)}";
     }
     public async Task<string> GitAsync(CancellationToken token, params string[] arguments)
     {
@@ -203,7 +243,10 @@ internal sealed class OwnedRealDotNetRuntime : ICommandExecutor
     public static void RequireSuccessful(CommandResult result, string stage)
     {
         if (result.ExitCode != 0 || result.TimedOut || result.Cancelled || !result.OwnedProcessQuiescent)
-            throw new InvalidOperationException("INCOMPLETE actual " + stage + " failed/uncertain: " + result.StandardError);
+            throw new InvalidOperationException(
+                $"INCOMPLETE actual {stage} failed/uncertain: exit={result.ExitCode?.ToString() ?? "unknown"}; " +
+                $"timedOut={result.TimedOut}; cancelled={result.Cancelled}; quiescent={result.OwnedProcessQuiescent}" +
+                $"\nstdout:\n{result.StandardOutput}\nstderr:\n{result.StandardError}");
     }
     public static async Task WriteNewAsync(string path, byte[] bytes, CancellationToken token)
     {

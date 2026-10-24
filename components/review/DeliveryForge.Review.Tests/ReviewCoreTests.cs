@@ -662,6 +662,7 @@ public sealed class ReviewCoreTests
 
     [Theory]
     [InlineData("ship", ReviewOutcome.Pass, 0)]
+    [InlineData("ship", ReviewOutcome.Incomplete, 1)]
     [InlineData("needs-attention", ReviewOutcome.Fail, 1)]
     [InlineData("do-not-ship", ReviewOutcome.Fail, 1)]
     [InlineData("anything-else", ReviewOutcome.Error, 1)]

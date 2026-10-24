@@ -1,3 +1,4 @@
+using DeliveryForge.Coordination;
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text;
@@ -19,18 +20,30 @@ public sealed class PublicationService
     private readonly IGitHostAdapter adapter;
     private readonly IPublicationJournal journal;
     private readonly PublicationLimits limits;
+    private readonly ICoordinatedEffectAdmission? coordinationAdmission;
+    // Actual in-process diagnostics only; never serialized as publication proof.
+    private readonly List<Exception> uncertaintyFailures = [];
+    internal IReadOnlyList<Exception> ActualUncertaintyFailures
+    {
+        get { lock (uncertaintyFailures) return Array.AsReadOnly(uncertaintyFailures.ToArray()); }
+    }
+    private void RetainUncertaintyFailure(Exception actual)
+    {
+        lock (uncertaintyFailures) { if (uncertaintyFailures.Count < 16) uncertaintyFailures.Add(actual); }
+    }
 
     public PublicationService(
         PublicationAuthorityHost authority,
         IPublicationFactSource facts,
         IGitHostAdapter adapter,
         IPublicationJournal journal,
-        PublicationLimits? limits = null)
+        PublicationLimits? limits = null, ICoordinatedEffectAdmission? coordinationAdmission = null)
     {
         ArgumentNullException.ThrowIfNull(authority);
         ArgumentNullException.ThrowIfNull(facts);
         ArgumentNullException.ThrowIfNull(adapter);
         ArgumentNullException.ThrowIfNull(journal);
+        this.coordinationAdmission = coordinationAdmission;
         this.authority = authority;
         this.facts = facts;
         this.adapter = adapter;
@@ -38,6 +51,8 @@ public sealed class PublicationService
         this.limits = limits ?? PublicationLimits.FixtureDefault;
         this.limits.Validate();
     }
+
+    public bool UsesCoordinationAdmission(ICoordinatedEffectAdmission actual) => ReferenceEquals(coordinationAdmission, actual);
 
     public async Task<PublicationResult> ExecuteAsync(
         PublicationRun run,
@@ -115,9 +130,11 @@ public sealed class PublicationService
             using var actionCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             actionCancellation.CancelAfter(limits.ActionTimeout);
             var mutation = new GitHostMutation(intent, remote.TargetHead);
-            actionTask = action == PublicationAction.MergeNormal
+            Task<GitHostMutationResult> InvokeMutation() => action == PublicationAction.MergeNormal
                 ? adapter.MergeNormalAsync(mutation, actionCancellation.Token)
                 : adapter.CreateOrUpdatePrAsync(mutation, actionCancellation.Token);
+            actionTask = coordinationAdmission is null ? InvokeMutation() :
+                coordinationAdmission.EnterAsync(run.Definition.RunIdentity, InvokeMutation);
             GitHostMutationResult result;
             try { result = await actionTask.WaitAsync(limits.ActionTimeout, cancellationToken).ConfigureAwait(false); }
             catch
@@ -186,8 +203,16 @@ public sealed class PublicationService
 
     private async Task MarkUncertain(PublicationIntent intent)
     {
+        // A failing owner notification cannot prevent the independent journal
+        // attempt or replace the conservative Blocked(Uncertain) result.
+        try { coordinationAdmission?.RetainUncertain(intent.RunIdentity, "Publication intent remains unresolved; no resend or lease release authority."); }
+        catch (Exception error) { RetainUncertaintyFailure(error); }
         try { await Append(intent with { State = PublicationIntentState.Uncertain }, CancellationToken.None).ConfigureAwait(false); }
-        catch (Exception) { /* The earlier durable Sent intent remains unresolved; no retry is authorized. */ }
+        catch (Exception error)
+        {
+            RetainUncertaintyFailure(error);
+            // Earlier durable Sent remains unresolved. No resend is authorized.
+        }
     }
 
     private static bool Matches(PublicationIntent i, PublicationRun run, PublicationRequest request, PublicationAction action)
@@ -228,6 +253,11 @@ public sealed class PublicationService
 
     private static void ObserveLate(Task task) => _ = task.ContinueWith(completed => _ = completed.Exception,
         CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Default);
-    private static PublicationResult Blocked(PublicationDenial denial, string reason) =>
-        new(PublicationOutcome.Blocked, denial, reason, PublicationAction.None, PublicationRealm.Fixture);
+    private PublicationResult Blocked(PublicationDenial denial, string reason)
+    {
+        lock (uncertaintyFailures)
+            if (uncertaintyFailures.Count != 0)
+                reason += " This service retains uncertainty-notice or journal failures; explicit owner reconciliation is required.";
+        return new(PublicationOutcome.Blocked, denial, reason, PublicationAction.None, PublicationRealm.Fixture);
+    }
 }

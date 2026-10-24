@@ -4,6 +4,7 @@ public static class ProductionCoordinationProfile
 {
     public static CoordinationCapabilities CurrentUnavailable() =>
         CoordinationCapabilities.Unavailable(
-            "Production profile INCOMPLETE: nucleoid/continuum#7 is open and no deployed, configured, capability-proven transport is supplied. " +
-            "The isolated contract fixture is test-only and cannot satisfy production readiness.");
+            "Production profile INCOMPLETE until the parent configures an authenticated Continuum transport, " +
+            "trusted current deployment/key-to-principal evidence, actual owned-work quiescence, a clock and checkpoint store. " +
+            "Source presence, discovery and isolated contract/live controls do not configure a production workflow.");
 }

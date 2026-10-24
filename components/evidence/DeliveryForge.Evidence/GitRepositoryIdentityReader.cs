@@ -675,7 +675,7 @@ public sealed class GitRepositoryIdentityReader(
     {
         var result = await ExecuteGitAsync(
             arguments, cancellationToken, deadline, captureIdentityStatusDiagnostics).ConfigureAwait(false);
-        if (result.TimedOut || result.Cancelled || result.ExitCode != 0)
+        if (result.TimedOut || result.Cancelled || !result.OwnedProcessQuiescent || result.ExitCode != 0)
             throw new EvidenceRepositoryException(
                 $"Git identity command failed: git {string.Join(" ", arguments)}");
         return result;
@@ -687,7 +687,7 @@ public sealed class GitRepositoryIdentityReader(
         DateTimeOffset? deadline = null)
     {
         var result = await ExecuteGitAsync(arguments, cancellationToken, deadline).ConfigureAwait(false);
-        if (result.TimedOut || result.Cancelled)
+        if (result.TimedOut || result.Cancelled || !result.OwnedProcessQuiescent)
             throw new EvidenceRepositoryException($"Frozen Git blob read did not settle: git {string.Join(" ", arguments)}");
         return result.ExitCode == 0 ? result : null;
     }

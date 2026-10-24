@@ -1,3 +1,4 @@
+using DeliveryForge.Evidence;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
@@ -13,9 +14,17 @@ public sealed record WorktreeObservation(
     string RootPath, string HeadCommit, string TreeId, bool IsClean,
     IReadOnlyList<string> StatusEntries, FileSnapshot Snapshot);
 
-public sealed class WorktreeManager
+public sealed partial class WorktreeManager
 {
+    static readonly List<WriterLease> RetainedWriterBirths = [];
     private readonly string _gitExecutable;
+    private readonly ProcessCommandExecutor? _originalExecutor;
+    private readonly IOwnedDuplexBudget? _originalBudget;
+    public WorktreeManager(string gitExecutablePath, ProcessCommandExecutor actualExecutor, IOwnedDuplexBudget actualOriginal) : this(gitExecutablePath)
+    {
+        ArgumentNullException.ThrowIfNull(actualExecutor); ArgumentNullException.ThrowIfNull(actualOriginal);
+        actualOriginal.CheckWork(); _originalExecutor = actualExecutor; _originalBudget = actualOriginal;
+    }
     public WorktreeManager(string? gitExecutablePath = null)
     {
         if (gitExecutablePath is not null)
@@ -29,6 +38,37 @@ public sealed class WorktreeManager
             .Where(Path.IsPathFullyQualified).Select(path => Path.Combine(path, name)).FirstOrDefault(File.Exists)
             ?? throw new WorktreeBoundaryException("No absolute Git executable was discovered on the trusted parent PATH.");
     }
+    readonly DeliveryForge.Coordination.ICoordinatedEffectAdmission? _effectAdmission;
+    readonly string? _effectRunId;
+    // A new immutable view retains the SAME executor/original/counter. No DTO issues authority.
+    // Provisioning and the existing explicitly owned cleanup observation view stay unchanged.
+    public WorktreeManager WithParentAdmission(DeliveryForge.Coordination.ICoordinatedEffectAdmission actualAdmission, string actualRunId)
+    {
+        ArgumentNullException.ThrowIfNull(actualAdmission);
+        if (_originalExecutor is null || _originalBudget is null || _effectAdmission is not null || string.IsNullOrWhiteSpace(actualRunId) || actualRunId.Length > 128)
+            throw new WorktreeBoundaryException("One actual original Git owner/parent binding required; no rebind.");
+        return new WorktreeManager(this, actualAdmission, actualRunId);
+    }
+    WorktreeManager(WorktreeManager source, DeliveryForge.Coordination.ICoordinatedEffectAdmission admission, string runId)
+    {
+        _gitExecutable = source._gitExecutable; _originalExecutor = source._originalExecutor; _originalBudget = source._originalBudget;
+        actualOwnedGitInvocations = source.actualOwnedGitInvocations; _effectAdmission = admission; _effectRunId = runId;
+        ownedGit = source.ownedGit;
+    }
+    sealed class InvocationCounter { internal long Value; }
+    InvocationCounter actualOwnedGitInvocations = new();
+    public long ActualOwnedGitInvocations => Interlocked.Read(ref actualOwnedGitInvocations.Value);
+    // Read-only same-original stopped-checkpoint path; never provisioning,
+    // writer acquisition, completion or writable Git under cleanup.
+    WorktreeManager OwnedCleanupObservationView()
+    {
+        if (_originalBudget is null || _originalExecutor is null) return this; // Existing legacy fixture realm only.
+        var view = new WorktreeManager(_gitExecutable, _originalExecutor, new OwnedCleanupPhaseBudget(_originalBudget));
+        view.actualOwnedGitInvocations = actualOwnedGitInvocations; view.ownedGit = ownedGit; view.cleanupObservation = true; return view;
+    }
+    public Task<WorktreeObservation> ObserveOwnedCleanupAsync(string worktree, CancellationToken token = default) => OwnedCleanupObservationView().ObserveAsync(worktree, token);
+    public Task EnsureDescendsFromOwnedCleanupAsync(string worktree, string baseCommit, string head, CancellationToken token = default) => OwnedCleanupObservationView().EnsureDescendsFromAsync(worktree, baseCommit, head, token);
+
     internal bool IsSameDirectory(string left, string right) =>
         string.Equals(CanonicalPath(left), CanonicalPath(right), PathComparison());
 
@@ -50,6 +90,7 @@ public sealed class WorktreeManager
         RejectParentOrNested(parent, target);
         RejectSymlinkAncestors(worktree);
         if (!Directory.Exists(worktree)) throw new WorktreeBoundaryException("Assigned worktree does not exist.");
+        if (_originalBudget is not null) _ = RequireOriginalBinding(worktree);
         var observedRoot = CanonicalPath((await GitAsync(worktree, cancellationToken, "rev-parse", "--show-toplevel").ConfigureAwait(false)).Trim());
         if (!string.Equals(target, observedRoot, PathComparison()))
             throw new WorktreeBoundaryException("Assigned path is not the exact Git worktree root.");
@@ -75,22 +116,111 @@ public sealed class WorktreeManager
         ValidateDestination(parentCheckout, destination);
         if (Directory.Exists(destination) && Directory.EnumerateFileSystemEntries(destination).Any())
             throw new WorktreeBoundaryException("Worker destination must not contain existing files.");
+        string? common = null;
+        if (_originalBudget is not null)
+        {
+            if (_effectAdmission is not DeliveryForge.Coordination.ICoordinatedSynchronousEffectAdmission)
+                throw new WorktreeBoundaryException("Original provisioning requires its actual synchronous parent.");
+            common = (await GitAsync(parentCheckout, cancellationToken, "rev-parse", "--path-format=absolute", "--git-common-dir").ConfigureAwait(false)).Trim();
+            RejectSymlinkAncestors(common);
+        }
         await GitAsync(parentCheckout, cancellationToken, "worktree", "add", "--detach", destination, baseCommit).ConfigureAwait(false);
+        if (common is not null)
+        {
+            var registered = await GitAsync(parentCheckout, cancellationToken, "worktree", "list", "--porcelain", "-z").ConfigureAwait(false);
+            var paths = registered.Split('\0').Where(value => value.StartsWith("worktree ", StringComparison.Ordinal)).Select(value => value[9..]).ToArray();
+            if (paths.Any(path => !Path.IsPathFullyQualified(path)) || paths.Count(path => IsSameDirectory(path, destination)) != 1)
+                throw new WorktreeBoundaryException("Actual parent did not uniquely register the provisioned destination.");
+            _ = CaptureProvisionedBinding(destination, common);
+        }
         var actual = (await GitAsync(destination, cancellationToken, "rev-parse", "HEAD").ConfigureAwait(false)).Trim();
         if (actual != baseCommit) throw new WorktreeBoundaryException("Provisioned worktree does not match the frozen base commit.");
     }
 
     public WriterLease AcquireWriter(string worktree, string runId, string writerToken)
     {
-        var path = WriterLockPath(worktree);
+        if (_effectAdmission is null)
+        {
+            if (_originalBudget is not null)
+            {
+                _originalBudget.CheckWork();
+                throw new WorktreeBoundaryException("Original writer birth requires its actual synchronous parent view.");
+            }
+            return AcquireWriterCore(worktree, runId, writerToken);
+        }
+        if (_effectAdmission is not DeliveryForge.Coordination.ICoordinatedSynchronousEffectAdmission parent || runId != _effectRunId)
+            throw new WorktreeBoundaryException("Writer birth requires the same synchronous original parent.");
+        _originalBudget!.CheckWork(); parent.CheckCurrent(runId);
+        WriterLease? lease = null;
+        try
+        {
+            parent.EnterSynchronous(runId, () => AcquireWriterCore(worktree, runId, writerToken, born => lease = born));
+            _originalBudget.CheckWork(); parent.CheckCurrent(runId);
+            return lease ?? throw new WorktreeBoundaryException("Actual writer birth returned no lease.");
+        }
+        catch (Exception primary)
+        {
+            if (lease is null) throw;
+            RetireFailedWriterBirth(lease, primary);
+            throw;
+        }
+    }
+    // Same concrete failure path used by AcquireWriter. Actual managed leases
+    // in controls do not supply provisioning or native execution authority.
+    internal void RetireFailedWriterBirth(WriterLease lease, Exception primary)
+    {
+        try { RetireFailedPreparationWriter(lease); }
+        catch (Exception close) { throw new AggregateException("Original writer birth and first disposition failed.", primary, close); }
+        // A known physical close never erases the failed birth or lock DATA.
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+    }
+    // A failed preparation cannot erase the original durable writer evidence.
+    // Only legacy managers retain their pre-existing Abandon/delete behavior.
+    internal void RetireFailedPreparationWriter(WriterLease writer)
+    {
+        if (_originalBudget is null) { writer.Abandon(); return; }
+        var closeEntered = false;
+        try
+        {
+            _ = _originalBudget.CleanupRemaining;
+            closeEntered = true; writer.Dispose();
+            _ = _originalBudget.CleanupRemaining;
+        }
+        catch (Exception close)
+        {
+            // A known first-close return followed by endpoint expiry is an
+            // accounting failure, not an unreturned actual handle disposition.
+            if (writer.FirstCloseReturned) throw;
+            lock (RetainedWriterBirths) RetainedWriterBirths.Add(writer);
+            var failures = new List<Exception> { close };
+            try { if (_originalBudget is IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown(); }
+            catch (Exception observation) { failures.Add(observation); }
+            // A known unclosed handle after expiry still retains capacity and
+            // revokes its parent. Never close it outside the same allowance.
+            var reason = closeEntered ? "Failed preparation writer first disposition did not return."
+                : "Failed preparation writer remains held after cleanup expired before its first disposition.";
+            try { _effectAdmission?.RetainUncertain(writer.RunId, reason); }
+            catch (Exception observation) { failures.Add(observation); }
+            if (failures.Count > 1) throw new AggregateException("Failed preparation writer disposition/uncertainty observations retained.", failures);
+            throw;
+        }
+    }
+
+    WriterLease AcquireWriterCore(string worktree, string runId, string writerToken, Action<WriterLease>? captureBirth = null)
+    {
+        var binding = _originalBudget is null ? null : RequireOriginalBinding(worktree);
+        var path = binding?.WriterPath ?? WriterLockPath(worktree);
         try
         {
             var stream = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.None);
+            var lease = new WriterLease(path, stream, runId, writerToken);
+            captureBirth?.Invoke(lease);
             using var writer = new StreamWriter(stream, leaveOpen: true);
             writer.Write($"{runId}\n{writerToken}\n");
             writer.Flush();
             stream.Flush(true);
-            return new WriterLease(path, stream, runId, writerToken);
+            binding?.Attach(lease);
+            return lease;
         }
         catch (IOException exception)
         {
@@ -100,6 +230,7 @@ public sealed class WorktreeManager
 
     public WriterLease RecoverWriter(string worktree, string runId, string writerToken)
     {
+        if (_originalBudget is not null) throw new WorktreeBoundaryException("An original production writer cannot be recovered from current marker/lock data.");
         var path = WriterLockPath(worktree);
         FileStream? stream = null;
         try
@@ -162,6 +293,7 @@ public sealed class WorktreeManager
 
     public async Task<WorktreeObservation> ObserveAsync(string worktree, CancellationToken cancellationToken = default)
     {
+        if (_originalBudget is not null) _ = RequireOriginalBinding(worktree);
         var root = CanonicalPath(worktree);
         var observedRoot = CanonicalPath((await GitAsync(worktree, cancellationToken, "rev-parse", "--show-toplevel").ConfigureAwait(false)).Trim());
         if (!string.Equals(root, observedRoot, PathComparison()))
@@ -183,6 +315,7 @@ public sealed class WorktreeManager
 
     public async Task EnsureDescendsFromAsync(string worktree, string baseCommit, string headCommit, CancellationToken cancellationToken = default)
     {
+        if (_originalBudget is not null) _ = RequireOriginalBinding(worktree);
         var result = await GitExitCodeAsync(worktree, cancellationToken, "merge-base", "--is-ancestor", baseCommit, headCommit).ConfigureAwait(false);
         if (result != 0) throw new WorktreeBoundaryException("Completed head is not a descendant of the frozen base commit.");
     }
@@ -244,6 +377,8 @@ public sealed class WorktreeManager
     private async Task<(int ExitCode, string Stdout, string Stderr)> RunGitCoreAsync(
         string cwd, CancellationToken cancellationToken, bool disableFilters, params string[] arguments)
     {
+        ownedGit.TryGetValue(Path.GetFullPath(cwd), out var binding);
+        binding?.Check(cleanupObservation); // Before even the effective-config probe.
         var filterNames = new HashSet<string>(StringComparer.Ordinal);
         if (disableFilters)
         {
@@ -275,6 +410,18 @@ public sealed class WorktreeManager
         start.Environment["GIT_GRAFT_FILE"] = disabledHooks;
         start.Environment["GIT_NO_LAZY_FETCH"] = "1";
         start.Environment["GIT_TERMINAL_PROMPT"] = "0";
+        if (binding is not null)
+        {
+            // Bound initial/cleanup observations must not refresh the retained
+            // index as an optional side effect. Required writes still use Git's
+            // ordinary mandatory locks; this grants no mutation authority.
+            start.ArgumentList.Add("--no-optional-locks");
+            start.ArgumentList.Add("--git-dir=" + binding.GitDirectory);
+            start.ArgumentList.Add("--work-tree=" + binding.Worktree);
+            start.Environment["GIT_COMMON_DIR"] = binding.CommonDirectory;
+            start.Environment["GIT_OBJECT_DIRECTORY"] = binding.ObjectsPath;
+            start.Environment["GIT_INDEX_FILE"] = binding.IndexPath;
+        }
         start.ArgumentList.Add("-c"); start.ArgumentList.Add("core.hooksPath=" + disabledHooks);
         start.ArgumentList.Add("-c"); start.ArgumentList.Add("core.fsmonitor=false");
         // Checkout/status use literal repository bytes, never external content-filter processes.
@@ -287,6 +434,26 @@ public sealed class WorktreeManager
             }
         }
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
+        if (_originalExecutor is not null)
+        {
+            var actualBudget = _originalBudget ?? throw new WorktreeBoundaryException("Actual original Git budget is absent.");
+            var actualExecutor = _originalExecutor;
+            actualBudget.CheckWork();
+            var env = start.Environment.ToDictionary(x => x.Key, x => x.Value ?? "", OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            Task<BoundedCommandCaptureResult> Birth()
+            {
+                actualBudget.CheckWork();
+                binding?.Check(cleanupObservation);
+                Interlocked.Increment(ref actualOwnedGitInvocations.Value);
+                return actualExecutor.ExecuteBoundedCaptureAsync(new(_gitExecutable, start.ArgumentList.ToArray(), cwd, env) { EnvironmentIsComplete = true }, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, cancellationToken, new OwnedWorkPhaseBudget(actualBudget));
+            }
+            var actual = await (binding is not null && !cleanupObservation ? binding.EnterAsync(Birth) :
+                _effectAdmission is null ? Birth() : _effectAdmission.EnterAsync(_effectRunId!, Birth)).ConfigureAwait(false);
+            actualBudget.CheckWork(); var command = actual.Command; var facts = command.LifecycleDiagnostics;
+            if (actual.CaptureBoundExceeded || command.TimedOut || command.Cancelled || !command.OwnedProcessQuiescent || !actual.RootExitObserved || !actual.StandardOutputDrainCompleted || !actual.StandardErrorDrainCompleted || facts?.NativeFailure is not null || facts?.OwnedTree is not { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 } || OperatingSystem.IsLinux() && actual.OwnershipKind != BoundedCaptureOwnershipKind.LinuxCreationOwnedScope || command.ExitCode is null)
+                throw new WorktreeBoundaryException("Actual original Git capture/group/stream closure is incomplete or failed.");
+            return (command.ExitCode.Value, Encoding.UTF8.GetString(actual.StandardOutputBytes), Encoding.UTF8.GetString(actual.StandardErrorBytes));
+        }
         using var process = Process.Start(start) ?? throw new WorktreeBoundaryException("Could not start Git.");
         var stdout = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var stderr = process.StandardError.ReadToEndAsync(cancellationToken);
@@ -345,7 +512,7 @@ public sealed class WorktreeManager
         return Path.Combine(CanonicalPath(gitDirectory), "delivery-forge-writer.lock");
     }
 
-    private static string WindowsFinalPath(string path)
+    internal static string WindowsFinalPath(string path)
     {
         const uint fileFlagBackupSemantics = 0x02000000;
         using var handle = CreateFile(path, 0, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero,
@@ -435,6 +602,8 @@ public sealed class WriterLease : IDisposable
     private readonly FileStream _stream;
     private readonly object _lifetime = new();
     private bool _disposed;
+    private bool _firstCloseReturned;
+    internal bool FirstCloseReturned { get { lock (_lifetime) return _firstCloseReturned; } }
 
     internal WriterLease(string path, FileStream stream, string runId, string writerToken)
     {
@@ -485,6 +654,7 @@ public sealed class WriterLease : IDisposable
             if (_disposed) return;
             _disposed = true;
             _stream.Dispose();
+            _firstCloseReturned = true;
         }
     }
 }

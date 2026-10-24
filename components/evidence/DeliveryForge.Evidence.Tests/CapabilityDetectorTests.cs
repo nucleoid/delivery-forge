@@ -47,6 +47,44 @@ public sealed class CapabilityDetectorTests
         Assert.Equal(["--help"], result.HelpInvocation!.Arguments);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Zero_exit_nonquiescent_version_or_help_cannot_advertise_supported_capability(bool helpStage)
+    {
+        using var temp = new TempDirectory();
+        var executable = Path.Combine(temp.Path, OperatingSystem.IsWindows() ? "tool.exe" : "tool");
+        await File.WriteAllTextAsync(executable, "fixture DATA, never executed", TestContext.Current.CancellationToken);
+        var version = new CommandResult(0, "1.2.3", "", false, false, TestEvidence.Time(0), TestEvidence.Time(1));
+        var help = new CommandResult(0, "--report json-v1", "", false, false, TestEvidence.Time(1), TestEvidence.Time(2));
+        var probe = new CapabilityProbe("mutate4csharp", ExecutableSource.TrustedExplicit, executable,
+            temp.Path, null, ["--version"], ["--help"], "1.2", "2.0", true);
+        var accepted = await new ToolCapabilityDetector(new QueueCommandExecutor(version, help))
+            .DetectAsync(probe, TestContext.Current.CancellationToken);
+        Assert.True(accepted.Capability.Supported);
+
+        // Keep valid version/help text, exit zero and no timeout/cancellation.
+        // Only the selected actual-result disposition changes. This models the
+        // ordinary bounded-prefix refusal without producing a 64MiB fixture.
+        var observedVersion = version with { OwnedProcessQuiescent = helpStage };
+        var observedHelp = help with { OwnedProcessQuiescent = !helpStage };
+        var refused = await new ToolCapabilityDetector(new QueueCommandExecutor(observedVersion, observedHelp))
+            .DetectAsync(probe, TestContext.Current.CancellationToken);
+        Assert.False(refused.Capability.Supported);
+        Assert.Same(observedVersion, refused.VersionResult);
+        if (helpStage)
+        {
+            Assert.Same(observedHelp, refused.HelpResult);
+            Assert.Contains("Help/capability probe", refused.Capability.Limitations!.Single());
+        }
+        else
+        {
+            Assert.Null(refused.HelpInvocation);
+            Assert.Null(refused.HelpResult);
+            Assert.Contains("Version probe", refused.Capability.Limitations!.Single());
+        }
+    }
+
     [Fact]
     public async Task Oxlint_version_prefix_is_parsed_without_weakening_exact_policy_matching()
     {

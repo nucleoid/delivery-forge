@@ -24,6 +24,9 @@ public sealed record OwnedProcessImageObservation(ProcessControlOutcome Outcome,
 
 public sealed class ProcessControl : IAsyncDisposable
 {
+    // This controller owns exact roots; it does not own a kernel descendant group.
+    public bool OwnsDescendantGroups => false;
+
     private readonly ConcurrentDictionary<int, OwnedProcess> _owned = new();
     private readonly ConcurrentDictionary<int, WindowsOwnedProcessImage> _windows = new();
     private readonly ConcurrentDictionary<int, string> _requestedLaunches = new();
