@@ -734,7 +734,8 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
                     throw new WorkerEnvelopeException("Immutable review preparation requires the actual completed native worker and current parent owner.");
                 frame.Review.Start(frame.Lifetime, () => installedReview.PrepareCompletedAsync(frame, coordination,
                     () => NativeCompletedAndQuiet(frame)));
-                reviewPreparation = await frame.Review.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
+                try { reviewPreparation = await frame.Review.ObserveAsync(frame.Lifetime).ConfigureAwait(false); }
+                catch (Exception error) { frame.Lifetime.RecordFirstCaught("review-source-preparation", error); throw; }
             }
             ToolResult? qualityResult = null;
             if (installedQuality is not null)
@@ -774,7 +775,7 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
             if (reviewPreparation is not null) return reviewPreparation;
             return new("COMPLETE", adapter.Realm == HostObservationRealm.ContractFixture ? "CONTRACT_FIXTURE_COMPLETE" : "OWNER_COMPLETED_REQUIRES_PROFILE_AUDIT", "Actual owner completion recorded; quality/review/publication and installed certification remain separate.", new { committed.RunId, committed.Sequence, committed.Sha256, Realm = adapter.Realm.ToString() });
         }
-        catch (Exception error) { frame.Primary ??= error; return ToolResult.Incomplete("HOST_OPERATION_RETAINED", "Actual host/owner operation failed or remains unknown; no retry or invented quiescence.", new { frame.RunId, frame.Unknown, Type = error.GetType().FullName, OwnerCompleted = frame.OwnerCompleted }); }
+        catch (Exception error) { frame.Lifetime.RecordFirstCaught("host-implement", error); frame.Primary ??= error; return ToolResult.Incomplete("HOST_OPERATION_RETAINED", "Actual host/owner operation failed or remains unknown; no retry or invented quiescence.", new { frame.RunId, frame.Unknown, Type = error.GetType().FullName, OwnerCompleted = frame.OwnerCompleted }); }
         finally { frame.LeaveRoute(); frame.CloseWhenSettled(); }
     }
     internal static bool SettledBatchEvidenceFailure(HostBridgeFrame frame) =>

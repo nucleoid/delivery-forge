@@ -5,6 +5,112 @@ namespace DeliveryForge.Tool.Tests;
 
 public sealed class ProgramFailureTests
 {
+    [Fact]
+    public void First_caught_capture_does_not_enter_cleanup_or_output_and_is_nonsecret_once_only()
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var errors = new StringWriter();
+        var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention);
+        var actual = new IOException("do-not-export-this-secret", new InvalidOperationException("nor-this-secret"));
+        life.RecordFirstCaught("review-source-preparation", actual); attention.EmitFirstCaughtOnce();
+        life.Check(); Assert.Equal("", errors.ToString()); // Capture did not latch cleanup; Check would throw if it had.
+        life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce();
+        life.RecordFirstCaught("standalone", new TimeoutException("later endpoint must not replace first catch"));
+        attention.EmitFirstCaughtOnce();
+        var lines = errors.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(row => row.TrimEnd('\r')).ToArray();
+        Assert.Equal(2, lines.Length); Assert.StartsWith("DFCLI_FAILURE|", lines[0], StringComparison.Ordinal);
+        const string prefix = "DFCLI_FIRST_CAUGHT|"; Assert.StartsWith(prefix, lines[1], StringComparison.Ordinal);
+        using var json = JsonDocument.Parse(lines[1][prefix.Length..]); var diagnostic = json.RootElement;
+        Assert.Equal("review-source-preparation", diagnostic.GetProperty("Stage").GetString());
+        Assert.Equal(typeof(IOException).FullName, diagnostic.GetProperty("Type").GetString());
+        Assert.Equal(actual.HResult, diagnostic.GetProperty("HResult").GetInt32());
+        Assert.Equal(typeof(InvalidOperationException).FullName, diagnostic.GetProperty("InnerType").GetString());
+        Assert.False(diagnostic.GetProperty("CleanupAlreadyBegun").GetBoolean()); Assert.False(diagnostic.GetProperty("MarkerAlreadyEntered").GetBoolean());
+        Assert.DoesNotContain("secret", errors.ToString(), StringComparison.Ordinal); Assert.False(diagnostic.TryGetProperty("Message", out _));
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(lines[1]) <= 1024); Assert.False(attention.Unknown); Assert.False(life.HasExplicitUnknown);
+    }
+    [Fact]
+    public void Marker_before_capture_records_cleanup_consequence_flags_at_later_root_emission()
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var errors = new StringWriter();
+        var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention);
+        life.BeginFailureCleanup(); var consequence = Assert.Throws<TimeoutException>(() => life.Check());
+        life.RecordFirstCaught("review-source-preparation", consequence);
+        life.BeginFailureCleanup(); Assert.DoesNotContain("DFCLI_FIRST_CAUGHT|", errors.ToString(), StringComparison.Ordinal);
+        attention.EmitFirstCaughtOnce(); attention.EmitFirstCaughtOnce();
+        var line = Assert.Single(errors.ToString().Split('\n').Where(row => row.StartsWith("DFCLI_FIRST_CAUGHT|", StringComparison.Ordinal)));
+        using var json = JsonDocument.Parse(line["DFCLI_FIRST_CAUGHT|".Length..]); var diagnostic = json.RootElement;
+        Assert.True(diagnostic.GetProperty("CleanupAlreadyBegun").GetBoolean()); Assert.True(diagnostic.GetProperty("MarkerAlreadyEntered").GetBoolean());
+        Assert.Equal(typeof(TimeoutException).FullName, diagnostic.GetProperty("Type").GetString()); Assert.False(life.HasExplicitUnknown);
+        Assert.Throws<TimeoutException>(() => life.Check()); // Diagnostic cannot reopen WORK or refund a cleanup latch.
+    }
+    sealed class BlockingDiagnosticWriter : StringWriter
+    {
+        readonly object writeGate = new();
+        internal readonly TaskCompletionSource DiagnosticStarted = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource PermitDiagnostic = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal int DiagnosticWrites;
+        public override Task WriteLineAsync(ReadOnlyMemory<char> buffer, CancellationToken cancellationToken = default)
+        {
+            var text = buffer.ToString(); lock (writeGate) base.WriteLine(text);
+            if (!text.StartsWith("DFCLI_FIRST_CAUGHT|", StringComparison.Ordinal)) return Task.CompletedTask;
+            Interlocked.Increment(ref DiagnosticWrites); DiagnosticStarted.TrySetResult(); return PermitDiagnostic.Task;
+        }
+    }
+    [Fact(Timeout = 10000)]
+    public async Task Concurrent_marker_and_root_diagnostic_do_not_turn_a_settled_marker_into_unknown()
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var errors = new BlockingDiagnosticWriter();
+        var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention);
+        life.RecordFirstCaught("host-implement", new IOException("actual caught host failure"));
+        using var start = new Barrier(3); var token = TestContext.Current.CancellationToken;
+        Task Invoke() => Task.Run(() => { Assert.True(start.SignalAndWait(TimeSpan.FromSeconds(5))); life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce(); }, token);
+        var a = Invoke(); var b = Invoke(); Assert.True(start.SignalAndWait(TimeSpan.FromSeconds(5)));
+        try
+        {
+            await errors.DiagnosticStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
+            Assert.True(attention.Unknown); Assert.False(life.HasExplicitUnknown);
+            life.BeginFailureCleanup(); Assert.False(life.HasExplicitUnknown); // Marker-only callback while the distinct diagnostic is pending.
+        }
+        finally { errors.PermitDiagnostic.TrySetResult(); }
+        await Task.WhenAll(a, b).WaitAsync(TimeSpan.FromSeconds(5), token);
+        Assert.Equal(1, errors.DiagnosticWrites); Assert.False(attention.Unknown); Assert.False(life.HasExplicitUnknown);
+        Assert.Equal(2, errors.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Length);
+    }
+    sealed class FailedDiagnosticWriter : StringWriter
+    {
+        internal int DiagnosticWrites;
+        public override Task WriteLineAsync(ReadOnlyMemory<char> buffer, CancellationToken cancellationToken = default)
+        {
+            if (buffer.Span.StartsWith("DFCLI_FIRST_CAUGHT|", StringComparison.Ordinal))
+            { DiagnosticWrites++; return Task.FromException(new IOException("actual diagnostic writer failed")); }
+            return base.WriteLineAsync(buffer, cancellationToken);
+        }
+    }
+    [Fact]
+    public void Failed_root_diagnostic_retains_actual_task_uncertainty_without_retry_or_fallback()
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var errors = new FailedDiagnosticWriter();
+        var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention);
+        life.RecordFirstCaught("host-implement", new IOException("actual host failure"));
+        life.BeginFailureCleanup(); Assert.Equal(0, errors.DiagnosticWrites);
+        attention.EmitFirstCaughtOnce(); attention.EmitFirstCaughtOnce(); life.BeginFailureCleanup();
+        Assert.Equal(1, errors.DiagnosticWrites); Assert.True(attention.Unknown); Assert.True(life.HasExplicitUnknown);
+        Assert.Single(errors.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries));
+    }
+    [Fact(Timeout = 10000)]
+    public async Task Actual_standalone_catch_emits_nonsecret_diagnostic_before_root_failure_delivery()
+    {
+        using var output = new StringWriter(); using var errors = new StringWriter();
+        var exit = await StandaloneEntrypoint.RunAsync(["not-a-tool-mode"], output, errors).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Equal(1, exit); Assert.Equal("", output.ToString());
+        var lines = errors.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(row => row.TrimEnd('\r')).ToArray();
+        Assert.StartsWith("DFCLI_FAILURE|", lines[0], StringComparison.Ordinal);
+        const string prefix = "DFCLI_FIRST_CAUGHT|"; Assert.StartsWith(prefix, lines[1], StringComparison.Ordinal);
+        using var json = JsonDocument.Parse(lines[1][prefix.Length..]); var diagnostic = json.RootElement;
+        Assert.Equal("standalone", diagnostic.GetProperty("Stage").GetString()); Assert.Equal(typeof(ToolUsageException).FullName, diagnostic.GetProperty("Type").GetString());
+        Assert.False(diagnostic.GetProperty("CleanupAlreadyBegun").GetBoolean()); Assert.False(diagnostic.GetProperty("MarkerAlreadyEntered").GetBoolean());
+        using var report = JsonDocument.Parse(string.Join('\n', lines.Skip(2))); Assert.Equal("ACTUAL_OPERATION_FAILED", report.RootElement.GetProperty("Code").GetString());
+    }
     sealed class CancellingIssue(CancellationTokenSource caller) : IIssueContentPort
     {
         public Task<PlanIntent>? Actual { get; private set; }

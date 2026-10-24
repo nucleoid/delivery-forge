@@ -29,6 +29,11 @@ public sealed class ToolLifetime : IDisposable, DeliveryForge.Evidence.IOwnedDup
     internal bool HasRetainedUnknown { get { lock (gate) return retainedUnknown || retainedBridgeFrames.Count != 0; } }
     internal bool HasExplicitUnknown { get { lock (gate) return retainedUnknown; } }
     internal void BindAttention(ToolFailureAttention actual) { lock (gate) { if (attention is not null) throw new IOException("Original failure attention already bound."); attention = actual; } }
+    internal void RecordFirstCaught(string stage, Exception actual)
+    {
+        bool cleanupBegun; lock (gate) cleanupBegun = cleanup != 0;
+        attention?.CaptureFirstCaught(stage, actual, cleanupBegun);
+    }
     internal void BeginFailureCleanup() { _ = CleanupRemaining; attention?.EmitOnce(); }
     void DeliveryForge.Evidence.IOwnedFailureCleanup.BeginFailureCleanup() => BeginFailureCleanup();
     void DeliveryForge.Evidence.IOwnedBudgetUnknownRetention.PreserveUnknown() => RetainUnknown();

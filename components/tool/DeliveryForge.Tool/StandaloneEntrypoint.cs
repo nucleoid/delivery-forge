@@ -118,13 +118,14 @@ internal sealed class StandaloneEntrypoint
             }
             exit = result?.ExitCode ?? 1;
         }
-        catch (Exception error) { batch?.StopNewDispatch(); primary = error; Program.RetainFailure(error); try { original.BeginFailureCleanup(); } catch (Exception endpoint) { secondary.Add(endpoint); original.RetainUnknown(); } }
+        catch (Exception error) { batch?.StopNewDispatch(); primary = error; original.RecordFirstCaught("standalone", error); Program.RetainFailure(error); try { original.BeginFailureCleanup(); } catch (Exception endpoint) { secondary.Add(endpoint); original.RetainUnknown(); } }
         // Unknown native/task frames are never disposed, restored or converted
         // into a normal exit. The same actual caller is passively retained for
         // its containing owner to reconcile; this is a failed, over-budget state.
         if (!original.HasRetainedUnknown && composition is not null) { try { await composition.DisposeAsync().ConfigureAwait(false); } catch (Exception error) { secondary.Add(error); } }
         if (!original.HasRetainedUnknown && batch is not null) { try { await batch.DisposeAsync().ConfigureAwait(false); } catch (Exception error) { secondary.Add(error); } }
         if (!original.HasRetainedUnknown && resources is not null) { try { resources.Close(); } catch (Exception error) { secondary.Add(error); } }
+        attention.EmitFirstCaughtOnce(); // Root terminal-delivery boundary only, after existing marker/cleanup admission.
         if (original.HasRetainedUnknown || attention.Unknown) return await HoldUnknown().ConfigureAwait(false);
         if (secondary.Count != 0) { if (primary is null) primary = secondary[0]; var all = new List<Exception> { primary }; all.AddRange(secondary.Where(e => !ReferenceEquals(e, primary))); primary = all.Count == 1 ? primary : new AggregateException("Actual root failure and independent first dispositions.", all); exit = 1; }
         try
@@ -163,7 +164,7 @@ internal sealed class StandaloneEntrypoint
         // WORK wait or turns an over-budget batch into COMPLETE.
         System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
     }
-    async Task<int> HoldUnknown() { original.RetainUnknown(); attention.EmitOnce(); return await unknownHold.Task.ConfigureAwait(false); }
+    async Task<int> HoldUnknown() { original.RetainUnknown(); attention.EmitOnce(); attention.EmitFirstCaughtOnce(); return await unknownHold.Task.ConfigureAwait(false); }
     static string Encode(object actual)
     {
         // Stream enforces the byte ceiling BEFORE every serializer write. No
