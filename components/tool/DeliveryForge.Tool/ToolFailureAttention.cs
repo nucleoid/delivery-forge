@@ -38,9 +38,12 @@ internal sealed class ToolFailureAttention
             // No Message/Stack/Data/path/config/worker content is read or emitted.
             var line = "DFCLI_FIRST_CAUGHT|" + System.Text.Json.JsonSerializer.Serialize(new
             {
-                Stage = failure.Stage, Type = TypeOf(failure.Error), failure.Error.HResult,
+                Stage = failure.Stage,
+                Type = TypeOf(failure.Error),
+                failure.Error.HResult,
                 InnerType = failure.Error.InnerException is { } inner ? TypeOf(inner) : null,
-                failure.CleanupAlreadyBegun, failure.MarkerAlreadyEntered
+                failure.CleanupAlreadyBegun,
+                failure.MarkerAlreadyEntered
             });
             if (System.Text.Encoding.UTF8.GetByteCount(line) > 1024) throw new IOException("Finite first-caught attention exceeded.");
             var write = actualErrors.WriteLineAsync(line.AsMemory(), CancellationToken.None);
