@@ -186,6 +186,89 @@ public sealed class ProvisionedGitBindingTests
             row => row.Kind == "stopped");
     }
 
+    sealed class ResultDirectoryPort(Fixture fixture) : IHostToolSessionPort
+    {
+        internal int Starts;
+        AgentRequest? request;
+        public AgentAdapterProfile Profile { get; } = new("codex.cli", "result-directory-fixture",
+            new[] { AgentCapability.Launch, AgentCapability.CompletionEvidence, AgentCapability.Stop }
+                .Select(capability => new AgentCapabilityEvidence(capability, AgentCapabilityStatus.Supported,
+                    "typed filesystem contract fixture only", "fixture:result-directory")).ToArray());
+        public HostObservationRealm Realm => HostObservationRealm.ContractFixture;
+        public Task<AgentAcceptedReceipt> StartAsync(AgentRequest actual, TimeSpan remaining, CancellationToken token)
+        {
+            Starts++;
+            Assert.True(Directory.Exists(actual.ResultDirectory));
+            request = actual;
+            return Task.FromResult(new AgentAcceptedReceipt(actual.SchemaVersion, actual.RunId, actual.RequestIdentity,
+                actual.PlanIdentity, actual.BaseCommit, actual.Worktree, actual.AdapterId, actual.AdapterVersion,
+                "result-fixture-run", "result-fixture-task", DateTimeOffset.UtcNow, Profile.Capabilities));
+        }
+        public async Task<AgentCompletionReceipt> WaitAsync(AgentRunBinding binding, TimeSpan remaining, CancellationToken token)
+        {
+            var actual = request ?? throw new IOException("Actual fixture request missing.");
+            var artifact = Path.Combine(actual.ResultDirectory, "actual-completion.json");
+            BoundedFiles.WriteNew(artifact, Encoding.UTF8.GetBytes("result namespace reached by actual completion"), fixture.Original);
+            File.WriteAllText(Path.Combine(fixture.Worker, "subject.txt"), "completed result-directory fixture\n");
+            await fixture.GitAt(fixture.Worker, "add", "--", "subject.txt");
+            await fixture.GitAt(fixture.Worker, "-c", "user.name=ResultFixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "completed");
+            var observed = await fixture.Manager.ObserveAsync(fixture.Worker, token);
+            return new(actual.SchemaVersion, actual.RunId, actual.RequestIdentity, actual.AdapterId, actual.AdapterVersion,
+                binding.RuntimeRunIdentity, binding.RuntimeTaskIdentity, "success", actual.Worktree,
+                observed.HeadCommit, observed.TreeId, DateTimeOffset.UtcNow, [artifact], []);
+        }
+        public Task<AgentControlResult> ControlAsync(AgentRunBinding binding, AgentControlAction action, TimeSpan remaining, CancellationToken token) => throw new IOException("No control belongs to the completed directory fixture.");
+        public Task<AgentControlResult> ObserveUnstartedAsync(AgentRunBinding binding, TimeSpan remaining, CancellationToken token) => throw new IOException("No unstarted adoption belongs to this fixture.");
+    }
+    static (FrozenWorkerPlan Plan, HostInstructionContext Instructions) ResultAssignment(Fixture fixture, string head, string result, string version)
+    {
+        var plan = new FrozenWorkerPlan("owned", "sha256:" + new string('a', 64), head, "fixture/repository", fixture.Repository,
+            fixture.Worker, result, "result-directory-writer", ["subject.txt"], [], "codex.cli", version,
+            [AgentCapability.Launch, AgentCapability.CompletionEvidence]);
+        var request = WorkerEnvelope.PrepareWorker(plan);
+        return (plan, HostInstructionContext.FromParentSelection(request, "sha256:" + new string('b', 64),
+            "physical directory contract fixture only", ["only subject.txt"], ["commit subject.txt and return actual completion artifact"]));
+    }
+    [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    [InlineData("absent")]
+    [InlineData("empty")]
+    [InlineData("retained-evidence")]
+    public async Task Actual_owner_prepares_results_before_start_and_preserves_existing_evidence(string initial)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var result = Path.Combine(fixture.Root, "worker-results");
+        var sentinel = Path.Combine(result, "retained.txt");
+        if (initial != "absent") Directory.CreateDirectory(result);
+        if (initial == "retained-evidence") File.WriteAllText(sentinel, "preserved");
+        var port = new ResultDirectoryPort(fixture); var adapter = new CodexHostAdapter(port);
+        await using var processes = new ProcessControl();
+        using var coordinator = new ExecutionCoordinator(new RunStore(Path.Combine(fixture.Root, "run-store")), fixture.Manager, processes, adapter);
+        var bridge = new OwnerHostBridge(coordinator, adapter);
+        var head = (await fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token)).HeadCommit;
+        var assignment = ResultAssignment(fixture, head, result, port.Profile.AdapterVersion);
+        var origin = fixture.Original.OriginalStarted; var whole = fixture.Original.WholeLimit; var work = fixture.Original.WorkLimit;
+        var completed = await bridge.ImplementAsync(assignment.Plan, assignment.Instructions, fixture.Original, fixture.Original.Token);
+        Assert.Equal("COMPLETE", completed.Outcome); Assert.Equal(1, port.Starts);
+        Assert.Equal("result namespace reached by actual completion", File.ReadAllText(Path.Combine(result, "actual-completion.json")));
+        if (initial == "retained-evidence") Assert.Equal("preserved", File.ReadAllText(sentinel));
+        Assert.Equal(origin, fixture.Original.OriginalStarted); Assert.Equal(whole, fixture.Original.WholeLimit); Assert.Equal(work, fixture.Original.WorkLimit);
+        Assert.True(Assert.Single(bridge.RetainedFrames).OwnerCompleted);
+    }
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Actual_owner_rejects_result_file_before_start_without_replacing_its_bytes()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var result = Path.Combine(fixture.Root, "worker-results"); File.WriteAllText(result, "preserved file");
+        var port = new ResultDirectoryPort(fixture); var adapter = new CodexHostAdapter(port);
+        await using var processes = new ProcessControl();
+        using var coordinator = new ExecutionCoordinator(new RunStore(Path.Combine(fixture.Root, "run-store")), fixture.Manager, processes, adapter);
+        var bridge = new OwnerHostBridge(coordinator, adapter);
+        var head = (await fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token)).HeadCommit;
+        var assignment = ResultAssignment(fixture, head, result, port.Profile.AdapterVersion);
+        var refused = await bridge.ImplementAsync(assignment.Plan, assignment.Instructions, fixture.Original, fixture.Original.Token);
+        Assert.Equal("INCOMPLETE", refused.Outcome); Assert.Equal(0, port.Starts);
+        Assert.Empty(adapter.ActualCalls); Assert.Equal("preserved file", File.ReadAllText(result));
+    }
     sealed class PostBirthParent : ICoordinatedSynchronousEffectAdmission
     {
         internal readonly ParentEffectAdmission Inner;
@@ -247,7 +330,7 @@ public sealed class ProvisionedGitBindingTests
             catch { value.Dispose(); throw; }
         }
         async Task<string> Git(params string[] arguments) => await GitAt(Repository, arguments);
-        async Task<string> GitAt(string directory, params string[] arguments)
+        internal async Task<string> GitAt(string directory, params string[] arguments)
         {
             var environment = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
                 .Where(row => !((string)row.Key).StartsWith("GIT_", StringComparison.OrdinalIgnoreCase))

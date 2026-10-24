@@ -625,6 +625,38 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
         }
         catch (Exception error) { frame.Primary ??= error; frame.Lifetime.RetainBridgeUnknown(frame); }
     }
+    Task<bool> PrepareWorkerResultDirectoryAsync(HostBridgeFrame frame, AgentRequest request)
+    {
+        return frame.Enter(() =>
+        {
+            var creationEntered = false;
+            try
+            {
+                bool Prepare()
+                {
+                    frame.Lifetime.Check();
+                    var path = BoundedFiles.Plain(request.ResultDirectory, true);
+                    if (!Directory.Exists(path))
+                    {
+                        creationEntered = true;
+                        Directory.CreateDirectory(path);
+                    }
+                    frame.Lifetime.Check();
+                    _ = BoundedFiles.Plain(path, true);
+                    return true;
+                }
+                // The selected directory may already contain retained evidence.
+                // Preserve it; each actual completion artifact still uses CreateNew.
+                return Task.FromResult(coordination is null ? Prepare() :
+                    coordination.EnterSynchronous(request.RunId, Prepare));
+            }
+            catch (Exception error)
+            {
+                if (creationEntered) frame.Lifetime.RetainUnknown();
+                return Task.FromException<bool>(error);
+            }
+        });
+    }
     async Task<ToolResult> ImplementRetainedCoreAsync(FrozenWorkerPlan plan, HostBridgeFrame frame)
     {
         try
@@ -643,6 +675,7 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
             }
             else request = (await frame.Enter(() => coordinator.PrepareWorkerAsync(plan, frame.Lifetime.Token)).ConfigureAwait(false)).Request;
             frame.Request = request;
+            await PrepareWorkerResultDirectoryAsync(frame, request).ConfigureAwait(false);
             frame.Accepted = await frame.Enter(() => batchControl is null
                 ? adapter.StartAsync(request, frame.Lifetime.Remaining, frame.Lifetime.Token)
                 : batchControl.EnterNodeStart(() => adapter.StartAsync(request, frame.Lifetime.Remaining, frame.Lifetime.Token))).ConfigureAwait(false);
