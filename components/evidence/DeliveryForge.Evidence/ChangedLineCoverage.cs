@@ -124,7 +124,7 @@ internal static partial class ChangedLineCoverage
             foreach (var context in sources)
             {
                 files.Check();
-                if (!context.Value.Values.Any(source => (fullCurrent || !source.Generated) && source.RepositoryPath is { } path && changes.ContainsKey(path))) continue;
+                if (!context.Value.Values.Any(source => fullCurrent || !source.Generated && source.RepositoryPath is { } path && changes.ContainsKey(path))) continue;
                 var selected = builds.Values.Where(build => Text(build, "contextId") == context.Key).Take(2).ToArray();
                 if (selected.Length != 1) throw Refuse("Changed compiler context lacks one exact actual build.");
                 var build = selected[0]; var buildId = Text(build, "id");
@@ -187,6 +187,11 @@ internal static partial class ChangedLineCoverage
                         censusComplete = false; completeContexts.Remove(context.Key);
                         censusReason ??= "Full-current generated source has executable compiler lines; generated executable membership remains unsupported and is not excluded.";
                     }
+                    if (fullCurrent && !source.Generated && source.RepositoryPath is null)
+                    {
+                        censusComplete = false; completeContexts.Remove(context.Key);
+                        censusReason ??= "Full-current authored executable compiler source lacks a repository mapping; no complete line census is inferred.";
+                    }
                     if (source.Generated && !fullCurrent || source.RepositoryPath is not { } path || !changes.TryGetValue(path, out var changed) || !changed.Contains(row.Number)) continue;
                     var key = path + ":" + row.Number.ToString(CultureInfo.InvariantCulture);
                     if (!providerLines.TryGetValue(key, out var membership)) providerLines.Add(key, membership = new(StringComparer.Ordinal));
@@ -204,6 +209,11 @@ internal static partial class ChangedLineCoverage
                     {
                         censusComplete = false; completeContexts.Remove(context.Key);
                         censusReason ??= "Full-current generated source has executable compiler lines; generated executable membership remains unsupported and is not excluded.";
+                    }
+                    if (fullCurrent && !source.Generated && source.RepositoryPath is null)
+                    {
+                        censusComplete = false; completeContexts.Remove(context.Key);
+                        censusReason ??= "Full-current authored executable compiler source lacks a repository mapping; no complete line census is inferred.";
                     }
                     if (source.Generated && !fullCurrent || source.RepositoryPath is not { } path || !changes.TryGetValue(path, out var changed) || !changed.Contains(row.Number)) continue;
                     var key = path + ":" + row.Number.ToString(CultureInfo.InvariantCulture);

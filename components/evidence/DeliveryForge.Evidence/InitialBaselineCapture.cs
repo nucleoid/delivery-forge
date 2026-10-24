@@ -49,6 +49,16 @@ public sealed class InitialBaselineCaptureData
 
 internal static class InitialBaselineCapture
 {
+    // A known closed native invocation can fail its producer binding. Preserve
+    // that stop as DATA, without adopting a report or a successful observation.
+    internal static InitialBaselineCaptureData Failed(string tool, string reportIdentity, Exception failure)
+    {
+        var type = failure.GetType().FullName;
+        if (type is null || type.Length > 256) type = "ExceptionTypeUnavailable";
+        return new(tool, GateOutcome.Error, false, false, reportIdentity, [], [], null, null,
+            ["PRODUCER_BINDING_FAILED", type]);
+    }
+
     internal static void RequirePurpose(InstalledToolPurpose purpose)
     {
         if (purpose is not (InstalledToolPurpose.ChangedCode or InstalledToolPurpose.InitialBaselineCapture))

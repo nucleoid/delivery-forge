@@ -42,8 +42,12 @@ internal sealed class InstalledToolInvocation(
             if (!owner.Known(actual)) throw new EvidenceWriteException("Actual owned process/output/disposition is unknown or truncated.");
             _report = reportPath is null ? new UTF8Encoding(false, true).GetBytes(actual.StandardOutput) : files.Read(reportPath, ProducerJson.MaximumBytes);
             using var document = ProducerJson.Read(_report);
-            if (profile.Tool == "mutate4csharp") JoinMutation(document.RootElement);
-            else JoinCrap(document.RootElement, actual);
+            // One retained raw configuration supplies both the actual join and
+            // the later capture reducer; each tool's join checks its approved hash.
+            var approvedConfiguration = files.Read(Path.Combine(invocation.WorkingDirectory, profile.Data.ConfigurationRelativePath), 1024 * 1024);
+            InitialBaselineCaptureData? mutationCapture = null;
+            if (profile.Tool == "mutate4csharp") mutationCapture = JoinMutation(document.RootElement, approvedConfiguration);
+            else JoinCrap(document.RootElement, actual, approvedConfiguration);
             // No forward SDK process is dispatched after the actual main owner enters cleanup.
             // The original parent retains the synchronous consume for quiescence;
             // its lease-state monitor remains available for renewal/revocation.
@@ -65,9 +69,12 @@ internal sealed class InstalledToolInvocation(
                 var raw = profile.Tool == "mutate4csharp"
                     ? Mutate4CSharpAdapter.NormalizeCurrent(_report, capability, actual.ExitCode!.Value)
                     : Crap4CSharpAdapter.NormalizeCurrent(_report, capability, actual.ExitCode!.Value);
-                using var config = ProducerJson.Read(files.Read(Path.Combine(invocation.WorkingDirectory, profile.Data.ConfigurationRelativePath), 1024 * 1024));
+                using var config = ProducerJson.Read(approvedConfiguration);
+                // The pure mutation candidate is published only after every actual
+                // installation/Git/source/environment/resource join above succeeds.
                 _capture = profile.Tool == "mutate4csharp"
-                    ? InitialBaselineCapture.Mutation(_report, document.RootElement, config.RootElement, raw.Outcome)
+                    ? mutationCapture is not null && mutationCapture.RawOutcome == raw.Outcome ? mutationCapture :
+                        throw new EvidenceWriteException("Actual mutation capture outcome differs from its validated report.")
                     : InitialBaselineCapture.Callables(_report, document.RootElement, _captureSources, _fullCurrentLines, raw.Outcome,
                         config.RootElement.GetProperty("testProjects").EnumerateArray().Select(p => p.GetString()!).ToArray(), invocation.WorkingDirectory);
             }
@@ -116,7 +123,7 @@ internal sealed class InstalledToolInvocation(
         catch (Exception error) { _failure = error; }
     }
 
-    private void JoinMutation(JsonElement root)
+    private InitialBaselineCaptureData? JoinMutation(JsonElement root, byte[] approvedConfiguration)
     {
         var data = Mutate4CSharpReportV2.ReadData(_report!);
         if (data.ClaimedExitCode != _actual!.ExitCode || root.GetProperty("mode").GetString() != "check" ||
@@ -128,20 +135,35 @@ internal sealed class InstalledToolInvocation(
         var timestamp = root.GetProperty("generatedAtUtc").GetDateTimeOffset();
         if (timestamp < _actual.StartedAt.AddSeconds(-2) || timestamp > _actual.CompletedAt.AddSeconds(2))
             throw new EvidenceWriteException("Mutation report was not generated within this actual invocation.");
-        using var configuration = ProducerJson.Read(files.Read(Path.Combine(invocation.WorkingDirectory, profile.Data.ConfigurationRelativePath), 1024 * 1024));
+        return JoinMutationConfiguration(_report!, root, approvedConfiguration, profile.Data.ConfigurationSha256, sdkBefore, request.Purpose, data.ClaimedOutcome);
+    }
+
+    // Pure DATA comparison on the actual join path, never a producer/owner issuer.
+    internal static InitialBaselineCaptureData? JoinMutationConfiguration(byte[] report, JsonElement root,
+        byte[] approvedConfiguration, string expectedConfigurationSha256, string expectedSdk,
+        InstalledToolPurpose purpose, GateOutcome outcome)
+    {
+        InitialBaselineCapture.RequirePurpose(purpose);
+        if (InstalledToolFiles.Identity(approvedConfiguration) != expectedConfigurationSha256)
+            throw new EvidenceWriteException("Approved mutation configuration changed.");
+        using var configuration = ProducerJson.Read(approvedConfiguration);
         MutationPolicyBinding.RequireSame(configuration.RootElement, root.GetProperty("policy"));
-        if (data.ClaimedOutcome != GateOutcome.Incomplete)
+        var capture = purpose == InstalledToolPurpose.InitialBaselineCapture
+            ? InitialBaselineCapture.Mutation(report, root, configuration.RootElement, outcome) : null;
+        // Valid prebaseline/noncontinuable refusals remain INCOMPLETE DATA. Only
+        // an otherwise continuable capture must prove full fresh suite accounting.
+        if (outcome != GateOutcome.Incomplete || capture?.MayCollectNextGate == true)
         {
+            if (capture?.MayCollectNextGate == true) Mutate4CSharpReportV2.RequireCompleteSuiteAccounting(root);
             var expected = configuration.RootElement.GetProperty("testSuites").EnumerateArray().Select(SuiteKey).ToHashSet(StringComparer.Ordinal);
             var observed = root.GetProperty("suites").EnumerateArray().Select(s => SuiteKey(s.GetProperty("accounting").GetProperty("configuration"))).ToHashSet(StringComparer.Ordinal);
             if (!expected.SetEquals(observed)) throw new EvidenceWriteException("Current mutation evidence omitted or substituted a configured suite.");
             var sdk = root.GetProperty("evidence").EnumerateArray().Where(e => e.GetProperty("kind").GetString() == "TOOL_INTERNAL_SDK")
                 .SelectMany(e => e.GetProperty("diagnostics").EnumerateArray()).Select(e => e.GetString()!).ToArray();
-            if (sdk.Length != 1 || !sdk[0].StartsWith("dotnet-sdk=" + sdkBefore + ";dependencies=", StringComparison.Ordinal))
+            if (sdk.Length != 1 || !sdk[0].StartsWith("dotnet-sdk=" + expectedSdk + ";dependencies=", StringComparison.Ordinal))
                 throw new EvidenceWriteException("Actual captured consumer SDK evidence differs from original selection.");
         }
-        // All source/config/SDK/coverage/ledger identities remain in the complete original report.
-        // Conclusive suite membership and fresh coverage joins were checked by ReadData.
+        return capture;
     }
 
     private static string SuiteKey(JsonElement suite)
@@ -157,9 +179,11 @@ internal sealed class InstalledToolInvocation(
             members
         });
     }
-    private void JoinCrap(JsonElement root, CommandResult actual)
+    private void JoinCrap(JsonElement root, CommandResult actual, byte[] approvedConfiguration)
     {
         var evaluation = root.GetProperty("evaluation"); var run = root.GetProperty("run");
+        if (request.Purpose == InstalledToolPurpose.InitialBaselineCapture && InstalledToolFiles.Identity(approvedConfiguration) != profile.Data.ConfigurationSha256)
+            throw new EvidenceWriteException("Approved raw policy changed.");
         if (root.GetProperty("toolVersion").GetString() != profile.Version || run.GetProperty("exitCode").GetInt32() != actual.ExitCode ||
             evaluation.GetProperty("invocationMode").GetString() != "check")
             throw new EvidenceWriteException("Crap original version/operation/exit differs from the real invocation.");
@@ -205,7 +229,7 @@ internal sealed class InstalledToolInvocation(
             var actualPolicy = files.Read(Path.Combine(_bundleRoot, policyLocator), 1024 * 1024);
             if (actualPolicy.LongLength != policies[0].GetProperty("length").GetInt64() || InstalledToolFiles.Identity(actualPolicy) != "sha256:" + policies[0].GetProperty("sha256").GetString())
                 throw new EvidenceWriteException("Actual canonical policy bytes changed during the current join.");
-            var approvedRaw = files.Read(Path.Combine(invocation.WorkingDirectory, profile.Data.ConfigurationRelativePath), 1024 * 1024);
+            var approvedRaw = approvedConfiguration;
             if (InstalledToolFiles.Identity(approvedRaw) != profile.Data.ConfigurationSha256) throw new EvidenceWriteException("Approved raw policy changed.");
             CrapPolicyBinding.RequireSame(approvedRaw, actualPolicy);
             if (request.Purpose == InstalledToolPurpose.InitialBaselineCapture)
@@ -226,8 +250,12 @@ internal sealed class InstalledToolInvocation(
     }
     internal InitialBaselineCaptureData CaptureInitialBaseline(GateRunResult actual)
     {
-        if (request.Purpose != InstalledToolPurpose.InitialBaselineCapture || !_entered || !_returned ||
-            _failure is not null || _capture is null || !ReferenceEquals(actual.Execution, _actual) ||
+        if (request.Purpose != InstalledToolPurpose.InitialBaselineCapture || !_entered ||
+            !ReferenceEquals(actual.Execution, _actual) || !owner.Known(actual.Execution))
+            throw new EvidenceWriteException("Same actual known closed initial capture invocation required.");
+        if (_failure is not null)
+            return InitialBaselineCapture.Failed(profile.Tool, _report is null ? "unavailable" : InstalledToolFiles.Identity(_report), _failure);
+        if (!_returned || _capture is null ||
             actual.SourceChanged || actual.Before != request.ExpectedRepository || actual.After != request.ExpectedRepository)
             throw new EvidenceWriteException("Same actual current completed initial capture required.");
         return _capture;

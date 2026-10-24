@@ -71,9 +71,55 @@ internal sealed class HistoricalQualityHost
     // Capture receipts are always advisory INCOMPLETE while RawOutcome independently retains PASS/FAIL.
     internal static void RequireInitialCaptureTuple(string expectedTool, GateRunResult result, InitialBaselineCaptureData capture)
     {
-        if (result.Outcome != GateOutcome.Incomplete || result.ProductionCapable || result.Fixture ||
+        var failedBinding = capture.RawOutcome == GateOutcome.Error && !capture.Complete && !capture.MayCollectNextGate;
+        if ((result.Outcome != GateOutcome.Incomplete && !(result.Outcome == GateOutcome.Error && failedBinding)) || result.ProductionCapable || result.Fixture ||
             capture.Tool != expectedTool || capture.ProductionAuthority)
             throw new IOException("Actual initial capture requires its nonfixture advisory receipt and matching observation DATA.");
+    }
+
+    internal sealed record InitialCaptureArtifact(string Path, string Identity);
+
+    // Summary DATA from the already retained actual result/capture; no sidecar read or new authority.
+    internal static object SummarizeInitialCapture(GateRunResult result, InitialBaselineCaptureData capture)
+    {
+        var receiptDirectory = Path.GetDirectoryName(result.ReceiptPath);
+        var gateRoot = receiptDirectory is null ? null : Path.GetDirectoryName(receiptDirectory);
+        if (!Path.IsPathFullyQualified(result.ReceiptPath) || gateRoot is null || Path.GetFileName(receiptDirectory) != "receipts")
+            throw new IOException("Actual gate receipt artifact directory required for capture references.");
+        InitialCaptureArtifact? Artifact(string leaf, bool required)
+        {
+            if (result.ArtifactHashes.TryGetValue(leaf, out var identity))
+                return new(Path.Combine(gateRoot, leaf), identity);
+            if (required) throw new IOException("Actual capture sidecar hash is absent from the retained gate artifacts.");
+            return null;
+        }
+        var lines = capture.Lines;
+        var failedBinding = result.Outcome == GateOutcome.Error && capture.RawOutcome == GateOutcome.Error && !capture.Complete && !capture.MayCollectNextGate;
+        return new
+        {
+            capture.Tool,
+            capture.RawOutcome,
+            capture.Complete,
+            capture.MayCollectNextGate,
+            capture.ReportIdentity,
+            SourceCount = capture.Sources.Count,
+            CallableCount = capture.Callables.Count,
+            DiagnosticCount = capture.Diagnostics.Count,
+            Lines = lines is null ? null : new
+            {
+                lines.ExecutableLines,
+                lines.CoveredLines,
+                lines.Percent,
+                lines.UnmeasuredLines,
+                lines.CompilerCensusComplete,
+                lines.SourceSetIdentity
+            },
+            capture.Mutation,
+            DiagnosticExcerpts = capture.Diagnostics.Take(8).Select(text => text.Length <= 256 ? text : text[..256]).ToArray(),
+            CaptureArtifact = Artifact("producer-initial-baseline-capture.json", required: !failedBinding),
+            BindingFailureArtifact = Artifact("producer-binding-failure.json", required: failedBinding),
+            ProductionAuthority = false
+        };
     }
 
     internal static void RequireNoWorker(HostBridgeFrame frame)
@@ -98,6 +144,7 @@ internal sealed class HistoricalQualityHost
         var references = new List<object>();
         var initialCapture = selection.Purpose == InitialBaselineCapture;
         var captures = new List<InitialBaselineCaptureData>();
+        var captureSummaries = new List<object>();
         void Current()
         {
             original.Check(); parent.CheckCurrent(run.RunId); RequireNoWorker(frame);
@@ -156,9 +203,10 @@ internal sealed class HistoricalQualityHost
                 });
                 RequireInitialCaptureTuple(gate.Tool, result, capture);
                 captures.Add(capture);
+                captureSummaries.Add(SummarizeInitialCapture(result, capture));
                 if (!capture.MayCollectNextGate)
                     return ToolResult.Incomplete("INITIAL_BASELINE_CAPTURE_STOPPED", "Actual capture cannot safely collect another gate; original artifacts/outcomes are retained without baseline authority.",
-                        new { run.RunId, expected, Gates = references.ToArray(), Captures = captures.ToArray(), BaselineApproved = false, ProductionAuthority = false });
+                        new { run.RunId, expected, Gates = references.ToArray(), Captures = captureSummaries.ToArray(), BaselineApproved = false, ProductionAuthority = false });
                 continue;
             }
             if (!InstalledQualityHost.IsExactCurrentGatePass(result, gate, selection.Quality.PolicyIdentity, expected))
@@ -181,7 +229,7 @@ internal sealed class HistoricalQualityHost
                     Purpose = InitialBaselineCapture,
                     Complete = complete,
                     Gates = references.ToArray(),
-                    Captures = captures.ToArray(),
+                    Captures = captureSummaries.ToArray(),
                     ChangedCodeComparison = "NotEvaluatedNoBaseline",
                     WorkerStarted = false,
                     BaselineApproved = false,

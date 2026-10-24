@@ -10,6 +10,42 @@ namespace DeliveryForge.Tool.Tests;
 // production profile or baseline approval is supplied by these DATA tests.
 public sealed class HistoricalQualityTests
 {
+    [Theory]
+    [InlineData(false, false, GateOutcome.Error, true)]
+    [InlineData(true, false, GateOutcome.Error, false)]
+    [InlineData(false, true, GateOutcome.Error, false)]
+    [InlineData(false, false, GateOutcome.Pass, false)]
+    public void Error_receipt_requires_noncontinuable_failure_DATA(bool complete, bool mayContinue, GateOutcome raw, bool accepted)
+    {
+        var tuple = AdvisoryTuple(raw);
+        var receipt = tuple.Receipt with { Outcome = GateOutcome.Error };
+        var capture = new InitialBaselineCaptureData("crap4csharp", raw, complete, mayContinue,
+            tuple.Capture.ReportIdentity, [], [], null, null, ["PRODUCER_BINDING_FAILED"]);
+        if (accepted) HistoricalQualityHost.RequireInitialCaptureTuple("crap4csharp", receipt, capture);
+        else Assert.Throws<IOException>(() => HistoricalQualityHost.RequireInitialCaptureTuple("crap4csharp", receipt, capture));
+    }
+
+    [Fact]
+    public void Failed_capture_summary_retains_actual_binding_failure_reference_without_requiring_a_capture_sidecar()
+    {
+        var tuple = AdvisoryTuple(GateOutcome.Error);
+        var root = Path.Combine(Path.GetTempPath(), "capture-failure-data");
+        var receipt = tuple.Receipt with
+        {
+            Outcome = GateOutcome.Error,
+            ReceiptPath = Path.Combine(root, "receipts", "gate.json"),
+            ArtifactHashes = new Dictionary<string, string> { ["producer-binding-failure.json"] = "sha256:" + new string('f', 64) }
+        };
+        var capture = new InitialBaselineCaptureData("crap4csharp", GateOutcome.Error, false, false,
+            tuple.Capture.ReportIdentity, [], [], null, null, ["PRODUCER_BINDING_FAILED"]);
+        HistoricalQualityHost.RequireInitialCaptureTuple("crap4csharp", receipt, capture);
+        var summary = JsonSerializer.SerializeToElement(HistoricalQualityHost.SummarizeInitialCapture(receipt, capture));
+        Assert.Equal(JsonValueKind.Null, summary.GetProperty("CaptureArtifact").ValueKind);
+        Assert.Equal(Path.Combine(root, "producer-binding-failure.json"), summary.GetProperty("BindingFailureArtifact").GetProperty("Path").GetString());
+        Assert.Equal(receipt.ArtifactHashes["producer-binding-failure.json"], summary.GetProperty("BindingFailureArtifact").GetProperty("Identity").GetString());
+        Assert.Throws<IOException>(() => HistoricalQualityHost.SummarizeInitialCapture(receipt with { ArtifactHashes = new Dictionary<string, string>() }, capture));
+    }
+
     static TrustedConfiguration Configuration()
     {
         var root = Path.Combine(Path.GetTempPath(), "historical-quality-data-" + Guid.NewGuid().ToString("N"));
@@ -224,5 +260,49 @@ public sealed class HistoricalQualityTests
             _ => tuple.Receipt with { ProductionCapable = true }
         };
         Assert.Throws<IOException>(() => HistoricalQualityHost.RequireInitialCaptureTuple("crap4csharp", receipt, tuple.Capture));
+    }
+    [Fact]
+    public void Initial_capture_summary_references_full_sidecars_without_serializing_large_measurement_vectors()
+    {
+        // Pure summary DATA, never supplied to an actual scope or native authority issuer.
+        const int count = 100000;
+        var tuple = AdvisoryTuple(GateOutcome.Fail);
+        var gateRoot = Path.Combine(Path.GetTempPath(), "capture-summary-data");
+        var captureHash = "sha256:" + new string('e', 64);
+        var failureHash = "sha256:" + new string('f', 64);
+        var receipt = tuple.Receipt with
+        {
+            ReceiptPath = Path.Combine(gateRoot, "receipts", "sha256-data.json"),
+            ArtifactHashes = new Dictionary<string, string>
+            {
+                ["producer-initial-baseline-capture.json"] = captureHash,
+                ["producer-binding-failure.json"] = failureHash
+            }
+        };
+        var source = new InitialBaselineSource("context", "source.cs", new string('a', 64), false);
+        var callable = new InitialBaselineCallable("context", "source.cs", "method", new string('a', 64), 0.25m, 99m);
+        var capture = new InitialBaselineCaptureData("crap4csharp", GateOutcome.Fail, true, true,
+            "sha256:" + new string('d', 64), Enumerable.Repeat(source, count), Enumerable.Repeat(callable, count),
+            new(12, 3, 25m, 0, true, "sha256:" + new string('c', 64), new string('x', 100000)), null,
+            Enumerable.Repeat(new string('z', 1024), count));
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(HistoricalQualityHost.SummarizeInitialCapture(receipt, capture), BoundedFiles.Json);
+        Assert.True(bytes.Length < 8192, $"Summary unexpectedly expanded to {bytes.Length} bytes.");
+        using var document = JsonDocument.Parse(bytes);
+        var summary = document.RootElement;
+        Assert.Equal(count, summary.GetProperty("SourceCount").GetInt32());
+        Assert.Equal(count, summary.GetProperty("CallableCount").GetInt32());
+        Assert.Equal(count, summary.GetProperty("DiagnosticCount").GetInt32());
+        Assert.False(summary.TryGetProperty("Sources", out _)); Assert.False(summary.TryGetProperty("Callables", out _));
+        Assert.Equal("Fail", summary.GetProperty("RawOutcome").GetString());
+        Assert.Equal(12, summary.GetProperty("Lines").GetProperty("ExecutableLines").GetInt32());
+        Assert.False(summary.GetProperty("Lines").TryGetProperty("Reason", out _));
+        var excerpts = summary.GetProperty("DiagnosticExcerpts").EnumerateArray().ToArray();
+        Assert.Equal(8, excerpts.Length); Assert.All(excerpts, value => Assert.Equal(256, value.GetString()!.Length));
+        Assert.Equal(Path.Combine(gateRoot, "producer-initial-baseline-capture.json"), summary.GetProperty("CaptureArtifact").GetProperty("Path").GetString());
+        Assert.Equal(captureHash, summary.GetProperty("CaptureArtifact").GetProperty("Identity").GetString());
+        Assert.Equal(Path.Combine(gateRoot, "producer-binding-failure.json"), summary.GetProperty("BindingFailureArtifact").GetProperty("Path").GetString());
+        Assert.Equal(failureHash, summary.GetProperty("BindingFailureArtifact").GetProperty("Identity").GetString());
+        Assert.False(summary.GetProperty("ProductionAuthority").GetBoolean());
+        Assert.Equal(count, capture.Sources.Count); Assert.Equal(count, capture.Callables.Count);
     }
 }

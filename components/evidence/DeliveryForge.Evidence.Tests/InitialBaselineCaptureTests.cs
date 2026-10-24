@@ -10,6 +10,18 @@ namespace DeliveryForge.Evidence.Tests;
 // Genuine PE/PDB/source coverage controls are in CompilerLineCensusTests.
 public sealed class InitialBaselineCaptureTests
 {
+    [Fact]
+    public void Failed_binding_retains_only_noncontinuable_error_DATA_and_the_report_identity()
+    {
+        var result = InitialBaselineCapture.Failed("crap4csharp", TestEvidence.Identity('d'), new IOException("private failure message"));
+        Assert.Equal(GateOutcome.Error, result.RawOutcome);
+        Assert.False(result.Complete); Assert.False(result.MayCollectNextGate); Assert.False(result.ProductionAuthority);
+        Assert.Equal(TestEvidence.Identity('d'), result.ReportIdentity);
+        Assert.Empty(result.Sources); Assert.Empty(result.Callables); Assert.Null(result.Lines); Assert.Null(result.Mutation);
+        Assert.Equal(["PRODUCER_BINDING_FAILED", typeof(IOException).FullName!], result.Diagnostics);
+        Assert.DoesNotContain("private failure message", JsonSerializer.Serialize(result));
+    }
+
     [Theory]
     [InlineData(-1)]
     [InlineData(2)]
@@ -139,6 +151,97 @@ public sealed class InitialBaselineCaptureTests
         Assert.Equal(new string('a', 64), Assert.Single(result.Callables).SourceSha256);
     }
 
+    [Fact]
+    public void Budget_capture_requires_the_exact_suite_SDK_and_fresh_accounting_before_continuing()
+    {
+        var root = BudgetOmission(); var configuration = MutationJoinConfiguration(root);
+        Assert.True(ReadMutation(root, configuration).MayCollectNextGate);
+        var result = JoinMutation(root, configuration);
+        Assert.NotNull(result); Assert.True(result.MayCollectNextGate); Assert.False(result.Complete); Assert.False(result.ProductionAuthority);
+    }
+
+    [Theory]
+    [InlineData("suite-path")]
+    [InlineData("runner")]
+    [InlineData("framework")]
+    [InlineData("configuration")]
+    [InlineData("members")]
+    [InlineData("accounted-members")]
+    [InlineData("accounting-run")]
+    [InlineData("sdk")]
+    [InlineData("configuration-bytes")]
+    public void Budget_capture_refuses_substituted_suite_accounting_SDK_or_unbound_configuration(string fault)
+    {
+        var root = BudgetOmission(); var configuration = MutationJoinConfiguration(root);
+        var observed = root["suites"]![0]!["accounting"]!["configuration"]!;
+        if (fault == "suite-path") observed["path"] = "tests/Foreign/Foreign.csproj";
+        if (fault == "runner") observed["runner"] = "foreign";
+        if (fault == "framework") observed["framework"] = "net9.0";
+        if (fault == "configuration") observed["configuration"] = "Debug";
+        if (fault == "members") observed["expectedMembers"] = new JsonArray("Foreign.Tests.dll");
+        if (fault == "accounted-members") root["suites"]![0]!["accounting"]!["accountedMembers"] = new JsonArray("Foreign.Tests.dll");
+        if (fault == "accounting-run") root["suites"]![0]!["accounting"]!["runId"] = "foreign";
+        if (fault == "sdk") root["evidence"]!.AsArray().Last()!["diagnostics"] = new JsonArray("dotnet-sdk=foreign;dependencies=fixture");
+        if (fault is "runner" or "framework")
+        {
+            Assert.Throws<MutationReportFormatException>(() => ReadMutation(root, configuration)); // Existing pinned schema already refuses these.
+            return;
+        }
+        Assert.True(ReadMutation(root, configuration).MayCollectNextGate); // Budget DATA alone does not bind suite accounting/SDK/config.
+        if (fault is "sdk" or "configuration-bytes")
+            Assert.Throws<EvidenceWriteException>(() => JoinMutation(root, configuration, drift: fault == "configuration-bytes"));
+        else Assert.Throws<MutationReportFormatException>(() => JoinMutation(root, configuration));
+    }
+
+    [Fact]
+    public void Noncontinuable_capture_retains_a_valid_incomplete_refusal_without_demanding_conclusive_suites()
+    {
+        var root = BudgetOmission(); var configuration = MutationJoinConfiguration(root);
+        root["units"]![1]!["evidence"]![0]!["kind"] = "FORMAT_ONLY"; // No positive cap proof, so this capture cannot continue.
+        root["evidence"]!.AsArray().RemoveAt(root["evidence"]!.AsArray().Count - 1);
+        root["suites"]![0]!["accounting"]!["runId"] = "foreign";
+        var result = JoinMutation(root, configuration);
+        Assert.NotNull(result); Assert.False(result.Complete); Assert.False(result.MayCollectNextGate);
+        Assert.Equal(GateOutcome.Incomplete, result.RawOutcome);
+    }
+
+    [Fact]
+    public void Normal_incomplete_mutation_retains_its_existing_nonconclusive_suite_branch()
+    {
+        var root = BudgetOmission(); var configuration = MutationJoinConfiguration(root);
+        root["evidence"]!.AsArray().RemoveAt(root["evidence"]!.AsArray().Count - 1);
+        root["suites"]![0]!["accounting"]!["configuration"]!["path"] = "tests/Foreign/Foreign.csproj";
+        Assert.Null(JoinMutation(root, configuration, purpose: InstalledToolPurpose.ChangedCode));
+    }
+
+    private static InitialBaselineCaptureData? JoinMutation(JsonObject root, JsonObject configuration,
+        bool drift = false, InstalledToolPurpose purpose = InstalledToolPurpose.InitialBaselineCapture)
+    {
+        var bytes = Encoding.UTF8.GetBytes(configuration.ToJsonString()); var expectedHash = InstalledToolFiles.Identity(bytes);
+        if (drift) bytes = bytes.Concat(" "u8.ToArray()).ToArray(); // Same JSON semantics, different approved bytes.
+        var reportBytes = Encoding.UTF8.GetBytes(root.ToJsonString());
+        var data = Mutate4CSharpReportV2.ReadData(reportBytes); using var report = JsonDocument.Parse(reportBytes);
+        return InstalledToolInvocation.JoinMutationConfiguration(reportBytes, report.RootElement, bytes,
+            expectedHash, "fixture-sdk", purpose, data.ClaimedOutcome);
+    }
+    private static JsonObject MutationJoinConfiguration(JsonObject root)
+    {
+        // Keep the strong fixture's complete suite digest/accounting unchanged.
+        // All of this is DATA: no SDK probe, native owner, receipt or authority.
+        var suite = root["suites"]![0]!["accounting"]!["configuration"]!.DeepClone();
+        var id = suite["id"]!.GetValue<string>(); var path = suite["path"]!.GetValue<string>();
+        root["scopePlan"]!["projectUnits"]![0]!["tests"] = new JsonArray(path);
+        root["evidence"]!.AsArray().Add(JsonSerializer.SerializeToNode(new
+        { kind = "TOOL_INTERNAL_SDK", summary = "Explicit DATA join fixture only.", diagnostics = new[] { "dotnet-sdk=fixture-sdk;dependencies=fixture" } }));
+        return new JsonObject
+        {
+            ["version"] = 2, ["semanticProfile"] = "resolved-project-graph-v1", ["exclusions"] = new JsonArray(),
+            ["projects"] = new JsonArray(JsonSerializer.SerializeToNode(new
+            { project = "src/App/App.csproj", testSuites = new[] { id } })),
+            ["testSuites"] = new JsonArray(suite), ["policy"] = root["policy"]!.DeepClone()
+        };
+    }
+
     private static JsonObject Mutation()
     {
         var root = JsonNode.Parse(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "MutationReportData", "strong.json")))!.AsObject();
@@ -162,10 +265,10 @@ public sealed class InitialBaselineCaptureTests
         { code = "UNIT_OMITTED", message = $"Evaluation unit {id} was omitted." }));
         return root;
     }
-    private static InitialBaselineCaptureData ReadMutation(JsonObject root)
+    private static InitialBaselineCaptureData ReadMutation(JsonObject root, JsonObject? approvedConfiguration = null)
     {
         using var report = JsonDocument.Parse(root.ToJsonString());
-        using var configuration = JsonDocument.Parse("""
+        using var configuration = JsonDocument.Parse(approvedConfiguration?.ToJsonString() ?? """
             {"version":2,"semanticProfile":"resolved-project-graph-v1","exclusions":[],
              "projects":[{"project":"src/App/App.csproj","testSuites":["tests"]}],
              "testSuites":[{"id":"tests","path":"tests/App.Tests/App.Tests.csproj"}]}

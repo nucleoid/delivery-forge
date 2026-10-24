@@ -86,6 +86,20 @@ public sealed class CompilerLineCensusTests
     }
 
     [Fact]
+    public void Initial_full_current_capture_inspects_nonrepository_authored_context_instead_of_claiming_an_empty_complete_census()
+    {
+        using var fixture = new Fixture();
+        _ = fixture.Read(omitReport: true, fullCurrentCapture: true, emptyDiff: true, nonRepositoryContext: true);
+        var full = Assert.IsType<InitialBaselineLineCoverage>(fixture.FullCurrent);
+        Assert.False(full.CompilerCensusComplete);
+        Assert.Contains("source", full.Reason, StringComparison.Ordinal);
+        Assert.Equal(0, full.ExecutableLines); Assert.Null(full.Percent);
+        // This actual standard-build PDB needs the removed repository roles to map
+        // its source documents. The existing compiler census refuses that missing
+        // mapping; all-nonrepository contexts must reach it, not be skipped as empty.
+    }
+
+    [Fact]
     public void Genuine_ordinary_class_has_complete_source_bound_points_including_excluded_method()
     {
         using var fixture = new Fixture();
@@ -475,7 +489,7 @@ public sealed class CompilerLineCensusTests
             bool declarationCompilerSource = false, bool extraCompilerConstructor = false, bool compilerSourceHashDrift = false,
             bool generatedChangedContext = false, string generatedChangedRole = "source", bool generatedChangedSourceDrift = false,
             bool generatedDeclaration = false, string? unreadRecipeContext = null, string? extraCompilerConstructorContext = null,
-            bool fullCurrentCapture = false, bool emptyDiff = false)
+            bool fullCurrentCapture = false, bool emptyDiff = false, bool nonRepositoryContext = false)
         {
             var rawSource = fault == "checksum" ? Source.Concat(" "u8.ToArray()).ToArray() : Source;
             // Only the checksum-negative uses a separate logical copy. Physical source
@@ -505,9 +519,9 @@ public sealed class CompilerLineCensusTests
                 {
                     id = context,
                     project = ProjectRole + "/DeliveryForge.Evidence.CensusFixture.csproj",
-                    inputs = new[] { new { role = generatedContext ? generatedChangedRole : "source", logicalPath = "Subject.cs", repositoryPath = ProjectRole + "/Subject.cs", locator = generatedContext ? "generated-context-source" : "source",
+                    inputs = new[] { new { role = generatedContext ? generatedChangedRole : "source", logicalPath = "Subject.cs", repositoryPath = nonRepositoryContext ? null : ProjectRole + "/Subject.cs", locator = generatedContext ? "generated-context-source" : "source",
                         length = contextSource.Length, sha256 = InstalledToolFiles.Identity(contextSource)[7..], generated = generatedContext, encoding = "utf-8" },
-                        new { role = declarationCompilerSource ? "compiler-source" : "source", logicalPath = "Declarations.cs", repositoryPath = ProjectRole + "/Declarations.cs", locator = "declaration",
+                        new { role = declarationCompilerSource ? "compiler-source" : "source", logicalPath = "Declarations.cs", repositoryPath = nonRepositoryContext ? null : ProjectRole + "/Declarations.cs", locator = "declaration",
                         length = DeclarationSource.Length, sha256 = InstalledToolFiles.Identity(DeclarationSource)[7..], generated = generatedDeclaration, encoding = "utf-8" } }
                 })!;
                 if (extraCompilerConstructor && (extraCompilerConstructorContext is null || extraCompilerConstructorContext == context))
