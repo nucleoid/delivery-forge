@@ -177,7 +177,7 @@ internal sealed class PlanImportGitView : IDisposable
     internal void Attach(GitRepositoryContextReader reader) => _reader = reader;
     internal void Apply(IDictionary<string, string?> environment)
     {
-        Verify(); environment["GIT_DIR"] = _directory; environment["GIT_COMMON_DIR"] = _directory;
+        environment["GIT_DIR"] = _directory; environment["GIT_COMMON_DIR"] = _directory;
         environment["GIT_WORK_TREE"] = Metadata.Root; environment["GIT_INDEX_FILE"] = Path.Combine(_directory, "index");
         environment["GIT_OBJECT_DIRECTORY"] = _objects;
     }
