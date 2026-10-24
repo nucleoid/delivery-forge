@@ -210,7 +210,10 @@ internal sealed class ParentNativeContractComposition : IAsyncDisposable
                 Bridge.RetainedFrames.Single().Worker.Primary is null && ReferenceEquals(Bridge.RetainedFrames.Single().Worker.Post, error))
             { InterruptedBridgeCall = actualBridge; InterruptedBridgeFailure = error; }
             _ = original.CleanupRemaining; var stopped = Parent.ObserveContractFixtureData().StopTask ?? throw new IOException("Interrupted fixture has no original lease-loss Stop task.");
-            await Keep(stopped).WaitAsync(original.CleanupRemaining).ConfigureAwait(false); _ = original.CleanupRemaining; var frame = Bridge.RetainedFrames.Single();
+            // The ordinary bridge must already have joined this existing stop;
+            // this fixture may observe it, but must not finish that work for it.
+            if (!stopped.IsCompletedSuccessfully) throw new IOException("Ordinary interrupted bridge returned before its same-original parent loss-stop settled.");
+            await Keep(stopped).ConfigureAwait(false); _ = original.CleanupRemaining; var frame = Bridge.RetainedFrames.Single();
             if (!ExpectedStoppedBridgeFailure(actualBridge)) throw new IOException("Expected interrupted original fixture is not genuinely settled.");
             result = frame.Worker.Actual!.Result; // Actual retained core DATA, never a successful bridge return.
         }

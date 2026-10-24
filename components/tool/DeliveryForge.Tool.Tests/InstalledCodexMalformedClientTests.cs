@@ -10,7 +10,7 @@ namespace DeliveryForge.Tool.Tests;
 [Trait("Category", "InstalledLocalRealAcceptance")]
 public sealed class InstalledCodexMalformedClientTests
 {
-    public static bool IsWindows => OperatingSystem.IsWindows();
+    public static bool IsWindowsOrLinux => OperatingSystem.IsWindows() || OperatingSystem.IsLinux();
     sealed class Probe : IAsyncDisposable
     {
         static readonly List<Probe> Retained = [];
@@ -18,6 +18,8 @@ public sealed class InstalledCodexMalformedClientTests
         internal readonly List<Task> Calls = [];
         internal readonly TaskCompletionSource<(int Code, int ParsedBytes, string ParsedSha256)> Reply = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal InstalledNativeHostConformanceTests.Fixture Fixture = null!;
+        internal LinuxScopeSelection? LinuxScope;
+        internal LinuxScopeImage? ExactImage;
         internal OwnedDuplexProcess? Native;
         internal CodexJsonlProtocol? Protocol;
         internal DuplexRetirement? Retirement;
@@ -26,7 +28,7 @@ public sealed class InstalledCodexMalformedClientTests
         internal static Probe Prepare()
         {
             var probe = new Probe(); lock (Retained) Retained.Add(probe);
-            if (!OperatingSystem.IsWindows()) throw new IOException("This actual installed control requires Windows original Job ownership.");
+            if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) throw new IOException("This actual installed control requires Windows Job or selected Linux original scope ownership.");
             const string key = "DELIVERY_FORGE_NATIVE_CONFORMANCE_CODEX_STOP";
             var fixturePath = Environment.GetEnvironmentVariable(key) ?? throw new IOException("Fresh Root-admitted Codex stop fixture required; no supported fixture fallback.");
             var bytes = BoundedFiles.Read(fixturePath, probe.Original, 65536);
@@ -34,9 +36,19 @@ public sealed class InstalledCodexMalformedClientTests
             _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(bytes);
             probe.Fixture = JsonSerializer.Deserialize<InstalledNativeHostConformanceTests.Fixture>(bytes, BoundedFiles.Json) ?? throw new IOException("Null fixture.");
             var f = probe.Fixture;
-            if (f.Kind != "RootAdmittedNativeConformanceProvisioningFixture-v2" || f.Adapter != "codex.cli" || f.CaseKind != "stop" || !f.ObserveRuntimeTrustRoute || f.Host is null || string.IsNullOrWhiteSpace(f.Host.Version) || f.Host.Version is "unverified" || f.Host.Version.Length > 256)
-                throw new IOException("Exact fresh Windows Codex UNVERIFIED fixture required.");
+            if (f.Kind != "RootAdmittedNativeConformanceProvisioningFixture-v2" || f.Adapter != "codex.cli" || f.CaseKind != "stop" || f.ObserveRuntimeTrustRoute != OperatingSystem.IsWindows() || f.Host is null || string.IsNullOrWhiteSpace(f.Host.Version) || f.Host.Version is "unverified" || f.Host.Version.Length > 256)
+                throw new IOException("Exact fresh platform-selected Codex UNVERIFIED fixture required.");
             BoundedFiles.Plain(f.ParentCheckout, true); BoundedFiles.Plain(f.ResultDirectory, true); BoundedFiles.Separate(f.ParentCheckout, f.ResultDirectory);
+            if (OperatingSystem.IsLinux())
+            {
+                var pin = f.LinuxScopeProfile ?? throw new IOException("Actual independently prepared Linux profile required.");
+                var raw = BoundedFiles.Read(pin.Path, probe.Original, 65536);
+                Assert.Equal(pin.Bytes, raw.LongLength); Assert.Equal(pin.Sha256, BoundedFiles.Sha(raw));
+                _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(raw);
+                probe.LinuxScope = JsonSerializer.Deserialize<LinuxScopeSelection>(raw, BoundedFiles.Json) ?? throw new IOException("Null actual Linux selection.");
+                probe.ExactImage = new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256);
+                BoundedFiles.ReserveExactLinuxImageReads(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256), probe.Original);
+            }
             BoundedFiles.VerifyNativeImage(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256), probe.Original);
             return probe;
         }
@@ -92,7 +104,7 @@ public sealed class InstalledCodexMalformedClientTests
         }
     }
 
-    [Fact(Timeout = 700000, Skip = "Actual original Windows Job required.", SkipUnless = nameof(IsWindows))]
+    [Fact(Timeout = 700000, Skip = "Actual Windows Job or selected Linux original scope required.", SkipUnless = nameof(IsWindowsOrLinux))]
     public async Task Actual_installed_Codex_refuses_malformed_client_initialize_then_same_original_retires()
     {
         using var affinity = new OwnedDuplexProcessTests.Affinity();
@@ -101,8 +113,9 @@ public sealed class InstalledCodexMalformedClientTests
         {
             var f = probe.Fixture;
             var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1" };
-            probe.Native = OwnedDuplexProcess.Open(new(f.Host.Executable, ["app-server"], f.ParentCheckout, environment), probe.Original);
+            probe.Native = OwnedDuplexProcess.Open(new(f.Host.Executable, ["app-server"], f.ParentCheckout, environment), probe.Original, probe.LinuxScope, probe.ExactImage);
             if (probe.Native.StartupFailure is Exception startup) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(startup).Throw();
+            if (OperatingSystem.IsLinux()) Assert.True(probe.Native.HasCreationOwnedExactLinuxImage);
             probe.Protocol = new(probe.Native.Input, probe.Native.Output, probe.Original);
             var reader = probe.ReadOriginal(); probe.Calls.Add(reader); probe.Native.AttachOriginalOutputConsumer(reader);
             var startupLimit = probe.Original.Remaining < TimeSpan.FromSeconds(120) ? probe.Original.Remaining : TimeSpan.FromSeconds(120);

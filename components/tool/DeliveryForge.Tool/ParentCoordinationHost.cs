@@ -309,6 +309,8 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
     // Restrictive cleanup observation: a completed worker's evidence refusal may
     // already have entered this parent's own stop. Fence renewal and await both
     // SAME retained Tasks before exact writer disposition. No new stop is born.
+    internal bool HasEnteredLossStop { get { lock (gate) return lossStop is not null; } }
+
     internal async Task<bool> ObserveExistingLossStopAsync(string runId, ToolLifetime sameOriginal)
     {
         Task? actualRenewal, actualStop;

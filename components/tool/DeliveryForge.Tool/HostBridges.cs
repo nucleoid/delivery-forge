@@ -516,10 +516,11 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
         var frame = new HostBridgeFrame(plan.RunId, original, coordinator, () => adapter.HasUnknownCalls(plan.RunId) || installedQuality?.Unknown == true || installedReview?.Unknown == true, ownsOriginal);
         if (!Register(plan.RunId, frame)) { if (ownsOriginal) original.Dispose(); throw new WorkerEnvelopeException("Run already entered or finite host frame allowance exhausted; no replay."); }
         frame.EnterRoute(); // Retain the actual original before phase factory entry.
+        ToolResult actualResult;
         try
         {
             frame.Worker.Start(original, () => ImplementRetainedCoreAsync(plan, frame));
-            var actualResult = await frame.Worker.ObserveAsync(original).ConfigureAwait(false);
+            actualResult = await frame.Worker.ObserveAsync(original).ConfigureAwait(false);
             if (frame.Scheduler is { } scheduler && frame.Reservation is { } reservation && frame.Primary is null && frame.Post is null && NativeCompletedAndQuiet(frame))
             {
                 Exception? evidenceFailure = null;
@@ -578,9 +579,22 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
                 });
                 await frame.SchedulingCompletion.ObserveAsync(original).ConfigureAwait(false);
             }
-            return RetainedResult(frame, actualResult);
         }
-        finally { if (!frame.Worker.Started) frame.LeaveRoute(); await FinishStoppedSchedulingAsync(frame).ConfigureAwait(false); frame.CloseWhenSettled(); }
+        finally
+        {
+            if (!frame.Worker.Started) frame.LeaveRoute();
+            try
+            {
+                // The existing parent stop can still be finishing its checkpoint
+                // after native retirement wakes the worker. Join that SAME task
+                // before the root decides that retained bridge work is UNKNOWN.
+                if (coordination is { HasEnteredLossStop: true })
+                    _ = await frame.EnterCleanup(_ => coordination.ObserveExistingLossStopAsync(plan.RunId, original)).ConfigureAwait(false);
+            }
+            catch (Exception error) { frame.Primary ??= error; original.RetainUnknown(); throw; }
+            finally { await FinishStoppedSchedulingAsync(frame).ConfigureAwait(false); frame.CloseWhenSettled(); }
+        }
+        return RetainedResult(frame, actualResult);
     }
     async Task FinishStoppedSchedulingAsync(HostBridgeFrame frame)
     {
