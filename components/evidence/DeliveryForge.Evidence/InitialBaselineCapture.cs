@@ -83,10 +83,15 @@ internal static class InitialBaselineCapture
         var complete = full && !diagnostic && baseline == "GREEN" && conditions.Length == 0 && data.Enumerated is > 0 &&
             data.Enumerated == data.Selected && data.Omitted == 0 && data.Errors == 0 && data.Executed + data.FreshUncovered == data.Selected &&
             outcome is GateOutcome.Pass or GateOutcome.Fail or GateOutcome.NotApplicable;
-        // The official reducer validates all omitted units. A deterministic budget
-        // omission remains incomplete but may leave the SAME parent able to collect
-        // the callable report. No timeout/test-red/unknown execution gets this path.
-        var budgetOnly = full && !diagnostic && baseline == "GREEN" && data.Enumerated is > 0 && data.Omitted > 0 && data.Errors == 0 &&
+        // Official CreateFull leaves top-level conditions empty for a cap but
+        // gives EACH omitted ledger unit one BUDGET_OMITTED evidence entry.
+        // Generic omissions cannot authorize continuing the SAME parent.
+        var mutationCap = root.GetProperty("policy").GetProperty("mutationCap").GetInt32();
+        var omittedUnits = root.GetProperty("units").EnumerateArray().Where(unit => unit.GetProperty("disposition").GetString() == "OMITTED").ToArray();
+        var budgetOnly = full && !diagnostic && baseline == "GREEN" && data.Enumerated is int enumerated && enumerated > mutationCap &&
+            data.Omitted > 0 && data.Errors == 0 && data.Selected - data.Omitted == mutationCap &&
+            omittedUnits.All(unit => unit.GetProperty("evidence").GetArrayLength() == 1 &&
+                unit.GetProperty("evidence")[0].GetProperty("kind").GetString() == "BUDGET_OMITTED") &&
             conditions.All(c => c == "BUDGET_OMITTED") && outcome == GateOutcome.Incomplete;
         var measurement = new InitialBaselineMutation(data.Enumerated, data.Selected, data.Executed, data.Killed,
             data.Survived, data.FreshUncovered, data.Omitted, data.CompileInvalid, data.Errors, baseline, full);

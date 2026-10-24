@@ -66,12 +66,36 @@ public sealed class InitialBaselineCaptureTests
     [Fact]
     public void Known_cap_omission_stays_incomplete_but_can_leave_the_same_parent_available_for_callable_measurement()
     {
-        var root = Mutation(); var unit = root["units"]![0]!; var id = unit["unitId"]!.GetValue<string>();
-        unit["disposition"] = "OMITTED"; root["counts"]!["killed"] = 0; root["counts"]!["executed"] = 0; root["counts"]!["omitted"] = 1;
-        root["outcome"] = "INCOMPLETE"; root["exitCode"] = 4;
-        root["reasons"] = new JsonArray(JsonSerializer.SerializeToNode(new { code = "UNIT_OMITTED", message = $"Evaluation unit {id} was omitted." }));
+        var root = BudgetOmission();
+        Assert.Empty(root["incompleteConditions"]!.AsArray()); // Genuine full-cap shape has no top-level condition.
         var result = ReadMutation(root);
         Assert.False(result.Complete); Assert.True(result.MayCollectNextGate); Assert.Equal(1, result.Mutation!.Omitted);
+        Assert.Equal(2, result.Mutation!.Enumerated); Assert.Equal(1, result.Mutation!.Executed); Assert.Equal(1, result.Mutation!.Killed);
+        Assert.Equal(GateOutcome.Incomplete, result.RawOutcome); Assert.False(result.ProductionAuthority);
+    }
+
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("foreign")]
+    [InlineData("multiple")]
+    [InlineData("cap")]
+    [InlineData("all-omitted")]
+    public void Generic_omission_or_inconsistent_cap_cannot_leave_the_parent_available_for_another_gate(string fault)
+    {
+        var root = BudgetOmission();
+        var unit = root["units"]![1]!;
+        if (fault == "missing") unit["evidence"] = new JsonArray();
+        if (fault == "foreign") unit["evidence"]![0]!["kind"] = "TARGET_NOT_REQUESTED";
+        if (fault == "multiple") unit["evidence"]!.AsArray().Add(unit["evidence"]![0]!.DeepClone());
+        if (fault == "cap") root["policy"]!["mutationCap"] = 2;
+        if (fault == "all-omitted")
+        {
+            root["units"]!.AsArray().RemoveAt(0);
+            root["counts"]!["enumerated"] = 1; root["counts"]!["selected"] = 1;
+            root["counts"]!["executed"] = 0; root["counts"]!["killed"] = 0;
+        }
+        var result = ReadMutation(root); // These remain internally valid official reducer DATA.
+        Assert.False(result.Complete); Assert.False(result.MayCollectNextGate);
         Assert.Equal(GateOutcome.Incomplete, result.RawOutcome); Assert.False(result.ProductionAuthority);
     }
 
@@ -120,6 +144,22 @@ public sealed class InitialBaselineCaptureTests
         var root = JsonNode.Parse(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "Fixtures", "MutationReportData", "strong.json")))!.AsObject();
         root["scopePlan"]!["projectUnits"] = new JsonArray(JsonSerializer.SerializeToNode(new
         { project = "src/App/App.csproj", tests = new[] { "tests/App.Tests/App.Tests.csproj" }, inputs = Array.Empty<string>(), expansion = "FULL_PROJECT" }));
+        return root;
+    }
+    private static JsonObject BudgetOmission()
+    {
+        var root = Mutation(); var omitted = root["units"]![0]!.DeepClone();
+        var id = "mutation:v1:" + new string('c', 64);
+        var evaluationId = "evaluation:v1:" + new string('d', 64);
+        omitted["unitId"] = id; omitted["evaluationUnitId"] = evaluationId; omitted["disposition"] = "OMITTED";
+        omitted["evidence"] = new JsonArray(JsonSerializer.SerializeToNode(new
+        { kind = "BUDGET_OMITTED", summary = $"Evaluation unit {evaluationId} exceeded the deterministic cap of 1.", diagnostics = (string[]?)null }));
+        root["units"]!.AsArray().Add(omitted);
+        root["policy"]!["mutationCap"] = 1;
+        root["counts"]!["enumerated"] = 2; root["counts"]!["selected"] = 2; root["counts"]!["omitted"] = 1;
+        root["outcome"] = "INCOMPLETE"; root["exitCode"] = 4;
+        root["reasons"] = new JsonArray(JsonSerializer.SerializeToNode(new
+        { code = "UNIT_OMITTED", message = $"Evaluation unit {id} was omitted." }));
         return root;
     }
     private static InitialBaselineCaptureData ReadMutation(JsonObject root)
