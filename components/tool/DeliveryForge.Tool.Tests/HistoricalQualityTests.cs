@@ -125,4 +125,102 @@ public sealed class HistoricalQualityTests
         else frame.Worker.Start(original, () => Task.FromResult(ToolResult.Incomplete("DATA_ONLY", "No native worker.")));
         Assert.Throws<DeliveryForge.Execution.WorkerEnvelopeException>(() => HistoricalQualityHost.RequireNoWorker(frame));
     }
+    [Theory]
+    [InlineData("")]
+    [InlineData("initial_baseline_capture")]
+    [InlineData("ordinary")]
+    public async Task Unknown_capture_purpose_refuses_at_actual_configuration_parse_before_plan_or_external_effect(string purpose)
+    {
+        var config = Configuration();
+        config = config with { HistoricalQuality = config.HistoricalQuality! with { Purpose = purpose } };
+        var path = Path.Combine(Path.GetTempPath(), "historical-purpose-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(config, BoundedFiles.Json));
+        var application = new ToolApplication();
+        var error = await Assert.ThrowsAsync<ToolUsageException>(() => application.ExecuteAsync(
+            CommandLine.Parse(["quality-baseline", "--plan", "/must-not-read", "--config", path]), TestContext.Current.CancellationToken));
+        Assert.Contains("Unknown historical quality purpose", error.Message);
+        Assert.Empty(application.RetainedExternalCalls); Assert.Empty(application.RetainedAssignments);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Initial_capture_selection_never_supplies_missing_plan_expectations_or_execution_ceiling(bool planOnly)
+    {
+        var config = Configuration();
+        config = config with { HistoricalQuality = config.HistoricalQuality! with { Purpose = HistoricalQualityHost.InitialBaselineCapture } };
+        if (planOnly) config = config with
+        {
+            ExpectedBundleIdentity = "sha256:" + new string('a', 64), ExpectedContractIdentity = "sha256:" + new string('b', 64),
+            ExpectedWorkItem = "#17", ExpectedPlanCeiling = "plan"
+        };
+        var path = Path.Combine(Path.GetTempPath(), "historical-capture-expectations-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(config, BoundedFiles.Json));
+        var application = new ToolApplication();
+        if (planOnly)
+        {
+            var error = await Assert.ThrowsAsync<ToolUsageException>(() => application.ExecuteAsync(
+                CommandLine.Parse(["quality-baseline", "--plan", "/must-not-read", "--config", path]), TestContext.Current.CancellationToken));
+            Assert.Contains("immutable ceiling", error.Message);
+        }
+        else
+        {
+            var result = await application.ExecuteAsync(CommandLine.Parse(["quality-baseline", "--plan", "/must-not-read", "--config", path]), TestContext.Current.CancellationToken);
+            Assert.Equal("PLAN_EXPECTATIONS_REQUIRED", result.Code); Assert.False(result.RuntimeCertified);
+        }
+        Assert.Empty(application.RetainedExternalCalls); Assert.Empty(application.RetainedAssignments);
+    }
+    [Fact]
+    public async Task Explicit_initial_capture_still_refuses_worker_mode_before_plan_or_assignment()
+    {
+        var config = Configuration();
+        config = config with { HistoricalQuality = config.HistoricalQuality! with { Purpose = HistoricalQualityHost.InitialBaselineCapture } };
+        var path = Path.Combine(Path.GetTempPath(), "historical-capture-mode-" + Guid.NewGuid().ToString("N") + ".json");
+        File.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(config, BoundedFiles.Json));
+        var application = new ToolApplication();
+        var error = await Assert.ThrowsAsync<ToolUsageException>(() => application.ExecuteAsync(
+            CommandLine.Parse(["implement", "--plan", "/must-not-read", "--config", path]), TestContext.Current.CancellationToken));
+        Assert.Contains("explicit quality-baseline mode", error.Message);
+        Assert.Empty(application.RetainedExternalCalls); Assert.Empty(application.RetainedAssignments);
+    }
+    // DATA guard regression only: no HostScope, original, producer or native ownership is issued.
+    static (GateRunResult Receipt, InitialBaselineCaptureData Capture) AdvisoryTuple(GateOutcome rawOutcome)
+    {
+        var repository = new RepositoryIdentity(new string('1', 40), new string('2', 40), new string('3', 40), true);
+        var receipt = new GateRunResult(GateOutcome.Incomplete, "advisory capture", false, false, [], false,
+            new("unused", [], Path.GetTempPath()), new(0, "", "", false, false, DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch),
+            repository, repository, "sha256:" + new string('a', 64), "sha256:" + new string('b', 64), "sha256:" + new string('c', 64),
+            "all", new Dictionary<string, string>(), "unused", null);
+        var capture = new InitialBaselineCaptureData("crap4csharp", rawOutcome, true, true,
+            "sha256:" + new string('d', 64), [], [], null, null, []);
+        return (receipt, capture);
+    }
+
+    [Theory]
+    [InlineData(GateOutcome.Pass)]
+    [InlineData(GateOutcome.Fail)]
+    public void Raw_producer_pass_or_debt_fail_does_not_have_to_equal_advisory_receipt(GateOutcome rawOutcome)
+    {
+        var tuple = AdvisoryTuple(rawOutcome);
+        HistoricalQualityHost.RequireInitialCaptureTuple("crap4csharp", tuple.Receipt, tuple.Capture);
+        Assert.Equal(GateOutcome.Incomplete, tuple.Receipt.Outcome);
+        Assert.Equal(rawOutcome, tuple.Capture.RawOutcome);
+        Assert.False(tuple.Capture.ProductionAuthority);
+    }
+
+    [Theory]
+    [InlineData("receipt-pass")]
+    [InlineData("fixture")]
+    [InlineData("production")]
+    public void Initial_capture_data_guard_refuses_gate_pass_or_capability_promotion(string changed)
+    {
+        var tuple = AdvisoryTuple(GateOutcome.Pass);
+        var receipt = changed switch
+        {
+            "receipt-pass" => tuple.Receipt with { Outcome = GateOutcome.Pass },
+            "fixture" => tuple.Receipt with { Fixture = true },
+            _ => tuple.Receipt with { ProductionCapable = true }
+        };
+        Assert.Throws<IOException>(() => HistoricalQualityHost.RequireInitialCaptureTuple("crap4csharp", receipt, tuple.Capture));
+    }
 }

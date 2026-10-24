@@ -7,10 +7,11 @@ namespace DeliveryForge.Tool;
 
 // Independently selected expected source and installed profile locators, never
 // an accepted worker, gate result, registry approval or live native identity.
-public sealed record HistoricalQualitySelection(string HeadCommit, string TreeId, InstalledQualitySelection Quality);
+public sealed record HistoricalQualitySelection(string HeadCommit, string TreeId, InstalledQualitySelection Quality, string? Purpose = null);
 
 internal sealed class HistoricalQualityHost
 {
+    internal const string InitialBaselineCapture = "INITIAL_BASELINE_CAPTURE";
     readonly TrustedConfiguration configuration;
     readonly AdmissionFile configurationPin;
     readonly ToolLifetime original;
@@ -36,6 +37,8 @@ internal sealed class HistoricalQualityHost
         if (!ObjectId(value.HeadCommit) || !ObjectId(value.TreeId) || value.Quality is null ||
             value.Quality.Registry is not null || config.InstalledQuality is not null || config.InstalledReview is not null || config.LocalRealGolden is not null)
             throw new ToolUsageException("Historical gates require exact expected H0/tree and their own two-gate selection, without registry/review/publication selections.");
+        if (value.Purpose is not null && value.Purpose != InitialBaselineCapture)
+            throw new ToolUsageException("Unknown historical quality purpose; only explicit INITIAL_BASELINE_CAPTURE is supported.");
         InstalledQualityHost.ValidateSelection(value.Quality);
     }
 
@@ -44,7 +47,7 @@ internal sealed class HistoricalQualityHost
         original.Check();
         var requested = config.HistoricalQuality;
         if (frozen is not null || !ReferenceEquals(life, original) || config.ExpectedBundleIdentity != configuration.ExpectedBundleIdentity ||
-            requested is null || requested.HeadCommit != selection.HeadCommit || requested.TreeId != selection.TreeId ||
+            requested is null || requested.HeadCommit != selection.HeadCommit || requested.TreeId != selection.TreeId || requested.Purpose != selection.Purpose ||
             plan.Identity != config.ExpectedBundleIdentity || plan.ContractIdentity != run.PlanIdentity || plan.BaseCommit != run.BaseCommit ||
             plan.Repository != config.Repository || run.Repository != config.Repository ||
             Path.GetFullPath(run.ParentCheckout) != Path.GetFullPath(config.RepositoryRoot) || run.BaseCommit == selection.HeadCommit)
@@ -62,6 +65,15 @@ internal sealed class HistoricalQualityHost
         foreach (var gate in selection.Quality.Gates) BoundedFiles.Separate(selection.Quality.ArtifactRoot, gate.Profile.Path);
         BoundedFiles.Separate(selection.Quality.ArtifactRoot, configurationPin.Path);
         frozen = plan; assignment = run;
+    }
+
+    // DATA consistency only; this helper cannot issue/access an actual capture or native result.
+    // Capture receipts are always advisory INCOMPLETE while RawOutcome independently retains PASS/FAIL.
+    internal static void RequireInitialCaptureTuple(string expectedTool, GateRunResult result, InitialBaselineCaptureData capture)
+    {
+        if (result.Outcome != GateOutcome.Incomplete || result.ProductionCapable || result.Fixture ||
+            capture.Tool != expectedTool || capture.ProductionAuthority)
+            throw new IOException("Actual initial capture requires its nonfixture advisory receipt and matching observation DATA.");
     }
 
     internal static void RequireNoWorker(HostBridgeFrame frame)
@@ -84,6 +96,8 @@ internal sealed class HistoricalQualityHost
         // its finite physical Git roles before policy resolution or native Git.
         actualTools.BindHistoricalInput(run.Worktree, expected);
         var references = new List<object>();
+        var initialCapture = selection.Purpose == InitialBaselineCapture;
+        var captures = new List<InitialBaselineCaptureData>();
         void Current()
         {
             original.Check(); parent.CheckCurrent(run.RunId); RequireNoWorker(frame);
@@ -111,7 +125,7 @@ internal sealed class HistoricalQualityHost
             var result = await frame.Enter(() => actualTools.RunAsync(run.Worktree, run.BaseCommit,
                 selection.Quality.PolicyRelativePath, selection.Quality.PolicyIdentity, profile, gate.GateId,
                 expected, gate.Scope, gate.ProjectRelativePath, TimeSpan.FromSeconds(gate.MaximumSeconds), output,
-                original.Token, baselineRegistry: null)).ConfigureAwait(false);
+                original.Token, baselineRegistry: null, purpose: initialCapture ? InstalledToolPurpose.InitialBaselineCapture : InstalledToolPurpose.ChangedCode)).ConfigureAwait(false);
             parent.EnterSynchronous(run.RunId, () =>
             {
                 Current(); _ = InstalledHostAdmission.ReadExact(gate.Profile, original, 1048576);
@@ -133,12 +147,56 @@ internal sealed class HistoricalQualityHost
                 });
                 return true;
             });
+            if (initialCapture)
+            {
+                var capture = parent.EnterSynchronous(run.RunId, () =>
+                {
+                    Current();
+                    return actualTools.CaptureInitialBaseline(result);
+                });
+                RequireInitialCaptureTuple(gate.Tool, result, capture);
+                captures.Add(capture);
+                if (!capture.MayCollectNextGate)
+                    return ToolResult.Incomplete("INITIAL_BASELINE_CAPTURE_STOPPED", "Actual capture cannot safely collect another gate; original artifacts/outcomes are retained without baseline authority.",
+                        new { run.RunId, expected, Gates = references.ToArray(), Captures = captures.ToArray(), BaselineApproved = false, ProductionAuthority = false });
+                continue;
+            }
             if (!InstalledQualityHost.IsExactCurrentGatePass(result, gate, selection.Quality.PolicyIdentity, expected))
                 return ToolResult.Incomplete("HISTORICAL_QUALITY_NONPASS", "Actual historical gates did not both pass; original artifacts remain evidence and no baseline is approved.", new { run.RunId, expected, Gates = references.ToArray(), BaselineApproved = false });
         }
         return parent.EnterSynchronous(run.RunId, () =>
         {
             Current();
+            if (initialCapture)
+            {
+                var complete = captures.Count == selection.Quality.Gates.Count && captures.All(c => c.Complete);
+                var captureCandidate = new
+                {
+                    Kind = "INITIAL_BASELINE_CAPTURE-DATA-v1",
+                    run.RunId,
+                    FrozenPlan = actualPlan.ContractIdentity,
+                    Repository = expected,
+                    HistoricalInput = actualTools.HistoricalInputData,
+                    selection.Quality.PolicyIdentity,
+                    Purpose = InitialBaselineCapture,
+                    Complete = complete,
+                    Gates = references.ToArray(),
+                    Captures = captures.ToArray(),
+                    ChangedCodeComparison = "NotEvaluatedNoBaseline",
+                    WorkerStarted = false,
+                    BaselineApproved = false,
+                    RegistryIssued = false,
+                    ProductionCapable = false,
+                    ProductionAuthority = false,
+                    SchedulingCertified = false
+                };
+                var capturePath = Path.Combine(output, "initial-baseline-capture-DATA.json");
+                BoundedFiles.WriteNew(capturePath, JsonSerializer.SerializeToUtf8Bytes(captureCandidate, BoundedFiles.Json), original);
+                return ToolResult.Incomplete(complete ? "INITIAL_BASELINE_CAPTURE_UNAPPROVED" : "INITIAL_BASELINE_CAPTURE_INCOMPLETE",
+                    complete ? "Complete actual full-project observations are an unapproved initial baseline capture; original gate outcomes are preserved." :
+                        "Actual full-project capture remains incomplete; original outcomes and artifacts are preserved without baseline authority.",
+                    new { Candidate = capturePath, Data = captureCandidate });
+            }
             var data = new
             {
                 Kind = "HistoricalQualityCandidate-DATA-v1",

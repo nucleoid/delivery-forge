@@ -27,6 +27,8 @@ public sealed class InstalledToolHostScope
         internal InstalledToolFiles? Files; internal InstalledToolGateProvider.ActualExecutor? Owner;
         internal ResolvedEvidencePolicy? Policy; internal ProtectedBaselineRegistry? Registry;
         internal InstalledBaselineComparison? Comparison;
+        internal InitialBaselineCaptureData? Capture;
+        internal InstalledToolPurpose Purpose;
     }
     readonly List<OriginalRun> runs = [];
     HistoricalGitInput? historicalInput;
@@ -84,8 +86,12 @@ public sealed class InstalledToolHostScope
         string policyRelativePath, string expectedPolicyIdentity, InstalledToolProfile profile, string gateId,
         RepositoryIdentity expected, string scope, string? project, TimeSpan maximum,
         string outputDirectory, CancellationToken cancellationToken = default,
-        ProtectedBaselineRegistrySelection? baselineRegistry = null)
+        ProtectedBaselineRegistrySelection? baselineRegistry = null,
+        InstalledToolPurpose purpose = InstalledToolPurpose.ChangedCode)
     {
+        InitialBaselineCapture.RequirePurpose(purpose);
+        if (purpose == InstalledToolPurpose.InitialBaselineCapture && baselineRegistry is not null)
+            throw new EvidenceWriteException("Initial capture cannot consume an approved registry.");
         if (!OperatingSystem.IsWindows() && !(OperatingSystem.IsLinux() && linuxScope is not null))
             throw new EvidenceWriteException("Containing installed quality requires Windows or an explicitly selected Linux creation-owned scope.");
         if (profile.Fixture) throw new EvidenceWriteException("Fixture profiles cannot enter the standalone real quality path.");
@@ -99,7 +105,7 @@ public sealed class InstalledToolHostScope
             files = Files(maximum);
             owner = new InstalledToolGateProvider.ActualExecutor(files, profile.Data.Environment, profile.Data.GitExecutablePath, admission, runId, linuxScope, installedTool: profile.Tool, historicalInput: historicalInput);
             retained.Add(owner);
-            row = new OriginalRun { Entered = true, Files = files, Owner = owner }; runs.Add(row);
+            row = new OriginalRun { Entered = true, Files = files, Owner = owner, Purpose = purpose }; runs.Add(row);
         }
         // The actual row is rooted before invocation; never acquire the original parent
         // admission lock while holding this scope lock in an arbitrary embedding.
@@ -119,7 +125,7 @@ public sealed class InstalledToolHostScope
                 if (profile.Tool != "crap4csharp") throw new EvidencePolicyException("Only the actual callable gate binds this registry comparison.");
                 registry = await ProtectedBaselineRegistry.ResolveAsync(owner, files, repositoryRoot, policy, baselineRegistry, cancellationToken).ConfigureAwait(false);
             }
-            var request = new InstalledToolGateRequest(gateId, policy, expected, scope, project, maximum, outputDirectory);
+            var request = new InstalledToolGateRequest(gateId, policy, expected, scope, project, maximum, outputDirectory, purpose);
             if (registry is not null && registry.CallableProducer != CallableProducerIdentity.Current(profile, request))
                 throw new EvidencePolicyException("Approved baseline producer/profile differs from the selected callable gate; compatible owner approval is required before execution.");
             var result = await new InstalledToolGateProvider(repositoryRoot, protectedBaseCommit)
@@ -134,8 +140,25 @@ public sealed class InstalledToolHostScope
                 comparison = new(compared.Outcome, compared.Reason, registry.RegistryCommit,
                     registry.Baseline.SourceRevision, registry.Baseline.BaselineIdentity, registry.ArtifactManifestIdentity);
             }
-            lock (gate) { row.Result = result; row.Policy = policy; row.Registry = registry; row.Comparison = comparison; }
+            var capture = purpose == InstalledToolPurpose.InitialBaselineCapture
+                ? (owner.MainBinding ?? throw new EvidenceWriteException("Actual capture binding is absent.")).CaptureInitialBaseline(result) : null;
+            lock (gate) { row.Result = result; row.Policy = policy; row.Registry = registry; row.Comparison = comparison; row.Capture = capture; }
             return result;
+        }
+    }
+    // This lookup consumes only the actual completed row identity, never a caller report
+    // or value-equivalent GateRunResult. Returned DATA cannot be supplied as authority.
+    public InitialBaselineCaptureData CaptureInitialBaseline(GateRunResult actual)
+    {
+        original.CheckWork();
+        lock (gate)
+        {
+            var row = runs.SingleOrDefault(r => ReferenceEquals(r.Result, actual))
+                ?? throw new EvidenceWriteException("Foreign result cannot read an actual initial capture.");
+            if (row.Purpose != InstalledToolPurpose.InitialBaselineCapture || !row.Returned ||
+                row.Task is not { IsCompletedSuccessfully: true } || row.Capture is null)
+                throw new EvidenceWriteException("Same completed initial capture original required.");
+            return row.Capture;
         }
     }
     public InstalledBaselineComparison CompareBaseline(GateRunResult actual)

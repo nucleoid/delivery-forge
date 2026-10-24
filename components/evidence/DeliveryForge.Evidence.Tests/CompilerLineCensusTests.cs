@@ -15,6 +15,77 @@ namespace DeliveryForge.Evidence.Tests;
 public sealed class CompilerLineCensusTests
 {
     [Fact]
+    public void Initial_full_current_capture_measures_real_compiler_lines_without_a_synthetic_diff()
+    {
+        using var fixture = new Fixture();
+        var normal = fixture.Read(fullCurrentCapture: true, emptyDiff: true);
+        Assert.Equal(GateOutcome.Incomplete, normal.Outcome); // Existing changed-code zero denominator remains closed.
+        var full = Assert.IsType<InitialBaselineLineCoverage>(fixture.FullCurrent);
+        Assert.True(full.CompilerCensusComplete); Assert.Equal(0, full.UnmeasuredLines);
+        Assert.Equal(3, full.ExecutableLines); Assert.Equal(3, full.CoveredLines); Assert.Equal(100m, full.Percent);
+        Assert.StartsWith("sha256:", full.SourceSetIdentity, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Initial_full_current_capture_records_real_line_debt_without_reducing_the_denominator()
+    {
+        using var fixture = new Fixture();
+        _ = fixture.Read(zeroLine: fixture.Line("CENSUS_LAST"), fullCurrentCapture: true, emptyDiff: true);
+        var full = Assert.IsType<InitialBaselineLineCoverage>(fixture.FullCurrent);
+        Assert.True(full.CompilerCensusComplete); Assert.Equal(3, full.ExecutableLines);
+        Assert.Equal(2, full.CoveredLines); Assert.True(full.Percent < 80m);
+    }
+
+    [Fact]
+    public void Initial_full_current_capture_keeps_unmeasured_source_membership_incomplete()
+    {
+        using var fixture = new Fixture();
+        _ = fixture.Read(omitLine: fixture.Line("CENSUS_LAST"), fullCurrentCapture: true, emptyDiff: true);
+        Assert.True(Assert.IsType<InitialBaselineLineCoverage>(fixture.FullCurrent).UnmeasuredLines > 0);
+    }
+
+    [Fact]
+    public void Initial_full_current_capture_proves_declaration_only_generated_source_from_the_actual_compiler_census()
+    {
+        using var fixture = new Fixture();
+        _ = fixture.Read(generatedDeclaration: true, fullCurrentCapture: true, emptyDiff: true);
+        var full = Assert.IsType<InitialBaselineLineCoverage>(fixture.FullCurrent);
+        Assert.True(full.CompilerCensusComplete, full.Reason); Assert.Equal(0, full.UnmeasuredLines);
+        Assert.Equal(3, full.ExecutableLines); Assert.Equal(3, full.CoveredLines);
+        // The unchanged normal changed-code mode still refuses the very same generated role.
+        Assert.False(fixture.Read(includeDeclarations: true, generatedDeclaration: true).CompilerCensusComplete);
+    }
+
+    [Fact]
+    public void Initial_full_current_capture_cannot_exempt_executable_generated_source_or_borrow_another_contexts_visits()
+    {
+        using var fixture = new Fixture();
+        _ = fixture.Read(secondContext: true, generatedChangedContext: true, fullCurrentCapture: true, emptyDiff: true);
+        var full = Assert.IsType<InitialBaselineLineCoverage>(fixture.FullCurrent);
+        Assert.False(full.CompilerCensusComplete); Assert.Contains("generated source has executable", full.Reason, StringComparison.Ordinal);
+        Assert.Equal(3, full.ExecutableLines); Assert.Equal(0, full.CoveredLines);
+        Assert.Equal(3, full.UnmeasuredLines);
+    }
+
+    [Theory]
+    [InlineData("mvid")]
+    [InlineData("checksum")]
+    [InlineData("context")]
+    public void Initial_full_current_capture_preserves_actual_source_module_and_unmapped_role_refusals(string fault)
+    {
+        using var fixture = new Fixture();
+        Assert.Throws<EvidenceWriteException>(() => fixture.Read(fault: fault, generatedDeclaration: true, fullCurrentCapture: true, emptyDiff: true));
+    }
+
+    [Fact]
+    public void Initial_full_current_capture_cannot_exempt_generated_source_when_an_authored_body_remains_unresolved()
+    {
+        using var fixture = new Fixture();
+        _ = fixture.Read(generatedDeclaration: true, extraCompilerConstructor: true, fullCurrentCapture: true, emptyDiff: true);
+        Assert.False(Assert.IsType<InitialBaselineLineCoverage>(fixture.FullCurrent).CompilerCensusComplete);
+    }
+
+    [Fact]
     public void Genuine_ordinary_class_has_complete_source_bound_points_including_excluded_method()
     {
         using var fixture = new Fixture();
@@ -397,12 +468,14 @@ public sealed class CompilerLineCensusTests
         }
         internal CompilerLineCensus.Inventory Inventory(CompilerLineCensus.Document? document = null)
             => CompilerLineCensus.Inspect(Pe, Pdb, Build, [document ?? Document, DeclarationDocument], Files);
+        internal InitialBaselineLineCoverage? FullCurrent { get; private set; }
         internal ChangedLineCoverage.Result Read(int? omitLine = null, int? zeroLine = null, bool omitFile = false,
             bool secondContext = false, string? fault = null, bool omitReport = false, bool commentOnly = false,
             bool includeDeclarations = false, bool declarationsOnly = false, bool rawReports = false,
             bool declarationCompilerSource = false, bool extraCompilerConstructor = false, bool compilerSourceHashDrift = false,
             bool generatedChangedContext = false, string generatedChangedRole = "source", bool generatedChangedSourceDrift = false,
-            bool generatedDeclaration = false, string? unreadRecipeContext = null, string? extraCompilerConstructorContext = null)
+            bool generatedDeclaration = false, string? unreadRecipeContext = null, string? extraCompilerConstructorContext = null,
+            bool fullCurrentCapture = false, bool emptyDiff = false)
         {
             var rawSource = fault == "checksum" ? Source.Concat(" "u8.ToArray()).ToArray() : Source;
             // Only the checksum-negative uses a separate logical copy. Physical source
@@ -536,6 +609,8 @@ public sealed class CompilerLineCensusTests
                 if (locator == "unread-optional-recipe") { OptionalRecipeReads++; throw UnusedRecipeRead; }
                 return data[locator];
             }
+            if (fullCurrentCapture) FullCurrent = ChangedLineCoverage.ReadCurrentCompilerBound(manifest.RootElement, Repository, ReadArtifact, Files);
+            if (emptyDiff) diff = [];
             return rawReports
                 ? ChangedLineCoverage.Read(diff, manifest.RootElement, Repository, ReadArtifact, Files)
                 : ChangedLineCoverage.ReadCompilerBound(diff, manifest.RootElement, Repository, ReadArtifact, Files);

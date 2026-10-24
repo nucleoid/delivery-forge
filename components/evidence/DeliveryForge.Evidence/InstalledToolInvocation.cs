@@ -11,7 +11,7 @@ internal sealed class InstalledToolInvocation(
     InstalledToolGateProvider.ActualExecutor owner, CommandInvocation invocation, string? reportPath,
     Dictionary<string, string> original, Dictionary<string, string> gitBefore,
     Dictionary<string, string> installBefore, string environmentBefore, string sdkBefore, InstalledToolResourceAdmission.Data resourcesBefore, byte[]? changedDiff,
-    Func<Dictionary<string, string>> captureGit, Func<Dictionary<string, string>> captureInstall)
+    Func<Dictionary<string, string>> captureGit, Func<Dictionary<string, string>> captureInstall, ToolCapability? capability = null)
 {
     private bool _entered;
     private bool _returned;
@@ -23,6 +23,9 @@ internal sealed class InstalledToolInvocation(
     private readonly Dictionary<string, string> _bundle = new(StringComparer.Ordinal);
     private string? _bundleRoot;
     private ChangedLineCoverage.Result? _lines;
+    private InitialBaselineLineCoverage? _fullCurrentLines;
+    private IReadOnlyList<InitialBaselineSource> _captureSources = [];
+    private InitialBaselineCaptureData? _capture;
 
     internal Task CompleteAsync(CommandResult actual)
     {
@@ -56,6 +59,18 @@ internal sealed class InstalledToolInvocation(
             var environmentAfter = InstalledToolGateProvider.EnvironmentIdentity();
             if (environmentAfter != environmentBefore) throw new EvidenceWriteException("Parent environment changed while the tool ran.");
             files.Check();
+            if (request.Purpose == InstalledToolPurpose.InitialBaselineCapture)
+            {
+                if (capability is null) throw new EvidenceWriteException("Actual detected capability is required for an initial capture.");
+                var raw = profile.Tool == "mutate4csharp"
+                    ? Mutate4CSharpAdapter.NormalizeCurrent(_report, capability, actual.ExitCode!.Value)
+                    : Crap4CSharpAdapter.NormalizeCurrent(_report, capability, actual.ExitCode!.Value);
+                using var config = ProducerJson.Read(files.Read(Path.Combine(invocation.WorkingDirectory, profile.Data.ConfigurationRelativePath), 1024 * 1024));
+                _capture = profile.Tool == "mutate4csharp"
+                    ? InitialBaselineCapture.Mutation(_report, document.RootElement, config.RootElement, raw.Outcome)
+                    : InitialBaselineCapture.Callables(_report, document.RootElement, _captureSources, _fullCurrentLines, raw.Outcome,
+                        config.RootElement.GetProperty("testProjects").EnumerateArray().Select(p => p.GetString()!).ToArray(), invocation.WorkingDirectory);
+            }
             _proof = JsonSerializer.SerializeToUtf8Bytes(new
             {
                 schema = "forge-current-installed-tool-v1",
@@ -69,6 +84,7 @@ internal sealed class InstalledToolInvocation(
                 repository = request.ExpectedRepository,
                 request.Scope,
                 request.ProjectRelativePath,
+                request.Purpose,
                 configuration = profile.Data.ConfigurationSha256,
                 environmentBefore,
                 environmentAfter,
@@ -192,10 +208,29 @@ internal sealed class InstalledToolInvocation(
             var approvedRaw = files.Read(Path.Combine(invocation.WorkingDirectory, profile.Data.ConfigurationRelativePath), 1024 * 1024);
             if (InstalledToolFiles.Identity(approvedRaw) != profile.Data.ConfigurationSha256) throw new EvidenceWriteException("Approved raw policy changed.");
             CrapPolicyBinding.RequireSame(approvedRaw, actualPolicy);
-            if (changedDiff is null) throw new EvidenceWriteException("The original current diff was not retained.");
-            _lines = ChangedLineCoverage.ReadCompilerBound(changedDiff, body, invocation.WorkingDirectory,
-                locator => { InstalledToolProfile.Relative(locator); return files.Read(Path.Combine(_bundleRoot, locator), 128 * 1024 * 1024); }, files);
+            if (request.Purpose == InstalledToolPurpose.InitialBaselineCapture)
+            {
+                using var approved = ProducerJson.Read(approvedRaw);
+                InitialBaselineCapture.RequireCompleteCallableScope(approved.RootElement, body);
+                _captureSources = InitialBaselineCapture.Sources(body);
+                _fullCurrentLines = ChangedLineCoverage.ReadCurrentCompilerBound(body, invocation.WorkingDirectory,
+                    locator => { InstalledToolProfile.Relative(locator); return files.Read(Path.Combine(_bundleRoot, locator), 128 * 1024 * 1024); }, files);
+            }
+            else
+            {
+                if (changedDiff is null) throw new EvidenceWriteException("The original current diff was not retained.");
+                _lines = ChangedLineCoverage.ReadCompilerBound(changedDiff, body, invocation.WorkingDirectory,
+                    locator => { InstalledToolProfile.Relative(locator); return files.Read(Path.Combine(_bundleRoot, locator), 128 * 1024 * 1024); }, files);
+            }
         }
+    }
+    internal InitialBaselineCaptureData CaptureInitialBaseline(GateRunResult actual)
+    {
+        if (request.Purpose != InstalledToolPurpose.InitialBaselineCapture || !_entered || !_returned ||
+            _failure is not null || _capture is null || !ReferenceEquals(actual.Execution, _actual) ||
+            actual.SourceChanged || actual.Before != request.ExpectedRepository || actual.After != request.ExpectedRepository)
+            throw new EvidenceWriteException("Same actual current completed initial capture required.");
+        return _capture;
     }
     internal NormalizedEvidence CompareApprovedBaseline(GateRunResult actual, ProtectedBaselineRegistry registry, ResolvedEvidencePolicy policy) => files.Effect(() =>
     {
@@ -248,6 +283,7 @@ internal sealed class InstalledToolInvocation(
         if (_report is not null) Save("producer-report.json", _report);
         if (changedDiff is not null) Save("producer-changed-lines.diff", changedDiff);
         if (_lines is not null) Save("producer-changed-line-coverage.json", JsonSerializer.SerializeToUtf8Bytes(_lines));
+        if (_capture is not null) Save("producer-initial-baseline-capture.json", JsonSerializer.SerializeToUtf8Bytes(_capture));
         for (var index = 0; index < owner.Calls.Count; index++)
         {
             var call = owner.Calls[index];
@@ -319,6 +355,8 @@ internal sealed class InstalledToolInvocation(
     {
         if (!_entered || !_returned || _failure is not null || !ReferenceEquals(_actual, execution) || _report is null)
             return NormalizedEvidence.Error("Current installed-tool binding did not complete: " + (_failure?.Message ?? "original observation missing"), profile.Fixture);
+        if (request.Purpose == InstalledToolPurpose.InitialBaselineCapture)
+            return NormalizedEvidence.Incomplete("INITIAL_BASELINE_CAPTURE is advisory DATA; raw outcome=" + (_capture?.RawOutcome.ToString() ?? "unavailable") + "; complete=" + (_capture?.Complete.ToString() ?? "false") + ". No changed-code PASS or approval is inferred.", profile.Fixture);
         var result = profile.Tool == "mutate4csharp" ? Mutate4CSharpAdapter.NormalizeCurrent(_report, capability, execution.ExitCode!.Value) :
             Crap4CSharpAdapter.NormalizeCurrent(_report, capability, execution.ExitCode!.Value);
         if (profile.Tool == "crap4csharp" && result.Outcome is GateOutcome.Pass or GateOutcome.NotApplicable)

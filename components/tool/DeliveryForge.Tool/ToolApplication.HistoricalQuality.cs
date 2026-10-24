@@ -14,6 +14,9 @@ public sealed partial class ToolApplication
         var bytes = BoundedFiles.Read(command.Get("plan")!, life);
         var imported = await Observe("ActualHistoricalPlanImport", () => ImportPlan(bytes, config, life), life).ConfigureAwait(false);
         if (imported.Plan is null || !imported.DownstreamReady) return ToolResult.Incomplete("PLAN_RECONCILIATION_INCOMPLETE", "Historical plan/P failed fresh reconciliation.", imported.Diagnostics);
+        if (command.Has("dry-run") && config.HistoricalQuality.Purpose == HistoricalQualityHost.InitialBaselineCapture)
+            return new("DRY_RUN", "INITIAL_BASELINE_CAPTURE_PREPARED", "Historical plan freshly reconciled for full current DATA capture; no gate or worker started.",
+                new { imported.Plan.Identity, Purpose = HistoricalQualityHost.InitialBaselineCapture, ChangedCodeComparison = "NotEvaluatedNoBaseline", BaselineApproved = false, ProductionAuthority = false });
         if (command.Has("dry-run")) return new("DRY_RUN", "HISTORICAL_QUALITY_PREPARED", "Historical plan freshly reconciled; no gate or worker started.", new { imported.Plan.Identity, BaselineApproved = false });
         if (host is null || assignments is null || !host.HasHistoricalQuality || actualOriginal is null || actualConfigurationPin is null || !ReferenceEquals(life, actualOriginal))
             return ToolResult.Incomplete("HISTORICAL_QUALITY_OWNER_REQUIRED", "Historical gates require the closed same-original standalone owner composition.");

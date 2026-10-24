@@ -8,7 +8,7 @@ namespace DeliveryForge.Evidence;
 
 public sealed record InstalledToolGateRequest(string GateId, ResolvedEvidencePolicy Policy,
     RepositoryIdentity ExpectedRepository, string Scope, string? ProjectRelativePath,
-    TimeSpan Timeout, string OutputDirectory);
+    TimeSpan Timeout, string OutputDirectory, InstalledToolPurpose Purpose = InstalledToolPurpose.ChangedCode);
 
 /// <summary>Real installed executable path. No injectable executor, caller result, report locator
 /// or supported=true switch exists on this API. The parent supplies an out-of-band pinned install
@@ -35,6 +35,10 @@ public sealed class InstalledToolGateProvider
         // Public unowned Linux execution remains closed. Only this exact internal
         // containing files/executor pair can use the selected kernel scope; selection
         // DATA does not establish birth or successful descendant settlement.
+        InitialBaselineCapture.RequirePurpose(request.Purpose);
+        if (request.Purpose == InstalledToolPurpose.InitialBaselineCapture &&
+            (profile.Fixture || profile.Tool == "crap4csharp" && request.Scope != "all"))
+            throw new EvidenceWriteException("Initial baseline capture requires complete real tools and full callable scope.");
         if (!OperatingSystem.IsWindows() && !(OperatingSystem.IsLinux() && actualFiles is not null &&
             actualOwner is not null && actualOwner.OwnsScopedFiles(actualFiles)))
             throw new EvidenceWriteException("Current installed-tool execution requires a genuine creation-owned process scope; the shared Linux owner is not yet integrated.");
@@ -95,7 +99,7 @@ public sealed class InstalledToolGateProvider
             var invocation = new CommandInvocation(executable, arguments, _root,
                 new Dictionary<string, string>(profile.Data.Environment, StringComparer.Ordinal));
             var binding = new InstalledToolInvocation(profile, request, files, owner, invocation, reportPath, original, gitState,
-                install, environment, sdkBefore, resourcesBefore, changedDiff, () => CaptureGitState(files), () => CaptureInstallation(profile, files));
+                install, environment, sdkBefore, resourcesBefore, changedDiff, () => CaptureGitState(files), () => CaptureInstallation(profile, files), detected.Capability);
             owner.BindMain(invocation, binding);
             var gate = new GateRequest(request.GateId, request.Policy, detected.Capability,
                 profile.Tool == "mutate4csharp" ? EvidenceAdapterKind.Mutate4CSharp : EvidenceAdapterKind.Crap4CSharp,

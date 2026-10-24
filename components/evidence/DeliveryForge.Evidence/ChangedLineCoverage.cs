@@ -21,11 +21,22 @@ internal static partial class ChangedLineCoverage
     internal static Result ReadCompilerBound(byte[] diff, JsonElement manifest, string repository,
         Func<string, byte[]> readArtifact, InstalledToolFiles files) => ReadCore(diff, manifest, repository, readArtifact, files, true);
 
+    internal static InitialBaselineLineCoverage ReadCurrentCompilerBound(JsonElement manifest, string repository,
+        Func<string, byte[]> readArtifact, InstalledToolFiles files)
+    {
+        // No synthetic diff is created. Full mode derives membership from the same
+        // hash-bound captured source and actual compiler/PDB provider inventories.
+        var result = ReadCore([], manifest, repository, readArtifact, files, true, true);
+        var sourceIdentity = InstalledToolFiles.Identity(JsonSerializer.SerializeToUtf8Bytes(InitialBaselineCapture.Sources(manifest)));
+        return new(result.ChangedExecutableLines, result.CoveredChangedLines, result.Percent,
+            result.UnmeasuredChangedLines, result.CompilerCensusComplete, sourceIdentity,
+            result.Reason.Replace("Changed", "Full-current", StringComparison.Ordinal).Replace("changed", "full-current", StringComparison.Ordinal));
+    }
     private static Result ReadCore(byte[] diff, JsonElement manifest, string repository,
-        Func<string, byte[]> readArtifact, InstalledToolFiles files, bool requireCompilerCensus)
+        Func<string, byte[]> readArtifact, InstalledToolFiles files, bool requireCompilerCensus, bool fullCurrent = false)
     {
         files.Check();
-        var changes = ReadHunks(diff);
+        var changes = fullCurrent ? new Dictionary<string, HashSet<int>>(InstalledToolFiles.PathComparer) : ReadHunks(diff);
         var comparer = InstalledToolFiles.PathComparer;
         var sources = new Dictionary<string, Dictionary<string, Source>>(StringComparer.Ordinal);
         var generatedChangedContexts = new HashSet<string>(StringComparer.Ordinal);
@@ -50,8 +61,8 @@ internal static partial class ChangedLineCoverage
                     throw Refuse("Captured source bytes differ from the current manifest.");
                 var repositoryPath = OptionalText(input, "repositoryPath");
                 var generated = Boolean(input, "generated");
-                var changedGenerated = requireCompilerCensus && generated && repositoryPath is not null && changes.ContainsKey(repositoryPath);
-                if (changedGenerated) generatedChangedContexts.Add(id);
+                var changedGenerated = requireCompilerCensus && generated && repositoryPath is not null && (fullCurrent || changes.ContainsKey(repositoryPath));
+                if (changedGenerated && !fullCurrent) generatedChangedContexts.Add(id);
                 string? path = null;
                 if (repositoryPath is not null && (!generated || changedGenerated))
                 {
@@ -72,6 +83,22 @@ internal static partial class ChangedLineCoverage
                 { CompilerPhysicalRole = path })) throw Refuse("Duplicate logical source path.");
             }
             if (requireCompilerCensus) BindCompilerPhysicalRoles(context, repository, documents, files);
+        }
+        if (fullCurrent)
+        {
+            var physicalMembership = 0;
+            foreach (var document in sources.Values.SelectMany(set => set.Values))
+            {
+                files.Check();
+                if (document.RepositoryPath is not { } path) continue;
+                if (!changes.TryGetValue(path, out var lines)) changes.Add(path, lines = []);
+                for (var line = 1; line <= document.Lines; line++)
+                {
+                    files.Check();
+                    if (++physicalMembership > 1_000_000) throw Refuse("Full current source-line membership exceeds the existing finite profile.");
+                    lines.Add(line);
+                }
+            }
         }
         var executable = new Dictionary<string, Dictionary<string, bool>>(comparer);
         var coveredContexts = new HashSet<string>(StringComparer.Ordinal);
@@ -97,7 +124,7 @@ internal static partial class ChangedLineCoverage
             foreach (var context in sources)
             {
                 files.Check();
-                if (!context.Value.Values.Any(source => !source.Generated && source.RepositoryPath is { } path && changes.ContainsKey(path))) continue;
+                if (!context.Value.Values.Any(source => (fullCurrent || !source.Generated) && source.RepositoryPath is { } path && changes.ContainsKey(path))) continue;
                 var selected = builds.Values.Where(build => Text(build, "contextId") == context.Key).Take(2).ToArray();
                 if (selected.Length != 1) throw Refuse("Changed compiler context lacks one exact actual build.");
                 var build = selected[0]; var buildId = Text(build, "id");
@@ -151,7 +178,16 @@ internal static partial class ChangedLineCoverage
                 {
                     MembershipStep();
                     var source = context.Value[row.LogicalPath];
-                    if (source.Generated || source.RepositoryPath is not { } path || !changes.TryGetValue(path, out var changed) || !changed.Contains(row.Number)) continue;
+                    // Full-current mode can prove a generated document contributes no
+                    // executable denominator only through this same complete actual
+                    // PE/PDB census. Any provider or policy line keeps it unsupported,
+                    // with its real membership retained below rather than excluded.
+                    if (fullCurrent && source.Generated)
+                    {
+                        censusComplete = false; completeContexts.Remove(context.Key);
+                        censusReason ??= "Full-current generated source has executable compiler lines; generated executable membership remains unsupported and is not excluded.";
+                    }
+                    if (source.Generated && !fullCurrent || source.RepositoryPath is not { } path || !changes.TryGetValue(path, out var changed) || !changed.Contains(row.Number)) continue;
                     var key = path + ":" + row.Number.ToString(CultureInfo.InvariantCulture);
                     if (!providerLines.TryGetValue(key, out var membership)) providerLines.Add(key, membership = new(StringComparer.Ordinal));
                     membership.Add(context.Key);
@@ -160,7 +196,16 @@ internal static partial class ChangedLineCoverage
                 {
                     MembershipStep();
                     var source = context.Value[row.LogicalPath];
-                    if (source.Generated || source.RepositoryPath is not { } path || !changes.TryGetValue(path, out var changed) || !changed.Contains(row.Number)) continue;
+                    // Full-current mode can prove a generated document contributes no
+                    // executable denominator only through this same complete actual
+                    // PE/PDB census. Any provider or policy line keeps it unsupported,
+                    // with its real membership retained below rather than excluded.
+                    if (fullCurrent && source.Generated)
+                    {
+                        censusComplete = false; completeContexts.Remove(context.Key);
+                        censusReason ??= "Full-current generated source has executable compiler lines; generated executable membership remains unsupported and is not excluded.";
+                    }
+                    if (source.Generated && !fullCurrent || source.RepositoryPath is not { } path || !changes.TryGetValue(path, out var changed) || !changed.Contains(row.Number)) continue;
                     var key = path + ":" + row.Number.ToString(CultureInfo.InvariantCulture);
                     if (!required.TryGetValue(key, out var membership)) required.Add(key, membership = new(StringComparer.Ordinal));
                     membership.Add(context.Key);
