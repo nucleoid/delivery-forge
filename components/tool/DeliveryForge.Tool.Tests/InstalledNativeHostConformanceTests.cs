@@ -15,6 +15,27 @@ namespace DeliveryForge.Tool.Tests;
 // Missing bindings fail; no environment/capability skip produces a PASS.
 public sealed class InstalledNativeHostConformanceTests
 {
+    [Theory]
+    [InlineData(null)]
+    [InlineData("nnp-user1000-ancestor-v3")]
+    public void Linux_scope_selection_preserves_legacy_shape_and_optional_policy(string? policy)
+    {
+        var image = new LinuxScopeImage("/unexecuted-DATA", 1, "unexecuted-DATA");
+        var selection = new LinuxScopeSelection(image, image, "manager-DATA", "kernel-DATA", image, [], image)
+        {
+            RestrictiveChildPolicy = policy
+        };
+        var (systemdRun, systemdLibrary, manager, kernel, gate, closure, receipt) = selection;
+        Assert.Same(image, systemdRun); Assert.Same(image, systemdLibrary);
+        Assert.Equal("manager-DATA", manager); Assert.Equal("kernel-DATA", kernel);
+        Assert.Same(image, gate); Assert.Empty(closure); Assert.Same(image, receipt);
+        var roundTrip = JsonSerializer.Deserialize<LinuxScopeSelection>(JsonSerializer.Serialize(selection, BoundedFiles.Json), BoundedFiles.Json);
+        Assert.NotNull(roundTrip); Assert.Equal(policy, roundTrip.RestrictiveChildPolicy);
+        var legacy = new { selection.SystemdRun, selection.SystemdLibrary, selection.ManagerVersion, selection.KernelRelease, selection.BirthGate, selection.BirthGateClosure, selection.GateBuildReceipt };
+        var legacyRoundTrip = JsonSerializer.Deserialize<LinuxScopeSelection>(JsonSerializer.Serialize(legacy, BoundedFiles.Json), BoundedFiles.Json);
+        Assert.NotNull(legacyRoundTrip); Assert.Null(legacyRoundTrip.RestrictiveChildPolicy);
+    }
+
     public sealed record Fixture(string Kind, string Adapter, StandaloneHostSelection Host, string Git, string ParentCheckout, string Worktree, string ResultDirectory, string BaseCommit, string Repository, string CaseKind, AdmissionFile PlanBundle, PlanImportExpectations Expectations, string MutableReference, string RelativePath, string ExpectedText, AdmissionFile? LinuxScopeProfile, bool ObserveRuntimeTrustRoute = false, OwnerTrustedLinuxHelper? LinuxOwnerTrustedHelper = null);
     // Explicit conformance-only DATA selection; never a RuntimeTrust/native authority issuer.
     public sealed record OwnerTrustedLinuxHelper(AdmissionFile OwnerDecision, AdmissionFile CompletedReceipt, string PreparedBootId, AdmissionFile FinalDisposition);
