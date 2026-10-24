@@ -6,10 +6,12 @@ namespace DeliveryForge.Tool.Claude;
 public sealed class ClaudeStreamState(string promptId, string exactPrompt)
 {
     readonly HashSet<string> started = new(StringComparer.Ordinal), finished = new(StringComparer.Ordinal);
+    readonly HashSet<string> commandEvents = new(StringComparer.Ordinal);
+    int commandStage;
     string? session, provisionalSession; bool replayed, initialized, admitted, poisoned; JsonElement? result; string? activity;
     public string Session => session ?? throw new IOException("Actual Claude init/session not received.");
     public bool Acknowledged => initialized && replayed;
-    public bool Settled => !poisoned && Acknowledged && result is not null && activity == "idle" && started.SetEquals(finished);
+    public bool Settled => !poisoned && Acknowledged && result is not null && activity == "idle" && started.SetEquals(finished) && (commandStage == 0 || commandStage == 3);
     public void AdmitPrompt() { if (admitted) throw new IOException("Original Claude prompt already entered."); admitted = true; activity = null; }
     internal static JsonElement Member(JsonElement row, string key) { if (row.ValueKind != JsonValueKind.Object || !row.TryGetProperty(key, out var value)) throw new IOException("Actual Claude member required: " + key); return value; }
     public static string Text(JsonElement row, string key) { var value = Member(row, key); if (value.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(value.GetString()) || value.GetString()!.Length > 4096) throw new IOException("Actual Claude string identity invalid: " + key); return value.GetString()!; }
@@ -18,6 +20,25 @@ public sealed class ClaudeStreamState(string promptId, string exactPrompt)
     void ObserveCore(JsonElement row)
     {
         var type = Text(row, "type");
+        if (type == "command_lifecycle")
+        {
+            // Actual SDK command notifications belong only to this admitted
+            // prompt. Pre-init identity stays provisional until matching init.
+            if (!admitted || Text(row, "command_uuid") != promptId || commandEvents.Count >= 3 ||
+                !commandEvents.Add(Text(row, "uuid"))) throw new IOException("Foreign, duplicate or excess actual Claude command event.");
+            if (initialized) SameSession(row);
+            else if (provisionalSession is null || Text(row, "session_id") != provisionalSession)
+                throw new IOException("Actual Claude command differs from its provisional SDK session.");
+            var commandState = Text(row, "state");
+            if (commandState == "queued" && commandStage == 0 && !replayed && result is null) commandStage = 1;
+            else if (commandState == "started" && commandStage == 1 && result is null) commandStage = 2;
+            else if (commandState == "completed" && commandStage == 2 && Acknowledged && result is not null)
+            {
+                commandStage = 3; activity = "running"; // require fresh idle after this terminal
+            }
+            else throw new IOException("Unsupported or reordered actual Claude command lifecycle.");
+            return;
+        }
         if (type == "system")
         {
             var subtype = Text(row, "subtype");
@@ -59,7 +80,7 @@ public sealed class ClaudeStreamState(string promptId, string exactPrompt)
         SameSession(row);
         if (type == "user")
         {
-            if (!admitted || replayed || Text(row, "uuid") != promptId || Member(row, "parent_tool_use_id").ValueKind != JsonValueKind.Null) throw new IOException("Foreign/duplicate actual Claude user acknowledgement.");
+            if (!admitted || replayed || commandStage != 0 && commandStage != 2 || Text(row, "uuid") != promptId || Member(row, "parent_tool_use_id").ValueKind != JsonValueKind.Null) throw new IOException("Foreign/duplicate actual Claude user acknowledgement.");
             var message = Member(row, "message"); var content = Member(message, "content"); if (Text(message, "role") != "user" || content.ValueKind != JsonValueKind.String || content.GetString() != exactPrompt) throw new IOException("Actual replay differs from complete parent-selected assignment.");
             if (Text(Member(row, "origin"), "kind") != "human") throw new IOException("Actual prompt origin differs."); replayed = true; return;
         }
@@ -70,6 +91,9 @@ public sealed class ClaudeStreamState(string promptId, string exactPrompt)
         if (type == "result")
         {
             if (!Acknowledged || result is not null || Text(Member(row, "origin"), "kind") != "human" || Text(row, "subtype") != "success" || Text(row, "terminal_reason") != "completed" || Member(row, "is_error").ValueKind != JsonValueKind.False) throw new IOException("Actual Claude result is foreign, duplicate, incomplete or unsuccessful.");
+            if (commandStage != 0 && commandStage != 2 ||
+                (commandStage != 0 || row.TryGetProperty("user_message_uuid", out _)) && Text(row, "user_message_uuid") != promptId)
+                throw new IOException("Actual Claude result differs from the admitted command prompt.");
             _ = Text(row, "uuid"); if (row.TryGetProperty("permission_denials", out var denials) && (denials.ValueKind != JsonValueKind.Array || denials.GetArrayLength() != 0)) throw new IOException("Actual Claude permission denial prevents success.");
             if (row.TryGetProperty("errors", out var errors) && errors.ValueKind != JsonValueKind.Null && (errors.ValueKind != JsonValueKind.Array || errors.GetArrayLength() != 0)) throw new IOException("Actual Claude errors prevent success."); result = row.Clone(); return;
         }

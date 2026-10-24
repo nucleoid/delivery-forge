@@ -72,6 +72,19 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
             throw new ToolUsageException("Explicit authenticated HTTPS Continuum endpoint required.");
         BoundedFiles.Plain(settings.PrivateKeyPath);
         var root = Path.GetFullPath(settings.CheckpointRoot); BoundedFiles.Plain(root, true);
+        // Reject known preconditions before retaining an entered store creator.
+        // The actual constructor still rechecks after this raceable observation;
+        // a later constructor failure keeps its existing conservative UNKNOWN.
+        const string checkpointRequired = "Parent coordination requires an existing empty checkpoint directory.";
+        life.Check();
+        bool checkpointReady;
+        try { checkpointReady = Directory.Exists(root) && !Directory.EnumerateFileSystemEntries(root).Any(); }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            life.Check(); throw new ToolUsageException(checkpointRequired);
+        }
+        life.Check();
+        if (!checkpointReady) throw new ToolUsageException(checkpointRequired);
         var evidence = new PinnedOperatorEvidence(settings.DeploymentEvidence, life);
         var observed = await evidence.ObserveAsync(life.Token).ConfigureAwait(false);
         if (observed.Endpoint != settings.Endpoint || observed.Project != settings.Project || observed.PrincipalId != settings.PrincipalId)

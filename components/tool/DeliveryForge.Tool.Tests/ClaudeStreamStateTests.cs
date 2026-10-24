@@ -200,4 +200,125 @@ public sealed class ClaudeStreamStateTests
         Assert.Throws<IOException>(() => Replay(state, "Foreign synthetic prompt"));
         Assert.False(state.Acknowledged); Assert.False(state.Settled); Assert.Throws<IOException>(state.RequireSuccess);
     }
+    static void Lifecycle(ClaudeStreamState state, string step, string command = PromptId, string session = Session, string? uuid = null) =>
+        Observe(state, new { type = "command_lifecycle", command_uuid = command, state = step, uuid = uuid ?? "command-event-" + step, session_id = session });
+    static ClaudeStreamState CommandStarted()
+    {
+        var state = new ClaudeStreamState(PromptId, Prompt); state.AdmitPrompt(); Observe(state, PreInitRunning());
+        Lifecycle(state, "queued"); Lifecycle(state, "started"); Init(state); Replay(state); return state;
+    }
+    static void CommandResult(ClaudeStreamState state, string prompt = PromptId) =>
+        Observe(state, new
+        {
+            type = "result",
+            session_id = Session,
+            subtype = "success",
+            terminal_reason = "completed",
+            is_error = false,
+            uuid = "result-command-test-id",
+            user_message_uuid = prompt,
+            origin = new { kind = "human" },
+            permission_denials = Array.Empty<string>(),
+            errors = Array.Empty<string>()
+        });
+    [Fact]
+    public void Complete_observed_sdk_command_sequence_requires_init_exact_replay_result_terminal_and_fresh_idle()
+    {
+        var state = new ClaudeStreamState(PromptId, Prompt); state.AdmitPrompt(); Observe(state, PreInitRunning());
+        Lifecycle(state, "queued"); Lifecycle(state, "started");
+        Assert.Throws<IOException>(() => state.Session); Assert.False(state.Acknowledged); Assert.False(state.Settled);
+        Init(state); Assert.False(state.Acknowledged); Replay(state); Assert.True(state.Acknowledged);
+        Observe(state, new { type = "assistant", session_id = Session });
+        Observe(state, new { type = "rate_limit_event", session_id = Session, uuid = "command-rate", rate_limit_info = new { status = "allowed" } });
+        CommandResult(state); Idle(state); Assert.False(state.Settled); // no terminal yet
+        Lifecycle(state, "completed"); Assert.False(state.Settled); // earlier idle cannot settle a later terminal
+        Idle(state); state.RequireSuccess();
+    }
+    [Theory]
+    [InlineData("not-admitted")]
+    [InlineData("no-provisional")]
+    [InlineData("foreign-command")]
+    [InlineData("foreign-session")]
+    [InlineData("missing-command")]
+    [InlineData("missing-session")]
+    [InlineData("missing-uuid")]
+    [InlineData("empty-uuid")]
+    [InlineData("unknown-state")]
+    [InlineData("failed-state")]
+    [InlineData("started-first")]
+    [InlineData("completed-first")]
+    [InlineData("duplicate-queued")]
+    [InlineData("duplicate-started")]
+    [InlineData("duplicate-event-uuid")]
+    [InlineData("replay-before-start")]
+    [InlineData("completed-before-result")]
+    [InlineData("result-missing-prompt")]
+    [InlineData("result-foreign-prompt")]
+    [InlineData("foreign-session-after-init")]
+    [InlineData("duplicate-completed")]
+    public void Foreign_malformed_reordered_or_duplicate_commands_permanently_poison_the_original(string mutation)
+    {
+        var state = new ClaudeStreamState(PromptId, Prompt);
+        if (mutation != "not-admitted") state.AdmitPrompt();
+        if (mutation != "no-provisional") Observe(state, PreInitRunning());
+        var row = new Dictionary<string, object?>
+        {
+            ["type"] = "command_lifecycle",
+            ["command_uuid"] = PromptId,
+            ["state"] = "queued",
+            ["uuid"] = "command-mutation",
+            ["session_id"] = Session
+        };
+        Action reject = () => Observe(state, row);
+        switch (mutation)
+        {
+            case "not-admitted": case "no-provisional": break;
+            case "foreign-command": row["command_uuid"] = "foreign-command"; break;
+            case "foreign-session": row["session_id"] = "foreign-session"; break;
+            case "missing-command": row.Remove("command_uuid"); break;
+            case "missing-session": row.Remove("session_id"); break;
+            case "missing-uuid": row.Remove("uuid"); break;
+            case "empty-uuid": row["uuid"] = ""; break;
+            case "unknown-state": row["state"] = "cancelled"; break;
+            case "failed-state": row["state"] = "failed"; break;
+            case "started-first": row["state"] = "started"; break;
+            case "completed-first": row["state"] = "completed"; break;
+            case "duplicate-queued": Lifecycle(state, "queued"); break;
+            case "duplicate-started": Lifecycle(state, "queued"); Lifecycle(state, "started"); row["state"] = "started"; break;
+            case "duplicate-event-uuid": Lifecycle(state, "queued", uuid: "command-mutation"); row["state"] = "started"; break;
+            case "replay-before-start": Lifecycle(state, "queued"); Init(state); reject = () => Replay(state); break;
+            case "completed-before-result":
+                Lifecycle(state, "queued"); Lifecycle(state, "started"); Init(state); Replay(state); row["state"] = "completed"; break;
+            case "result-missing-prompt":
+            case "result-foreign-prompt":
+            case "foreign-session-after-init":
+            case "duplicate-completed":
+                Lifecycle(state, "queued"); Lifecycle(state, "started"); Init(state); Replay(state);
+                if (mutation == "result-missing-prompt") reject = () => Result(state);
+                else if (mutation == "result-foreign-prompt") reject = () => CommandResult(state, "foreign-prompt");
+                else
+                {
+                    CommandResult(state); row["state"] = "completed";
+                    if (mutation == "foreign-session-after-init") row["session_id"] = "foreign-session";
+                    else Lifecycle(state, "completed");
+                }
+                break;
+            default: throw new ArgumentException("Unknown synthetic command mutation.");
+        }
+        Assert.Throws<IOException>(reject); Assert.False(state.Settled); Assert.Throws<IOException>(state.RequireSuccess);
+        Assert.Throws<IOException>(() => Idle(state));
+    }
+    [Fact]
+    public void Init_first_command_sequence_is_supported_and_later_command_cannot_reuse_settlement()
+    {
+        var state = Admitted(); Lifecycle(state, "queued"); Lifecycle(state, "started"); Replay(state); CommandResult(state);
+        Lifecycle(state, "completed"); Idle(state); state.RequireSuccess();
+        Assert.Throws<IOException>(() => Lifecycle(state, "queued", uuid: "later-command")); Assert.False(state.Settled);
+    }
+    [Fact]
+    public void A_result_carrying_a_foreign_prompt_cannot_settle_the_legacy_init_first_route()
+    {
+        var state = Started(); Assert.Throws<IOException>(() => CommandResult(state, "foreign-prompt"));
+        Assert.False(state.Settled); Assert.Throws<IOException>(state.RequireSuccess);
+    }
 }
