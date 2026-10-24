@@ -517,6 +517,7 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
         if (!Register(plan.RunId, frame)) { if (ownsOriginal) original.Dispose(); throw new WorkerEnvelopeException("Run already entered or finite host frame allowance exhausted; no replay."); }
         frame.EnterRoute(); // Retain the actual original before phase factory entry.
         ToolResult actualResult;
+        Exception? pendingFailure = null;
         try
         {
             frame.Worker.Start(original, () => ImplementRetainedCoreAsync(plan, frame));
@@ -580,6 +581,7 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
                 await frame.SchedulingCompletion.ObserveAsync(original).ConfigureAwait(false);
             }
         }
+        catch (Exception error) { pendingFailure = error; throw; }
         finally
         {
             if (!frame.Worker.Started) frame.LeaveRoute();
@@ -591,7 +593,15 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
                 if (coordination is { HasEnteredLossStop: true })
                     _ = await frame.EnterCleanup(_ => coordination.ObserveExistingLossStopAsync(plan.RunId, original)).ConfigureAwait(false);
             }
-            catch (Exception error) { frame.Primary ??= error; original.RetainUnknown(); throw; }
+            catch (Exception error)
+            {
+                var primary = pendingFailure ?? frame.Primary;
+                frame.Primary ??= primary ?? error;
+                original.RetainUnknown();
+                if (primary is not null && !ReferenceEquals(primary, error))
+                    throw new AggregateException("Original host operation and existing parent loss-stop observation failed.", primary, error);
+                throw;
+            }
             finally { await FinishStoppedSchedulingAsync(frame).ConfigureAwait(false); frame.CloseWhenSettled(); }
         }
         return RetainedResult(frame, actualResult);
