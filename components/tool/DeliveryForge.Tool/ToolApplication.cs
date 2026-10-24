@@ -36,6 +36,9 @@ public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssue
     }
     public async Task<ToolResult> ExecuteAsync(ToolCommand command, CancellationToken cancellationToken = default)
     {
+        // The caller may retain a mutable backing dictionary. Bind all options
+        // once before validating paths or awaiting any external operation.
+        command = command with { Options = new System.Collections.ObjectModel.ReadOnlyDictionary<string, string?>(new Dictionary<string, string?>(command.Options, StringComparer.Ordinal)) };
         if (command.Mode == ToolMode.Capabilities) return Capabilities(command.Get("profile") ?? "local");
         if (command.Get("config") is not string configPath) return ToolResult.Incomplete("TRUSTED_CONFIG_REQUIRED", "Select explicit owner-reviewed --config; ambient paths and capabilities are not inferred.");
         var life = actualOriginal ?? new ToolLifetime(TimeSpan.FromSeconds(1200), cancellationToken);
@@ -99,12 +102,13 @@ public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssue
     {
         var hasIssue = command.Has("issue"); var hasIntentFile = command.Has("intent-file");
         var selectedIssue = command.Get("issue"); var selectedIntentFile = command.Get("intent-file");
-        if (hasIssue == hasIntentFile || (hasIssue && string.IsNullOrWhiteSpace(selectedIssue)) || (hasIntentFile && string.IsNullOrWhiteSpace(selectedIntentFile)))
+        if (string.IsNullOrWhiteSpace(command.Get("repo")) || hasIssue == hasIntentFile || (hasIssue && string.IsNullOrWhiteSpace(selectedIssue)) || (hasIntentFile && string.IsNullOrWhiteSpace(selectedIntentFile)))
             throw new ToolUsageException("plan requires --repo and exactly one --issue/--intent-file.");
         var repo = BoundedFiles.Plain(command.Get("repo")!, true); if (!Same(repo, config.RepositoryRoot)) throw new ToolUsageException("Repository differs from explicit trusted configuration.");
         PlanIntent intent; bool fromIssue;
-        if (selectedIssue is string issue)
+        if (hasIssue)
         {
+            var issue = selectedIssue!;
             fromIssue = true;
             if (!System.Text.RegularExpressions.Regex.IsMatch(issue, "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$")) throw new ToolUsageException("Expected OWNER/REPO#N.");
             if (!issue.StartsWith(config.Repository + "#", StringComparison.Ordinal)) throw new ToolUsageException("Issue repository differs from trusted selection.");

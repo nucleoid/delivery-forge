@@ -39,6 +39,20 @@ internal sealed class Issue17HostInputs
         var result = new Issue17HostInputs(original, copy, env); result.Check(); return result;
     }
     internal bool Contains(string path) => inputs.Any(row => Paths.Equals(row.Path, Path.GetFullPath(path)));
+    // Compare the already completed read against this original's immutable
+    // selected tuple. This performs no file read and consumes no new credit.
+    internal void RequireSelectedBytes(ToolLifetime actual, string path, byte[]? current)
+    {
+        original.Check();
+        if (!ReferenceEquals(original, actual)) throw new ToolUsageException("Selected host input cannot cross original owners.");
+        var full = Path.GetFullPath(path);
+        var selected = inputs.SingleOrDefault(row => Paths.Equals(row.Path, full));
+        if (selected is null || (current is null
+            ? selected.Bytes is not null || selected.Sha256 is not null
+            : selected.Bytes != current.LongLength || selected.Sha256 != BoundedFiles.Sha(current)))
+            throw new ToolUsageException("Actual reviewer settings differ from the independently selected complete input.");
+        original.Check();
+    }
     internal void RequirePath(string path)
     {
         if (!Contains(path))
@@ -149,6 +163,15 @@ public sealed partial class InstalledHostAdmission
         {
             if (!Matches(actual, reviewer)) throw new ToolUsageException("Independent reviewer trust differs from its accepted original selection.");
             Check(actual);
+        }
+        internal void RequireSelectedReviewerSettings(ToolLifetime actual, IndependentClaudeReviewSelection reviewer, string path, byte[]? current)
+        {
+            original.Check();
+            var expected = Path.Combine(ClaudeReviewerUserSettings.ActualDirectory(), "settings.json");
+            if (!Matches(actual, reviewer) || !StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(path), Path.GetFullPath(expected)))
+                throw new ToolUsageException("Reviewer settings must belong to the same selected original and reviewer.");
+            inputs.RequireSelectedBytes(actual, path, current);
+            original.Check();
         }
         void RefuseRepositoryConfiguration(string directory)
         {

@@ -154,15 +154,18 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             // Deterministic no-birth refusals happen before asynchronous effect
             // enrollment. Keep the same checks inside the atomic birth delegate:
             // a racing refusal there remains conservatively uncertain.
+            var nativeArguments = ClaudeIndependentReviewData.IsolatedObservationArguments(arguments);
+            actualUserSettings.RequireIsolationArguments(nativeArguments, observation: true);
             PrecheckObservationInputs(parent, runId, actualWorkingDirectory, Remaining(phaseStarted));
             capture = await parent.EnterAsync(runId, () =>
             {
                 var left = Remaining(phaseStarted); if (left > TimeSpan.FromSeconds(30)) left = TimeSpan.FromSeconds(30);
+                actualUserSettings.RequireIsolationArguments(nativeArguments, observation: true);
                 actualWorkingDirectory.Check();
                 if (OperatingSystem.IsLinux()) BoundedFiles.ReserveExactLinuxImageReads(selection.Image, original);
                 lock (tasks) { Current(); row.Entered = true; }
                 var actual = executor.ExecuteBoundedCaptureAsync(new(selection.Image.Path,
-                    ClaudeIndependentReviewData.IsolatedObservationArguments(arguments), actualWorkingDirectory.Path),
+                    nativeArguments, actualWorkingDirectory.Path),
                     left, 65536, phaseCancellation!.Token, new OwnedWorkPhaseBudget(original), linuxScope, OperatingSystem.IsLinux() ? new LinuxScopeImage(selection.Image.Path, selection.Image.Bytes, selection.Image.Sha256) : null);
                 lock (tasks) { row.Actual = Keep(actual); row.Returned = true; }
                 return actual;
@@ -311,14 +314,17 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             var inherited = Environment.GetEnvironmentVariable("CLAUDE_CODE_SDK_READS_SESSION_STATE");
             if (inherited is not null && inherited != "1") throw new ToolUsageException("Existing session-state selection differs; no settings override.");
             var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["CLAUDE_CODE_SDK_READS_SESSION_STATE"] = "1" };
+            var nativeArguments = ClaudeIndependentReviewData.IsolatedReviewArguments(bootstrap.Policy.Budget.MaximumCost);
+            actualUserSettings.RequireIsolationArguments(nativeArguments, observation: false);
             VerifyImage(); verifyProtectedConfiguration();
             process = parent.EnterSynchronous(runId, () =>
             {
+                actualUserSettings.RequireIsolationArguments(nativeArguments, observation: false);
                 actualWorkingDirectory.Check();
                 if (OperatingSystem.IsLinux()) BoundedFiles.ReserveExactLinuxImageReads(selection.Image, original);
                 lock (tasks) { _ = Remaining(started); nativeBirthEntered = true; }
                 var actual = OwnedDuplexProcess.Open(new(selection.Image.Path,
-                    ClaudeIndependentReviewData.IsolatedReviewArguments(bootstrap.Policy.Budget.MaximumCost), actualWorkingDirectory.Path, environment), original, linuxScope, OperatingSystem.IsLinux() ? new LinuxScopeImage(selection.Image.Path, selection.Image.Bytes, selection.Image.Sha256) : null);
+                    nativeArguments, actualWorkingDirectory.Path, environment), original, linuxScope, OperatingSystem.IsLinux() ? new LinuxScopeImage(selection.Image.Path, selection.Image.Bytes, selection.Image.Sha256) : null);
                 lock (tasks) { process = actual; nativeBirthReturned = true; }
                 return actual;
             });

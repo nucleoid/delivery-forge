@@ -303,10 +303,12 @@ public sealed class ProductionBatchTests
     }
 
     [Theory(Timeout = 150000)]
-    [InlineData("implement", true, false)]
-    [InlineData("plan", false, false)]
-    [InlineData("plan", false, true)]
-    public async Task Actual_CLI_plan_preserves_explicit_intent_and_only_implement_artifact_is_schedulable(string mode, bool schedulable, bool fromIssue)
+    [InlineData("implement", true, false, null)]
+    [InlineData("plan", false, false, null)]
+    [InlineData("plan", false, true, null)]
+    [InlineData("plan", false, true, "output")]
+    [InlineData("plan", false, true, "dry-replay")]
+    public async Task Actual_CLI_plan_preserves_explicit_intent_and_only_implement_artifact_is_schedulable(string mode, bool schedulable, bool fromIssue, string? mutation)
     {
         using var original = new ToolLifetime(TimeSpan.FromSeconds(120), TestContext.Current.CancellationToken);
         var root = Path.Combine(Path.GetTempPath(), "forge-cli-plan-mode-" + Guid.NewGuid().ToString("N"));
@@ -340,11 +342,25 @@ public sealed class ProductionBatchTests
         var configPath = Path.Combine(root, "config.json"); var intentPath = Path.Combine(root, "intent.json"); var outputPath = Path.Combine(root, "frozen-plan.json");
         await File.WriteAllBytesAsync(configPath, JsonSerializer.SerializeToUtf8Bytes(new TrustedConfiguration(request.Repository, repository, "refs/heads/main", git, MaximumCeiling: "implement", OperationSeconds: 120), BoundedFiles.Json), original.Token);
         await File.WriteAllBytesAsync(intentPath, JsonSerializer.SerializeToUtf8Bytes(intent, BoundedFiles.Json), original.Token);
-        var issue = fromIssue ? new PlanIssueFixture(intent) : null;
-        var application = new ToolApplication(issues: issue, actualOriginal: original);
         var selection = fromIssue ? new[] { "--issue", "fixture/cli-plan#1" } : new[] { "--intent-file", intentPath };
-        var result = await application.ExecuteAsync(CommandLine.Parse(new[] { "plan", "--repo", repository }.Concat(selection).Concat(["--config", configPath, "--plan-out", outputPath]).ToArray()), original.Token);
+        var parsed = CommandLine.Parse(new[] { "plan", "--repo", repository }.Concat(selection).Concat(["--config", configPath, "--plan-out", outputPath]).ToArray());
+        var options = new Dictionary<string, string?>(parsed.Options, StringComparer.Ordinal);
+        var replay = Path.Combine(root, "absent-replay"); var forbidden = Path.Combine(repository, "forbidden-plan.json");
+        if (mutation == "dry-replay") { options["dry-run"] = null; options["replay-out"] = replay; }
+        var issue = fromIssue ? new PlanIssueFixture(intent, afterYield: mutation is null ? null : async () =>
+        {
+            await Task.Yield(); options["plan-out"] = forbidden;
+            options.Remove("dry-run"); options.Remove("replay-out");
+        }) : null;
+        var application = new ToolApplication(issues: issue, actualOriginal: original);
+        var result = await application.ExecuteAsync(mutation is null ? parsed : new ToolCommand(ToolMode.Plan, options), original.Token);
         Assert.Equal(fromIssue ? 1 : 0, issue?.Calls ?? 0);
+        Assert.False(File.Exists(forbidden)); Assert.False(Directory.Exists(replay));
+        if (mutation == "dry-replay")
+        {
+            Assert.Equal("DRY_RUN", result.Outcome); Assert.Equal("PLAN_FROZEN", result.Code);
+            Assert.False(File.Exists(outputPath)); Assert.Empty(await Git("status", "--porcelain=v1", "--untracked-files=all")); return;
+        }
         Assert.Equal("COMPLETE", result.Outcome); Assert.Equal("PLAN_FROZEN", result.Code); Assert.False(result.RuntimeCertified);
         var bytes = await File.ReadAllBytesAsync(outputPath, original.Token);
         using var json = JsonDocument.Parse(bytes); var envelope = json.RootElement; var material = envelope.GetProperty("plan");
@@ -479,13 +495,32 @@ public sealed class ProductionBatchTests
         Assert.False(File.Exists(output)); Assert.False(File.Exists(Path.Combine(root, "absent-git")));
     }
 
-    sealed class PlanIssueFixture(PlanIntent content, Action? beforeReturn = null) : IIssueContentPort
+    [Theory]
+    [InlineData("repo", null)]
+    [InlineData("repo", " ")]
+    [InlineData("issue", null)]
+    [InlineData("issue", " ")]
+    public async Task Direct_plan_command_with_empty_required_value_refuses_before_issue_read(string key, string? value)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-plan-empty-value-" + Guid.NewGuid().ToString("N"));
+        var repository = Path.Combine(root, "parent"); Directory.CreateDirectory(repository);
+        var config = Path.Combine(root, "config.json"); var output = Path.Combine(root, "absent-output.json");
+        await File.WriteAllBytesAsync(config, JsonSerializer.SerializeToUtf8Bytes(new TrustedConfiguration("fixture/cli-plan", repository, "refs/heads/main", Path.Combine(root, "absent-git")), BoundedFiles.Json), TestContext.Current.CancellationToken);
+        var options = new Dictionary<string, string?> { ["repo"] = repository, ["config"] = config, ["issue"] = "fixture/cli-plan#1", ["plan-out"] = output };
+        if (value is null && key == "repo") options.Remove(key); else options[key] = value;
+        var application = new ToolApplication();
+        var refused = await Assert.ThrowsAsync<ToolUsageException>(() => application.ExecuteAsync(new ToolCommand(ToolMode.Plan, options), TestContext.Current.CancellationToken));
+        Assert.Equal("plan requires --repo and exactly one --issue/--intent-file.", refused.Message);
+        Assert.Empty(application.RetainedExternalCalls); Assert.False(File.Exists(output));
+    }
+
+    sealed class PlanIssueFixture(PlanIntent content, Action? beforeReturn = null, Func<Task>? afterYield = null) : IIssueContentPort
     {
         internal int Calls { get; private set; }
-        public Task<PlanIntent> ReadPublicIssueAsync(string issue, TimeSpan remaining, CancellationToken token)
+        public async Task<PlanIntent> ReadPublicIssueAsync(string issue, TimeSpan remaining, CancellationToken token)
         {
             token.ThrowIfCancellationRequested(); Assert.Equal("fixture/cli-plan#1", issue); Assert.True(remaining > TimeSpan.Zero);
-            Calls++; beforeReturn?.Invoke(); return Task.FromResult(content);
+            Calls++; beforeReturn?.Invoke(); if (afterYield is not null) await afterYield(); return content;
         }
     }
 

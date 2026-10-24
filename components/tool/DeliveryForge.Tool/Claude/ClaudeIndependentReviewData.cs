@@ -19,6 +19,24 @@ internal static class ClaudeIndependentReviewData
     internal static string[] IsolatedReviewArguments(decimal maximumCost) =>
         ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd", maximumCost.ToString(CultureInfo.InvariantCulture)];
 
+    // Validate the ACTUAL argv before birth when selected user settings use
+    // the private personal-host profile. This is no capability or file effect.
+    internal static void RequirePinnedSettingsIsolation(IReadOnlyList<string> arguments, bool observation)
+    {
+        if (observation)
+        {
+            if (arguments.SequenceEqual(new[] { "--safe-mode", "--setting-sources", "user", "--version" }) ||
+                arguments.SequenceEqual(new[] { "--safe-mode", "--setting-sources", "user", "auth", "status" })) return;
+        }
+        else
+        {
+            string[] prefix = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd"];
+            if (arguments.Count == prefix.Length + 1 && arguments.Take(prefix.Length).SequenceEqual(prefix) &&
+                decimal.TryParse(arguments[^1], NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var cost) && cost > 0) return;
+        }
+        throw new ToolUsageException("Selected reviewer settings require the exact isolated native invocation.");
+    }
+
     internal static readonly string[] ProviderOverrides = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_SIMPLE"];
     internal static void RequireSubscriptionEnvironment(Func<string, string?> read)
     {

@@ -113,4 +113,92 @@ public sealed class ClaudeReviewerUserSettingsTests
         var selected = ClaudeReviewerUserSettings.Capture(original, DirectoryRoot()); stopped.Cancel();
         Assert.ThrowsAny<OperationCanceledException>(selected.Check); Assert.False(original.HasExplicitUnknown);
     }
+    [Fact]
+    public void Selected_profile_parser_preserves_only_inert_customizations_without_granting_capture_authority()
+    {
+        var raw = Utf8("""{"env":{"ANTHROPIC_CUSTOM_MODEL_OPTION":"claude-synthetic[1m]","ANTHROPIC_CUSTOM_MODEL_OPTION_NAME":"Synthetic menu entry","ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION":"Synthetic description","CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":"50"},"permissions":{"allow":["Read(*)"],"ask":[],"defaultMode":"bypassPermissions"},"hooks":{"Stop":[]},"model":"configured-existing-default"}""");
+        ClaudeReviewerUserSettings.RequireOwnerSelectedSettings(raw); // DATA parsing only.
+        Assert.Throws<ToolUsageException>(() => ClaudeReviewerUserSettings.RequireSafeSettings(raw));
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var root = DirectoryRoot(); var path = Path.Combine(root, "settings.json"); File.WriteAllBytes(path, raw);
+        Assert.Throws<ToolUsageException>(() => ClaudeReviewerUserSettings.Capture(original, root));
+        Assert.Equal(raw, File.ReadAllBytes(path)); // Ordinary capture never gets a boolean bypass.
+    }
+    [Theory]
+    [InlineData("ANTHROPIC_API_KEY")]
+    [InlineData("ANTHROPIC_AUTH_TOKEN")]
+    [InlineData("ANTHROPIC_BASE_URL")]
+    [InlineData("ANTHROPIC_MODEL")]
+    [InlineData("ANTHROPIC_DEFAULT_OPUS_MODEL")]
+    [InlineData("CLAUDE_CODE_USE_BEDROCK")]
+    [InlineData("NODE_OPTIONS")]
+    [InlineData("PATH")]
+    [InlineData("unknown")]
+    [InlineData("anthropic_custom_model_option")]
+    public void Selected_profile_still_refuses_every_unlisted_environment_name_without_raw_values(string name)
+    {
+        var raw = JsonSerializer.SerializeToUtf8Bytes(new { env = new Dictionary<string, string> { [name] = "secret-sentinel-value" } });
+        var error = Assert.Throws<ToolUsageException>(() => ClaudeReviewerUserSettings.RequireOwnerSelectedSettings(raw));
+        Assert.DoesNotContain("secret-sentinel", error.ToString()); Assert.Null(error.InnerException);
+    }
+    [Theory]
+    [InlineData("apiKeyHelper")]
+    [InlineData("APIKEYHELPER")]
+    [InlineData("awsAuthRefresh")]
+    [InlineData("awsCredentialExport")]
+    [InlineData("otelHeadersHelper")]
+    public void Selected_profile_never_accepts_credential_or_command_helpers(string name)
+    {
+        var raw = JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, string> { [name] = "secret-sentinel-value" });
+        var error = Assert.Throws<ToolUsageException>(() => ClaudeReviewerUserSettings.RequireOwnerSelectedSettings(raw));
+        Assert.DoesNotContain("secret-sentinel", error.ToString()); Assert.Null(error.InnerException);
+    }
+    [Theory]
+    [InlineData("{\"env\":{\"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE\":\"101\"}}")]
+    [InlineData("{\"env\":{\"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE\":\"0\"}}")]
+    [InlineData("{\"env\":{\"CLAUDE_AUTOCOMPACT_PCT_OVERRIDE\":\" 50\"}}")]
+    [InlineData("{\"env\":{\"ANTHROPIC_CUSTOM_MODEL_OPTION\":\"https://secret-sentinel.invalid\"}}")]
+    [InlineData("{\"env\":{\"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME\":17}}")]
+    [InlineData("{\"env\":{\"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME\":\"one\",\"ANTHROPIC_CUSTOM_MODEL_OPTION_NAME\":\"secret-sentinel\"}}")]
+    [InlineData("{\"Env\":{}}")]
+    [InlineData("{\"hooks\":[]}")]
+    [InlineData("{\"permissions\":{\"additionalDirectories\":[\"secret-sentinel\"]}}")]
+    public void Selected_profile_refuses_invalid_or_ambiguous_inert_data(string raw)
+    {
+        var error = Assert.Throws<ToolUsageException>(() => ClaudeReviewerUserSettings.RequireOwnerSelectedSettings(Utf8(raw)));
+        Assert.DoesNotContain("secret-sentinel", error.ToString()); Assert.Null(error.InnerException);
+    }
+    [Theory]
+    [InlineData("safe")]
+    [InlineData("tools")]
+    [InlineData("permission")]
+    [InlineData("model")]
+    [InlineData("settings")]
+    [InlineData("mcp")]
+    public void Pinned_profile_argv_regression_refuses_before_any_native_invocation(string mutation)
+    {
+        var actual = ClaudeIndependentReviewData.IsolatedReviewArguments(5).ToList();
+        switch (mutation)
+        {
+            case "safe": actual.Remove("--safe-mode"); break;
+            case "tools": actual[actual.IndexOf("--tools") + 1] = "default"; break;
+            case "permission": actual[actual.IndexOf("--permission-mode") + 1] = "bypassPermissions"; break;
+            case "model": actual.AddRange(["--model", "other"]); break;
+            case "settings": actual.AddRange(["--settings", "other.json"]); break;
+            case "mcp": actual.Remove("--strict-mcp-config"); break;
+            default: throw new ArgumentException("Unknown mutation.");
+        }
+        Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(actual, observation: false));
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Pinned_profile_readonly_observation_keeps_exact_safe_route(bool auth)
+    {
+        var actual = ClaudeIndependentReviewData.IsolatedObservationArguments(auth ? ["auth", "status"] : ["--version"]);
+        ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(actual, observation: true);
+        Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(actual.Skip(1).ToArray(), observation: true));
+        ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(ClaudeIndependentReviewData.IsolatedReviewArguments(5), observation: false);
+    }
+
 }

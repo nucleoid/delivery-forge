@@ -135,7 +135,7 @@ internal sealed class InstalledReviewHost : IDisposable
         var userSettings = parent.EnterSynchronous(assignment.RunId, () =>
         {
             sourceOwner.Check(); original.Check(); runtimeTrust?.CheckReviewer(original, selection.IndependentReviewer);
-            return ClaudeReviewerUserSettings.CaptureActual(original,
+            return ClaudeReviewerUserSettings.CaptureActual(original, runtimeTrust, selection.IndependentReviewer,
                 assignment.ParentCheckout, assignment.Worktree, assignment.ResultDirectory, selection.ArtifactRoot);
         });
         var reviewerDirectory = parent.EnterSynchronous(assignment.RunId, () =>

@@ -59,6 +59,27 @@ public sealed class Issue17RuntimeTrustTests
         Assert.True(File.Exists(selected)); // Failed namespace remains evidence.
     }
     [Fact]
+    public void Selected_already_read_bytes_require_exact_original_path_length_and_digest_without_new_file_credit()
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        using var foreign = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var root = Path.Combine(Path.GetTempPath(), "forge-host-trust-existing-bytes-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(root);
+        var path = Path.Combine(root, "settings.json"); var absent = Path.Combine(root, "absent"); byte[] raw = [1, 2, 3]; File.WriteAllBytes(path, raw);
+        var inputs = Issue17HostInputs.Capture(original, [new(path, raw.Length, BoundedFiles.Sha(raw)), new(absent, null, null)]);
+        // Capture consumed two operations and four bytes for its one present file.
+        inputs.RequireSelectedBytes(original, path, raw);
+        inputs.RequireSelectedBytes(original, absent, null);
+        BoundedFiles.RequireReadCapacity(original, 4094, 1073741820);
+        Assert.Throws<ToolUsageException>(() => inputs.RequireSelectedBytes(foreign, path, raw));
+        Assert.Throws<ToolUsageException>(() => inputs.RequireSelectedBytes(original, Path.Combine(root, "unselected"), raw));
+        Assert.Throws<ToolUsageException>(() => inputs.RequireSelectedBytes(original, path, [1, 2]));
+        Assert.Throws<ToolUsageException>(() => inputs.RequireSelectedBytes(original, path, [3, 2, 1]));
+        Assert.Throws<ToolUsageException>(() => inputs.RequireSelectedBytes(original, absent, []));
+        BoundedFiles.RequireReadCapacity(original, 4094, 1073741820); // No checks/read/refill were added.
+        Assert.Empty(typeof(InstalledHostAdmission.RuntimeTrust).GetConstructors());
+        original.Check();
+    }
+    [Fact]
     public void Duplicate_and_source_overlapping_host_inputs_are_refused()
     {
         using var life = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);

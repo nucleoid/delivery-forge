@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using DeliveryForge.Contracts.Serialization;
 
@@ -14,25 +15,32 @@ internal sealed class ClaudeReviewerUserSettings
     readonly bool existed;
     readonly long bytes;
     readonly string? digest;
+    readonly bool ownerSelected;
     const int MaximumBytes = 65536;
     static StringComparison PathComparison => OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
-    ClaudeReviewerUserSettings(ToolLifetime owner, string selectedDirectory, IReadOnlyList<string> protectedRoots)
+    ClaudeReviewerUserSettings(ToolLifetime owner, string selectedDirectory, IReadOnlyList<string> protectedRoots,
+        InstalledHostAdmission.RuntimeTrust? runtimeTrust = null, IndependentClaudeReviewSelection? reviewer = null)
     {
         original = owner; original.Check();
         directory = Normalize(BoundedFiles.Plain(selectedDirectory, true));
         RequireSeparate(protectedRoots);
         settings = System.IO.Path.Combine(directory, "settings.json");
         var current = Read(); existed = current is not null;
+        ownerSelected = runtimeTrust is not null;
+        if (runtimeTrust is not null)
+            runtimeTrust.RequireSelectedReviewerSettings(original, reviewer ?? throw new ToolUsageException("Exact selected reviewer required."), settings, current);
         if (current is not null)
         {
-            RequireSafeSettings(current);
+            if (ownerSelected) RequireOwnerSelectedSettings(current); else RequireSafeSettings(current);
             bytes = current.LongLength; digest = BoundedFiles.Sha(current);
         }
         original.Check();
     }
 
     internal static ClaudeReviewerUserSettings CaptureActual(ToolLifetime original, params string[] protectedRoots) => new(original, ActualDirectory(), protectedRoots);
+    internal static ClaudeReviewerUserSettings CaptureActual(ToolLifetime original, InstalledHostAdmission.RuntimeTrust? runtimeTrust,
+        IndependentClaudeReviewSelection reviewer, params string[] protectedRoots) => new(original, ActualDirectory(), protectedRoots, runtimeTrust, reviewer);
     // Testable ordinary-file boundary, not a production selection or DTO issuer.
     internal static ClaudeReviewerUserSettings Capture(ToolLifetime original, string selectedDirectory, params string[] protectedRoots) => new(original, selectedDirectory, protectedRoots);
     void RequireSeparate(IReadOnlyList<string> protectedRoots)
@@ -81,7 +89,11 @@ internal sealed class ClaudeReviewerUserSettings
         Check();
     }
 
-    internal static void RequireSafeSettings(byte[] complete)
+    // Both parsers are DATA checks only. Only the private original trust path
+    // above may construct a captured settings owner using the narrow profile.
+    internal static void RequireSafeSettings(byte[] complete) => RequireSettings(complete, false);
+    internal static void RequireOwnerSelectedSettings(byte[] complete) => RequireSettings(complete, true);
+    static void RequireSettings(byte[] complete, bool selectedPersonalProfile)
     {
         if (complete.Length > MaximumBytes) throw new ToolUsageException("Reviewer user settings exceed the finite complete input profile.");
         try
@@ -91,19 +103,89 @@ internal sealed class ClaudeReviewerUserSettings
             if (doc.RootElement.ValueKind != JsonValueKind.Object) throw new JsonException();
             foreach (var property in doc.RootElement.EnumerateObject())
             {
-                // Current supported user settings that can change environment,
-                // invoke custom code, replace auth, or grant tool permissions.
-                // Other preferences (including the configured model) are kept.
-                if (new[] { "env", "hooks", "apiKeyHelper", "permissions", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper" }.Any(name => string.Equals(name, property.Name, StringComparison.OrdinalIgnoreCase)))
+                if (new[] { "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper" }.Any(name => string.Equals(name, property.Name, StringComparison.OrdinalIgnoreCase)))
                     throw new JsonException();
+                if (string.Equals(property.Name, "env", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!selectedPersonalProfile || property.Name != "env") throw new JsonException();
+                    RequireInertEnvironment(property.Value);
+                }
+                else if (string.Equals(property.Name, "hooks", StringComparison.OrdinalIgnoreCase))
+                {
+                    // User hooks stay disabled by the guarded actual safe-mode
+                    // argv. Never execute, copy or include command values in DATA.
+                    if (!selectedPersonalProfile || property.Name != "hooks" || property.Value.ValueKind != JsonValueKind.Object) throw new JsonException();
+                }
+                else if (string.Equals(property.Name, "permissions", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!selectedPersonalProfile || property.Name != "permissions") throw new JsonException();
+                    RequireInertPermissions(property.Value);
+                }
             }
         }
         catch (Exception failure) when (failure is not OutOfMemoryException)
         {
-            // Parser/property/value text may include credentials. No raw error,
-            // inner exception, key name or user value leaves this boundary.
             throw new ToolUsageException("Reviewer user settings are malformed or contain unsupported security-sensitive customization; no settings are changed.");
         }
+    }
+    static string BoundedText(JsonElement value, int maximum)
+    {
+        if (value.ValueKind != JsonValueKind.String) throw new JsonException();
+        var text = value.GetString()!;
+        if (text.Length is < 1 || text.Length > maximum || text.Any(char.IsControl)) throw new JsonException();
+        return text;
+    }
+    static void RequireInertEnvironment(JsonElement environment)
+    {
+        if (environment.ValueKind != JsonValueKind.Object) throw new JsonException();
+        foreach (var property in environment.EnumerateObject())
+        {
+            var text = BoundedText(property.Value, 256);
+            switch (property.Name)
+            {
+                case "ANTHROPIC_CUSTOM_MODEL_OPTION":
+                    // Picker metadata only; this neither chooses the session
+                    // model nor overrides any built-in model alias or provider.
+                    var id = text.EndsWith("[1m]", StringComparison.Ordinal) ? text[..^4] : text;
+                    if (!id.StartsWith("claude-", StringComparison.Ordinal) || id.Length < 8 || id[7..].Any(c => !(c is >= 'a' and <= 'z' or >= '0' and <= '9' or '.' or '_' or '-')))
+                        throw new JsonException();
+                    break;
+                case "ANTHROPIC_CUSTOM_MODEL_OPTION_NAME":
+                case "ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION":
+                    break;
+                case "CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":
+                    if (!int.TryParse(text, NumberStyles.None, CultureInfo.InvariantCulture, out var percent) || percent is < 1 or > 100)
+                        throw new JsonException();
+                    break;
+                default:
+                    // No model/default/fallback, provider/auth/endpoint,
+                    // launcher, shell or unknown environment override.
+                    throw new JsonException();
+            }
+        }
+    }
+    static void RequireInertPermissions(JsonElement permissions)
+    {
+        if (permissions.ValueKind != JsonValueKind.Object) throw new JsonException();
+        foreach (var property in permissions.EnumerateObject())
+        {
+            if (property.Name is "allow" or "ask" or "deny")
+            {
+                if (property.Value.ValueKind != JsonValueKind.Array || property.Value.GetArrayLength() > 512) throw new JsonException();
+                foreach (var rule in property.Value.EnumerateArray()) _ = BoundedText(rule, 1024);
+            }
+            else if (property.Name == "defaultMode")
+            {
+                if (BoundedText(property.Value, 64) is not ("default" or "acceptEdits" or "plan" or "dontAsk" or "bypassPermissions" or "auto")) throw new JsonException();
+            }
+            else throw new JsonException();
+        }
+    }
+    internal void RequireIsolationArguments(IReadOnlyList<string> arguments, bool observation)
+    {
+        original.Check();
+        if (ownerSelected) ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(arguments, observation);
+        original.Check();
     }
 
     internal void RequireObservedConfigurationDirectory(byte[] actualAuthStatus)
