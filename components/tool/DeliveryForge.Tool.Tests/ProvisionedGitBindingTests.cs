@@ -270,6 +270,8 @@ public sealed class ProvisionedGitBindingTests
         var head = (await fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token)).HeadCommit;
         var assignment = ResultAssignment(fixture, head, result, port.Profile.AdapterVersion);
         var nativeBefore = fixture.Manager.ActualOwnedGitInvocations;
+        var workerBefore = File.ReadAllBytes(Path.Combine(fixture.Worker, "subject.txt"));
+        var parentBefore = File.ReadAllBytes(Path.Combine(fixture.Repository, "subject.txt"));
         var origin = fixture.Original.OriginalStarted; var whole = fixture.Original.WholeLimit; var work = fixture.Original.WorkLimit;
         var refused = await bridge.ImplementAsync(assignment.Plan, assignment.Instructions, fixture.Original, fixture.Original.Token);
         Assert.Equal("INCOMPLETE", refused.Outcome); Assert.Equal(0, port.Starts); Assert.Empty(adapter.ActualCalls);
@@ -279,8 +281,8 @@ public sealed class ProvisionedGitBindingTests
         Assert.Equal(origin, fixture.Original.OriginalStarted); Assert.Equal(whole, fixture.Original.WholeLimit); Assert.Equal(work, fixture.Original.WorkLimit);
         if (fault == "file") Assert.Equal("preserved file", File.ReadAllText(result));
         if (fault == "retained-evidence") Assert.Equal("retained original evidence", File.ReadAllText(sentinel));
-        Assert.Equal("original\n", File.ReadAllText(Path.Combine(fixture.Worker, "subject.txt")));
-        Assert.Equal("original\n", File.ReadAllText(Path.Combine(fixture.Repository, "subject.txt")));
+        Assert.Equal(workerBefore, File.ReadAllBytes(Path.Combine(fixture.Worker, "subject.txt")));
+        Assert.Equal(parentBefore, File.ReadAllBytes(Path.Combine(fixture.Repository, "subject.txt")));
     }
     sealed class PostBirthParent : ICoordinatedSynchronousEffectAdmission
     {
