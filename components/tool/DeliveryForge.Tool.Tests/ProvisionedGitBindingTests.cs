@@ -258,7 +258,7 @@ public sealed class ProvisionedGitBindingTests
     public async Task Actual_owner_refuses_unsafe_or_populated_results_before_preparation(string fault)
     {
         using var fixture = await Fixture.CreateAsync();
-        var result = fault switch { "worktree" => fixture.Worker, "parent-checkout" => fixture.Repository, _ => Path.Combine(fixture.Root, "worker-results") };
+        var result = fault switch { "worktree" => Path.Combine(fixture.Worker, "out"), "parent-checkout" => Path.Combine(fixture.Repository, "out"), _ => Path.Combine(fixture.Root, "worker-results") };
         var sentinel = Path.Combine(result, "retained.txt");
         if (fault == "file") File.WriteAllText(result, "preserved file");
         if (fault == "retained-evidence") { Directory.CreateDirectory(result); File.WriteAllText(sentinel, "retained original evidence"); }
@@ -283,6 +283,11 @@ public sealed class ProvisionedGitBindingTests
         if (fault == "retained-evidence") Assert.Equal("retained original evidence", File.ReadAllText(sentinel));
         Assert.Equal(workerBefore, File.ReadAllBytes(Path.Combine(fixture.Worker, "subject.txt")));
         Assert.Equal(parentBefore, File.ReadAllBytes(Path.Combine(fixture.Repository, "subject.txt")));
+        if (fault is "worktree" or "parent-checkout")
+        {
+            Assert.False(Directory.Exists(result)); Assert.False(File.Exists(result));
+            Assert.True((await fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token)).IsClean);
+        }
     }
     sealed class PostBirthParent : ICoordinatedSynchronousEffectAdmission
     {
