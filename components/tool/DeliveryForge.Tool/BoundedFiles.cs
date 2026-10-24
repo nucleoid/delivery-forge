@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using DeliveryForge.Contracts.Serialization;
+using DeliveryForge.Execution.Git;
 namespace DeliveryForge.Tool;
 
 public sealed class ToolLifetime : IDisposable, DeliveryForge.Evidence.IOwnedDuplexBudget, DeliveryForge.Evidence.IOwnedBudgetUnknownRetention, DeliveryForge.Evidence.IOwnedFailureCleanup
@@ -257,9 +258,43 @@ public static class BoundedFiles
     public static string Sha(ReadOnlySpan<byte> bytes) => Convert.ToHexStringLower(SHA256.HashData(bytes));
     public static void Separate(string first, string second)
     {
-        var a = Path.GetFullPath(first).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        var b = Path.GetFullPath(second).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var a = SeparationIdentity(first).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var b = SeparationIdentity(second).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         if (a.StartsWith(b, comparison) || b.StartsWith(a, comparison)) throw new ToolUsageException("Result/replay/worktree destinations overlap.");
+    }
+    static string SeparationIdentity(string path)
+    {
+        var full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        if (!OperatingSystem.IsWindows()) return full;
+        if (full.Length > 32767) throw new ToolUsageException("Separation path exceeds the Windows path bound.");
+        var suffix = new Stack<string>(); var current = full;
+        // Resolve the actual existing entry, including a file alias. Missing
+        // output components stay absent; only their bounded suffix is appended.
+        for (var depth = 0; depth < 128; depth++)
+        {
+            FileAttributes? attributes;
+            try { attributes = File.GetAttributes(current); }
+            catch (FileNotFoundException) { attributes = null; }
+            catch (DirectoryNotFoundException) { attributes = null; }
+            if (attributes is { } actual)
+            {
+                var directory = (actual & FileAttributes.Directory) != 0;
+                if (suffix.Count != 0 && !directory) throw new IOException("Separation ancestor is not a directory.");
+                _ = Plain(current, directory);
+                // Reuse the existing production handle resolver and its exact
+                // disposal; no process, retry owner or file-byte credit is added.
+                var resolved = WorktreeManager.WindowsFinalPath(current);
+                _ = Plain(resolved, directory);
+                while (suffix.TryPop(out var component)) resolved = Path.Combine(resolved, component);
+                return resolved;
+            }
+            var leaf = Path.GetFileName(current);
+            if (leaf.Length == 0 || leaf.EndsWith('.') || leaf.EndsWith(' '))
+                throw new ToolUsageException("Unresolved Windows output component is ambiguous.");
+            suffix.Push(leaf);
+            current = Path.GetDirectoryName(current) ?? throw new ToolUsageException("Existing separation ancestor required.");
+        }
+        throw new ToolUsageException("Separation ancestry exceeds the finite path profile.");
     }
 }

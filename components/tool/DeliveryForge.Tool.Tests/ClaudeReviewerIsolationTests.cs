@@ -12,7 +12,7 @@ public sealed class ClaudeReviewerIsolationTests
     public void Existing_readonly_observations_use_safe_mode_and_user_settings_only(bool auth)
     {
         string[] tail = auth ? ["auth", "status"] : ["--version"];
-        Assert.Equal(new[] { "--safe-mode", "--setting-sources", "user" }.Concat(tail), ClaudeIndependentReviewData.IsolatedObservationArguments(tail));
+        Assert.Equal(new[] { "--safe-mode", "--setting-sources", "user", "--settings", "{\"disableAllHooks\":true,\"permissions\":{\"defaultMode\":\"dontAsk\"}}" }.Concat(tail), ClaudeIndependentReviewData.IsolatedObservationArguments(tail));
     }
     [Fact]
     public void Isolation_does_not_add_authentication_mutation_or_model_overrides()
@@ -20,8 +20,10 @@ public sealed class ClaudeReviewerIsolationTests
         Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.IsolatedObservationArguments(["auth", "login"]));
         Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.IsolatedObservationArguments(["settings", "set", "model", "other"]));
         var main = ClaudeIndependentReviewData.IsolatedReviewArguments(1.25m);
-        Assert.Equal(new[] { "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd", "1.25" }, main);
-        Assert.DoesNotContain("--model", main); Assert.DoesNotContain("--settings", main);
+        Assert.Equal(new[] { "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--settings", "{\"disableAllHooks\":true,\"permissions\":{\"defaultMode\":\"dontAsk\"}}", "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd", "1.25" }, main);
+        Assert.DoesNotContain("--model", main); Assert.DoesNotContain("--fallback-model", main);
+        Assert.Single(main.Where(x => x == "--settings"));
+        Assert.Equal("{\"disableAllHooks\":true,\"permissions\":{\"defaultMode\":\"dontAsk\"}}", main[Array.IndexOf(main, "--settings") + 1]);
     }
     [Fact]
     public void Private_cwd_is_separate_and_marker_drift_refuses_before_any_native_creation()

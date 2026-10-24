@@ -181,10 +181,14 @@ internal sealed class ClaudeReviewerUserSettings
             else throw new JsonException();
         }
     }
-    internal void RequireIsolationArguments(IReadOnlyList<string> arguments, bool observation)
+    internal void RequireIsolationArguments(IReadOnlyList<string> arguments, bool observation, IReadOnlyDictionary<string, string>? actualEnvironment = null)
     {
         original.Check();
-        if (ownerSelected) ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(arguments, observation);
+        if (ownerSelected)
+        {
+            ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(arguments, observation);
+            if (!observation) ClaudeIndependentReviewData.RequirePinnedSettingsReviewEnvironment(actualEnvironment);
+        }
         original.Check();
     }
 

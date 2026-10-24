@@ -63,6 +63,42 @@ public static class CommandLine
         if (Has("ceiling") && values["ceiling"] is not ("plan" or "implement" or "pr" or "merge")) throw new ToolUsageException("Invalid ceiling.");
         return new(mode, values);
     }
+    // Bind the public API's actual enumeration once without silently changing
+    // comparer/custom-dictionary semantics. Reuse this parser's exact key/mode
+    // table; required/value grammar remains at its existing owning boundary.
+    internal static ToolCommand SnapshotForExecution(ToolCommand command)
+    {
+        const string refusal = "Command options must be a stable exact-key selection for the selected mode.";
+        try
+        {
+            if (command.Mode is not { } mode || !Enum.IsDefined(mode) || command.Options is null) throw new ToolUsageException(refusal);
+            var source = command.Options; var expectedCount = source.Count;
+            if (expectedCount < 0 || expectedCount > Table.Length) throw new ToolUsageException(refusal);
+            var values = new Dictionary<string, string?>(StringComparer.Ordinal);
+            foreach (var row in source)
+            {
+                var definition = Table.SingleOrDefault(x => string.Equals(x.Name, row.Key, StringComparison.Ordinal));
+                if (definition is null || !definition.Modes.Contains(ModeNames[(int)mode], StringComparer.Ordinal) || !values.TryAdd(row.Key, row.Value))
+                    throw new ToolUsageException(refusal);
+            }
+            if (values.Count != expectedCount || source.Count != expectedCount) throw new ToolUsageException(refusal);
+            // Never discard an option that the caller's own lookup would expose
+            // (notably dry-run), or accept a lookup value unlike its enumeration.
+            foreach (var definition in Table)
+            {
+                var present = values.TryGetValue(definition.Name, out var copied);
+                if (source.ContainsKey(definition.Name) != present || source.TryGetValue(definition.Name, out var actual) != present ||
+                    present && !string.Equals(copied, actual, StringComparison.Ordinal)) throw new ToolUsageException(refusal);
+            }
+            if (source.Count != expectedCount) throw new ToolUsageException(refusal);
+            return command with { Options = new System.Collections.ObjectModel.ReadOnlyDictionary<string, string?>(values) };
+        }
+        catch (Exception failure) when (failure is not OutOfMemoryException)
+        {
+            // Dictionary exceptions can contain user values; no raw inner error.
+            throw new ToolUsageException(refusal);
+        }
+    }
     public static string Help() => "delivery-forge <plan|implement|pr|merge|resume|capabilities|quality-baseline> [options]\n" +
         "plan --repo ROOT (--issue OWNER/REPO#N | --intent-file FILE) [--plan-out FILE]\n" +
         "implement --plan RICH_BUNDLE [--repo EXACT_ROOT] [--run-dir DIR] [--result-dir DIR]\n" +

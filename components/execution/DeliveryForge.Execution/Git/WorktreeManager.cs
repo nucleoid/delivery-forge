@@ -512,7 +512,7 @@ public sealed partial class WorktreeManager
         return Path.Combine(CanonicalPath(gitDirectory), "delivery-forge-writer.lock");
     }
 
-    private static string WindowsFinalPath(string path)
+    internal static string WindowsFinalPath(string path)
     {
         const uint fileFlagBackupSemantics = 0x02000000;
         using var handle = CreateFile(path, 0, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero,

@@ -38,7 +38,7 @@ public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssue
     {
         // The caller may retain a mutable backing dictionary. Bind all options
         // once before validating paths or awaiting any external operation.
-        command = command with { Options = new System.Collections.ObjectModel.ReadOnlyDictionary<string, string?>(new Dictionary<string, string?>(command.Options, StringComparer.Ordinal)) };
+        command = CommandLine.SnapshotForExecution(command);
         if (command.Mode == ToolMode.Capabilities) return Capabilities(command.Get("profile") ?? "local");
         if (command.Get("config") is not string configPath) return ToolResult.Incomplete("TRUSTED_CONFIG_REQUIRED", "Select explicit owner-reviewed --config; ambient paths and capabilities are not inferred.");
         var life = actualOriginal ?? new ToolLifetime(TimeSpan.FromSeconds(1200), cancellationToken);

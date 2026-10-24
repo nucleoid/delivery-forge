@@ -46,12 +46,14 @@ public sealed class ClaudeStreamStateTests
         Assert.Throws<IOException>(() => ClaudeStreamState.Member(doc.RootElement, "response"));
     }
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void Unknown_system_subtype_permanently_refuses_even_a_previously_settled_stream(bool settled)
+    [InlineData(false, "unqualified-new-subtype")]
+    [InlineData(true, "unqualified-new-subtype")]
+    [InlineData(false, "compact_boundary")]
+    [InlineData(true, "compact_boundary")]
+    public void Unknown_system_subtype_permanently_refuses_even_a_previously_settled_stream(bool settled, string subtype)
     {
         var state = Started(); if (settled) { Result(state); Idle(state); state.RequireSuccess(); }
-        Assert.Throws<IOException>(() => Observe(state, new { type = "system", subtype = "unqualified-new-subtype", session_id = Session }));
+        Assert.Throws<IOException>(() => Observe(state, new { type = "system", subtype, session_id = Session }));
         Assert.False(state.Settled); Assert.Throws<IOException>(state.RequireSuccess);
         Assert.Throws<IOException>(() => Idle(state));
     }

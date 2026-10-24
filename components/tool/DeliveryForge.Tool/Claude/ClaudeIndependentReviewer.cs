@@ -313,13 +313,13 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             var promptId = Guid.NewGuid().ToString(); state = new(promptId, prompt);
             var inherited = Environment.GetEnvironmentVariable("CLAUDE_CODE_SDK_READS_SESSION_STATE");
             if (inherited is not null && inherited != "1") throw new ToolUsageException("Existing session-state selection differs; no settings override.");
-            var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["CLAUDE_CODE_SDK_READS_SESSION_STATE"] = "1" };
+            var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["CLAUDE_CODE_SDK_READS_SESSION_STATE"] = "1", ["DISABLE_COMPACT"] = "1" };
             var nativeArguments = ClaudeIndependentReviewData.IsolatedReviewArguments(bootstrap.Policy.Budget.MaximumCost);
-            actualUserSettings.RequireIsolationArguments(nativeArguments, observation: false);
+            actualUserSettings.RequireIsolationArguments(nativeArguments, observation: false, actualEnvironment: environment);
             VerifyImage(); verifyProtectedConfiguration();
             process = parent.EnterSynchronous(runId, () =>
             {
-                actualUserSettings.RequireIsolationArguments(nativeArguments, observation: false);
+                actualUserSettings.RequireIsolationArguments(nativeArguments, observation: false, actualEnvironment: environment);
                 actualWorkingDirectory.Check();
                 if (OperatingSystem.IsLinux()) BoundedFiles.ReserveExactLinuxImageReads(selection.Image, original);
                 lock (tasks) { _ = Remaining(started); nativeBirthEntered = true; }

@@ -8,16 +8,17 @@ namespace DeliveryForge.Tool.Claude;
 // Parsed native DATA only. These helpers cannot issue capabilities or receipts.
 internal static class ClaudeIndependentReviewData
 {
-    // Global options apply to observation commands too. No model/auth or
-    // settings-file override is added; only the selected user source is read.
+    // Closed session-only restrictions retain the selected user source and
+    // configured model/auth; no settings file or global configuration is written.
+    internal const string SessionSafetySettings = "{\"disableAllHooks\":true,\"permissions\":{\"defaultMode\":\"dontAsk\"}}";
     internal static string[] IsolatedObservationArguments(string[] arguments)
     {
         if (!arguments.SequenceEqual(new[] { "--version" }) && !arguments.SequenceEqual(new[] { "auth", "status" }))
             throw new ToolUsageException("Only the existing read-only reviewer observations are supported.");
-        return ["--safe-mode", "--setting-sources", "user", .. arguments];
+        return ["--safe-mode", "--setting-sources", "user", "--settings", SessionSafetySettings, .. arguments];
     }
     internal static string[] IsolatedReviewArguments(decimal maximumCost) =>
-        ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd", maximumCost.ToString(CultureInfo.InvariantCulture)];
+        ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--settings", SessionSafetySettings, "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd", maximumCost.ToString(CultureInfo.InvariantCulture)];
 
     // Validate the ACTUAL argv before birth when selected user settings use
     // the private personal-host profile. This is no capability or file effect.
@@ -25,16 +26,29 @@ internal static class ClaudeIndependentReviewData
     {
         if (observation)
         {
-            if (arguments.SequenceEqual(new[] { "--safe-mode", "--setting-sources", "user", "--version" }) ||
-                arguments.SequenceEqual(new[] { "--safe-mode", "--setting-sources", "user", "auth", "status" })) return;
+            if (arguments.SequenceEqual(new[] { "--safe-mode", "--setting-sources", "user", "--settings", SessionSafetySettings, "--version" }) ||
+                arguments.SequenceEqual(new[] { "--safe-mode", "--setting-sources", "user", "--settings", SessionSafetySettings, "auth", "status" })) return;
         }
         else
         {
-            string[] prefix = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd"];
+            string[] prefix = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--settings", SessionSafetySettings, "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd"];
             if (arguments.Count == prefix.Length + 1 && arguments.Take(prefix.Length).SequenceEqual(prefix) &&
                 decimal.TryParse(arguments[^1], NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var cost) && cost > 0) return;
         }
         throw new ToolUsageException("Selected reviewer settings require the exact isolated native invocation.");
+    }
+
+    // Compare the actual explicit child overrides, not ambient/profile DATA.
+    // Compaction is disabled for the complete bounded review rather than
+    // assuming any model/context-dependent percentage is universally safe.
+    internal static void RequirePinnedSettingsReviewEnvironment(IReadOnlyDictionary<string, string>? environment)
+    {
+        if (environment is null || environment.Count != 4 ||
+            !environment.TryGetValue("DOTNET_PROCESSOR_COUNT", out var processors) || processors != "2" ||
+            !environment.TryGetValue("DOTNET_GCHeapHardLimit", out var heap) || heap != "0x100000000" ||
+            !environment.TryGetValue("CLAUDE_CODE_SDK_READS_SESSION_STATE", out var session) || session != "1" ||
+            !environment.TryGetValue("DISABLE_COMPACT", out var compact) || compact != "1")
+            throw new ToolUsageException("Selected reviewer settings require the exact bounded noncompacting process environment.");
     }
 
     internal static readonly string[] ProviderOverrides = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY", "CLAUDE_CODE_SIMPLE"];

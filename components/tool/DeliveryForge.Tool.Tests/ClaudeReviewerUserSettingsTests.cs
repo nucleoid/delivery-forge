@@ -175,6 +175,9 @@ public sealed class ClaudeReviewerUserSettingsTests
     [InlineData("model")]
     [InlineData("settings")]
     [InlineData("mcp")]
+    [InlineData("hooks")]
+    [InlineData("default-mode")]
+    [InlineData("inline-missing")]
     public void Pinned_profile_argv_regression_refuses_before_any_native_invocation(string mutation)
     {
         var actual = ClaudeIndependentReviewData.IsolatedReviewArguments(5).ToList();
@@ -186,6 +189,9 @@ public sealed class ClaudeReviewerUserSettingsTests
             case "model": actual.AddRange(["--model", "other"]); break;
             case "settings": actual.AddRange(["--settings", "other.json"]); break;
             case "mcp": actual.Remove("--strict-mcp-config"); break;
+            case "hooks": actual[actual.IndexOf("--settings") + 1] = "{\"disableAllHooks\":false,\"permissions\":{\"defaultMode\":\"dontAsk\"}}"; break;
+            case "default-mode": actual[actual.IndexOf("--settings") + 1] = "{\"disableAllHooks\":true,\"permissions\":{\"defaultMode\":\"bypassPermissions\"}}"; break;
+            case "inline-missing": var at = actual.IndexOf("--settings"); actual.RemoveAt(at); actual.RemoveAt(at); break;
             default: throw new ArgumentException("Unknown mutation.");
         }
         Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(actual, observation: false));
@@ -201,4 +207,37 @@ public sealed class ClaudeReviewerUserSettingsTests
         ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(ClaudeIndependentReviewData.IsolatedReviewArguments(5), observation: false);
     }
 
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("disabled")]
+    [InlineData("provider")]
+    [InlineData("model")]
+    [InlineData("resource")]
+    public void Pinned_profile_actual_child_environment_refuses_missing_or_tampered_restrictions(string mutation)
+    {
+        var environment = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["DOTNET_PROCESSOR_COUNT"] = "2",
+            ["DOTNET_GCHeapHardLimit"] = "0x100000000",
+            ["CLAUDE_CODE_SDK_READS_SESSION_STATE"] = "1",
+            ["DISABLE_COMPACT"] = "1"
+        };
+        ClaudeIndependentReviewData.RequirePinnedSettingsReviewEnvironment(environment);
+        switch (mutation)
+        {
+            case "missing": environment.Remove("DISABLE_COMPACT"); break;
+            case "disabled": environment["DISABLE_COMPACT"] = "0"; break;
+            case "provider": environment["ANTHROPIC_BASE_URL"] = "secret-sentinel-endpoint"; break;
+            case "model": environment["ANTHROPIC_MODEL"] = "secret-sentinel-model"; break;
+            case "resource": environment["DOTNET_PROCESSOR_COUNT"] = "3"; break;
+            default: throw new ArgumentException("Unknown mutation.");
+        }
+        var error = Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsReviewEnvironment(environment));
+        Assert.DoesNotContain("secret-sentinel", error.ToString()); Assert.Null(error.InnerException);
+    }
+    [Fact]
+    public void Pinned_profile_review_cannot_omit_the_actual_environment()
+    {
+        Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsReviewEnvironment(null));
+    }
 }
