@@ -30,6 +30,8 @@ internal sealed class InstalledReviewHost : IDisposable
     ClaudeIndependentReviewer? independentReviewer;
     DeliveryForge.Contracts.Validation.ValidatedContract? protectedEvidencePolicy;
     bool entered, disposed, uncertain, dispositionEntered;
+    enum SourceGitOperation { Head, Tree, FilterConfig, Status, BaseEvidence, Other }
+    enum SourceGitFailure { CountBound, AdmissionThrow, DispatchThrow, Unsettled, OutputBound, TimedOut, Cancelled, UnexpectedExit }
     internal bool DispositionEntered => dispositionEntered;
     internal bool DispositionReturned => disposed && (bootstrap is null || bootstrap.ActualDispositionReturned);
     internal bool Unknown => uncertain || sourceOwner?.Uncertain == true || independentReviewer?.Unknown == true;
@@ -167,26 +169,49 @@ internal sealed class InstalledReviewHost : IDisposable
         var run = assignment;
         // Obtained only from this frame's actual provisioning/writer owner,
         // before any worker-controlled Git/config/status discovery can run.
-        var provisioned = frame.Owner.RequireOriginalWorktreeBinding(run.RunId, original);
+        WorktreeManager.OwnedGitBinding provisioned;
+        try { provisioned = frame.Owner.RequireOriginalWorktreeBinding(run.RunId, original); }
+        catch (Exception error) { original.RecordFirstCaught("review-source-original-binding", error); throw; }
         void Current()
         {
-            original.Check();
-            if (disposed || Unknown || !ReferenceEquals(frame.Lifetime, original) ||
-                !ReferenceEquals(frame.Completion, completion) || !frame.OwnerCompleted || frame.OwnerStopped ||
-                frame.RunId != run.RunId || completion.RunId != run.RunId || completion.Worktree != run.Worktree ||
-                completion.RequestIdentity != frame.Request?.RequestIdentity || !actualNativeCompletedAndQuiet())
-                throw new WorkerEnvelopeException("Same original completed native worker changed before review effect.");
-            parent.EnterSynchronous(run.RunId, () =>
+            try
             {
-                _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
-                _ = InstalledHostAdmission.ReadExact(selection.GitImage, original, 64 * 1024 * 1024);
-                return true;
-            });
+                original.Check();
+                if (disposed || Unknown || !ReferenceEquals(frame.Lifetime, original) ||
+                    !ReferenceEquals(frame.Completion, completion) || !frame.OwnerCompleted || frame.OwnerStopped ||
+                    frame.RunId != run.RunId || completion.RunId != run.RunId || completion.Worktree != run.Worktree ||
+                    completion.RequestIdentity != frame.Request?.RequestIdentity || !actualNativeCompletedAndQuiet())
+                    throw new WorkerEnvelopeException("Same original completed native worker changed before review effect.");
+                parent.EnterSynchronous(run.RunId, () =>
+                {
+                    _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
+                    _ = InstalledHostAdmission.ReadExact(selection.GitImage, original, 64 * 1024 * 1024);
+                    return true;
+                });
+            }
+            catch (Exception error) { original.RecordFirstCaught("review-source-current", error); throw; }
         }
+        void CheckProvisioned()
+        {
+            try { provisioned.Check(); }
+            catch (Exception error) { original.RecordFirstCaught("review-source-provisioned-path", error); throw; }
+        }
+        // Marker tokens come only from these closed code-owned enums, never source/exception values.
+        void RecordGitFailure(SourceGitOperation operation, SourceGitFailure reason, Exception error) =>
+            original.RecordFirstCaught($"review-source-git-{operation}-{reason}", error);
         async Task<string> Git(params string[] arguments)
         {
+            var operation = arguments switch
+            {
+                ["rev-parse", "HEAD^{commit}"] => SourceGitOperation.Head,
+                ["rev-parse", "HEAD^{tree}"] => SourceGitOperation.Tree,
+                ["config", "--includes", "--name-only", "--get-regexp", "^filter\\."] => SourceGitOperation.FilterConfig,
+                ["status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"] => SourceGitOperation.Status,
+                ["show", var selectedArgument] when selectedArgument == run.BaseCommit + ":" + selection.EvidencePolicyRelativePath => SourceGitOperation.BaseEvidence,
+                _ => SourceGitOperation.Other
+            };
             Current();
-            provisioned.Check();
+            CheckProvisioned();
             var filterProbe = arguments.SequenceEqual(new[] { "config", "--includes", "--name-only", "--get-regexp", "^filter\\." });
             var filters = new HashSet<string>(StringComparer.Ordinal);
             if (arguments[0] == "status")
@@ -203,9 +228,13 @@ internal sealed class InstalledReviewHost : IDisposable
                     filters.Add(name);
                     if (filters.Count > 128) throw new WorktreeBoundaryException("Review filters exceed128 names.");
                 }
-                provisioned.Check();
+                CheckProvisioned();
             }
-            if (captures.Count >= 8) throw new IOException("Finite review source-discovery call bound exceeded.");
+            if (captures.Count >= 8)
+            {
+                var error = new IOException("Finite review source-discovery call bound exceeded.");
+                RecordGitFailure(operation, SourceGitFailure.CountBound, error); throw error;
+            }
             var environment = new Dictionary<string, string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
             foreach (DictionaryEntry item in Environment.GetEnvironmentVariables())
                 if (!((string)item.Key).StartsWith("GIT_", StringComparison.OrdinalIgnoreCase))
@@ -232,7 +261,7 @@ internal sealed class InstalledReviewHost : IDisposable
             {
                 capture = await parent.EnterAsync(run.RunId, () =>
                 {
-                    provisioned.Check();
+                    CheckProvisioned();
                     dispatchEntered = true;
                     actualCapture = executor.ExecuteBoundedCaptureAsync(invocation,
                         original.Remaining < TimeSpan.FromSeconds(30) ? original.Remaining : TimeSpan.FromSeconds(30),
@@ -240,8 +269,9 @@ internal sealed class InstalledReviewHost : IDisposable
                     return actualCapture;
                 }).ConfigureAwait(false);
             }
-            catch
+            catch (Exception error)
             {
+                RecordGitFailure(operation, dispatchEntered ? SourceGitFailure.DispatchThrow : SourceGitFailure.AdmissionThrow, error);
                 if (actualCapture is { IsCompletedSuccessfully: true })
                 {
                     var actualReturned = actualCapture.Result; captures.Add(actualReturned);
@@ -261,7 +291,12 @@ internal sealed class InstalledReviewHost : IDisposable
             }
             if (!settled || capture.CaptureBoundExceeded || capture.Command.TimedOut || capture.Command.Cancelled ||
                 capture.Command.ExitCode != 0 && !(filterProbe && capture.Command.ExitCode == 1))
-                throw new IOException("Actual review source discovery failed or remained incomplete.");
+            {
+                var error = new IOException("Actual review source discovery failed or remained incomplete.");
+                var reason = !settled ? SourceGitFailure.Unsettled : capture.CaptureBoundExceeded ? SourceGitFailure.OutputBound :
+                    capture.Command.TimedOut ? SourceGitFailure.TimedOut : capture.Command.Cancelled ? SourceGitFailure.Cancelled : SourceGitFailure.UnexpectedExit;
+                RecordGitFailure(operation, reason, error); throw error;
+            }
             Current();
             return new UTF8Encoding(false, true).GetString(capture.StandardOutputBytes);
         }
@@ -269,7 +304,8 @@ internal sealed class InstalledReviewHost : IDisposable
         Current();
         var gitDirectory = provisioned.GitDirectory;
         var commonDirectory = provisioned.CommonDirectory;
-        BoundedFiles.Plain(gitDirectory); BoundedFiles.Plain(commonDirectory);
+        try { BoundedFiles.Plain(gitDirectory); BoundedFiles.Plain(commonDirectory); }
+        catch (Exception error) { original.RecordFirstCaught("review-source-metadata-path", error); throw; }
         var head = (await Git("rev-parse", "HEAD^{commit}").ConfigureAwait(false)).Trim();
         var tree = (await Git("rev-parse", "HEAD^{tree}").ConfigureAwait(false)).Trim();
         if (head != completion.HeadCommit || tree != completion.TreeId ||
@@ -280,40 +316,53 @@ internal sealed class InstalledReviewHost : IDisposable
         if (evidence.SchemaName != "evidence-policy" || evidence.Identity != selection.EvidencePolicyIdentity)
             throw new ToolUsageException("Actual protected-base evidence policy differs from the selected identity.");
         protectedEvidencePolicy = evidence;
-        sourceOwner = new(executor, original, parent, run.RunId, run.Worktree, gitDirectory, commonDirectory,
-            selection.GitImage.Path, selection.GitImage.Bytes, selection.GitImage.Sha256, selection.GitVersion,
-            run.BaseCommit, completion.HeadCommit, () =>
-                ReferenceEquals(frame.Completion, completion) && frame.OwnerCompleted && !frame.OwnerStopped &&
-                frame.Primary is null && frame.Post is null && actualNativeCompletedAndQuiet(),
-            frozen.ContractIdentity, evidence.Identity, selection.PolicyRelativePath, selection.MaximumEvidenceBytes, provisioned);
-        var preparedBootstrap = await ReviewAuthorityHost.CreateProductionFromOwnedSourceAsync(sourceOwner, frozen.PlanContractBytes,
-            evidence.CanonicalBytes.ToArray(), selection.PolicyRelativePath, selection.MaximumEvidenceBytes, original.Token).ConfigureAwait(false);
+        try
+        {
+            sourceOwner = new(executor, original, parent, run.RunId, run.Worktree, gitDirectory, commonDirectory,
+                selection.GitImage.Path, selection.GitImage.Bytes, selection.GitImage.Sha256, selection.GitVersion,
+                run.BaseCommit, completion.HeadCommit, () =>
+                    ReferenceEquals(frame.Completion, completion) && frame.OwnerCompleted && !frame.OwnerStopped &&
+                    frame.Primary is null && frame.Post is null && actualNativeCompletedAndQuiet(),
+                frozen.ContractIdentity, evidence.Identity, selection.PolicyRelativePath, selection.MaximumEvidenceBytes, provisioned);
+        }
+        catch (Exception error) { original.RecordFirstCaught("review-source-owner-construction", error); throw; }
+        ProductionReviewBootstrap preparedBootstrap;
+        try
+        {
+            preparedBootstrap = await ReviewAuthorityHost.CreateProductionFromOwnedSourceAsync(sourceOwner, frozen.PlanContractBytes,
+                evidence.CanonicalBytes.ToArray(), selection.PolicyRelativePath, selection.MaximumEvidenceBytes, original.Token).ConfigureAwait(false);
+        }
+        catch (Exception error) { original.RecordFirstCaught("review-source-bootstrap", error); throw; }
         bootstrap = preparedBootstrap;
         Current();
         var output = Path.Combine(selection.ArtifactRoot, run.RunId);
         var path = Path.Combine(output, "review-source-preparation.json");
-        parent.EnterSynchronous(run.RunId, () =>
+        try
         {
-            original.Check(); BoundedFiles.Plain(output, true);
-            if (Directory.Exists(output) || File.Exists(output)) throw new IOException("Review result namespace already exists; no replay.");
-            Directory.CreateDirectory(output);
-            BoundedFiles.WriteNew(path, JsonSerializer.SerializeToUtf8Bytes(new
+            parent.EnterSynchronous(run.RunId, () =>
             {
-                Kind = "OwnedImmutableReviewSourceData-v1",
-                run.RunId,
-                run.PlanIdentity,
-                run.BaseCommit,
-                completion.HeadCommit,
-                completion.TreeId,
-                EvidencePolicyIdentity = evidence.Identity,
-                preparedBootstrap.RootContext.SourceAuthorityIdentity,
-                preparedBootstrap.RootContext.ProtectedObjectViewIdentity,
-                ReviewPolicyIdentity = preparedBootstrap.Policy.PolicyIdentity,
-                ReviewerAccepted = false,
-                PublicationAuthority = false
-            }), original);
-            return true;
-        });
+                original.Check(); BoundedFiles.Plain(output, true);
+                if (Directory.Exists(output) || File.Exists(output)) throw new IOException("Review result namespace already exists; no replay.");
+                Directory.CreateDirectory(output);
+                BoundedFiles.WriteNew(path, JsonSerializer.SerializeToUtf8Bytes(new
+                {
+                    Kind = "OwnedImmutableReviewSourceData-v1",
+                    run.RunId,
+                    run.PlanIdentity,
+                    run.BaseCommit,
+                    completion.HeadCommit,
+                    completion.TreeId,
+                    EvidencePolicyIdentity = evidence.Identity,
+                    preparedBootstrap.RootContext.SourceAuthorityIdentity,
+                    preparedBootstrap.RootContext.ProtectedObjectViewIdentity,
+                    ReviewPolicyIdentity = preparedBootstrap.Policy.PolicyIdentity,
+                    ReviewerAccepted = false,
+                    PublicationAuthority = false
+                }), original);
+                return true;
+            });
+        }
+        catch (Exception error) { original.RecordFirstCaught("review-source-artifact-namespace", error); throw; }
         return ToolResult.Incomplete("IMMUTABLE_REVIEW_SOURCE_PREPARED_REVIEWER_REQUIRED",
             "Actual completed worker source and protected policies are bound to an owned immutable object view; an actual independent reviewer is still required.",
             new { run.RunId, SourcePreparation = path, ReviewerAccepted = false, PublicationAuthority = false });
