@@ -151,8 +151,10 @@ public sealed class HistoricalQualityTests
         config = config with { HistoricalQuality = config.HistoricalQuality! with { Purpose = HistoricalQualityHost.InitialBaselineCapture } };
         if (planOnly) config = config with
         {
-            ExpectedBundleIdentity = "sha256:" + new string('a', 64), ExpectedContractIdentity = "sha256:" + new string('b', 64),
-            ExpectedWorkItem = "#17", ExpectedPlanCeiling = "plan"
+            ExpectedBundleIdentity = "sha256:" + new string('a', 64),
+            ExpectedContractIdentity = "sha256:" + new string('b', 64),
+            ExpectedWorkItem = "#17",
+            ExpectedPlanCeiling = "plan"
         };
         var path = Path.Combine(Path.GetTempPath(), "historical-capture-expectations-" + Guid.NewGuid().ToString("N") + ".json");
         File.WriteAllBytes(path, JsonSerializer.SerializeToUtf8Bytes(config, BoundedFiles.Json));
