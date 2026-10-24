@@ -81,7 +81,7 @@ internal sealed class LinuxCommandScope
                 var membership = ReadText("/proc/self/cgroup", 8192, false);
                 if (!membership.StartsWith("0::/", StringComparison.Ordinal) || !membership.EndsWith('\n') || membership.Count(c => c == '\n') != 1 || membership[..^1].Any(char.IsControl)) throw new IOException("Complete actual owner unified-cgroup membership required before selected-policy birth.");
                 var ownerGroup = membership[3..^1];
-                if (ownerGroup != "/" && ownerGroup[1..].Split('/').Any(component => component is "" or "." or "..")) throw new IOException("Canonical actual owner unified-cgroup membership required.");
+                if (ownerGroup == "/" || ownerGroup[1..].Split('/').Any(component => component is "" or "." or "..")) throw new IOException("Canonical non-root actual owner unified-cgroup membership required; a namespace-relative root cannot establish outside-ancestor placement.");
                 const string ancestor = "/user.slice/user-1000.slice";
                 if (ownerGroup == ancestor || ownerGroup.StartsWith(ancestor + "/", StringComparison.Ordinal)) throw new IOException("Selected-policy owner must be outside the constrained user-1000.slice ancestor; an independently selected outside-owner launch is required.");
             }

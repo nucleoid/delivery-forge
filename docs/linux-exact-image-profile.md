@@ -73,6 +73,11 @@ scope memory cap. For the selected restrictive exact child, the same components
 share its total 2 GiB cap, including the 296,885,960-byte memfd and its page cache.
 Non-helper Linux fixtures, including STOP, refuse an ambient root helper or
 ancestor drop-in; they require the separately selected rollback first.
+While the helper or ancestor drop-in is provisioned, this dedicated guest must
+run only the selected COMPLETE conformance fixture. Ordinary production Tool
+invocations are outside this profile and do not enforce the fixture's ambient
+absence guard. Roll back and verify both entries absent before any other guest
+workload, including standalone implementation or other worker adapters.
 
 The measured official Linux Claude Code 2.1.306 image is 290,532,720 bytes,
 SHA-256 `520bc6c1f40af466bd03a278b5ae1af1a2938bc7de5b9e5cb15526da20d71cfe`.
