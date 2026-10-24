@@ -40,6 +40,100 @@ internal sealed class LinuxCommandScope
         try { Check(cleanup || row.Primary is not null); } catch (Exception error) { row.Post = error; failures.Add(error); }
         Exception? disposition = row.CloseFailure; if (row.Post is not null) disposition = disposition is null ? row.Post : new AggregateException(disposition, row.Post); Throw(row.Primary, disposition); return result;
     }
+    void RequireInitialCgroupNamespace()
+    {
+        // Linux6.8 source-profile observation, not a caller-issued capability.
+        // Keep returned descriptors on the SAME original journal before any post.
+        var opened = new List<(int Fd, Operation Row)>(4); Exception? primary = null;
+        int Native(string kind, Func<int> invoke, bool cleanup = false)
+        {
+            var error = 0;
+            var result = Observe(kind, () => { var value = invoke(); if (value < 0) error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError(); return value; }, cleanup);
+            if (result < 0) throw new System.ComponentModel.Win32Exception(error, "Actual prebirth namespace observation refused: " + kind);
+            return result;
+        }
+        int Open(int parent, string path, int flags)
+        {
+            var row = Enroll("actual-owner-namespace-open:" + path, false); int value = -1, error = 0; Exception? failure = null, post = null;
+            try
+            {
+                Check(false); row.Entered = true; value = NamespaceOpenAt(parent, path, flags);
+                if (value >= 0) { row.Resource = value; opened.Add((value, row)); } else error = System.Runtime.InteropServices.Marshal.GetLastPInvokeError();
+                row.Returned = true; if (value < 0) throw new System.ComponentModel.Win32Exception(error, "Actual owner namespace open refused.");
+            }
+            catch (Exception caught) { failure = caught; row.Primary = caught; failures.Add(caught); }
+            try { Check(false); } catch (Exception caught) { post = caught; row.Post = caught; failures.Add(caught); }
+            Throw(failure, post); return value;
+        }
+        NamespaceStatx Identity(int fd, string path, int flags)
+        {
+            NamespaceStatx value = default; Native("actual-owner-namespace-statx", () => NamespaceStat(fd, path, flags, 0x17ff, out value));
+            if ((value.Mask & 0x1103) != 0x1103) throw new IOException("Actual namespace metadata lacks type/mode/inode/mount identity.");
+            return value;
+        }
+        static bool SameMount(NamespaceStatx a, NamespaceStatx b) => a.Major == b.Major && a.Minor == b.Minor && a.Mount == b.Mount;
+        static bool SameLink(NamespaceStatx a, NamespaceStatx b) => SameMount(a, b) && a.Inode == b.Inode && a.Mode == b.Mode;
+        try
+        {
+            const int Directory = 0x10000, NoFollow = 0x20000, CloseOnExec = 0x80000;
+            var proc = Open(-100, "/proc", Directory | NoFollow | CloseOnExec);
+            NamespaceStatFs fs = default; Native("actual-owner-procfs", () => NamespaceFileSystem(proc, out fs));
+            if (fs.Type != 0x9fa0) throw new IOException("Actual own namespace path requires procfs.");
+            var root = Identity(proc, "", 0x1000);
+            var selfBefore = Identity(proc, "thread-self", 0x100);
+            if ((root.Mode & 0xf000) != 0x4000 || (selfBefore.Mode & 0xf000) != 0xa000 || !SameMount(root, selfBefore)) throw new IOException("Actual procfs thread-self magic-link provenance unavailable.");
+            // Follow the verified calling-thread magic link, not the TGID leader.
+            // The closed OpenDuplex callsite synchronously reaches Process.Start
+            // on this caller after Prepare; no cross-thread preparation token.
+            var self = Open(proc, "thread-self", Directory | CloseOnExec);
+            var selfIdentity = Identity(self, "", 0x1000);
+            var selfAfter = Identity(proc, "thread-self", 0x100);
+            if ((selfIdentity.Mode & 0xf000) != 0x4000 || !SameMount(root, selfIdentity) || !SameLink(selfBefore, selfAfter)) throw new IOException("Actual own procfs task association changed or was redirected.");
+            var directory = Open(self, "ns", Directory | NoFollow | CloseOnExec);
+            var directoryIdentity = Identity(directory, "", 0x1000);
+            if ((directoryIdentity.Mode & 0xf000) != 0x4000 || !SameMount(root, directoryIdentity)) throw new IOException("Actual own namespace directory was redirected.");
+            var linkBefore = Identity(directory, "cgroup", 0x100);
+            if ((linkBefore.Mode & 0xf000) != 0xa000 || !SameMount(root, linkBefore)) throw new IOException("Actual own cgroup namespace magic link was redirected.");
+            var actual = Open(directory, "cgroup", CloseOnExec);
+            Native("actual-owner-namespace-filesystem", () => NamespaceFileSystem(actual, out fs));
+            if (fs.Type != 0x6e736673 || Native("actual-owner-namespace-type", () => NamespaceType(actual, 0xb703)) != 0x02000000) throw new IOException("Actual cgroup namespace object/type required.");
+            var identity = Identity(actual, "", 0x1000);
+            var linkAfter = Identity(directory, "cgroup", 0x100);
+            if (!SameLink(linkBefore, linkAfter) || identity.Inode != 0xeffffffbUL) throw new IOException("Selected Linux6.8 policy requires the actual initial cgroup namespace before birth.");
+        }
+        catch (Exception caught) { primary = caught; failures.Add(caught); }
+        // Every actual returned descriptor gets at most its first close. Mark
+        // that ownership before admission so a refused close remains retained.
+        for (var index = opened.Count - 1; index >= 0; index--)
+        {
+            var actual = opened[index]; actual.Row.CloseEntered = true;
+            try
+            {
+                var cleanup = primary is not null;
+                if (cleanup && original is IOwnedFailureCleanup failure) failure.BeginFailureCleanup();
+                Native("actual-owner-namespace-first-close", () => { var result = NamespaceClose(actual.Fd); if (result == 0) actual.Row.Closed = true; return result; }, cleanup);
+            }
+            catch (Exception caught) { actual.Row.CloseFailure = caught; failures.Add(caught); primary = primary is null ? caught : new AggregateException("Actual owner namespace observation and independent first disposition.", primary, caught); }
+        }
+        Throw(primary, null);
+    }
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit, Size = 256)] struct NamespaceStatFs { [System.Runtime.InteropServices.FieldOffset(0)] public long Type; }
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Explicit, Size = 256)]
+    struct NamespaceStatx
+    {
+        [System.Runtime.InteropServices.FieldOffset(0)] public uint Mask;
+        [System.Runtime.InteropServices.FieldOffset(28)] public ushort Mode;
+        [System.Runtime.InteropServices.FieldOffset(32)] public ulong Inode;
+        [System.Runtime.InteropServices.FieldOffset(136)] public uint Major;
+        [System.Runtime.InteropServices.FieldOffset(140)] public uint Minor;
+        [System.Runtime.InteropServices.FieldOffset(144)] public ulong Mount;
+    }
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "openat", SetLastError = true)] static extern int NamespaceOpenAt(int fd, [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, int flags);
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "close", SetLastError = true)] static extern int NamespaceClose(int fd);
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "fstatfs", SetLastError = true)] static extern int NamespaceFileSystem(int fd, out NamespaceStatFs value);
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "statx", SetLastError = true)] static extern int NamespaceStat(int fd, [System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out NamespaceStatx value);
+    [System.Runtime.InteropServices.DllImport("libc", EntryPoint = "ioctl", SetLastError = true)] static extern int NamespaceType(int fd, nuint request);
+
     void VerifyGateDirectory(string directory)
     {
         var expected = selected.BirthGateClosure.Select(x => Path.GetFullPath(x.Path)).ToHashSet(StringComparer.Ordinal); var found = new HashSet<string>(StringComparer.Ordinal);
@@ -78,7 +172,8 @@ internal sealed class LinuxCommandScope
                 // The selected ancestor must contain descendants, not their
                 // owner. Observe only this caller before any library/bus/birth.
                 if (selected.RestrictiveChildPolicy != "nnp-user1000-ancestor-v3") throw new IOException("Only explicit exact-image unprivileged child policy is supported.");
-                var membership = ReadText("/proc/self/cgroup", 8192, false);
+                RequireInitialCgroupNamespace();
+                var membership = ReadText("/proc/thread-self/cgroup", 8192, false);
                 if (!membership.StartsWith("0::/", StringComparison.Ordinal) || !membership.EndsWith('\n') || membership.Count(c => c == '\n') != 1 || membership[..^1].Any(char.IsControl)) throw new IOException("Complete actual owner unified-cgroup membership required before selected-policy birth.");
                 var ownerGroup = membership[3..^1];
                 if (ownerGroup == "/" || ownerGroup[1..].Split('/').Any(component => component is "" or "." or "..")) throw new IOException("Canonical non-root actual owner unified-cgroup membership required; a namespace-relative root cannot establish outside-ancestor placement.");

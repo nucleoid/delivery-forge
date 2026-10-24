@@ -73,11 +73,15 @@ scope memory cap. For the selected restrictive exact child, the same components
 share its total 2 GiB cap, including the 296,885,960-byte memfd and its page cache.
 Non-helper Linux fixtures, including STOP, refuse an ambient root helper or
 ancestor drop-in; they require the separately selected rollback first.
-While the helper or ancestor drop-in is provisioned, this dedicated guest must
-run only the selected COMPLETE conformance fixture. Ordinary production Tool
-invocations are outside this profile and do not enforce the fixture's ambient
-absence guard. Roll back and verify both entries absent before any other guest
-workload, including standalone implementation or other worker adapters.
+While the helper or ancestor drop-in is provisioned, the allowed installed-guest
+workloads are the separately approved V7 read-only receipt inspection, V8
+same-boot decision/final staging, and the selected COMPLETE conformance fixture
+with its bounded prerequisites. The separately approved offline rollback runs
+from rescue media. Every other guest workload is forbidden until rollback and
+verification that both entries are absent. This includes standalone production
+Tool implementation and other worker adapters, which do not enforce the
+fixture's ambient absence guard. The operator packet must use the same allowed
+workload list; this documentation grants no launcher or other service effect.
 
 The measured official Linux Claude Code 2.1.306 image is 290,532,720 bytes,
 SHA-256 `520bc6c1f40af466bd03a278b5ae1af1a2938bc7de5b9e5cb15526da20d71cfe`.
@@ -187,7 +191,7 @@ hash. Rollback is not automatic, a retry, arbitrary cleanup, or authority adopti
 
 ### Proposed V8 closed child and final disposition
 
-The opt-in nnp-user1000-ancestor-v3 child is stricter: 48 tasks and 2 GiB under the unchanged root-controlled ancestor/global 128 tasks, 4 GiB and two CPUs. Ordinary null selection retains its prior limits. The arithmetic difference is not measured free capacity, a reservation or a guarantee against hostile same-UID manager brokerage; actual Codex/helper fit remains unproved. Only COMPLETE may select the root-owned helper; STOP cannot. No protected runtime authority is issued.
+The opt-in nnp-user1000-ancestor-v3 child is stricter: 48 tasks and 2 GiB under the unchanged root-controlled user-1000 ancestor's 128 tasks, 4 GiB and two CPUs. The required outside owner is outside that ancestor's accounting; 128 is not an aggregate owner-plus-child task guarantee. Ordinary null selection retains its prior limits. The arithmetic difference is not measured free capacity, a reservation or a guarantee against hostile same-UID manager brokerage; actual Codex/helper fit remains unproved. Only COMPLETE may select the root-owned helper; STOP cannot. No protected runtime authority is issued.
 
 Before any offline archive/ISO or persistent write, bind the actual current source/Csc/PDB and gate-five-file build acceptance. The existing already-running KVP daemon supplies fresh nonce READY, one host ACK before installed-root RW, and FINAL only after installed-root unmount/clean plus seed unmount. The host retains FINAL before first ID-only graceful shutdown. Missing/failed/unknown FINAL blocks profile even if completed.json exists. No new service, transport or credential route is implied. Fresh same-running-boot guest preparation stages approved decision/final DATA at actual guest paths and derives PreparedBootId there; inspection's previous boot ID and Windows paths are inadmissible. All byte exceptions and persistent policy remain owner-pending.
 
@@ -205,7 +209,15 @@ For the optional restrictive policy, the actual owner must be outside
 `/user.slice/user-1000.slice` and its descendants. Before loading the library,
 opening the bus or creating the birth root, the parent reads its own complete
 unified-cgroup membership under the original bounded 8 KiB read and refuses an
-in-ancestor, malformed or unknown membership. The default/null policy is unchanged.
+in-ancestor or malformed membership and a literal namespace-root path. A
+canonical non-root path alone does not prove the initial cgroup namespace. For
+the selected Linux6.8 profile, prebirth admission checks the actual calling
+thread through its procfs thread-self magic link and held nsfs object, type and
+reserved initial inode. Unknown or redirected observations refuse before birth.
+This relies on the current synchronous owning OpenDuplex call path. Actual
+Linux initial/nested namespace and close-disposition acceptance remain unrun;
+the check supplies neither an outside-ancestor launcher nor resource-fit proof.
+The default/null policy is unchanged.
 This check establishes a refusal boundary, not owner placement. The current
 prepared operator does not provide the required privileged outside-ancestor owner
 launch; that remains a concrete owner-policy and implementation dependency.
