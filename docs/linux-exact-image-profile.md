@@ -40,11 +40,14 @@ complete bytes and seals before RELEASE. The child executes that descriptor with
 
 Ordinary scopes that never enter exact-image binding retain their original
 14,680,064-byte WORK and 16,777,216-byte total kernel read ceilings. Actual
-exact-image admission checks image plus EOF against a 300,031,689-byte WORK
-ceiling and retains a 302,128,841-byte total ceiling. The inclusive image maximum
-is 296,885,960 bytes, leaving exactly 3 MiB for metadata after accounting for
-image plus EOF and preserving 2 MiB for cleanup. ALL prior metadata debits stay
-on the same counter; no bytes or time are refunded or reset when binding enters.
+exact-image admission checks image plus EOF against the approved absolute
+300,031,689-byte WORK ceiling. On that same counter it captures a per-instance
+WORK ceiling equal to prior debits plus selected image plus EOF plus 3 MiB,
+capped at 300,031,689 bytes. Its total ceiling adds 2 MiB for cleanup, capped at
+302,128,841 bytes. Thus a smaller image has at most 3 MiB of later WORK metadata
+headroom, not the maximum image's unused extent. At the inclusive maximum of
+296,885,960 bytes, prior metadata reduces that later headroom. ALL prior metadata
+debits stay on the same counter; no bytes or time are refunded or reset.
 Insufficient remaining WORK credit refuses before descriptor open. The shared
 public maximum is profile DATA, not native authority. The child gate's existing
 512 MiB ceiling is unchanged and grants no additional parent allowance.
@@ -67,10 +70,15 @@ introduced. Native memfd writes and private operator fixture/provisioning writes
 are separate explicitly bounded domains, not Tool WriteNew credit. Source cache,
 memfd, loader and descendants all remain under the same 4 GiB scope memory cap.
 
-Actual Linux Claude image extent/hash/compatibility remain unmeasured. Independent
-review would require twelve complete image passes per reviewer image and remains
-fail-closed under the existing Linux production guards. This change enables no
-RuntimeTrust platform branch, auth copy, model/provider change or reviewer policy.
+The measured official Linux Claude Code 2.1.306 image is 290,532,720 bytes,
+SHA-256 `520bc6c1f40af466bd03a278b5ae1af1a2938bc7de5b9e5cb15526da20d71cfe`.
+Its complete signed-release download was verified; this does not establish
+protected review compatibility. Independent review requires twelve complete
+image passes per reviewer image. Together with the four measured Codex passes,
+that is 4,673,936,496 bytes before nonimage inputs, exceeding the 2,147,483,648-byte
+Linux original read ceiling. Protected Linux review remains fail-closed under
+the existing production guards. This change enables no RuntimeTrust platform
+branch, auth copy, model/provider change or reviewer policy.
 
 The hash loop keeps one bounded read record with a finite syscall count and
 actual return facts for each read. A short-read plan refusal, deadline or failed

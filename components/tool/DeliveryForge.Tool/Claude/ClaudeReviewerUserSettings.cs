@@ -17,6 +17,15 @@ internal sealed class ClaudeReviewerUserSettings
     readonly string? digest;
     readonly bool ownerSelected;
     const int MaximumBytes = 65536;
+    // Exact known personal profile only. --restricted does not read this user
+    // settings source; retain its complete pin without importing arbitrary new
+    // settings or silently dropping a future configured model selection.
+    static readonly HashSet<string> OwnerTopLevel = new(StringComparer.Ordinal)
+    {
+        "env", "permissions", "hooks", "statusLine", "enabledPlugins", "extraKnownMarketplaces", "effortLevel",
+        "autoUpdatesChannel", "autoMemoryEnabled", "autoDreamEnabled", "skipDangerousModePermissionPrompt",
+        "skipWorkflowUsageWarning", "verbose", "agentPushNotifEnabled", "skipAutoPermissionPrompt"
+    };
     static StringComparison PathComparison => OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
 
     ClaudeReviewerUserSettings(ToolLifetime owner, string selectedDirectory, IReadOnlyList<string> protectedRoots,
@@ -103,6 +112,7 @@ internal sealed class ClaudeReviewerUserSettings
             if (doc.RootElement.ValueKind != JsonValueKind.Object) throw new JsonException();
             foreach (var property in doc.RootElement.EnumerateObject())
             {
+                if (selectedPersonalProfile && !OwnerTopLevel.Contains(property.Name)) throw new JsonException();
                 if (new[] { "apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper" }.Any(name => string.Equals(name, property.Name, StringComparison.OrdinalIgnoreCase)))
                     throw new JsonException();
                 if (string.Equals(property.Name, "env", StringComparison.OrdinalIgnoreCase))
@@ -112,8 +122,8 @@ internal sealed class ClaudeReviewerUserSettings
                 }
                 else if (string.Equals(property.Name, "hooks", StringComparison.OrdinalIgnoreCase))
                 {
-                    // User hooks stay disabled by the guarded actual safe-mode
-                    // argv. Never execute, copy or include command values in DATA.
+                    // The exact private profile uses --restricted, which excludes
+                    // user settings, plus --safe-mode. Never execute or copy values.
                     if (!selectedPersonalProfile || property.Name != "hooks" || property.Value.ValueKind != JsonValueKind.Object) throw new JsonException();
                 }
                 else if (string.Equals(property.Name, "permissions", StringComparison.OrdinalIgnoreCase))
@@ -181,6 +191,12 @@ internal sealed class ClaudeReviewerUserSettings
             else throw new JsonException();
         }
     }
+    internal string[] ObservationArguments(string[] arguments) => ownerSelected
+        ? ClaudeIndependentReviewData.RestrictedObservationArguments(arguments)
+        : ClaudeIndependentReviewData.IsolatedObservationArguments(arguments);
+    internal string[] ReviewArguments(decimal maximumCost) => ownerSelected
+        ? ClaudeIndependentReviewData.RestrictedReviewArguments(maximumCost)
+        : ClaudeIndependentReviewData.IsolatedReviewArguments(maximumCost);
     internal void RequireIsolationArguments(IReadOnlyList<string> arguments, bool observation, IReadOnlyDictionary<string, string>? actualEnvironment = null)
     {
         original.Check();

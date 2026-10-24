@@ -154,7 +154,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             // Deterministic no-birth refusals happen before asynchronous effect
             // enrollment. Keep the same checks inside the atomic birth delegate:
             // a racing refusal there remains conservatively uncertain.
-            var nativeArguments = ClaudeIndependentReviewData.IsolatedObservationArguments(arguments);
+            var nativeArguments = actualUserSettings.ObservationArguments(arguments);
             actualUserSettings.RequireIsolationArguments(nativeArguments, observation: true);
             PrecheckObservationInputs(parent, runId, actualWorkingDirectory, Remaining(phaseStarted));
             capture = await parent.EnterAsync(runId, () =>
@@ -314,7 +314,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             var inherited = Environment.GetEnvironmentVariable("CLAUDE_CODE_SDK_READS_SESSION_STATE");
             if (inherited is not null && inherited != "1") throw new ToolUsageException("Existing session-state selection differs; no settings override.");
             var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["CLAUDE_CODE_SDK_READS_SESSION_STATE"] = "1", ["DISABLE_COMPACT"] = "1" };
-            var nativeArguments = ClaudeIndependentReviewData.IsolatedReviewArguments(bootstrap.Policy.Budget.MaximumCost);
+            var nativeArguments = actualUserSettings.ReviewArguments(bootstrap.Policy.Budget.MaximumCost);
             actualUserSettings.RequireIsolationArguments(nativeArguments, observation: false, actualEnvironment: environment);
             VerifyImage(); verifyProtectedConfiguration();
             process = parent.EnterSynchronous(runId, () =>

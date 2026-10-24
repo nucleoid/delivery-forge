@@ -116,7 +116,7 @@ public sealed class ClaudeReviewerUserSettingsTests
     [Fact]
     public void Selected_profile_parser_preserves_only_inert_customizations_without_granting_capture_authority()
     {
-        var raw = Utf8("""{"env":{"ANTHROPIC_CUSTOM_MODEL_OPTION":"claude-synthetic[1m]","ANTHROPIC_CUSTOM_MODEL_OPTION_NAME":"Synthetic menu entry","ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION":"Synthetic description","CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":"50"},"permissions":{"allow":["Read(*)"],"ask":[],"defaultMode":"bypassPermissions"},"hooks":{"Stop":[]},"model":"configured-existing-default"}""");
+        var raw = Utf8("""{"env":{"ANTHROPIC_CUSTOM_MODEL_OPTION":"claude-synthetic[1m]","ANTHROPIC_CUSTOM_MODEL_OPTION_NAME":"Synthetic menu entry","ANTHROPIC_CUSTOM_MODEL_OPTION_DESCRIPTION":"Synthetic description","CLAUDE_AUTOCOMPACT_PCT_OVERRIDE":"50"},"permissions":{"allow":["Read(*)"],"ask":[],"defaultMode":"bypassPermissions"},"hooks":{"Stop":[]}}""");
         ClaudeReviewerUserSettings.RequireOwnerSelectedSettings(raw); // DATA parsing only.
         Assert.Throws<ToolUsageException>(() => ClaudeReviewerUserSettings.RequireSafeSettings(raw));
         using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
@@ -178,12 +178,16 @@ public sealed class ClaudeReviewerUserSettingsTests
     [InlineData("hooks")]
     [InlineData("default-mode")]
     [InlineData("inline-missing")]
+    [InlineData("restricted")]
+    [InlineData("setting-sources")]
     public void Pinned_profile_argv_regression_refuses_before_any_native_invocation(string mutation)
     {
-        var actual = ClaudeIndependentReviewData.IsolatedReviewArguments(5).ToList();
+        var actual = ClaudeIndependentReviewData.RestrictedReviewArguments(5).ToList();
         switch (mutation)
         {
             case "safe": actual.Remove("--safe-mode"); break;
+            case "restricted": actual.Remove("--restricted"); break;
+            case "setting-sources": actual.AddRange(["--setting-sources", "user"]); break;
             case "tools": actual[actual.IndexOf("--tools") + 1] = "default"; break;
             case "permission": actual[actual.IndexOf("--permission-mode") + 1] = "bypassPermissions"; break;
             case "model": actual.AddRange(["--model", "other"]); break;
@@ -201,10 +205,10 @@ public sealed class ClaudeReviewerUserSettingsTests
     [InlineData(true)]
     public void Pinned_profile_readonly_observation_keeps_exact_safe_route(bool auth)
     {
-        var actual = ClaudeIndependentReviewData.IsolatedObservationArguments(auth ? ["auth", "status"] : ["--version"]);
+        var actual = ClaudeIndependentReviewData.RestrictedObservationArguments(auth ? ["auth", "status"] : ["--version"]);
         ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(actual, observation: true);
         Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(actual.Skip(1).ToArray(), observation: true));
-        ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(ClaudeIndependentReviewData.IsolatedReviewArguments(5), observation: false);
+        ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(ClaudeIndependentReviewData.RestrictedReviewArguments(5), observation: false);
     }
 
     [Theory]
@@ -239,5 +243,39 @@ public sealed class ClaudeReviewerUserSettingsTests
     public void Pinned_profile_review_cannot_omit_the_actual_environment()
     {
         Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsReviewEnvironment(null));
+    }
+    [Theory]
+    [InlineData("model")]
+    [InlineData("MODEL")]
+    [InlineData("fallbackModel")]
+    [InlineData("outputStyle")]
+    [InlineData("unknown")]
+    [InlineData("StatusLine")]
+    [InlineData("plugins")]
+    public void Owner_profile_refuses_new_settings_and_model_selection_without_exporting_values(string name)
+    {
+        var raw = JsonSerializer.SerializeToUtf8Bytes(new Dictionary<string, object> { [name] = "secret-sentinel-value" });
+        var error = Assert.Throws<ToolUsageException>(() => ClaudeReviewerUserSettings.RequireOwnerSelectedSettings(raw));
+        Assert.DoesNotContain("secret-sentinel", error.ToString()); Assert.Null(error.InnerException);
+    }
+    [Fact]
+    public void Ordinary_capture_keeps_existing_user_model_source_instead_of_restricted_variant()
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var root = DirectoryRoot(); File.WriteAllText(Path.Combine(root, "settings.json"), "{\"model\":\"configured-existing-default\"}");
+        var captured = ClaudeReviewerUserSettings.Capture(original, root);
+        Assert.Equal(ClaudeIndependentReviewData.IsolatedObservationArguments(["--version"]), captured.ObservationArguments(["--version"]));
+        Assert.Equal(ClaudeIndependentReviewData.IsolatedReviewArguments(5), captured.ReviewArguments(5));
+        Assert.DoesNotContain("--restricted", captured.ReviewArguments(5));
+        Assert.Equal("{\"model\":\"configured-existing-default\"}", File.ReadAllText(Path.Combine(root, "settings.json")));
+    }
+    [Fact]
+    public void Owner_profile_closed_argv_excludes_user_source_bare_and_model_options()
+    {
+        var arguments = ClaudeIndependentReviewData.RestrictedReviewArguments(5);
+        ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(arguments, observation: false);
+        Assert.Contains("--restricted", arguments); Assert.DoesNotContain("--setting-sources", arguments);
+        Assert.DoesNotContain("--bare", arguments); Assert.DoesNotContain("--model", arguments); Assert.DoesNotContain("--fallback-model", arguments);
+        Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(ClaudeIndependentReviewData.IsolatedReviewArguments(5), observation: false));
     }
 }

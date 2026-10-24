@@ -6,7 +6,7 @@ namespace DeliveryForge.Tool.Claude;
 public sealed class ClaudeStreamState(string promptId, string exactPrompt)
 {
     readonly HashSet<string> started = new(StringComparer.Ordinal), finished = new(StringComparer.Ordinal);
-    string? session; bool replayed, initialized, admitted, poisoned; JsonElement? result; string? activity;
+    string? session, provisionalSession; bool replayed, initialized, admitted, poisoned; JsonElement? result; string? activity;
     public string Session => session ?? throw new IOException("Actual Claude init/session not received.");
     public bool Acknowledged => initialized && replayed;
     public bool Settled => !poisoned && Acknowledged && result is not null && activity == "idle" && started.SetEquals(finished);
@@ -21,7 +21,25 @@ public sealed class ClaudeStreamState(string promptId, string exactPrompt)
         if (type == "system")
         {
             var subtype = Text(row, "subtype");
-            if (subtype == "init") { if (initialized) throw new IOException("Duplicate actual Claude init."); session = Text(row, "session_id"); initialized = true; return; }
+            if (subtype == "init")
+            {
+                if (initialized) throw new IOException("Duplicate actual Claude init.");
+                var initSession = Text(row, "session_id");
+                if (provisionalSession is not null && initSession != provisionalSession)
+                    throw new IOException("Actual Claude init differs from its provisional SDK session.");
+                session = initSession; initialized = true; return;
+            }
+            // CLI 2.1.306 may report its SDK-only running state before init.
+            // Retain only this one provisional correlation, never an accepted
+            // Session, acknowledgement, idle state or completion authority.
+            if (!initialized)
+            {
+                if (provisionalSession is not null || subtype != "session_state_changed" ||
+                    Text(row, "state") != "running" || Member(row, "sdk_host_only").ValueKind != JsonValueKind.True)
+                    throw new IOException("Unsupported or duplicate actual Claude pre-init state.");
+                _ = Text(row, "uuid");
+                provisionalSession = Text(row, "session_id"); return;
+            }
             // Selected SDK permits task_updated without session_id. Only a
             // task ID already entered on THIS actual stream can be updated.
             if (subtype != "task_updated" || row.TryGetProperty("session_id", out var actualSession) && actualSession.ValueKind != JsonValueKind.Null) SameSession(row);

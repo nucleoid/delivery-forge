@@ -20,18 +20,28 @@ internal static class ClaudeIndependentReviewData
     internal static string[] IsolatedReviewArguments(decimal maximumCost) =>
         ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--settings", SessionSafetySettings, "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd", maximumCost.ToString(CultureInfo.InvariantCulture)];
 
+    // Private owner-profile variant. Ordinary strict settings retain their
+    // existing source/model behavior. Restricted excludes user/project settings;
+    // managed policy remains the explicit personal-host trust assumption.
+    internal static string[] RestrictedObservationArguments(string[] arguments)
+    {
+        _ = IsolatedObservationArguments(arguments); // existing read-only tail grammar
+        return ["--safe-mode", "--restricted", "--settings", SessionSafetySettings, .. arguments];
+    }
+    internal static string[] RestrictedReviewArguments(decimal maximumCost) =>
+        ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--restricted", "--settings", SessionSafetySettings, "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd", maximumCost.ToString(CultureInfo.InvariantCulture)];
     // Validate the ACTUAL argv before birth when selected user settings use
     // the private personal-host profile. This is no capability or file effect.
     internal static void RequirePinnedSettingsIsolation(IReadOnlyList<string> arguments, bool observation)
     {
         if (observation)
         {
-            if (arguments.SequenceEqual(new[] { "--safe-mode", "--setting-sources", "user", "--settings", SessionSafetySettings, "--version" }) ||
-                arguments.SequenceEqual(new[] { "--safe-mode", "--setting-sources", "user", "--settings", SessionSafetySettings, "auth", "status" })) return;
+            if (arguments.SequenceEqual(new[] { "--safe-mode", "--restricted", "--settings", SessionSafetySettings, "--version" }) ||
+                arguments.SequenceEqual(new[] { "--safe-mode", "--restricted", "--settings", SessionSafetySettings, "auth", "status" })) return;
         }
         else
         {
-            string[] prefix = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--settings", SessionSafetySettings, "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd"];
+            string[] prefix = ["-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--restricted", "--settings", SessionSafetySettings, "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd"];
             if (arguments.Count == prefix.Length + 1 && arguments.Take(prefix.Length).SequenceEqual(prefix) &&
                 decimal.TryParse(arguments[^1], NumberStyles.AllowDecimalPoint, CultureInfo.InvariantCulture, out var cost) && cost > 0) return;
         }

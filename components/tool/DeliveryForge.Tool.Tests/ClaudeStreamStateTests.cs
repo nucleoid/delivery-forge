@@ -110,4 +110,94 @@ public sealed class ClaudeStreamStateTests
         Assert.Throws<IOException>(() => Observe(state, new { type = "system", subtype = "task_updated", task_id = "task-1" }));
         Assert.False(state.Settled); Assert.Throws<IOException>(state.RequireSuccess);
     }
+    static Dictionary<string, object?> PreInitRunning() => new()
+    {
+        ["type"] = "system",
+        ["subtype"] = "session_state_changed",
+        ["state"] = "running",
+        ["sdk_host_only"] = true,
+        ["uuid"] = "synthetic-sdk-running-id",
+        ["session_id"] = Session
+    };
+    static void Init(ClaudeStreamState state, string session = Session) =>
+        Observe(state, new { type = "system", subtype = "init", session_id = session });
+    static void Replay(ClaudeStreamState state, string prompt = Prompt) =>
+        Observe(state, new
+        {
+            type = "user",
+            session_id = Session,
+            uuid = PromptId,
+            parent_tool_use_id = (string?)null,
+            message = new { role = "user", content = prompt },
+            origin = new { kind = "human" }
+        });
+    [Fact]
+    public void One_sdk_running_before_init_stays_provisional_until_matching_init_exact_replay_result_and_idle()
+    {
+        var state = new ClaudeStreamState(PromptId, Prompt); state.AdmitPrompt();
+        Observe(state, PreInitRunning());
+        Assert.Throws<IOException>(() => state.Session); Assert.False(state.Acknowledged); Assert.False(state.Settled);
+        Assert.Throws<IOException>(state.RequireSuccess);
+        Init(state); Assert.Equal(Session, state.Session); Assert.False(state.Acknowledged); Assert.False(state.Settled);
+        Replay(state); Assert.True(state.Acknowledged); Assert.False(state.Settled);
+        Result(state); Assert.False(state.Settled); Idle(state); state.RequireSuccess();
+    }
+    [Theory]
+    [InlineData("idle")]
+    [InlineData("requires-action")]
+    [InlineData("unknown-subtype")]
+    [InlineData("compact")]
+    [InlineData("other-type")]
+    [InlineData("flag-missing")]
+    [InlineData("flag-false")]
+    [InlineData("flag-string")]
+    [InlineData("uuid-missing")]
+    [InlineData("uuid-empty")]
+    [InlineData("uuid-null")]
+    [InlineData("session-missing")]
+    [InlineData("session-empty")]
+    [InlineData("session-null")]
+    public void Other_or_malformed_pre_init_rows_permanently_poison_correspondence(string mutation)
+    {
+        var state = new ClaudeStreamState(PromptId, Prompt); state.AdmitPrompt(); var row = PreInitRunning();
+        switch (mutation)
+        {
+            case "idle": row["state"] = "idle"; break;
+            case "requires-action": row["state"] = "requires_action"; break;
+            case "unknown-subtype": row["subtype"] = "unsupported"; break;
+            case "compact": row["subtype"] = "compact_boundary"; break;
+            case "other-type": row["type"] = "assistant"; break;
+            case "flag-missing": row.Remove("sdk_host_only"); break;
+            case "flag-false": row["sdk_host_only"] = false; break;
+            case "flag-string": row["sdk_host_only"] = "true"; break;
+            case "uuid-missing": row.Remove("uuid"); break;
+            case "uuid-empty": row["uuid"] = ""; break;
+            case "uuid-null": row["uuid"] = null; break;
+            case "session-missing": row.Remove("session_id"); break;
+            case "session-empty": row["session_id"] = ""; break;
+            case "session-null": row["session_id"] = null; break;
+            default: throw new ArgumentException("Unknown synthetic mutation.");
+        }
+        Assert.Throws<IOException>(() => Observe(state, row));
+        Assert.Throws<IOException>(() => Init(state)); Assert.Throws<IOException>(() => state.Session);
+        Assert.False(state.Acknowledged); Assert.False(state.Settled); Assert.Throws<IOException>(state.RequireSuccess);
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Duplicate_pre_init_running_or_foreign_init_cannot_promote_the_provisional_session(bool foreignInit)
+    {
+        var state = new ClaudeStreamState(PromptId, Prompt); state.AdmitPrompt(); Observe(state, PreInitRunning());
+        if (foreignInit) Assert.Throws<IOException>(() => Init(state, "foreign-synthetic-session"));
+        else Assert.Throws<IOException>(() => Observe(state, PreInitRunning()));
+        Assert.Throws<IOException>(() => Init(state)); Assert.Throws<IOException>(() => state.Session);
+        Assert.False(state.Acknowledged); Assert.False(state.Settled); Assert.Throws<IOException>(state.RequireSuccess);
+    }
+    [Fact]
+    public void Provisional_running_does_not_relax_the_complete_parent_prompt_replay()
+    {
+        var state = new ClaudeStreamState(PromptId, Prompt); state.AdmitPrompt(); Observe(state, PreInitRunning()); Init(state);
+        Assert.Throws<IOException>(() => Replay(state, "Foreign synthetic prompt"));
+        Assert.False(state.Acknowledged); Assert.False(state.Settled); Assert.Throws<IOException>(state.RequireSuccess);
+    }
 }
