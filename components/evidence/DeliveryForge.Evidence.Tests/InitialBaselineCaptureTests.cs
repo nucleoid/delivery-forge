@@ -84,7 +84,7 @@ public sealed class InitialBaselineCaptureTests
     {
         var root = BudgetOmission();
         var unit = root["units"]![1]!;
-        if (fault == "missing") unit["evidence"] = new JsonArray();
+        if (fault == "missing") unit["evidence"]![0]!["kind"] = "FORMAT_ONLY"; // Required evidence exists but carries no budget proof.
         if (fault == "foreign") unit["evidence"]![0]!["kind"] = "TARGET_NOT_REQUESTED";
         if (fault == "multiple") unit["evidence"]!.AsArray().Add(unit["evidence"]![0]!.DeepClone());
         if (fault == "cap") root["policy"]!["mutationCap"] = 2;
