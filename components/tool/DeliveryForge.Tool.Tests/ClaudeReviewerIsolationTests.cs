@@ -22,7 +22,7 @@ public sealed class ClaudeReviewerIsolationTests
         var main = ClaudeIndependentReviewData.IsolatedReviewArguments(1.25m);
         Assert.Equal(new[] { "-p", "--input-format", "stream-json", "--output-format", "stream-json", "--verbose", "--replay-user-messages", "--safe-mode", "--setting-sources", "user", "--settings", "{\"disableAllHooks\":true,\"permissions\":{\"defaultMode\":\"dontAsk\"}}", "--no-session-persistence", "--strict-mcp-config", "--tools", "", "--permission-mode", "dontAsk", "--max-budget-usd", "1.25" }, main);
         Assert.DoesNotContain("--model", main); Assert.DoesNotContain("--fallback-model", main);
-        Assert.Single(main.Where(x => x == "--settings"));
+        Assert.Single(main, x => x == "--settings");
         Assert.Equal("{\"disableAllHooks\":true,\"permissions\":{\"defaultMode\":\"dontAsk\"}}", main[Array.IndexOf(main, "--settings") + 1]);
     }
     [Fact]
