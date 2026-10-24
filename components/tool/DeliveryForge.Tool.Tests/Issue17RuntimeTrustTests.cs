@@ -113,9 +113,10 @@ public sealed class Issue17RuntimeTrustTests
         File.WriteAllBytes(file, [1, 2, 3]);
         Assert.Equal(new byte[] { 1, 2, 3 }, BoundedFiles.Read(file, life)); // two existing operations, four read bytes
         Assert.Throws<ToolUsageException>(() => BoundedFiles.RequireReadCapacity(life, 4095, 0));
-        Assert.Throws<ToolUsageException>(() => BoundedFiles.RequireReadCapacity(life, 0, 1073741821));
-        BoundedFiles.RequireReadCapacity(life, 4094, 1073741820);
-        BoundedFiles.RequireReadCapacity(life, 4094, 1073741820); // admission neither consumes nor refunds
+        var readLimit = OperatingSystem.IsLinux() ? 2147483648L : 1073741824L;
+        Assert.Throws<ToolUsageException>(() => BoundedFiles.RequireReadCapacity(life, 0, readLimit - 3));
+        BoundedFiles.RequireReadCapacity(life, 4094, readLimit - 4);
+        BoundedFiles.RequireReadCapacity(life, 4094, readLimit - 4); // admission neither consumes nor refunds
         Assert.Equal(new byte[] { 1, 2, 3 }, BoundedFiles.Read(file, life));
         Assert.Throws<ToolUsageException>(() => BoundedFiles.RequireReadCapacity(life, 4094, 0));
         Assert.True(File.Exists(file));

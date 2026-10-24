@@ -225,7 +225,7 @@ internal sealed class PlanImportGitView : IDisposable
             else if (OperatingSystem.IsWindows())
             {
                 _windows = new FileStream(path, FileMode.CreateNew, FileAccess.ReadWrite, FileShare.Read);
-                try { _windows.Write(bytes); _windows.Flush(true); _windowsIdentity = PlanImportFilesystem.CaptureFileIdentity(_windows.SafeFileHandle); Verify(); }
+                try { _windows.Write(bytes); _windows.Flush(); _windowsIdentity = PlanImportFilesystem.CaptureFileIdentity(_windows.SafeFileHandle); Verify(); }
                 catch { _windows.Dispose(); throw; }
             }
             else throw new PlanningException("Immutable effective Git metadata unavailable on this platform.");
