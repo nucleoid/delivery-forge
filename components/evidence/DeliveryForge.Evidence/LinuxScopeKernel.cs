@@ -140,6 +140,117 @@ internal sealed class LinuxScopeKernel
         try { Close(fd, cleanup); Check(cleanup); } catch (Exception error) { post = error; }
         if (primary is not null && post is not null) throw new AggregateException("Actual original cgroup read/first-close.", primary, post); if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw(); return data.AsSpan(0, count).ToArray();
     }
+    // Invoked only by the private owner for its already-bound creator, while the
+    // verified gate is waiting for RELEASE. This method cannot bind/adopt a PID.
+    internal void RequireUnprivilegedCreator(int actualPid)
+    {
+        lock (gate)
+        {
+            Check(false); Same(false);
+            if (!exactImageEntered || actualPid <= 0) throw new IOException("Actual exact-image creator required before privilege observation.");
+            const int maximum = 8192, maximumReads = 32;
+            if (readBytes > exactWorkReadByteLimit - (maximum + 1)) throw new IOException("Original privilege-status byte credit exhausted before open.");
+            readBytes += maximum + 1; var bytes = new byte[maximum + 1]; var used = 0; var eof = false;
+            var fd = OpenFd("/proc/" + actualPid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/status", NoFollow | CloseOnExec, false);
+            Exception? primary = null, post = null;
+            try
+            {
+                StatFs fs = default; Native("fstatfs-original-creator-status", () => fstatfs(fd.Actual, out fs), false);
+                if (fs.Type != 0x9fa0) throw new IOException("Actual creator status requires procfs.");
+                for (var attempt = 0; attempt < maximumReads && used < bytes.Length; attempt++)
+                {
+                    var chunk = new byte[bytes.Length - used];
+                    var n = checked((int)Native("read-original-creator-status", () => read(fd.Actual, chunk, (nuint)chunk.Length), false, chunk));
+                    if (n == 0) { eof = true; break; }
+                    if (n > chunk.Length) throw new IOException("Actual creator status exceeded requested extent.");
+                    Buffer.BlockCopy(chunk, 0, bytes, used, n); used += n;
+                }
+                if (!eof || used > maximum) throw new IOException("Complete creator status exceeded finite read plan.");
+            }
+            catch (Exception failure) { primary = failure; }
+            post = CloseExactImage(fd, primary is not null, post);
+            if (primary is not null && post is not null) throw new AggregateException("Original creator status and first-close.", primary, post);
+            if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+            if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+            var required = new HashSet<string>(StringComparer.Ordinal) { "Pid", "Tgid", "Uid", "Gid", "NoNewPrivs", "CapInh", "CapPrm", "CapEff", "CapAmb", "Groups" };
+            var found = new Dictionary<string, string[]>(StringComparer.Ordinal);
+            foreach (var line in Utf8.GetString(bytes, 0, used).Split('\n'))
+            {
+                var colon = line.IndexOf(':'); if (colon < 0) continue; var key = line[..colon];
+                if (!required.Contains(key)) continue;
+                if (!found.TryAdd(key, line[(colon + 1)..].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))) throw new IOException("Duplicate creator privilege field.");
+            }
+            bool One(string key, string expected) => found.TryGetValue(key, out var values) && values.Length == 1 && values[0] == expected;
+            bool Identity(string key) => found.TryGetValue(key, out var values) && values.Length == 4 && values.All(value => value == "1000");
+            if (found.Count != required.Count || !One("Pid", actualPid.ToString(System.Globalization.CultureInfo.InvariantCulture)) || !One("Tgid", actualPid.ToString(System.Globalization.CultureInfo.InvariantCulture)) ||
+                !One("NoNewPrivs", "1") || !One("Groups", "1000") || !Identity("Uid") || !Identity("Gid") ||
+                new[] { "CapInh", "CapPrm", "CapEff", "CapAmb" }.Any(key => !One(key, "0000000000000000")))
+                throw new IOException("Actual creator must have NNP1, UID/GID1000 and zero inherited/permitted/effective/ambient capabilities before release.");
+            Same(false); Check(false);
+        }
+    }
+    // Selected conformance ancestor is observed only, never signalled/adopted.
+    // The actual original cgroup path must be below this root-controlled boundary.
+    internal void RequireConformanceAncestor(string expectedCpus)
+    {
+        lock (gate)
+        {
+            Check(false); Same(false);
+            const string path = "/sys/fs/cgroup/user.slice/user-1000.slice";
+            if (originalPath is null || !originalPath.StartsWith(path + "/", StringComparison.Ordinal)) throw new IOException("Original scope is outside selected forge ancestor.");
+            var held = new List<OwnedFd>(); Exception? primary = null, post = null;
+            void RootControlled(OwnedFd fd, bool directory)
+            {
+                StatFs fs = default; Native("fstatfs-selected-ancestor", () => fstatfs(fd.Actual, out fs), false);
+                Statx row = default; Native("statx-selected-ancestor", () => statx(fd.Actual, "", 0x1800, 0x17ff, out row), false);
+                if (fs.Type != Cgroup2Magic || (row.Mask & 0x111b) != 0x111b || row.Uid != 0 || row.Gid != 0 || (row.Mode & 0x12) != 0 || (row.Mode & 0xf000) != (directory ? 0x4000 : 0x8000)) throw new IOException("Actual selected ancestor/control is not root-controlled cgroup2.");
+            }
+            try
+            {
+                var ancestor = OpenFd("/sys/fs/cgroup", DirectoryFlag | NoFollow | CloseOnExec, false); held.Add(ancestor); RootControlled(ancestor, true);
+                foreach (var name in new[] { "user.slice", "user-1000.slice" })
+                { var next = OpenFd(name, DirectoryFlag | NoFollow | CloseOnExec, false, ancestor); held.Add(next); RootControlled(next, true); ancestor = next; }
+                Statx identity = default; Native("statx-held-conformance-ancestor", () => statx(ancestor.Actual, "", 0x1800, 0x17ff, out identity), false);
+                string Text(string name)
+                {
+                    const int maximum = 256; var limit = exactImageEntered ? exactWorkReadByteLimit : WorkReadByteLimit;
+                    if (readBytes > limit - (maximum + 1)) throw new IOException("Original ancestor read credit exhausted.");
+                    readBytes += maximum + 1; var bytes = new byte[maximum + 1]; var used = 0; var eof = false;
+                    var fd = OpenFd(name, NoFollow | CloseOnExec, false, ancestor); Exception? failure = null, closeFailure = null;
+                    try
+                    {
+                        RootControlled(fd, false);
+                        for (var attempt = 0; attempt < 4 && used < bytes.Length; attempt++)
+                        {
+                            var chunk = new byte[bytes.Length - used]; var n = checked((int)Native("read-selected-ancestor:" + name, () => read(fd.Actual, chunk, (nuint)chunk.Length), false, chunk));
+                            if (n == 0) { eof = true; break; }
+                            if (n > chunk.Length) throw new IOException("Actual ancestor read exceeded request.");
+                            Buffer.BlockCopy(chunk, 0, bytes, used, n); used += n;
+                        }
+                        if (!eof || used > maximum) throw new IOException("Complete selected ancestor metadata exceeded finite plan.");
+                    }
+                    catch (Exception error) { failure = error; }
+                    closeFailure = CloseExactImage(fd, failure is not null, closeFailure);
+                    if (failure is not null && closeFailure is not null) throw new AggregateException(failure, closeFailure);
+                    if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+                    if (closeFailure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(closeFailure).Throw();
+                    return Utf8.GetString(bytes, 0, used).TrimEnd('\n');
+                }
+                if (Text("memory.max") != "4294967296" || Text("memory.swap.max") != "0" || Text("cpuset.cpus.effective") != expectedCpus || Text("pids.max") != "128") throw new IOException("Selected ancestor resource limits differ.");
+                var cpu = Text("cpu.max").Split(' ');
+                if (cpu.Length != 2 || !ulong.TryParse(cpu[0], out var quota) || !ulong.TryParse(cpu[1], out var period) || period == 0 || quota / period != 2 || quota % period != 0) throw new IOException("Selected ancestor CPU quota differs.");
+                if (!uint.TryParse(Text("pids.current"), out var current) || current is < 1 or > 128) throw new IOException("Actual ancestor task population exceeds profile.");
+                Statx after = default; Native("statx-conformance-ancestor-post", () => statx(ancestor.Actual, "", 0x1800, 0x17ff, out after), false);
+                if (after.Inode != identity.Inode || after.Mount != identity.Mount || after.Major != identity.Major || after.Minor != identity.Minor) throw new IOException("Original conformance ancestor identity changed.");
+                RootControlled(ancestor, true); Same(false); Check(false);
+            }
+            catch (Exception error) { primary = error; }
+            foreach (var fd in held.AsEnumerable().Reverse()) post = CloseExactImage(fd, primary is not null || post is not null, post);
+            if (primary is not null && post is not null) throw new AggregateException("Selected ancestor observation and first-close.", primary, post);
+            if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+            if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+        }
+    }
     static readonly UTF8Encoding Utf8 = new(false, true);
     internal static bool ParsePopulated(byte[] complete)
     {
@@ -237,12 +348,12 @@ internal sealed class LinuxScopeKernel
             if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
         }
     }
-    internal void RequireLimits(string expectedCpus, bool cleanup) { lock (gate) RequireLimitsCore(expectedCpus, cleanup); }
-    void RequireLimitsCore(string expectedCpus, bool cleanup)
+    internal void RequireLimits(string expectedCpus, bool cleanup, bool restrictedChild = false) { lock (gate) RequireLimitsCore(expectedCpus, cleanup, restrictedChild); }
+    void RequireLimitsCore(string expectedCpus, bool cleanup, bool restrictedChild)
     {
         Same(cleanup);
         string Text(string name) => Utf8.GetString(Read(name, cleanup, 256)).TrimEnd('\n');
-        if (Text("memory.max") != "4294967296" || Text("memory.swap.max") != "0" || Text("cpuset.cpus.effective") != expectedCpus || Text("pids.max") != "128") throw new IOException("Actual scope limits differ from fixed twoCPU/4GiB/128task profile.");
+        if (Text("memory.max") != (restrictedChild ? "2147483648" : "4294967296") || Text("memory.swap.max") != "0" || Text("cpuset.cpus.effective") != expectedCpus || Text("pids.max") != (restrictedChild ? "48" : "128")) throw new IOException("Actual scope limits differ from selected closed ordinary or stricter child profile.");
         var cpu = Text("cpu.max").Split(' '); if (cpu.Length != 2 || !ulong.TryParse(cpu[0], out var quota) || !ulong.TryParse(cpu[1], out var period) || period == 0 || quota / period > 2 || quota % period != 0 || quota / period != 2) throw new IOException("Actual cgroup CPU quota is not exactly two CPUs."); Same(cleanup);
     }
     internal void Kill(bool cleanup) { lock (gate) KillCore(cleanup); }
@@ -266,7 +377,7 @@ internal sealed class LinuxScopeKernel
         if (primary is not null && post is not null) throw new AggregateException(primary, post); if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
     }
     [StructLayout(LayoutKind.Explicit, Size = 256)] struct StatFs { [FieldOffset(0)] public long Type; }
-    [StructLayout(LayoutKind.Explicit, Size = 256)] struct Statx { [FieldOffset(0)] public uint Mask; [FieldOffset(28)] public ushort Mode; [FieldOffset(32)] public ulong Inode; [FieldOffset(40)] public ulong Size; [FieldOffset(136)] public uint Major; [FieldOffset(140)] public uint Minor; [FieldOffset(144)] public ulong Mount; }
+    [StructLayout(LayoutKind.Explicit, Size = 256)] struct Statx { [FieldOffset(0)] public uint Mask; [FieldOffset(20)] public uint Uid; [FieldOffset(24)] public uint Gid; [FieldOffset(28)] public ushort Mode; [FieldOffset(32)] public ulong Inode; [FieldOffset(40)] public ulong Size; [FieldOffset(136)] public uint Major; [FieldOffset(140)] public uint Minor; [FieldOffset(144)] public ulong Mount; }
     [DllImport("libc", SetLastError = true)] static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
     [DllImport("libc", SetLastError = true)] static extern int openat(int fd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
     [DllImport("libc", SetLastError = true)] static extern int close(int fd);

@@ -104,7 +104,7 @@ If cleanup admission or native closure remains unknown, the descriptor stays
 retained and cannot count as disposed. Admission, close and post failures remain
 retained. No rows, bytes or time are refunded or added.
 
-All memfd pages, source page cache, loader/runtime pages and descendants consume
+For default/null selection, all memfd pages, source page cache, loader/runtime pages and descendants consume
 the same scope `MemoryMax=4294967296` and `MemorySwapMax=0`. This is a total scope
 cap; it does not promise 4 GiB of target heap in addition to the sealed image.
 CPU, memory, time, tokens, call-row and cleanup-duration limits are unchanged.
@@ -122,3 +122,72 @@ controls alone do not establish the process-owner binding. Replacing a pathname
 after RELEASE does not establish a pre-RELEASE race witness. Mid-copy cancellation,
 pre-RELEASE replacement and forged descriptor/READY controls remain separate
 acceptance requirements before broader protected-runtime certification.
+
+## Proposed explicit helper dependency policy
+
+The optional `nnp-user1000-ancestor-v3` exact-image child policy is restrictive DATA
+selection, not a Root or runtime certificate. The source-attested birth gate sets
+`PR_SET_NO_NEW_PRIVS` on its main-thread leader before READY and retains it at
+exec. Before RELEASE, the existing creator-bound owner reads that actual PID's
+complete bounded procfs status and requires NoNewPrivs=1, all four UID/GID fields
+1000, and zero inheritable, permitted, effective and ambient capabilities. It
+retains the same original counters, generation checks and first-close semantics.
+Ordinary captures (including prerequisite Git/plan import using the SAME selected
+profile) keep their ordinary launch/NNP behavior. The recognized policy adds the
+ancestor-resource check to those captures. Its NNP token/status requirement applies
+only when an exact image is selected; ordinary capture is not rejected.
+Default/null policy is unchanged. Helper admission is explicitly opt-in fixture
+DATA; existing exact-version STOP/malformed/other fixtures are not auto-selected.
+
+A conformance fixture may explicitly select the measured official
+`/codex-code-mode-host` (74277776 bytes, SHA256
+`6b4de7a1a69656779c88b6e249ab976cbbc9a43e1edf65e6ec9927feb26f996b`)
+as a root-owned 0555 path dependency after a separate owner decision, actual
+provision receipt, fresh boot, no-follow metadata, a prebirth full original-credit
+hash and a second same-original full postrun hash. The primary stays sealed; this child is not sealed or a protected Linux
+reviewer. Root/operator mutation and privileged brokers remain trusted: NNP
+prevents exec privilege gain, not privileged IPC or compromise of other trusted
+processes. The operator installer must be closed before model entry. No global
+host sudo/auth/service/model policy or numeric product allowance is expanded. Missing policy,
+proof, credit or helper refuses; protected Linux RuntimeTrust remains closed.
+
+The explicit offline Route A proposal additionally installs a Root-owned
+user-1000.slice resource drop-in. This is a guest service-policy exception needing
+new owner approval. Selected-profile owners observe the actual root-controlled
+ancestor cgroup and exact effective CPU/memory/swap/task ceilings; all forge user
+manager units share those ceilings. Status also requires supplementary Groups1000.
+The profile does not claim a complete sandbox or universal original-group closure.
+Only a separate Root audit after the original whole-VM shutdown may accept the
+unprotected conformance scope; protected Linux RuntimeTrust stays closed.
+
+V7 offline provisioning is paired with one separately approved read-only installed
+receipt-inspection boot. That boot can activate a partial ancestor policy before
+inspection; it is not a model/profile admission. Missing/failed/extra receipt
+entries, a changed helper/drop-in, SSH failure, or unknown VM closure blocks the
+profile. The fixture reads the raw completed receipt directly, checks its nonce,
+root UUID, inner helper tuple and policy digest, and captures installed-boot device
+identity rather than assuming rescue major/minor numbering is portable. Existing
+post-retirement owned Git observation checks the same ancestor; policy metadata
+and full88-byte digest are checked before and after on the same original.
+
+The owner packet also contains a separately selected offline rollback program. It
+only unlinks the exact two newly published helper/policy hardlinks after joining
+the retained root-private stage and prepared receipt; all stage/attempt evidence
+and directories remain. Every rollback original pays its own full rescue-media
+hash. Rollback is not automatic, a retry, arbitrary cleanup, or authority adoption.
+
+### Proposed V8 closed child and final disposition
+
+The opt-in nnp-user1000-ancestor-v3 child is stricter: 48 tasks and 2 GiB under the unchanged root-controlled ancestor/global 128 tasks, 4 GiB and two CPUs. Ordinary null selection retains its prior limits. The arithmetic difference is not measured free capacity, a reservation or a guarantee against hostile same-UID manager brokerage; actual Codex/helper fit remains unproved. Only COMPLETE may select the root-owned helper; STOP cannot. No protected runtime authority is issued.
+
+Before any offline archive/ISO or persistent write, bind the actual current source/Csc/PDB and gate-five-file build acceptance. The existing already-running KVP daemon supplies fresh nonce READY, one host ACK before installed-root RW, and FINAL only after installed-root unmount/clean plus seed unmount. The host retains FINAL before first ID-only graceful shutdown. Missing/failed/unknown FINAL blocks profile even if completed.json exists. No new service, transport or credential route is implied. Fresh same-running-boot guest preparation stages approved decision/final DATA at actual guest paths and derives PreparedBootId there; inspection's previous boot ID and Windows paths are inadmissible. All byte exceptions and persistent policy remain owner-pending.
+
+V9 private correction: only the opted-in exact native image receives the lower
+48-task/2GiB child limits; ordinary prerequisite captures launch and read back
+their original128-task/4GiB scope. New operator permission must explicitly cover
+one host VM-configuration AddKvpItems and conditional RemoveKvpItems. The fresh
+ACK is removed once only after raw matching FINAL is retained while the VM is still Running; after Off, only read-only original-frame verification is permitted;
+original indexed HostExchangeItems bytes must match exactly afterward. Foreign
+values stay opaque and are not exported. A failed/missing FINAL, unknown Add or
+Remove job, or changed host frame blocks acceptance and preserves uncertainty.
+Existing daemon refresh latency and actual guest fit remain unproved.

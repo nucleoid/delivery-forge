@@ -7,7 +7,7 @@ namespace DeliveryForge.Evidence;
 // Selection is DATA, never a scope or native-owner constructor. Runtime checks
 // pin actual opened images; actual user-manager/kernel/resource proof follows.
 public sealed record LinuxScopeImage(string Path, long Bytes, string Sha256);
-public sealed record LinuxScopeSelection(LinuxScopeImage SystemdRun, LinuxScopeImage SystemdLibrary, string ManagerVersion, string KernelRelease, LinuxScopeImage BirthGate, IReadOnlyList<LinuxScopeImage> BirthGateClosure, LinuxScopeImage GateBuildReceipt);
+public sealed record LinuxScopeSelection(LinuxScopeImage SystemdRun, LinuxScopeImage SystemdLibrary, string ManagerVersion, string KernelRelease, LinuxScopeImage BirthGate, IReadOnlyList<LinuxScopeImage> BirthGateClosure, LinuxScopeImage GateBuildReceipt, string? RestrictiveChildPolicy = null);
 [SupportedOSPlatform("linux")]
 internal sealed class LinuxSystemdLibrary
 {

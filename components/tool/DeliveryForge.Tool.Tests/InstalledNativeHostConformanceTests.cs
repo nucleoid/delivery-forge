@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using DeliveryForge.Evidence;
@@ -14,12 +15,134 @@ namespace DeliveryForge.Tool.Tests;
 // Missing bindings fail; no environment/capability skip produces a PASS.
 public sealed class InstalledNativeHostConformanceTests
 {
-    public sealed record Fixture(string Kind, string Adapter, StandaloneHostSelection Host, string Git, string ParentCheckout, string Worktree, string ResultDirectory, string BaseCommit, string Repository, string CaseKind, AdmissionFile PlanBundle, PlanImportExpectations Expectations, string MutableReference, string RelativePath, string ExpectedText, AdmissionFile? LinuxScopeProfile, bool ObserveRuntimeTrustRoute = false);
+    public sealed record Fixture(string Kind, string Adapter, StandaloneHostSelection Host, string Git, string ParentCheckout, string Worktree, string ResultDirectory, string BaseCommit, string Repository, string CaseKind, AdmissionFile PlanBundle, PlanImportExpectations Expectations, string MutableReference, string RelativePath, string ExpectedText, AdmissionFile? LinuxScopeProfile, bool ObserveRuntimeTrustRoute = false, OwnerTrustedLinuxHelper? LinuxOwnerTrustedHelper = null);
+    // Explicit conformance-only DATA selection; never a RuntimeTrust/native authority issuer.
+    public sealed record OwnerTrustedLinuxHelper(AdmissionFile OwnerDecision, AdmissionFile CompletedReceipt, string PreparedBootId, AdmissionFile FinalDisposition);
+    sealed record HelperDecision(string Kind, bool Approved, string VmId, string HelperPath, long HelperBytes, string HelperSha256, string TrustBoundary, string RestrictiveChildPolicy, string OfflineDecisionSha256);
+    sealed record HelperFinal(string Kind, string Status, string VmId, string RootUuid, string Nonce, string Operation, string BootId, string DecisionSha256, string? CompletedSha256, long HelperBytes, string HelperSha256, bool InstalledRootUnmounted, bool SeedUnmounted, bool Clean, int Errors, bool NoRuntimeAuthority);
+    sealed record HelperProvision(string Kind, string VmId, string HelperPath, long HelperBytes, string HelperSha256, uint Uid, uint Gid, int Mode, ulong Inode, uint Major, uint Minor, uint Links);
+    sealed record HelperCompleted(string Kind, string VmId, string RootUuid, string Nonce, string InstallerBootId, HelperProvision HelperProvision, string PolicyPath, string PolicySha256, long PolicyBytes, bool NoRuntimeAuthority, long ReadBytesWithReserve, long WriteBytesBeforeReceipt, int OperationsBeforeReceipt);
+    sealed class HelperGuard(ToolLifetime original)
+    {
+        const string PathName = "/codex-code-mode-host", Vm = "6baeba02-2e64-4b62-a051-4bb82f57a913";
+        const string Hash = "6b4de7a1a69656779c88b6e249ab976cbbc9a43e1edf65e6ec9927feb26f996b";
+        const string RootUuid = "336b7308-380b-4f03-8a00-a46b12910576", ProvisionNonce = "7f1f3e2c0a954b56b9ec5e407f61fac7";
+        const string ProvisionDirectory = "/var/lib/delivery-forge-route-a-" + ProvisionNonce;
+        const string PolicyPath = "/etc/systemd/system/user-1000.slice.d/90-delivery-forge-conformance.conf";
+        const string PolicyHash = "e8d9d5317a40bd34453241e81f7e0c3f035d79bb8a1d5d0d1b27bbb20ee07c2a";
+        const long Extent = 74277776;
+        HelperProvision? provision; Statx selected, selectedPolicy; bool captured, policyCaptured;
+        FileStream? bootStream; bool bootCloseEntered, bootClosed;
+        T ReadSelected<T>(AdmissionFile pin) where T : class
+        {
+            if (pin is null || pin.Bytes is < 1 or > 65536) throw new IOException("Finite explicit helper policy/raw completed receipt pin required.");
+            var bytes = BoundedFiles.Read(pin.Path, original, 65536);
+            if (bytes.LongLength != pin.Bytes || BoundedFiles.Sha(bytes) != pin.Sha256) throw new IOException("Complete selected helper DATA pin changed.");
+            return JsonSerializer.Deserialize<T>(bytes, BoundedFiles.Json) ?? throw new IOException("Null selected helper DATA.");
+        }
+        Statx Observe(string path)
+        {
+            original.Check(); var returned = statx(-100, path, 0x100, 0x7ff, out var row); original.Check();
+            if (returned != 0 || (row.Mask & 0x3df) != 0x3df) throw new IOException("Complete actual no-follow helper/policy metadata unavailable.");
+            return row;
+        }
+        static void RootDirectory(Statx row)
+        {
+            if ((row.Mode & 0xf000) != 0x4000 || row.Uid != 0 || row.Gid != 0 || (row.Mode & 0x12) != 0) throw new IOException("Root-owned non-writable selected ancestor required.");
+        }
+        void CheckProvisionDirectory()
+        {
+            foreach (var path in new[] { "/", "/var", "/var/lib", ProvisionDirectory }) RootDirectory(Observe(path));
+            var found = new HashSet<string>(StringComparer.Ordinal);
+            original.Check(); using var entries = Directory.EnumerateFileSystemEntries(ProvisionDirectory).GetEnumerator(); original.Check();
+            for (var attempt = 0; attempt < 3; attempt++)
+            {
+                original.Check(); var more = entries.MoveNext(); original.Check();
+                if (!more)
+                {
+                    if (!found.SetEquals(new[] { "prepared.json", "completed.json" })) throw new IOException("Actual successful provision receipt directory is incomplete.");
+                    return;
+                }
+                var name = Path.GetFileName(entries.Current);
+                if (name is not ("prepared.json" or "completed.json") || !found.Add(name)) throw new IOException("Failed, partial or extra provision attempt evidence requires Root review before conformance.");
+            }
+            throw new IOException("Finite successful provision receipt directory exceeded.");
+        }
+        internal void Prepare(Fixture fixture)
+        {
+            var selectedHelper = fixture.LinuxOwnerTrustedHelper ?? throw new IOException("Explicit owner-trusted Linux helper selection required; no ambient helper admission.");
+            var decision = ReadSelected<HelperDecision>(selectedHelper.OwnerDecision);
+            if (decision.Kind != "RouteALinuxCodexHelperOwnerDecision-v1" || !decision.Approved || decision.VmId != Vm || decision.HelperPath != PathName || decision.HelperBytes != Extent || decision.HelperSha256 != Hash || decision.TrustBoundary != "root-owned-path-not-sealed" || decision.RestrictiveChildPolicy != "nnp-user1000-ancestor-v3" || decision.OfflineDecisionSha256 is not { Length: 64 }) throw new IOException("Exact owner-approved helper trust boundary required.");
+            if (selectedHelper.CompletedReceipt.Path != ProvisionDirectory + "/completed.json") throw new IOException("Select the raw actual provision receipt, never an unbound projection.");
+            CheckProvisionDirectory();
+            var terminal = ReadSelected<HelperFinal>(selectedHelper.FinalDisposition);
+            if (terminal.Kind != "RouteAOfflineFinal-v8" || terminal.Status != "PASS" || terminal.VmId != Vm || terminal.RootUuid != RootUuid || terminal.Nonce != ProvisionNonce || terminal.Operation != "provision" || !Guid.TryParseExact(terminal.BootId, "D", out _) || terminal.DecisionSha256 != decision.OfflineDecisionSha256 || terminal.CompletedSha256 != selectedHelper.CompletedReceipt.Sha256 || terminal.HelperBytes != Extent || terminal.HelperSha256 != Hash || !terminal.InstalledRootUnmounted || !terminal.SeedUnmounted || !terminal.Clean || terminal.Errors != 0 || !terminal.NoRuntimeAuthority) throw new IOException("Selected successful post-unmount original final DATA required; completed file alone is insufficient.");
+            var completed = ReadSelected<HelperCompleted>(selectedHelper.CompletedReceipt);
+            if (completed.InstallerBootId != terminal.BootId || completed.Kind != "ActualOfflineHelperAncestorProvision-v1" || completed.VmId != Vm || completed.RootUuid != RootUuid || completed.Nonce != ProvisionNonce || !Guid.TryParseExact(completed.InstallerBootId, "D", out _) || completed.PolicyPath != PolicyPath || completed.PolicyBytes != 88 || completed.PolicySha256 != PolicyHash || !completed.NoRuntimeAuthority) throw new IOException("Exact raw completed provision/nonce/root/policy binding required.");
+            provision = completed.HelperProvision ?? throw new IOException("Raw completed receipt lacks its actual helper provision.");
+            if (provision.Kind != "ActualRootOwnedLinuxCodexHelperProvision-v1" || provision.VmId != Vm || provision.HelperPath != PathName || provision.HelperBytes != Extent || provision.HelperSha256 != Hash || provision.Uid != 0 || provision.Gid != 0 || provision.Mode != 365 || provision.Inode == 0 || provision.Links != 2) throw new IOException("Exact selected actual helper provision DATA required.");
+            if (!Guid.TryParseExact(selectedHelper.PreparedBootId, "D", out _)) throw new IOException("Fresh actual prepared guest boot required.");
+            var buffer = new byte[65]; var count = 0;
+            try
+            {
+                original.Check(); bootStream = new("/proc/sys/kernel/random/boot_id", FileMode.Open, FileAccess.Read, FileShare.Read); original.Check();
+                while (count < buffer.Length) { original.Check(); var n = bootStream.Read(buffer, count, buffer.Length - count); original.Check(); if (n == 0) break; count += n; }
+                if (count != 37 || Encoding.ASCII.GetString(buffer, 0, count) != selectedHelper.PreparedBootId + "\n") throw new IOException("Actual current guest boot differs from prepared helper selection.");
+            }
+            finally { if (bootStream is not null) { bootCloseEntered = true; bootStream.Dispose(); bootClosed = true; original.Check(); } }
+            CheckPolicy(); CheckMetadata();
+            // Exactly ONE prelaunch helper pass; successful completion adds the
+            // second pass below, both on the SAME original file credit.
+            BoundedFiles.VerifyNativeImage(new(PathName, Extent, Hash), original);
+            CheckMetadata();
+        }
+        void CheckPolicyMetadata()
+        {
+            foreach (var path in new[] { "/", "/etc", "/etc/systemd", "/etc/systemd/system", "/etc/systemd/system/user-1000.slice.d" }) RootDirectory(Observe(path));
+            var actual = Observe(PolicyPath);
+            if ((actual.Mode & 0xf000) != 0x8000 || actual.Uid != 0 || actual.Gid != 0 || (actual.Mode & 0x12) != 0 || actual.Size != 88 || actual.Links != 2) throw new IOException("Actual selected root-owned ancestor policy differs.");
+            if (policyCaptured && (actual.Inode != selectedPolicy.Inode || actual.Major != selectedPolicy.Major || actual.Minor != selectedPolicy.Minor || actual.MTimeSeconds != selectedPolicy.MTimeSeconds || actual.MTimeNanos != selectedPolicy.MTimeNanos || actual.CTimeSeconds != selectedPolicy.CTimeSeconds || actual.CTimeNanos != selectedPolicy.CTimeNanos)) throw new IOException("Actual same-boot selected ancestor policy identity changed.");
+            selectedPolicy = actual; policyCaptured = true;
+        }
+        void CheckPolicy()
+        {
+            CheckPolicyMetadata(); var bytes = BoundedFiles.Read(PolicyPath, original, 88);
+            if (bytes.Length != 88 || BoundedFiles.Sha(bytes) != PolicyHash) throw new IOException("Actual complete selected ancestor policy hash differs.");
+            CheckPolicyMetadata();
+        }
+        internal void VerifyAfterRun()
+        {
+            CheckProvisionDirectory(); CheckPolicy();
+            CheckMetadata(); BoundedFiles.VerifyNativeImage(new(PathName, Extent, Hash), original); CheckMetadata();
+        }
+        internal void CheckMetadata()
+        {
+            if (provision is null || bootCloseEntered && !bootClosed) throw new IOException("Original helper preparation/first-close incomplete.");
+            RootDirectory(Observe("/")); var actual = Observe(PathName);
+            if ((actual.Mode & 0xf000) != 0x8000 || (actual.Mode & 0xfff) != 365 || actual.Uid != 0 || actual.Gid != 0 || actual.Size != Extent || actual.Links != 2 || actual.Inode != provision.Inode) throw new IOException("Actual root-owned helper identity/permissions differ.");
+            // Raw receipt Major/Minor describe the rescue mount. Capture actual
+            // installed-boot device identity here, then require SAME-boot stability.
+            if (captured && (actual.Inode != selected.Inode || actual.Size != selected.Size || actual.Major != selected.Major || actual.Minor != selected.Minor || actual.MTimeSeconds != selected.MTimeSeconds || actual.MTimeNanos != selected.MTimeNanos || actual.CTimeSeconds != selected.CTimeSeconds || actual.CTimeNanos != selected.CTimeNanos)) throw new IOException("Original root-owned helper metadata changed before birth or after run.");
+            selected = actual; captured = true; original.Check();
+        }
+        [StructLayout(LayoutKind.Explicit, Size = 256)]
+        struct Statx
+        {
+            [FieldOffset(0)] public uint Mask; [FieldOffset(16)] public uint Links;
+            [FieldOffset(20)] public uint Uid; [FieldOffset(24)] public uint Gid; [FieldOffset(28)] public ushort Mode;
+            [FieldOffset(32)] public ulong Inode; [FieldOffset(40)] public ulong Size;
+            [FieldOffset(96)] public long CTimeSeconds; [FieldOffset(104)] public uint CTimeNanos;
+            [FieldOffset(112)] public long MTimeSeconds; [FieldOffset(120)] public uint MTimeNanos;
+            [FieldOffset(136)] public uint Major; [FieldOffset(140)] public uint Minor;
+        }
+        [DllImport("libc", SetLastError = true)] static extern int statx(int fd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out Statx value);
+    }
     sealed class Frame : IAsyncDisposable
     {
         static readonly List<Frame> Unknown = [];
         internal readonly string RunId = "probe-" + Guid.NewGuid().ToString("N");
         internal bool BindingCurrent = true;
+        HelperGuard? helper; LinuxScopeSelection? helperScope;
         internal WorktreeManager ProvisioningGit = null!;
         internal ParentEffectAdmission Parent = null!;
         internal readonly ToolLifetime Original = new(TimeSpan.FromSeconds(600), TestContext.Current.CancellationToken);
@@ -38,6 +161,12 @@ public sealed class InstalledNativeHostConformanceTests
             if (f.Kind != "RootAdmittedNativeConformanceProvisioningFixture-v2" || f.CaseKind != (stop ? "stop" : "completion") || f.PlanBundle is null || f.Expectations is null || f.Adapter != adapter || f.Host is null || string.IsNullOrWhiteSpace(f.Host.Version) || f.Host.Version == "unverified" || f.Host.Version.Length > 256 || f.RelativePath is null || f.RelativePath.Length is < 1 or > 256 || f.RelativePath.Contains('\\') || Path.IsPathFullyQualified(f.RelativePath) || f.RelativePath.Split('/').Any(v => v is "" or "." or "..") || f.ExpectedText is null || f.ExpectedText.Length is < 1 or > 4096 || f.ExpectedText.Contains('\0')) throw new IOException("Exact finite independently prepared real-host task fixture required.");
             if (f.ObserveRuntimeTrustRoute && (adapter != "codex.cli" || !OperatingSystem.IsWindows()))
                 throw new IOException("Trust-route conformance selects only the existing Windows Codex UNVERIFIED producer; no authority is granted.");
+            if (f.LinuxOwnerTrustedHelper is not null && !stop && f.CaseKind == "completion" && OperatingSystem.IsLinux() && adapter == "codex.cli" && f.Host.Version == "0.163.0-alpha.10.2")
+            {
+                if (f.Host.Bytes != 296885960 || f.Host.Sha256 != "70ea33b7094a4c20c007d09b83bb50e33debb9bbf99bf066709f9eb85bad524a") throw new IOException("Exact measured RouteA primary image required.");
+                frame.helper = new(frame.Original);
+            }
+            else if (f.LinuxOwnerTrustedHelper is not null) throw new IOException("Helper trust selection is only the explicit measured Linux Codex fixture.");
             BoundedFiles.Plain(f.ParentCheckout, true); BoundedFiles.Plain(f.Worktree, true); BoundedFiles.Plain(f.ResultDirectory, true); BoundedFiles.Separate(f.ParentCheckout, f.Worktree); BoundedFiles.Separate(f.Worktree, f.ResultDirectory);
             if (Directory.Exists(f.Worktree) || File.Exists(f.Worktree))
                 throw new IOException("Native conformance v2 requires the exact independently admitted absent destination; existing metadata cannot be adopted.");
@@ -46,6 +175,8 @@ public sealed class InstalledNativeHostConformanceTests
             {
                 var pin = f.LinuxScopeProfile ?? throw new IOException("Actual independently prepared Linux profile required."); var raw = BoundedFiles.Read(pin.Path, frame.Original, 65536); Assert.Equal(pin.Bytes, raw.LongLength); Assert.Equal(pin.Sha256, BoundedFiles.Sha(raw)); scope = JsonSerializer.Deserialize<LinuxScopeSelection>(raw, BoundedFiles.Json) ?? throw new IOException("Null actual Linux selection.");
             }
+            if (frame.helper is not null && scope?.RestrictiveChildPolicy != "nnp-user1000-ancestor-v3") throw new IOException("Explicit helper selection requires the creator-observed unprivileged child policy.");
+            frame.helper?.Prepare(f); frame.helperScope = frame.helper is null ? null : scope;
             var executor = OperatingSystem.IsLinux() ? new ProcessCommandExecutor(scope!, frame.Original) : new ProcessCommandExecutor(); frame.Executor = executor; frame.Git = new(f.Git, executor, frame.Original);
             // A private finite test parent owns actual provisioning/captures;
             // it issues no production host/profile or coordination authority.
@@ -90,14 +221,25 @@ public sealed class InstalledNativeHostConformanceTests
             AgentAcceptedReceipt accepted;
             try
             {
+                helper?.CheckMetadata();
                 StartupCall = Port.StartAsync(Request, StartupPhaseLimit, StartupPhase.Token); ActualCalls.Add(StartupCall);
                 accepted = await StartupCall.WaitAsync(StartupPhaseLimit, StartupPhase.Token);
                 Original.Check(); StartupPhase.Token.ThrowIfCancellationRequested();
                 if (System.Diagnostics.Stopwatch.GetElapsedTime(StartupPhaseStarted) >= StartupPhaseLimit) throw new TimeoutException("Actual conformance startup phase exceeded its original bounded allowance.");
             }
             catch (Exception error) { Failure ??= error; throw; }
+            if (helper is not null && Native is not { HasCreationOwnedExactLinuxImage: true }) throw new IOException("Selected Codex main did not return its actual checked exact-image release.");
             Assert.Equal(Request.RequestIdentity, accepted.RequestIdentity); Assert.Equal(Request.RunId, accepted.RunId); Assert.Equal(Request.PlanIdentity, accepted.PlanIdentity); Assert.Equal(Request.BaseCommit, accepted.BaseCommit); Assert.Equal(Request.Worktree, accepted.Worktree); Assert.Equal(Request.AdapterId, accepted.AdapterId); Assert.Equal(Request.AdapterVersion, accepted.AdapterVersion); Assert.False(string.IsNullOrWhiteSpace(accepted.RuntimeRunIdentity)); Assert.False(string.IsNullOrWhiteSpace(accepted.RuntimeTaskIdentity)); Assert.All(accepted.Capabilities, c => Assert.Equal(AgentCapabilityStatus.Unverified, c.Status));
             Assert.Throws<AgentCapabilityIncompleteException>(() => WorkerEnvelope.ValidateAccepted(Request, accepted)); return accepted;
+        }
+        internal async Task<WorktreeObservation> ObserveAfterRun()
+        {
+            // This is the existing post-retirement Git observation. Its actual
+            // selected ordinary scopes re-read the ancestor in the existing
+            // kernel ledger; no additional process or adoption is introduced.
+            if (helper is not null) Executor.RequireSelectedLinuxCaptureOwner(Original, helperScope ?? throw new IOException("Selected original helper scope missing."));
+            var after = await Call(() => Git.ObserveAsync(Selected.Worktree, TestContext.Current.CancellationToken));
+            helper?.VerifyAfterRun(); return after;
         }
         internal static AgentRunBinding Binding(AgentAcceptedReceipt a) => new(a.AdapterId, a.AdapterVersion, a.RunId, a.RequestIdentity, a.RuntimeRunIdentity, a.RuntimeTaskIdentity);
         internal void CaptureFailureAfterNativeSettlement()
@@ -293,10 +435,11 @@ public sealed class InstalledNativeHostConformanceTests
             InstalledHostAdmission.RequireRuntimeTrustRouteArtifact(traceBytes, f.Host, f.Host.Version);
         }
         var native = frame.Native ?? throw new IOException("Actual original process reference missing."); var sameRetirement = native.RetireAsync(false); frame.Retirement = await sameRetirement.WaitAsync(frame.Original.Remaining, TestContext.Current.CancellationToken); HostTransportRetirement.RequireSuccessful(frame.Retirement);
-        var after = await frame.Call(() => frame.Git.ObserveAsync(f.Worktree, TestContext.Current.CancellationToken)); Assert.True(after.IsClean); Assert.Equal(after.HeadCommit, completion.HeadCommit); Assert.Equal(after.TreeId, completion.TreeId); Assert.Equal(Encoding.UTF8.GetBytes(f.ExpectedText), BoundedFiles.Read(Path.Combine(f.Worktree, f.RelativePath.Replace('/', Path.DirectorySeparatorChar)), frame.Original));
+        var after = await frame.ObserveAfterRun(); Assert.True(after.IsClean); Assert.Equal(after.HeadCommit, completion.HeadCommit); Assert.Equal(after.TreeId, completion.TreeId); Assert.Equal(Encoding.UTF8.GetBytes(f.ExpectedText), BoundedFiles.Read(Path.Combine(f.Worktree, f.RelativePath.Replace('/', Path.DirectorySeparatorChar)), frame.Original));
         Assert.NotEmpty(completion.ArtifactPaths); foreach (var artifact in completion.ArtifactPaths) { var bytes = BoundedFiles.Read(artifact, frame.Original); Assert.DoesNotContain(frame.Request.WriterToken, Encoding.UTF8.GetString(bytes), StringComparison.Ordinal); }
-        // Actual native/protocol/Git observations only. This probe never writes
-        // RootActualInstalledHostConformanceAcceptance or publishes authority.
+        // These are original-group facts. Final whole-VM conformance acceptance
+        // additionally requires Root's outer actual Off/IO/frame audit; this Fact
+        // cannot certify that no manager-brokered descendants left the group.
         frame.AcceptanceAssertionsReturned = true;
     }
     [Theory(Timeout = 700000)]
