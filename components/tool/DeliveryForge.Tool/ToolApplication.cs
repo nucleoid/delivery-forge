@@ -97,19 +97,24 @@ public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssue
     }
     async Task<ToolResult> PlanAsync(ToolCommand command, TrustedConfiguration config, ToolLifetime life)
     {
+        var hasIssue = command.Has("issue"); var hasIntentFile = command.Has("intent-file");
+        var selectedIssue = command.Get("issue"); var selectedIntentFile = command.Get("intent-file");
+        if (hasIssue == hasIntentFile || (hasIssue && string.IsNullOrWhiteSpace(selectedIssue)) || (hasIntentFile && string.IsNullOrWhiteSpace(selectedIntentFile)))
+            throw new ToolUsageException("plan requires --repo and exactly one --issue/--intent-file.");
         var repo = BoundedFiles.Plain(command.Get("repo")!, true); if (!Same(repo, config.RepositoryRoot)) throw new ToolUsageException("Repository differs from explicit trusted configuration.");
-        PlanIntent intent;
-        if (command.Get("issue") is string issue)
+        PlanIntent intent; bool fromIssue;
+        if (selectedIssue is string issue)
         {
+            fromIssue = true;
             if (!System.Text.RegularExpressions.Regex.IsMatch(issue, "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#[1-9][0-9]*$")) throw new ToolUsageException("Expected OWNER/REPO#N.");
             if (!issue.StartsWith(config.Repository + "#", StringComparison.Ordinal)) throw new ToolUsageException("Issue repository differs from trusted selection.");
             if (issues is null) return ToolResult.Incomplete("ISSUE_CONNECTOR_UNAVAILABLE", "The skill must supply the actual supported GitHub issue connector; no network command is invented.", new { Issue = issue });
             intent = await Observe("ActualIssueRead", () => issues.ReadPublicIssueAsync(issue, life.Remaining, life.Token), life).ConfigureAwait(false);
         }
-        else intent = BoundedFiles.ReadJson<PlanIntent>(command.Get("intent-file")!, life);
+        else { fromIssue = false; intent = BoundedFiles.ReadJson<PlanIntent>(selectedIntentFile!, life); }
         if (intent.Request.Repository != config.Repository || intent.Request.Mode is not ("plan" or "implement") ||
             TrustedConfiguration.Ceiling(intent.Request.RequestedCeiling) > TrustedConfiguration.Ceiling(config.MaximumCeiling) ||
-            (intent.Request.Mode == "implement" && (!command.Has("intent-file") || TrustedConfiguration.Ceiling(intent.Request.RequestedCeiling) < AuthorizationCeiling.Implement)))
+            (intent.Request.Mode == "implement" && (fromIssue || TrustedConfiguration.Ceiling(intent.Request.RequestedCeiling) < AuthorizationCeiling.Implement)))
             throw new ToolUsageException("Intent identity/mode/ceiling differs from protected selection.");
         var reader = actualExecutor is null ? new GitRepositoryContextReader(config.GitExecutable) : new GitRepositoryContextReader(config.GitExecutable, actualExecutor, life); var context = await Observe("ActualRepositoryRead", () => reader.ReadAsync(repo, config.MutableReference, life.Token), life).ConfigureAwait(false); life.Check();
         if (intent.EvidencePaths.Count is < 1 or > 128) throw new ToolUsageException("Explicit bounded repository evidence paths are required.");
