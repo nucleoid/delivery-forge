@@ -37,7 +37,7 @@ public sealed class ProgramFailureTests
         life.RecordFirstCaught("review-source-preparation", consequence);
         life.BeginFailureCleanup(); Assert.DoesNotContain("DFCLI_FIRST_CAUGHT|", errors.ToString(), StringComparison.Ordinal);
         attention.EmitFirstCaughtOnce(); attention.EmitFirstCaughtOnce();
-        var line = Assert.Single(errors.ToString().Split('\n').Where(row => row.StartsWith("DFCLI_FIRST_CAUGHT|", StringComparison.Ordinal)));
+        var line = Assert.Single(errors.ToString().Split('\n'), row => row.StartsWith("DFCLI_FIRST_CAUGHT|", StringComparison.Ordinal));
         using var json = JsonDocument.Parse(line["DFCLI_FIRST_CAUGHT|".Length..]); var diagnostic = json.RootElement;
         Assert.True(diagnostic.GetProperty("CleanupAlreadyBegun").GetBoolean()); Assert.True(diagnostic.GetProperty("MarkerAlreadyEntered").GetBoolean());
         Assert.Equal(typeof(TimeoutException).FullName, diagnostic.GetProperty("Type").GetString()); Assert.False(life.HasExplicitUnknown);
@@ -63,8 +63,8 @@ public sealed class ProgramFailureTests
         var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention);
         life.RecordFirstCaught("host-implement", new IOException("actual caught host failure"));
         using var start = new Barrier(3); var token = TestContext.Current.CancellationToken;
-        Task Invoke() => Task.Run(() => { Assert.True(start.SignalAndWait(TimeSpan.FromSeconds(5))); life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce(); }, token);
-        var a = Invoke(); var b = Invoke(); Assert.True(start.SignalAndWait(TimeSpan.FromSeconds(5)));
+        Task Invoke() => Task.Run(() => { Assert.True(start.SignalAndWait(TimeSpan.FromSeconds(5), token)); life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce(); }, token);
+        var a = Invoke(); var b = Invoke(); Assert.True(start.SignalAndWait(TimeSpan.FromSeconds(5), token));
         try
         {
             await errors.DiagnosticStarted.Task.WaitAsync(TimeSpan.FromSeconds(5), token);
