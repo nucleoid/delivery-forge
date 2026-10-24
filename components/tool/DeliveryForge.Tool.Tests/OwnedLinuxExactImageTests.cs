@@ -44,7 +44,7 @@ public sealed class OwnedLinuxExactImageTests
         ((IHostInstructionPort)port).BindInstructions(HostInstructionContext.FromParentSelection(request, "sha256:" + new string('c', 64),
             "Never dispatch this oversized negative fixture.", ["Refuse before image acquisition."], ["No native work."]));
         var refusal = await Assert.ThrowsAsync<ToolUsageException>(() => port.StartAsync(request, original.Remaining, original.Token));
-        Assert.Equal("Exact Linux ELF image must fit the eleven-MiB exact-image profile inside the existing kernel quota and cleanup reserve.", refusal.Message);
+        Assert.Equal("Exact Linux ELF image must fit the selected finite exact-image profile and original kernel cleanup reserve.", refusal.Message);
         switch (port)
         {
             case DeliveryForge.Tool.Codex.CodexAppServerPort codex:
@@ -245,20 +245,39 @@ public sealed class OwnedLinuxExactImageTests
         if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Actual Linux native image required.");
         const string actual = "/usr/bin/cat";
         var bytes = BoundedFiles.Read(actual, original, 1048576);
-        if (maximumExtent)
-        {
-            // Preserve the actual ELF prefix and zero-pad only this private
-            // copy. The selected hash/extent cover EVERY padded byte; this
-            // exercises the inclusive maximum without a new fixture row.
-            original.CheckWork(); Assert.True(bytes.LongLength < OwnedDuplexProcess.MaximumExactLinuxImageBytes);
-            Array.Resize(ref bytes, checked((int)OwnedDuplexProcess.MaximumExactLinuxImageBytes)); original.CheckWork();
-        }
         var directory = Path.Combine(Path.GetTempPath(), "forge-exact-image-" + Guid.NewGuid().ToString("N"));
         original.CheckWork(); Directory.CreateDirectory(directory); original.CheckWork();
-        var target = Path.Combine(directory, "actual-cat"); BoundedFiles.WriteNew(target, bytes, original);
+        var target = Path.Combine(directory, "actual-cat");
+        long length = bytes.LongLength; string hash;
+        if (maximumExtent)
+        {
+            // Private fixture staging only: preserve the real ELF prefix and
+            // extend this fresh file to the inclusive maximum without a whole
+            // image array or Tool WriteNew's separate sixteen-MiB output path.
+            // This finite test-owned write is not a product write-credit grant.
+            original.CheckWork(); Assert.True(length < OwnedDuplexProcess.MaximumExactLinuxImageBytes);
+            using (var output = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536))
+            {
+                original.CheckWork(); output.Write(bytes); original.CheckWork();
+                output.SetLength(OwnedDuplexProcess.MaximumExactLinuxImageBytes); original.CheckWork();
+                output.Flush(true); original.CheckWork();
+            }
+            original.CheckWork(); length = OwnedDuplexProcess.MaximumExactLinuxImageBytes;
+            using var input = new FileStream(target, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.SequentialScan);
+            using var digest = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+            var buffer = new byte[65536]; long observed = 0;
+            while (observed < length)
+            {
+                original.CheckWork(); var count = input.Read(buffer, 0, (int)Math.Min(buffer.Length, length - observed)); original.CheckWork();
+                if (count == 0) throw new IOException("Complete private maximum-image fixture ended early.");
+                digest.AppendData(buffer, 0, count); observed += count;
+            }
+            original.CheckWork(); Assert.Equal(-1, input.ReadByte()); original.CheckWork(); Assert.Equal(length, input.Length);
+            hash = Convert.ToHexStringLower(digest.GetHashAndReset()); original.CheckWork();
+        }
+        else { BoundedFiles.WriteNew(target, bytes, original); hash = BoundedFiles.Sha(bytes); }
         original.CheckWork(); File.SetUnixFileMode(target, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); original.CheckWork();
-        original.CheckWork(); var hash = BoundedFiles.Sha(bytes); original.CheckWork();
-        return (directory, new(target, bytes.LongLength, hash));
+        return (directory, new(target, length, hash));
     }
     [Fact(Timeout = 90000, Skip = "Sealed descriptor execution requires Linux.", SkipUnless = nameof(IsLinux))]
     public async Task Actual_duplex_executes_sealed_image_and_survives_selected_path_replacement()

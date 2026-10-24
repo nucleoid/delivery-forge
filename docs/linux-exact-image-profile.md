@@ -17,7 +17,7 @@ image binding, not authentication, installed CLI compatibility, runtime-trust
 admission, independent review acceptance or protected Root/Parent authority.
 
 Standalone non-dry-run `implement` admission rejects a selected Linux worker
-extent below 64 bytes or above the shared 11 MiB maximum before image hashing,
+extent below 64 bytes or above the shared 296,885,960-byte inclusive maximum before image hashing,
 composition, or durable store/owner effects. Existing read-only retained-history
 and namespace checks keep their earlier priority. Every production-batch node is
 checked during the common selected-input preflight, before any plan import,
@@ -28,26 +28,49 @@ This is refusal-only DATA admission, not ELF validity, conformance or authority;
 the in-port read reservation and actual same-owner image/scope proof remain
 mandatory. The fixed message identifies an INCOMPLETE capability; the existing
 standalone failure wire remains ERROR, not a new outcome mapping. The measured
-296,885,960-byte Linux Codex image is unavailable for worker dispatch under the
-unchanged profile. An in-range extent enables no positive installed Linux CLI
-compatibility or protected Linux runtime policy.
+296,885,960-byte official Linux Codex image is extent-eligible under the approved
+byte profile. This does not establish that the actual CLI executes successfully
+from a memfd, is authenticated, or has installed conformance. An in-range extent
+enables no protected Linux runtime policy or independent-review acceptance.
 
 The child copies the selected executable into a sealed executable memfd. The
 original parent independently verifies the same descriptor, its kernel identity,
 complete bytes and seals before RELEASE. The child executes that descriptor with
 `execveat`; there is no script or pathname fallback.
 
-The parent charges the image plus EOF to its existing 16 MiB cumulative kernel
-observation quota. WORK can debit only the first 14 MiB, preserving at least
-2 MiB for cleanup inside the same original ceiling. Exact images are limited
-to 11 MiB inclusive, leaving approximately 3 MiB of the WORK partition for
-metadata after image binding; prior observations and EOF still consume it.
-The shared public size constant is profile DATA, not native authority. An
-image must also fit the actual remaining WORK credit; the gate's larger
-standalone extent ceiling grants no additional allowance. Tool callers also
-reserve both complete image reads against the same existing file credit. A
-large real CLI can be unsupported under this profile even when its Windows
-counterpart works. The actual Linux CLI's size and compatibility must be checked.
+Ordinary scopes that never enter exact-image binding retain their original
+14,680,064-byte WORK and 16,777,216-byte total kernel read ceilings. Actual
+exact-image admission checks image plus EOF against a 300,031,689-byte WORK
+ceiling and retains a 302,128,841-byte total ceiling. The inclusive image maximum
+is 296,885,960 bytes, leaving exactly 3 MiB for metadata after accounting for
+image plus EOF and preserving 2 MiB for cleanup. ALL prior metadata debits stay
+on the same counter; no bytes or time are refunded or reset when binding enters.
+Insufficient remaining WORK credit refuses before descriptor open. The shared
+public maximum is profile DATA, not native authority. The child gate's existing
+512 MiB ceiling is unchanged and grants no additional parent allowance.
+
+ALL Linux Tool originals now have a 2,147,483,648-byte cumulative complete-read
+ceiling; Windows and other platforms retain 1,073,741,824 bytes. Both read debit
+and capacity admission consult the same platform ceiling on the existing
+per-original counter. The shared 4,096-operation and 268,435,456-byte write
+ceilings are unchanged. Read's default per-file maximum remains 16 MiB and its
+maximum allowed argument remains 256 MiB; native hashes stream with 64 KiB
+buffers under the separate existing 512 MiB native-file extent ceiling.
+
+Root admission plus an ordinary Linux Codex worker accounts four complete image
+passes: root pathname hash, worker pathname hash, gate copy and parent sealed-fd
+hash. The last two reserve 2*(image bytes+1) before birth. The selected measured
+image therefore debits 1,187,543,844 bytes and five operations before nonimage
+inputs. Actual selected inputs and remaining credit must still fit; this is no
+universal pipeline or batch-fit guarantee. No new quality-receipt count limit is
+introduced. Native memfd writes and private operator fixture/provisioning writes
+are separate explicitly bounded domains, not Tool WriteNew credit. Source cache,
+memfd, loader and descendants all remain under the same 4 GiB scope memory cap.
+
+Actual Linux Claude image extent/hash/compatibility remain unmeasured. Independent
+review would require twelve complete image passes per reviewer image and remains
+fail-closed under the existing Linux production guards. This change enables no
+RuntimeTrust platform branch, auth copy, model/provider change or reviewer policy.
 
 The hash loop keeps one bounded read record with a finite syscall count and
 actual return facts for each read. A short-read plan refusal, deadline or failed
@@ -76,7 +99,9 @@ retained. No rows, bytes or time are refunded or added.
 All memfd pages, source page cache, loader/runtime pages and descendants consume
 the same scope `MemoryMax=4294967296` and `MemorySwapMax=0`. This is a total scope
 cap; it does not promise 4 GiB of target heap in addition to the sealed image.
-No memory, time, observation, file or cleanup credit is increased.
+CPU, memory, time, tokens, call-row and cleanup-duration limits are unchanged.
+Only the explicitly described image/kernel and Linux managed read-byte ceilings
+are increased; no additional original or resource owner is created.
 
 A new ordinary Linux gate build and package are required. The selected build
 audit must enumerate every actual compiler source, including `ExactNativeImage.cs`,

@@ -53,7 +53,7 @@ public sealed class CommandLineTests
         var error = await Assert.ThrowsAsync<ToolUsageException>(() => application.ExecuteAsync(new(mode, options), original.Token));
         Assert.Equal("Command options must be a stable exact-key selection for the selected mode.", error.Message);
         Assert.Empty(application.RetainedExternalCalls); Assert.False(File.Exists(config));
-        BoundedFiles.RequireReadCapacity(original, 4096, 1073741824); // No configuration/file effect was admitted.
+        BoundedFiles.RequireReadCapacity(original, 4096, OperatingSystem.IsLinux() ? 2147483648L : 1073741824L); // No configuration/file effect was admitted.
     }
     [Theory]
     [InlineData("throw")]
@@ -69,7 +69,7 @@ public sealed class CommandLineTests
         Assert.Equal("Command options must be a stable exact-key selection for the selected mode.", error.Message);
         Assert.DoesNotContain("secret-sentinel", error.ToString()); Assert.Null(error.InnerException);
         Assert.Empty(application.RetainedExternalCalls);
-        BoundedFiles.RequireReadCapacity(original, 4096, 1073741824);
+        BoundedFiles.RequireReadCapacity(original, 4096, OperatingSystem.IsLinux() ? 2147483648L : 1073741824L);
     }
     [Theory]
     [InlineData(ToolMode.Plan)]
@@ -86,6 +86,26 @@ public sealed class CommandLineTests
         foreach (var row in options) Assert.Equal(row.Value, selected.Get(row.Key));
         options["config"] = "changed-config"; options.Remove("dry-run");
         Assert.Equal("original-config", selected.Get("config")); Assert.True(selected.Has("dry-run")); Assert.NotSame(options, selected.Options);
+    }
+    [Fact]
+    public void Original_file_read_credit_has_platform_boundary_and_preserves_prior_complete_debits()
+    {
+        var maximum = OperatingSystem.IsLinux() ? 2147483648L : 1073741824L;
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        using var other = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        BoundedFiles.RequireReadCapacity(original, 4096, maximum);
+        Assert.Throws<ToolUsageException>(() => BoundedFiles.RequireReadCapacity(original, 0, maximum + 1));
+        var directory = Path.Combine(Path.GetTempPath(), "forge-read-credit-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory); var path = Path.Combine(directory, "one-byte"); File.WriteAllBytes(path, [42]);
+        Assert.Equal(new byte[] { 42 }, BoundedFiles.Read(path, original, 1));
+        // Actual Read debits its open and complete byte+EOF: no capacity check
+        // refunds either operation or byte, and another original is independent.
+        BoundedFiles.RequireReadCapacity(original, 4094, maximum - 2);
+        Assert.Throws<ToolUsageException>(() => BoundedFiles.RequireReadCapacity(original, 0, maximum - 1));
+        Assert.Throws<ToolUsageException>(() => BoundedFiles.RequireReadCapacity(original, 4095, 0));
+        BoundedFiles.RequireReadCapacity(other, 4096, maximum);
+        BoundedFiles.RequireReadCapacity(original, 4094, maximum - 2);
+        TestContext.Current.TestOutputHelper!.WriteLine("Retained bounded read-credit fixture: " + directory);
     }
     sealed class InconsistentOptions(string behavior) : IReadOnlyDictionary<string, string?>
     {

@@ -230,7 +230,7 @@ public sealed class ProductionBatchTests
             Assert.Equal(1, await Program.Main(["implement", "--plan", nodes[0].Plan.Path, "--config", containing.Path, "--json"])
                 .WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken));
             Assert.Empty(output.ToString());
-            var expected = unsupportedNode < 0 ? "Actual pinned Linux scope required for every batch node." : "Selected Linux worker image must fit the 64-byte through eleven-MiB exact-image profile before dispatch.";
+            var expected = unsupportedNode < 0 ? "Actual pinned Linux scope required for every batch node." : "Selected Linux worker image must fit the 64-byte through selected finite exact-image profile before dispatch.";
             Assert.Contains(expected, errors.ToString(), StringComparison.Ordinal);
             Assert.False(Directory.Exists(storeRoot)); Assert.All(stores, store => Assert.False(Directory.Exists(store)));
             Assert.All(nodes, node => Assert.False(File.Exists(node.Plan.Path)));

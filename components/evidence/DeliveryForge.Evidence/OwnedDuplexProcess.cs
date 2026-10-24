@@ -23,7 +23,7 @@ public sealed record DuplexRetirement(bool KnownClosed, bool RootExited, uint Ac
 public sealed class OwnedDuplexProcess
 {
     // DATA profile bound only; this constant grants no scope or native authority.
-    public const long MaximumExactLinuxImageBytes = 11L * 1024 * 1024;
+    public const long MaximumExactLinuxImageBytes = 296885960L;
     static readonly ConcurrentDictionary<OwnedDuplexProcess, byte> Retained = new();
     readonly IOwnedDuplexBudget budget; readonly bool commandCapture; readonly List<DuplexIoObservation> io = []; readonly object gate = new();
     Stream? input, output, error; Action<bool>? closeInput; readonly int errorLimit; bool errorQuotaExceeded; Func<bool, DuplexNativeObservation>? observe; Action<bool>? terminate; Func<bool, bool>? dispose;

@@ -13,8 +13,10 @@ internal sealed class LinuxScopeKernel
 {
     const int DirectoryFlag = 0x10000, NoFollow = 0x20000, CloseOnExec = 0x80000;
     const long Cgroup2Magic = 0x63677270;
-    // Reserve within the EXISTING cumulative ceilings, never another allowance.
+    // Ordinary scopes keep their original ceilings. Exact-image admission selects
+    // the approved finite ceiling on this SAME counter; no prior debit is reset.
     const long WorkReadByteLimit = 14L * 1024 * 1024, TotalReadByteLimit = 16L * 1024 * 1024;
+    const long ExactWorkReadByteLimit = 300031689L, ExactTotalReadByteLimit = 302128841L;
     const int WorkCallLimit = 8192, TotalCallLimit = 16384;
     readonly IOwnedDuplexBudget original; readonly object gate = new(); readonly List<Call> calls = []; readonly List<OwnedFd> descriptors = [];
     bool exactImageEntered;
@@ -132,7 +134,7 @@ internal sealed class LinuxScopeKernel
     byte[] Read(string name, bool cleanup, int maximum)
     {
         Check(cleanup); if (name is not ("cgroup.events" or "memory.max" or "memory.swap.max" or "cpuset.cpus.effective" or "cpu.max" or "pids.max")) throw new IOException("Unlisted original cgroup observation.");
-        if (readBytes > (cleanup ? TotalReadByteLimit : WorkReadByteLimit) - (maximum + 1)) throw new IOException("Complete cgroup observation byte quota exceeded before allocation."); readBytes += maximum + 1; var data = new byte[maximum + 1]; var fd = OpenFd(name, NoFollow | CloseOnExec, cleanup, group); var count = 0; Exception? primary = null, post = null;
+        if (readBytes > (exactImageEntered ? (cleanup ? ExactTotalReadByteLimit : ExactWorkReadByteLimit) : (cleanup ? TotalReadByteLimit : WorkReadByteLimit)) - (maximum + 1)) throw new IOException("Complete cgroup observation byte quota exceeded before allocation."); readBytes += maximum + 1; var data = new byte[maximum + 1]; var fd = OpenFd(name, NoFollow | CloseOnExec, cleanup, group); var count = 0; Exception? primary = null, post = null;
         try { while (count < data.Length) { Check(cleanup); var chunk = new byte[data.Length - count]; var n = (int)Native("read:" + name, () => read(fd.Actual, chunk, (nuint)chunk.Length), cleanup, chunk); if (n == 0) break; Buffer.BlockCopy(chunk, 0, data, count, n); count += n; } if (count > maximum) throw new IOException("Complete cgroup file exceeded its finite profile."); }
         catch (Exception error) { primary = error; }
         try { Close(fd, cleanup); Check(cleanup); } catch (Exception error) { post = error; }
@@ -181,10 +183,11 @@ internal sealed class LinuxScopeKernel
         lock (gate)
         {
             Check(false); Same(false); if (exactImageEntered || actualPid <= 0 || actualFd <= 2 || selected.Bytes < 64 || selected.Bytes > OwnedDuplexProcess.MaximumExactLinuxImageBytes) throw new IOException("One finite original exact-image descriptor observation required.");
-            // Charge complete content plus EOF against this SAME existing kernel
-            // quota before opening the descriptor. No refund or image allowance.
+            // Admit complete image plus EOF against the approved exact-mode ceiling
+            // before descriptor open. Preserve ALL prior metadata debits; the
+            // remaining three-MiB WORK headroom is not a fresh allowance.
             var byteLimit = selected.Bytes + 1;
-            if (byteLimit > WorkReadByteLimit - readBytes) throw new IOException("Complete sealed-image observation exceeds remaining original kernel byte quota before open.");
+            if (byteLimit > ExactWorkReadByteLimit - readBytes) throw new IOException("Complete sealed-image observation exceeds remaining original kernel byte quota before open.");
             readBytes += byteLimit; exactImageEntered = true; Check(false);
             var fd = OpenFd("/proc/" + actualPid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/fd/" + actualFd.ToString(System.Globalization.CultureInfo.InvariantCulture), CloseOnExec, false);
             Exception? primary = null, post = null;

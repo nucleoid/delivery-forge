@@ -143,7 +143,7 @@ internal sealed class StandaloneEntrypoint
         if (!OperatingSystem.IsLinux()) return;
         if (selectedHost is null) throw new ToolUsageException("Selected Linux worker admission has no image selection.");
         if (selectedHost.Bytes < 64 || selectedHost.Bytes > OwnedDuplexProcess.MaximumExactLinuxImageBytes)
-            throw new ToolUsageException("INCOMPLETE: Selected Linux worker image must fit the 64-byte through eleven-MiB exact-image profile before dispatch.");
+            throw new ToolUsageException("INCOMPLETE: Selected Linux worker image must fit the 64-byte through selected finite exact-image profile before dispatch.");
     }
     internal static async Task SettleBatchTaskAfterWorkFailureAsync(Task actual, ToolLifetime original, Exception primary)
     {

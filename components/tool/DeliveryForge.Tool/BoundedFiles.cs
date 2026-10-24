@@ -79,13 +79,16 @@ public static class BoundedFiles
     sealed class FileCredits { internal readonly object Gate = new(); internal int Operations; internal long Reads, Writes; }
     static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ToolLifetime, FileCredits> Credits = new();
     static readonly List<FileFrame> UnknownFiles = [];
+    // Approved platform byte policy; ALL Linux originals use two GiB. Other
+    // platforms keep one GiB. The existing per-original counters never reset.
+    static long MaximumOriginalReadBytes => OperatingSystem.IsLinux() ? 2147483648L : 1073741824L;
     static void Credit(ToolLifetime life, long bytes, bool write)
     {
         life.Check(); var credit = Credits.GetValue(life, _ => new());
         lock (credit.Gate)
         {
             if (credit.Operations >= 4096 || bytes < 0) throw new IOException("Original finite file-operation credit exhausted before effect.");
-            var maximum = write ? 268435456L : 1073741824L; var used = write ? credit.Writes : credit.Reads;
+            var maximum = write ? 268435456L : MaximumOriginalReadBytes; var used = write ? credit.Writes : credit.Reads;
             if (bytes > maximum - used) throw new IOException("Original cumulative complete file-byte credit exhausted before allocation/effect.");
             credit.Operations++; if (write) credit.Writes += bytes; else credit.Reads += bytes;
         }
@@ -99,7 +102,7 @@ public static class BoundedFiles
         if (operations < 0 || bytes < 0) throw new ToolUsageException("Finite declared read requirement required.");
         var credit = Credits.GetValue(life, _ => new());
         lock (credit.Gate)
-            if (operations > 4096 - credit.Operations || bytes > 1073741824L - credit.Reads)
+            if (operations > 4096 - credit.Operations || bytes > MaximumOriginalReadBytes - credit.Reads)
                 throw new ToolUsageException("Selected runtime-trust reads cannot fit the remaining SAME original file credit; no host is dispatched.");
         life.Check();
     }
@@ -151,7 +154,7 @@ public static class BoundedFiles
     // This does not grant image/scope/reviewer authority.
     internal static void ReserveExactLinuxImageReads(AdmissionFile pin, ToolLifetime life)
     {
-        life.Check(); if (pin.Bytes < 64 || pin.Bytes > DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes) throw new ToolUsageException("Exact Linux ELF image must fit the eleven-MiB exact-image profile inside the existing kernel quota and cleanup reserve.");
+        life.Check(); if (pin.Bytes < 64 || pin.Bytes > DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes) throw new ToolUsageException("Exact Linux ELF image must fit the selected finite exact-image profile and original kernel cleanup reserve.");
         Credit(life, checked(2 * (pin.Bytes + 1)), false);
     }
     // Windows sharing denies writes and deletion for the entire retained native

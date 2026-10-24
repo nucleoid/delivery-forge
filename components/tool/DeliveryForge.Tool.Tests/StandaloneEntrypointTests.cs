@@ -87,7 +87,7 @@ public sealed class StandaloneEntrypointTests
         {
             Assert.Equal(1, await Program.Main(["implement", "--plan", Path.Combine(root, "absent-plan"), "--config", config.Path, "--json"])
                 .WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken));
-            Assert.Empty(output.ToString()); Assert.Contains("Selected Linux worker image must fit the 64-byte through eleven-MiB exact-image profile before dispatch.", errors.ToString(), StringComparison.Ordinal);
+            Assert.Empty(output.ToString()); Assert.Contains("Selected Linux worker image must fit the 64-byte through selected finite exact-image profile before dispatch.", errors.ToString(), StringComparison.Ordinal);
             Assert.False(File.Exists(hostPath)); Assert.False(Directory.Exists(store));
             Assert.False(Directory.Exists(worker.Worktree)); Assert.False(Directory.Exists(worker.ResultDirectory));
         }
