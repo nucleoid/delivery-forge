@@ -214,7 +214,7 @@ internal sealed class FixtureExactCopyControl : IDisposable
     internal static FixtureExactCopyControl Create(string mode, string source, string extent, string expectedHash, string dll, string dllExtent, string dllHash, Action clock)
     {
         clock(); Require(mode is "replace-before-ready" or "cancel-mid-copy" or "forged-sealed-ready");
-        Require(long.TryParse(extent, NumberStyles.None, CultureInfo.InvariantCulture, out var length) && length is >= 64 and <= 11534336);
+        Require(long.TryParse(extent, NumberStyles.None, CultureInfo.InvariantCulture, out var length) && length is >= 64 and <= 296885960);
         Require(long.TryParse(dllExtent, NumberStyles.None, CultureInfo.InvariantCulture, out var dllLength));
         Require(Path.GetFileName(dll) == "DeliveryForge.LinuxScopeBirthGate.dll");
         _ = PlainBytes(dll, dllLength, dllHash, clock);
