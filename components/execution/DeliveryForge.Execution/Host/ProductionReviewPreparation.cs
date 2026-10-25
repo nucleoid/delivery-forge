@@ -81,17 +81,17 @@ public sealed partial class ProductionReviewSourceOwner
         parent.CheckCurrent(RunId);
         if (Uncertain || !nativeCompletedAndQuiet()) throw new ReviewPreflightException("Original completed native worker is no longer quiet.", residualProcessUncertain: Uncertain);
     }
-    bool VerifySelectedImage()
-    {
-        Plain(GitExecutable);
-        using var image = new FileStream(GitExecutable, FileMode.Open, FileAccess.Read, FileShare.Read);
-        if (image.Length != gitBytes || Convert.ToHexStringLower(SHA256.HashData(image)) != gitSha256)
-            throw new ReviewPreflightException("Trusted Git image changed after original selection.");
-        original.CheckWork(); return true;
-    }
     void VerifyImage()
     {
         Check();
+        bool VerifySelectedImage()
+        {
+            Plain(GitExecutable);
+            using var image = new FileStream(GitExecutable, FileMode.Open, FileAccess.Read, FileShare.Read);
+            if (image.Length != gitBytes || Convert.ToHexStringLower(SHA256.HashData(image)) != gitSha256)
+                throw new ReviewPreflightException("Trusted Git image changed after original selection.");
+            original.CheckWork(); return true;
+        }
         if (provisionedBinding is not null)
         {
             // Preserve the metadata-entry and image-entry currentness checks;
@@ -116,12 +116,6 @@ public sealed partial class ProductionReviewSourceOwner
             !ReferenceEquals(parent, actualParent) || RunId != actualRunId || !ReferenceEquals(executor, actualExecutor))
             throw new ReviewPreflightException("Native review Git requires the same retained source/binding/executor/original parent/run.");
         Check();
-    }
-    internal void VerifyNativeGitImage(WorktreeManager.OwnedGitBinding actualBinding, IOwnedDuplexBudget actualOriginal,
-        ICoordinatedEffectAdmission actualParent, string actualRunId, ProcessCommandExecutor actualExecutor)
-    {
-        RequireNativeGitBinding(actualBinding, actualOriginal, actualParent, actualRunId, actualExecutor);
-        _ = VerifySelectedImage();
     }
     // Observation counter only; never a completion or dispatch authority. The
     // retained binding calls this immediately before the actual native call.
@@ -224,11 +218,7 @@ public sealed partial class ProductionReviewSourceOwner
     internal async Task<GitProcessResult> GitAsync(string gitDirectory, IReadOnlyList<string> arguments,
         CancellationToken token, byte[]? input = null, IReadOnlyDictionary<string, string>? extra = null)
     {
-        // The provisioned binding performs the complete image check in the
-        // synchronous prefix of its actual native admission. Input-bearing
-        // calls also retain this earlier check across their file-write await.
-        if (provisionedBinding is null || input is not null) VerifyImage(); else Check();
-        token.ThrowIfCancellationRequested();
+        VerifyImage(); token.ThrowIfCancellationRequested();
         Plain(gitDirectory); gitDirectory = Path.GetFullPath(gitDirectory);
         var workerRole = SamePath(gitDirectory, WorkerGitDirectory);
         var controlledRole = controlled is not null && SamePath(gitDirectory, controlled);

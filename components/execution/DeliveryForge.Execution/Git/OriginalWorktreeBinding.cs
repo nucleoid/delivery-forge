@@ -178,9 +178,6 @@ public sealed partial class WorktreeManager
                 {
                     actualOwner.Check();
                     VerifyMetadata(false);
-                    // Full current image verification and actual birth share
-                    // one retained effect, with no await or admission escape.
-                    actualOwner.VerifyNativeGitImage(this, original, parent, RunId, executor);
                     var allowance = actualOwner.Remaining();
                     entered = true;
                     actualOwner.NativeGitCaptureStarting();

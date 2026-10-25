@@ -86,12 +86,13 @@ public sealed class ProductionReviewPreparationTests : IDisposable
     [Fact]
     public async Task Parent_revocation_at_file_birth_refuses_read_and_never_creates_write_target()
     {
-        var owner = Owner(); parent.AllowAsync = true; parent.DenySynchronous = true;
-        var read = await Assert.ThrowsAsync<InvalidOperationException>(() => owner.ReadFileAsync(Image, 1024, CancellationToken.None));
-        Assert.Equal("File birth admission revoked.", read.Message);
+        var owner = Owner(); parent.AllowAsync = true;
+        parent.BeforeAsync = () => parent.Revoked = true;
+        var read = await Assert.ThrowsAsync<IOException>(() => owner.ReadFileAsync(Image, 1024, CancellationToken.None));
+        Assert.Equal("File currentness revoked.", read.Message);
         var target = Path.Combine(root, "must-not-exist");
-        var write = await Assert.ThrowsAsync<InvalidOperationException>(() => owner.WriteFileAsync(target, [1, 2, 3], CancellationToken.None));
-        Assert.Equal("File birth admission revoked.", write.Message);
+        var write = await Assert.ThrowsAsync<IOException>(() => owner.WriteFileAsync(target, [1, 2, 3], CancellationToken.None));
+        Assert.Equal("File currentness revoked.", write.Message);
         Assert.False(File.Exists(target)); Assert.False(owner.Uncertain);
     }
 
@@ -101,8 +102,15 @@ public sealed class ProductionReviewPreparationTests : IDisposable
     public async Task Parent_postbirth_refusal_closes_the_exact_stream_and_preserves_created_bytes(bool write)
     {
         var owner = Owner(); parent.AllowAsync = true;
-        parent.AfterSynchronous = value => { if (value is FileStream) parent.Revoked = true; };
         var path = write ? Path.Combine(root, "created-before-refusal") : Image;
+        parent.ObserveCurrent = () =>
+        {
+            if (!File.Exists(path)) return;
+            // Observe the actual owned stream's sharing denial, rather than
+            // depending on a second synchronous ledger enrollment.
+            try { using var probe = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None); }
+            catch (IOException) { parent.Revoked = true; }
+        };
         if (write) await Assert.ThrowsAsync<IOException>(() => owner.WriteFileAsync(path, [1, 2, 3], CancellationToken.None));
         else await Assert.ThrowsAsync<IOException>(() => owner.ReadFileAsync(path, 1024, CancellationToken.None));
         using var exclusive = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
@@ -236,17 +244,21 @@ public sealed class ProductionReviewPreparationTests : IDisposable
     sealed class RefusingParent : ICoordinatedSynchronousEffectAdmission
     {
         internal int Entries;
-        internal bool AllowAsync, DenySynchronous, Revoked;
+        internal bool AllowAsync, Revoked;
         internal int UnknownObservations;
-        internal Action<object?>? AfterSynchronous;
-        public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke) { Entries++; return AllowAsync ? invoke() : throw new InvalidOperationException("Negative control must not reach native admission."); }
+        internal Action? BeforeAsync, ObserveCurrent;
+        public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke)
+        {
+            Entries++;
+            if (!AllowAsync) throw new InvalidOperationException("Negative control must not reach native admission.");
+            BeforeAsync?.Invoke(); return invoke();
+        }
         public void RetainUncertain(string runId, string reason) { UnknownObservations++; throw new IOException(reason); }
         public T EnterSynchronous<T>(string runId, Func<T> invoke)
         {
-            if (DenySynchronous) throw new InvalidOperationException("File birth admission revoked.");
-            CheckCurrent(runId); var value = invoke(); AfterSynchronous?.Invoke(value); CheckCurrent(runId); return value;
+            CheckCurrent(runId); var value = invoke(); CheckCurrent(runId); return value;
         }
-        public void CheckCurrent(string runId) { if (Revoked) throw new IOException("File birth postcheck revoked."); }
+        public void CheckCurrent(string runId) { ObserveCurrent?.Invoke(); if (Revoked) throw new IOException("File currentness revoked."); }
     }
     sealed class SourceBuilderParent : ICoordinatedSynchronousEffectAdmission
     {

@@ -16,6 +16,39 @@ public sealed class ProductionReviewFiniteAdmissionTests
 {
     public static bool Windows => OperatingSystem.IsWindows();
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Actual_file_operation_retains_one_parent_entry_and_closes_its_stream(bool write)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-file-ledger-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(root, ".git"));
+        var image = Path.Combine(root, "inert-image.data");
+        byte[] bytes = Encoding.UTF8.GetBytes("actual bounded file bytes; image is never launched");
+        await File.WriteAllBytesAsync(image, bytes, TestContext.Current.CancellationToken);
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var current = true;
+        var parent = new ParentEffectAdmission(new object(), run => current && run == "owned", _ => current = false);
+        var owner = new ProductionReviewSourceOwner(new ProcessCommandExecutor(), original, parent, "owned", root,
+            Path.Combine(root, ".git"), Path.Combine(root, ".git"), image, bytes.Length,
+            Convert.ToHexStringLower(SHA256.HashData(bytes)), "git version inert", new('a', 40), new('b', 40), () => true,
+            "sha256:" + new string('a', 64), "sha256:" + new string('b', 64), "review.json", 1024);
+        var before = parent.EnteredCount;
+        var path = write ? Path.Combine(root, "created") : image;
+        if (write) await owner.WriteFileAsync(path, bytes, TestContext.Current.CancellationToken);
+        else Assert.Equal(bytes, await owner.ReadFileAsync(path, 1024, TestContext.Current.CancellationToken));
+        await Task.WhenAll(parent.OriginalObservers).WaitAsync(original.Remaining, TestContext.Current.CancellationToken);
+        Assert.True(parent.AllKnownSettled); Assert.True(current);
+        Assert.False(owner.Uncertain); Assert.False(original.HasExplicitUnknown);
+        using (var exclusive = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var actual = new byte[bytes.Length]; exclusive.ReadExactly(actual);
+            Assert.Equal(bytes, actual); Assert.Equal(bytes.Length, exclusive.Length);
+        }
+        TestContext.Current.TestOutputHelper!.WriteLine("Retained actual file-operation fixture: " + root);
+        Assert.Equal(before + 1, parent.EnteredCount);
+    }
+
     [Fact(Timeout = 180000, SkipUnless = nameof(Windows), Skip = "Linux native source preparation requires its separately selected owned scope.")]
     public async Task Actual_linked_worktree_prepares_with_the_real_finite_parent_without_multiplicative_metadata_effects()
     {
