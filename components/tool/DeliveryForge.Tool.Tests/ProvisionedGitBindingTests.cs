@@ -113,25 +113,15 @@ public sealed class ProvisionedGitBindingTests
     {
         using var fixture = await Fixture.CreateAsync();
         var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
-        var head = (await fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token)).HeadCommit;
-        var image = File.ReadAllBytes(fixture.GitImage);
-        var owner = new ProductionReviewSourceOwner(fixture.Executor, fixture.Original, fixture.Parent, "owned", fixture.Worker,
-            binding.GitDirectory, binding.CommonDirectory, fixture.GitImage, image.Length,
-            Convert.ToHexStringLower(SHA256.HashData(image)), "git version fixture", head, head, () => true,
-            "sha256:" + new string('a', 64), "sha256:" + new string('b', 64), ".forge/policy.json", 1048576, binding)
-        { MaximumBytes = 1048576 };
+        var owner = await fixture.ReviewOwnerAsync();
         var effects = fixture.Parent.Inner.EnteredCount;
         var admissions = fixture.Parent.NativeAdmissionAttempts;
         fixture.Parent.ObserveNativeReturn = true;
         // The method's internal Review assembly result is intentionally absent
         // from this assembly's API. Invoke the actual owner without widening
         // production visibility or manufacturing a capture/authority receipt.
-        var method = typeof(ProductionReviewSourceOwner).GetMethod("GitAsync",
-            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
-        var actual = Assert.IsAssignableFrom<Task>(method.Invoke(owner,
-            [binding.GitDirectory, new[] { "--version" }, fixture.Original.Token, null, null]));
-        await actual;
-        var native = Assert.IsType<Task<BoundedCommandCaptureResult>>(fixture.Parent.ObservedNativeTask);
+        await ReviewGitAsync(owner, binding.GitDirectory, fixture.Original.Token);
+        var native = Assert.IsAssignableFrom<Task<BoundedCommandCaptureResult>>(fixture.Parent.ObservedNativeTask);
         var capture = await native;
         Assert.Equal(0, capture.Command.ExitCode);
         Assert.True(capture.Command.OwnedProcessQuiescent); Assert.True(capture.RootExitObserved);
@@ -147,6 +137,41 @@ public sealed class ProvisionedGitBindingTests
         // Two retained effects: checked native birth and the complete postcheck.
         // No ledger pruning/refund, saved receipt, or production acceptance.
         Assert.Equal(effects + 2, fixture.Parent.Inner.EnteredCount);
+    }
+
+    static Task ReviewGitAsync(ProductionReviewSourceOwner owner, string gitDirectory, CancellationToken token)
+    {
+        var method = typeof(ProductionReviewSourceOwner).GetMethod("GitAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic, null,
+            [typeof(string), typeof(IReadOnlyList<string>), typeof(CancellationToken), typeof(byte[]), typeof(IReadOnlyDictionary<string, string>)], null)!;
+        return Assert.IsAssignableFrom<Task>(method.Invoke(owner, [gitDirectory, new[] { "--version" }, token, null, null]));
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Review_git_rechecks_metadata_inside_the_actual_native_admission()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        var owner = await fixture.ReviewOwnerAsync();
+        var effects = fixture.Parent.Inner.EnteredCount;
+        var admissions = fixture.Parent.NativeAdmissionAttempts;
+        var path = Path.Combine(binding.GitDirectory, "commondir");
+        var changed = Encoding.UTF8.GetBytes(fixture.Foreign + "\n");
+        fixture.Parent.ObserveNativeReturn = true;
+        fixture.Parent.BeforeNativeAdmission = () =>
+        {
+            using var metadata = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read);
+            metadata.SetLength(0); metadata.Write(changed);
+        };
+        await Assert.ThrowsAsync<WorktreeBoundaryException>(() => ReviewGitAsync(owner, binding.GitDirectory, fixture.Original.Token));
+        Assert.Equal(changed, File.ReadAllBytes(path));
+        Assert.Equal(admissions + 1, fixture.Parent.NativeAdmissionAttempts);
+        Assert.Equal(effects + 1, fixture.Parent.Inner.EnteredCount);
+        Assert.Null(fixture.Parent.ObservedNativeTask);
+        Assert.True(owner.MayCleanOwnedFiles); Assert.False(owner.Uncertain);
+        Assert.False(fixture.Original.HasExplicitUnknown);
+        // A real failed entered prefix is retained, with no later Git birth.
+        Assert.False(fixture.Parent.Inner.AllKnownSettled);
     }
 
     [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
@@ -460,6 +485,7 @@ public sealed class ProvisionedGitBindingTests
         internal bool Current = true;
         internal int NativeAdmissionAttempts;
         internal bool ObserveNativeReturn;
+        internal Action? BeforeNativeAdmission;
         internal Task? ObservedNativeTask;
         internal WriterLease? ActualWriter;
         internal PostBirthParent() => Inner = new(new object(), run => Current && run == "owned", _ => Current = false);
@@ -467,6 +493,7 @@ public sealed class ProvisionedGitBindingTests
         public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke)
         {
             NativeAdmissionAttempts++;
+            var before = BeforeNativeAdmission; BeforeNativeAdmission = null; before?.Invoke();
             if (!ObserveNativeReturn) return Inner.EnterAsync(runId, invoke);
             return Inner.EnterAsync(runId, () =>
             {
@@ -540,6 +567,16 @@ public sealed class ProvisionedGitBindingTests
             environment["GIT_CONFIG_NOSYSTEM"] = "1"; environment["GIT_CONFIG_GLOBAL"] = "NUL";
             environment["GIT_CONFIG_SYSTEM"] = "NUL"; environment["GIT_TERMINAL_PROMPT"] = "0";
             return new(GitImage, ["--version"], Worker, environment) { EnvironmentIsComplete = true };
+        }
+        internal async Task<ProductionReviewSourceOwner> ReviewOwnerAsync()
+        {
+            var binding = Manager.RequireOriginalBinding(Worker);
+            var head = (await Manager.ObserveAsync(Worker, Original.Token)).HeadCommit;
+            var image = File.ReadAllBytes(GitImage);
+            return new(Executor, Original, Parent, "owned", Worker, binding.GitDirectory, binding.CommonDirectory,
+                GitImage, image.Length, Convert.ToHexStringLower(SHA256.HashData(image)), "git version fixture", head, head, () => true,
+                "sha256:" + new string('a', 64), "sha256:" + new string('b', 64), ".forge/policy.json", 1048576, binding)
+            { MaximumBytes = 1048576 };
         }
         async Task<string> Git(params string[] arguments) => await GitAt(Repository, arguments);
         internal async Task<string> GitAt(string directory, params string[] arguments)
