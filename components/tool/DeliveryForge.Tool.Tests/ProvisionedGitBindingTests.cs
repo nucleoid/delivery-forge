@@ -123,7 +123,13 @@ public sealed class ProvisionedGitBindingTests
         var effects = fixture.Parent.Inner.EnteredCount;
         var admissions = fixture.Parent.NativeAdmissionAttempts;
         fixture.Parent.ObserveNativeReturn = true;
-        Task actual = owner.GitAsync(binding.GitDirectory, ["--version"], fixture.Original.Token);
+        // The method's internal Review assembly result is intentionally absent
+        // from this assembly's API. Invoke the actual owner without widening
+        // production visibility or manufacturing a capture/authority receipt.
+        var method = typeof(ProductionReviewSourceOwner).GetMethod("GitAsync",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        var actual = Assert.IsAssignableFrom<Task>(method.Invoke(owner,
+            [binding.GitDirectory, new[] { "--version" }, fixture.Original.Token, null, null]));
         await actual;
         var native = Assert.IsType<Task<BoundedCommandCaptureResult>>(fixture.Parent.ObservedNativeTask);
         var capture = await native;
