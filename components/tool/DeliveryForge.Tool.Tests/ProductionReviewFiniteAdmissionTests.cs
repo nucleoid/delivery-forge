@@ -6,6 +6,7 @@ using DeliveryForge.Contracts.Validation;
 using DeliveryForge.Evidence;
 using DeliveryForge.Execution.Host;
 using DeliveryForge.Execution.Git;
+using DeliveryForge.Review;
 
 namespace DeliveryForge.Tool.Tests;
 
@@ -139,16 +140,22 @@ public sealed class ProductionReviewFiniteAdmissionTests
                 baseCommit, head, () => true, planIdentity, evidenceIdentity, "review.json", 1048576, provisioned);
             using var bootstrap = await ReviewAuthorityHost.CreateProductionFromOwnedSourceAsync(owner, planBytes, evidenceBytes,
                 "review.json", 1048576, TestContext.Current.CancellationToken);
-            // Exercise the retained review entry directly after the real
-            // bootstrap has selected its finite capture bound. Both full image
-            // verifications and the actual native capture remain enrolled:
-            // two synchronous groups plus the SAME native capture Task.
-            var beforeReviewGit = parent.EnteredCount;
-            var version = await owner.GitAsync(workerGit, ["--version"], TestContext.Current.CancellationToken);
-            Assert.Equal(beforeReviewGit + 3, parent.EnteredCount);
-            Assert.Equal(0, version.ExitCode);
-            Assert.StartsWith("git version ", Encoding.UTF8.GetString(version.StandardOutput), StringComparison.Ordinal);
-            Assert.Empty(version.StandardError);
+            // Exercise all five fresh source computations through the public
+            // actual bootstrap/export boundary. This is source conformance;
+            // quality, reviewer and full installed-run costs are not included.
+            var counts = new List<int> { parent.EnteredCount };
+            var patch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, baseCommit, head,
+                planIdentity, new Dictionary<string, string>(), TestContext.Current.CancellationToken);
+            counts.Add(parent.EnteredCount);
+            for (var export = 0; export < 3; export++)
+            {
+                var bytes = await GitPatchIdentity.ExportVerifiedPatchAsync(bootstrap.ObjectView, patch, TestContext.Current.CancellationToken);
+                Assert.Equal(patch.PatchSha256, "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes)));
+                counts.Add(parent.EnteredCount);
+            }
+            Assert.Equal(5, counts.Count);
+            for (var index = 1; index < counts.Count; index++) Assert.True(counts[index] > counts[index - 1]);
+            TestContext.Current.TestOutputHelper!.WriteLine("Actual five source-computation cumulative effects=" + string.Join(",", counts) + "/1024; excludes quality/reviewer/full installed run.");
             Assert.Equal(baseCommit, bootstrap.Policy.SourceRevision); Assert.Equal(head, bootstrap.ObjectView.FrozenHeadCommit);
             Assert.True(current); Assert.False(owner.Uncertain); Assert.False(original.HasExplicitUnknown);
             Assert.InRange(parent.EnteredCount, 1, 1023); Assert.True(parent.AllKnownSettled);
