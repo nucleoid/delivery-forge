@@ -93,4 +93,73 @@ public sealed partial class LocalSingleTests
         }
         Assert.False(scheduler.HasRetainedReservation); Assert.Equal(0, original.CleanupReads);
     }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Completed_worker_review_failure_releases_only_settled_known_original_reservation(bool unknown)
+    {
+        using var repository = new PlanningRepository(); await repository.InitializeAsync(); var plan = await repository.FreezeAsync();
+        var worker = Worker(repository, plan, "completed-review-failure-" + Guid.NewGuid().ToString("N"));
+        var store = new RunStore(Path.Combine(repository.Root, "results")); var worktrees = new WorktreeManager();
+        await using var processes = new ProcessControl(); using var execution = new ExecutionCoordinator(store, worktrees, processes, new FixtureControl());
+        var original = new SchedulingOriginal(); var parent = new SchedulingParent();
+        execution.BindCoordinationAdmission(parent);
+        // Exercise the existing internal original-owner API without widening
+        // Execution's production/test friend assembly surface.
+        const System.Reflection.BindingFlags internalInstance = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+        typeof(ExecutionCoordinator).GetMethod("BindOriginalScheduling", internalInstance)!.Invoke(execution, [original, parent, worker.RunId, worktrees]);
+        var scheduler = LocalSingleScheduler.Create(plan, worker, Demand, Budget(), store, execution, worktrees, repository.Reader);
+        var pipeline = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var retainedUnknown = false; var writerDispositions = 0;
+        scheduler.BindOriginal(original, parent, () => pipeline.Task, () => false, () => retainedUnknown);
+        var ticket = await scheduler.ReserveAsync(Cancellation);
+        AgentCompletionReceipt? completion = null;
+        async Task ReleaseActualWriter()
+        {
+            var actual = Assert.IsAssignableFrom<Task>(typeof(ExecutionCoordinator).GetMethod("ReleaseCompletedWriterAfterFailureAsync", internalInstance)!
+                .Invoke(execution, [worker.RunId, completion!, (Func<bool>)(() => !retainedUnknown)]));
+            await actual;
+            writerDispositions++;
+        }
+        try
+        {
+            var request = await scheduler.ProvisionAndPrepareAsync(ticket, Cancellation); var accepted = Accepted(request);
+            await execution.AcceptAsync(accepted, Cancellation);
+            await File.WriteAllTextAsync(Path.Combine(worker.Worktree, "README.md"), "completed before actual review refusal", Cancellation);
+            await repository.GitAsync(worker.Worktree, "add", "README.md");
+            await repository.GitAsync(worker.Worktree, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "worker");
+            var observed = await worktrees.ObserveAsync(worker.Worktree, Cancellation);
+            completion = new(WorkerEnvelope.SchemaVersion, request.RunId, request.RequestIdentity, request.AdapterId, request.AdapterVersion,
+                accepted.RuntimeRunIdentity, accepted.RuntimeTaskIdentity, "success", worker.Worktree, observed.HeadCommit, observed.TreeId, DateTimeOffset.UtcNow, [], []);
+            await execution.CompleteAsync(completion, Cancellation);
+            var failure = new IOException("Actual post-completion review Task refused.");
+            pipeline.SetException(failure);
+            Assert.Same(failure, await Assert.ThrowsAsync<IOException>(() => pipeline.Task));
+            original.Refuse = true; // Cleanup never reopens WORK.
+            retainedUnknown = unknown;
+            if (unknown)
+            {
+                await Assert.ThrowsAsync<SchedulingException>(() => scheduler.ReleaseCompletedFailureObservedAsync(ticket, () => true, ReleaseActualWriter));
+                Assert.True(scheduler.HasRetainedReservation); Assert.Equal(0, writerDispositions);
+            }
+            else
+            {
+                await scheduler.ReleaseCompletedFailureObservedAsync(ticket, () => true, ReleaseActualWriter);
+                Assert.False(scheduler.HasRetainedReservation); Assert.Equal(1, writerDispositions);
+                Assert.Same(failure, pipeline.Task.Exception!.InnerException);
+                var records = (await store.RecoverAsync(worker.RunId, Cancellation)).Records;
+                Assert.Contains(records, row => row.Kind == "worker-completed"); Assert.DoesNotContain(records, row => row.Kind == "stopped");
+                Assert.Equal("prepared", (await store.RecoverAsync(worker.RunId + "-scheduler", Cancellation)).Latest!.Payload.GetProperty("phase").GetString());
+            }
+        }
+        finally
+        {
+            // This mutable uncertainty flag is fixture DATA only; Tool's sticky
+            // actual UNKNOWN can never be cleared by this cleanup control.
+            retainedUnknown = false;
+            if (scheduler.HasRetainedReservation && completion is not null)
+                await scheduler.ReleaseCompletedFailureObservedAsync(ticket, () => true, ReleaseActualWriter);
+        }
+    }
 }

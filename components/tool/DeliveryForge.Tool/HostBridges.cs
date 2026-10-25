@@ -603,9 +603,42 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
                     throw new AggregateException("Original host operation and existing parent loss-stop observation failed.", primary, error);
                 throw;
             }
-            finally { await FinishStoppedSchedulingAsync(frame).ConfigureAwait(false); frame.CloseWhenSettled(); }
+            finally
+            {
+                await FinishCompletedFailureSchedulingAsync(frame).ConfigureAwait(false);
+                await FinishStoppedSchedulingAsync(frame).ConfigureAwait(false);
+                frame.CloseWhenSettled();
+            }
         }
         return RetainedResult(frame, actualResult);
+    }
+    // Failure is retained, but a known-closed completed author must not hold a
+    // reservation forever solely because a later review/quality phase refused.
+    // This is cleanup on the same live frame, never saved terminal DATA.
+    internal static bool SettledCompletedPipelineFailure(HostBridgeFrame frame) =>
+        frame.OwnerCompleted && !frame.OwnerStopped && frame.Completion is not null &&
+        (frame.Primary is not null || frame.Post is not null) &&
+        frame.Worker.Actual is { IsCompleted: true } && !frame.Worker.Unknown &&
+        !frame.Quality.Unknown && !frame.Review.Unknown && !frame.IndependentReview.Unknown &&
+        !frame.LocalReal.Unknown && !frame.BatchEvidenceCapture.Unknown &&
+        !frame.Lifetime.HasExplicitUnknown;
+    async Task FinishCompletedFailureSchedulingAsync(HostBridgeFrame frame)
+    {
+        if (frame.Scheduler is not { HasRetainedReservation: true } scheduler || frame.Reservation is not { } ticket ||
+            !SettledCompletedPipelineFailure(frame) || !ObservePipelineSettled(frame.RunId) ||
+            !CompletedNativeOwnedResourcesClosed(frame)) return;
+        bool ActualClosed() => SettledCompletedPipelineFailure(frame) && ObservePipelineSettled(frame.RunId) &&
+            CompletedNativeOwnedResourcesClosed(frame);
+        try
+        {
+            bool enter;
+            lock (frame.ReconciliationGate) { enter = !frame.SchedulingCleanupEntered; frame.SchedulingCleanupEntered = true; }
+            if (enter) frame.SchedulingCleanup = scheduler.ReleaseCompletedFailureObservedAsync(ticket, ActualClosed,
+                () => coordinator.ReleaseCompletedWriterAfterFailureAsync(frame.RunId, frame.Completion!, ActualClosed));
+            var actual = frame.SchedulingCleanup ?? throw new IOException("Original completed-failure cleanup invocation has not returned its task.");
+            await actual.WaitAsync(frame.Lifetime.CleanupRemaining).ConfigureAwait(false); _ = frame.Lifetime.CleanupRemaining;
+        }
+        catch (Exception error) { frame.Post ??= error; frame.Lifetime.RetainBridgeUnknown(frame); }
     }
     async Task FinishStoppedSchedulingAsync(HostBridgeFrame frame)
     {

@@ -186,6 +186,31 @@ public sealed class ProvisionedGitBindingTests
             row => row.Kind == "stopped");
     }
 
+    [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    [InlineData("directories")]
+    [InlineData("git-file")]
+    [InlineData("common-file")]
+    public async Task Review_metadata_accepts_actual_provisioned_directories_and_refuses_file_substitution(string selected)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        Assert.True(Directory.Exists(binding.GitDirectory)); Assert.True(Directory.Exists(binding.CommonDirectory));
+        var before = fixture.Manager.ActualOwnedGitInvocations;
+        if (selected == "directories")
+            InstalledReviewHost.RequirePlainMetadataDirectories(binding.GitDirectory, binding.CommonDirectory);
+        else
+        {
+            var file = Path.Combine(fixture.Root, "metadata-file"); File.WriteAllText(file, "not a metadata directory");
+            Assert.Throws<IOException>(() => InstalledReviewHost.RequirePlainMetadataDirectories(
+                selected == "git-file" ? file : binding.GitDirectory,
+                selected == "common-file" ? file : binding.CommonDirectory));
+        }
+        Assert.Equal(before, fixture.Manager.ActualOwnedGitInvocations);
+        Assert.False(fixture.Original.HasExplicitUnknown);
+        // Real provisioned directory/type guard only; no native worker/reviewer
+        // result or installed acceptance is manufactured by this control.
+    }
+
     sealed class ResultDirectoryPort(Fixture fixture) : IHostToolSessionPort
     {
         internal int Starts;

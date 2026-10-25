@@ -94,4 +94,39 @@ public sealed class BatchEvidenceHandoffBoundaryTests
         Assert.Throws<IOException>(() => bridge.RequireCapturedBatchEvidence(frame, original));
         Assert.True(frame.CloseWhenSettled());
     }
+
+    [Theory]
+    [InlineData("settled")]
+    [InlineData("pending-review")]
+    [InlineData("explicit-unknown")]
+    public async Task Completed_review_failure_requires_actual_phase_settlement_without_erasing_primary(string state)
+    {
+        await using var processes = new ProcessControl();
+        using var coordinator = IdleCoordinator(processes);
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var frame = new HostBridgeFrame("completed-review-failure", original, coordinator, () => false, false);
+        var failure = new IOException("Actual review preparation fixture failure.");
+        frame.Completion = new(WorkerEnvelope.SchemaVersion, frame.RunId, new string('a', 64), "codex.cli", "fixture", "run", "task", "success",
+            Path.GetFullPath("."), new string('b', 40), new string('c', 40), DateTimeOffset.UtcNow, [], []);
+        frame.OwnerCompleted = true;
+        frame.Primary = failure;
+        frame.Worker.Start(original, () => Task.FromResult(ToolResult.Incomplete("HOST_OPERATION_RETAINED", "Fixture actual failed pipeline.")));
+        _ = await frame.Worker.ObserveAsync(original);
+        var pending = new TaskCompletionSource<ToolResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var actual = state == "pending-review" ? pending.Task : Task.FromException<ToolResult>(failure);
+        frame.Review.Start(original, () => actual);
+        if (state != "pending-review")
+            Assert.Same(failure, await Assert.ThrowsAsync<IOException>(() => frame.Review.ObserveAsync(original)));
+        if (state == "explicit-unknown") original.RetainUnknown();
+        Assert.Equal(state == "settled", OwnerHostBridge.SettledCompletedPipelineFailure(frame));
+        Assert.Same(failure, frame.Primary); Assert.Same(actual, frame.Review.Actual);
+        // DATA/task guard only: no native quiescence, writer, reservation or authority is supplied.
+        if (state == "pending-review")
+        {
+            Assert.False(frame.CloseWhenSettled());
+            pending.SetException(failure);
+            Assert.Same(failure, await Assert.ThrowsAsync<IOException>(() => frame.Review.ObserveAsync(original)));
+            Assert.True(frame.CloseWhenSettled());
+        }
+    }
 }

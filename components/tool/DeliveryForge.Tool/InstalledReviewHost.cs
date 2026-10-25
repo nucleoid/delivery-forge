@@ -305,7 +305,7 @@ internal sealed class InstalledReviewHost : IDisposable
         Current();
         var gitDirectory = provisioned.GitDirectory;
         var commonDirectory = provisioned.CommonDirectory;
-        try { BoundedFiles.Plain(gitDirectory); BoundedFiles.Plain(commonDirectory); }
+        try { RequirePlainMetadataDirectories(gitDirectory, commonDirectory); }
         catch (Exception error) { original.RecordFirstCaught("review-source-metadata-path", error); throw; }
         var head = (await Git("rev-parse", "HEAD^{commit}").ConfigureAwait(false)).Trim();
         var tree = (await Git("rev-parse", "HEAD^{tree}").ConfigureAwait(false)).Trim();
@@ -412,6 +412,13 @@ internal sealed class InstalledReviewHost : IDisposable
         _ = await GitPatchIdentity.ExportVerifiedPatchAsync(bootstrap.ObjectView, accepted.Patch, original.Token).ConfigureAwait(false);
         original.Check(); sourceOwner.Check();
         return (accepted, protectedEvidencePolicy);
+    }
+    // These independently provisioned metadata inputs are directories, not files.
+    // The plain-ancestor and reparse refusals remain the same path guard.
+    internal static void RequirePlainMetadataDirectories(string gitDirectory, string commonDirectory)
+    {
+        _ = BoundedFiles.Plain(gitDirectory, directory: true);
+        _ = BoundedFiles.Plain(commonDirectory, directory: true);
     }
     static bool Digest(string value) => value is { Length: 64 } && value.All(char.IsAsciiHexDigitLower);
     static bool Settled(BoundedCommandCaptureResult capture) => capture.Command.OwnedProcessQuiescent &&
