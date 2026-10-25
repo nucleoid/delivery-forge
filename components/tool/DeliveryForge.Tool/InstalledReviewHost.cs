@@ -100,7 +100,8 @@ internal sealed class InstalledReviewHost : IDisposable
     }
 
     internal async Task<ToolResult> RunIndependentAsync(HostBridgeFrame frame, ParentCoordinationHost parent, string? actualAuthorFamily,
-        Func<bool> actualNativeCompletedAndQuiet, IReadOnlyList<GateRunResult> actualQualityResults)
+        Func<bool> actualNativeCompletedAndQuiet, IReadOnlyList<GateRunResult> actualQualityResults,
+        InstalledQualityHost? completedQuality = null)
     {
         if (selection.IndependentReviewer is null) return ToolResult.Incomplete("INDEPENDENT_REVIEWER_REQUIRED", "No actual independent runtime reviewer was selected.");
         if (bootstrap is null || sourceOwner is null || assignment is null || frozen is null || frame.Completion is not { } completion ||
@@ -108,6 +109,7 @@ internal sealed class InstalledReviewHost : IDisposable
             throw new WorkerEnvelopeException("Same original immutable source preparation and completed author required.");
         if (actualAuthorFamily != "gpt") return ToolResult.Incomplete("ACTUAL_AUTHOR_FAMILY_REQUIRED", "The completed native author did not expose unambiguous opposite-family provenance.");
         if (independentReviewer is not null) throw new ToolUsageException("Actual independent reviewer cannot replay.");
+        completedQuality?.BindCompletedReviewOutputs(frame, sourceOwner);
         // Refuse this unsupported production profile before source/settings/CWD I/O.
         // RunAsync keeps the same guard as defense at its own boundary.
         if (ClaudeIndependentReviewer.UnsupportedProductionProfile(runtimeTrust, original, selection.IndependentReviewer) is { } profileRefusal) return profileRefusal;

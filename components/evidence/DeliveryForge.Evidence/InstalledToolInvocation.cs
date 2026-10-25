@@ -28,6 +28,15 @@ internal sealed class InstalledToolInvocation(
     private InitialBaselineLineCoverage? _fullCurrentLines;
     private IReadOnlyList<InitialBaselineSource> _captureSources = [];
     private InitialBaselineCaptureData? _capture;
+    private InstalledSourceInventory? completedSource;
+
+    internal InstalledSourceInventory CompletedSourceInventory()
+    {
+        if (!_entered || !_returned || !_artifactsPublished || _failure is not null || _proof is null || profile.Tool != "crap4csharp" ||
+            profile.Fixture || request.Purpose != InstalledToolPurpose.ChangedCode || completedSource is null)
+            throw new EvidenceWriteException("The actual completed callable invocation has no retained source inventory.");
+        return completedSource;
+    }
 
     internal Task CompleteAsync(CommandResult actual)
     {
@@ -120,7 +129,11 @@ internal sealed class InstalledToolInvocation(
                 NativeOrPublicationAuthority = false
             });
             if (_proof.Length > ProducerJson.MaximumBytes) throw new EvidenceWriteException("Complete current-binding projection exceeds the named receipt bound.");
-            files.Check(); _returned = true;
+            files.Check();
+            completedSource = new(invocation.WorkingDirectory, request.ExpectedRepository,
+                new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(new Dictionary<string, string>(original, StringComparer.Ordinal)),
+                new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(new Dictionary<string, string>(current, StringComparer.Ordinal)));
+            _returned = true;
         }
         catch (Exception error) { _capture = null; _failure = error; }
     }

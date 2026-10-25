@@ -25,6 +25,8 @@ internal sealed class InstalledQualityHost
     readonly Dictionary<string, AdmissionFile> gateReceiptPins = new(StringComparer.Ordinal);
     HostBridgeFrame? protectedCompletedFrame;
     AgentCompletionReceipt? protectedCompletedWorker;
+    FileSnapshot? completedWorkerSnapshot;
+    CompletedQualityOutputs? completedOutputs;
     sealed record ProtectedCompletion(InstalledBaselineComparison Comparison, ProtectedBaselineRegistrySelection Registry,
         string PolicyIdentity, IReadOnlyList<GateRunResult> Results);
     ProtectedCompletion? protectedCompletion;
@@ -117,8 +119,14 @@ internal sealed class InstalledQualityHost
         });
         var actualGit = admittedCurrentness ?? throw new WorkerEnvelopeException("Same-parent currentness Git view is absent."); var observation = await actualGit.ObserveAsync(assignment.Worktree, original.Token).ConfigureAwait(false);
         original.Check();
-        if (!observation.IsClean || observation.HeadCommit != actualCompletion.HeadCommit || observation.TreeId != actualCompletion.TreeId)
+        if (observation.HeadCommit != actualCompletion.HeadCommit || observation.TreeId != actualCompletion.TreeId)
             throw new WorkerEnvelopeException("Current committed worker H/tree changed before installed quality effect.");
+        if (completedOutputs is not null) completedOutputs.RequireCurrent(observation);
+        else
+        {
+            if (!observation.IsClean) throw new WorkerEnvelopeException("Current committed worker source is not clean before installed quality effect.");
+            completedWorkerSnapshot ??= observation.Snapshot;
+        }
         await actualGit.EnsureDescendsFromAsync(assignment.Worktree, assignment.BaseCommit, observation.HeadCommit, original.Token).ConfigureAwait(false);
         original.Check();
     }
@@ -163,6 +171,11 @@ internal sealed class InstalledQualityHost
             }).ConfigureAwait(false);
             results.Add(result);
             gateResults.Add(gate.GateId, result);
+            if (gate.Tool == "crap4csharp" && !result.SourceChanged && !result.Fixture &&
+                result.Outcome is GateOutcome.Pass or GateOutcome.Fail or GateOutcome.NotApplicable)
+                completedOutputs = new(actualTools, result, original, parent, run.RunId, run.Worktree,
+                    new(run.BaseCommit, completion.HeadCommit, completion.TreeId, true),
+                    completedWorkerSnapshot ?? throw new WorkerEnvelopeException("Completed worker source snapshot is absent."));
             await frame.Enter(async () =>
             {
                 await CurrentAsync(frame, completion, parent).ConfigureAwait(false);
@@ -219,6 +232,14 @@ internal sealed class InstalledQualityHost
         protectedCompletion = new(comparison, selection.Registry, selection.PolicyIdentity, results.ToArray());
         protectedCompletedFrame = frame; protectedCompletedWorker = completion;
         return ToolResult.Incomplete("PROTECTED_QUALITY_PASSED_INDEPENDENT_REVIEW_REQUIRED", "Actual installed gates and owner-approved protected baseline comparison passed; independent review and later publication authorization remain separate.", new { run.RunId, comparison, PublicationAuthority = false });
+    }
+
+    internal void BindCompletedReviewOutputs(HostBridgeFrame frame, ProductionReviewSourceOwner sourceOwner)
+    {
+        original.Check();
+        if (!ReferenceEquals(protectedCompletedFrame, frame) || completedOutputs is null || protectedCompletion is null)
+            throw new WorkerEnvelopeException("Only the same protected completed quality original can bind review outputs.");
+        sourceOwner.BindCompletedQualityOutputs(completedOutputs);
     }
 
     internal async Task<IReadOnlyList<DeliveryForge.Contracts.Validation.ValidatedContract>?> LocalRealEvidenceAsync(HostBridgeFrame frame, ParentCoordinationHost parent)

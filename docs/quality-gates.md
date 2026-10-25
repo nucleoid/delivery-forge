@@ -73,6 +73,8 @@ Host Git reads reject repository-local `filter.*`, `include.*`/`includeIf.*`, an
 
 Installed independent review retains each complete canonical gate receipt and all referenced artifacts. Its review-only presentation includes the exact raw receipt path, length, SHA256 and original identity, every result field unchanged, and the complete artifact-hash inventory's canonical digest and count. This presentation is not a gate receipt or authority input. The patch identity still binds the original raw receipt bytes; the complete patch and frozen plan and the existing native prompt-size refusal remain unchanged.
 
+After an actual callable gate creates SDK outputs, the same parent may recognize only the exact new files measured by that completed invocation under original project `bin`/`obj` roots. Original files, assigned Git metadata, committed revision and the entire measured output inventory remain checked. Review exports the committed source only; generated files are counted, checked for redirection and rehashed through the same containing file credits before and after its source census. Saved receipts or caller file lists cannot select this exception, and general worker clean-checkout rules remain strict.
+
 The built-in `ci` authority is an explicit external-issuer boundary: Delivery Forge does not produce CI receipts. A trusted host must translate an authenticated GitHub Actions/Checks result for the exact head into tool version `github-actions-v1` and format `github-checks-v1`, then append the receipt to a host-owned append-only store. Repository files and workflow-produced patch artifacts are inputs only and cannot establish authoritative receipt provenance.
 
 ## Baseline and policy ownership

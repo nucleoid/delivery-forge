@@ -174,7 +174,44 @@ public sealed class InstalledToolHostScope
         }
     }
 
+    // Only the owning Execution implementation can consume this private completed
+    // row. A receipt, copied result or caller inventory cannot select source files.
+    internal InstalledSourceInventory CompletedSourceInventory(GateRunResult actual, IOwnedDuplexBudget actualOriginal,
+        ICoordinatedEffectAdmission actualParent, string actualRun, string worktree, RepositoryIdentity expected,
+        bool verifyCurrent)
+    {
+        original.CheckWork();
+        InstalledSourceInventory inventory;
+        lock (gate)
+        {
+            if (!ReferenceEquals(original, actualOriginal) || !ReferenceEquals(admission, actualParent) || runId != actualRun ||
+                HasUncertainOriginals || actual.Fixture || actual.SourceChanged || actual.Before != expected || actual.After != expected)
+                throw new EvidenceWriteException("Completed source inventory cannot cross originals or changed source bindings.");
+            var row = runs.SingleOrDefault(row => ReferenceEquals(row.Result, actual));
+            if (row is null || !row.Returned || row.Task is not { IsCompletedSuccessfully: true } || row.Owner?.MainBinding is null)
+                throw new EvidenceWriteException("Only the same actual completed gate result can select its source inventory.");
+            inventory = row.Owner.MainBinding.CompletedSourceInventory();
+            if (!string.Equals(Path.GetFullPath(inventory.Root), Path.GetFullPath(worktree),
+                OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal) || inventory.Repository != expected)
+                throw new EvidenceWriteException("Completed source inventory belongs to another worktree or revision.");
+        }
+        if (verifyCurrent)
+        {
+            InstalledToolFiles files;
+            lock (gate) files = Files(original.WholeLimit);
+            // These reads spend the SAME containing complete-file credits and
+            // original endpoint. No new process, gate or finalization is started.
+            var current = files.Inventory(worktree, 100000, 1024L * 1024 * 1024, skipGit: true);
+            InstalledToolFiles.Same(inventory.After, current, false, files, InstalledToolFiles.ComparisonPhase.ConsumerCurrent);
+            files.Check(); files.ReleaseKnown();
+        }
+        original.CheckWork(); return inventory;
+    }
+
 }
+
+internal sealed record InstalledSourceInventory(string Root, RepositoryIdentity Repository,
+    IReadOnlyDictionary<string, string> Before, IReadOnlyDictionary<string, string> After);
 
 // Report DATA only. Cannot be supplied back to the scope as execution or approval.
 public sealed record InstalledBaselineComparison(GateOutcome Outcome, string Reason, string RegistryCommit,

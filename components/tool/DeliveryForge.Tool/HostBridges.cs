@@ -793,7 +793,7 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
                 if (coordination is null || !NativeCompletedAndQuiet(frame) || frame.Quality.Unknown || installedQuality?.Unknown == true || frame.EnteredTasks.Any(task => !task.IsCompleted)) throw new WorkerEnvelopeException("Actual independent review requires its same original completed author and settled quality originals.");
                 var completion = frame.Completion ?? throw new WorkerEnvelopeException("Actual original completion is absent.");
                 frame.IndependentReview.Start(frame.Lifetime, () => installedReview.RunIndependentAsync(frame, coordination, adapter.CompletedImplementationFamily(completion),
-                    () => NativeCompletedAndQuiet(frame) && !frame.Quality.Unknown && installedQuality?.Unknown != true, installedQuality?.RetainedResults ?? Array.Empty<DeliveryForge.Evidence.GateRunResult>()));
+                    () => NativeCompletedAndQuiet(frame) && !frame.Quality.Unknown && installedQuality?.Unknown != true, installedQuality?.RetainedResults ?? Array.Empty<DeliveryForge.Evidence.GateRunResult>(), installedQuality));
                 var reviewed = await frame.IndependentReview.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
                 if (localRealGolden is not null)
                 {
