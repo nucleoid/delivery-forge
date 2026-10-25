@@ -64,6 +64,20 @@ public sealed class ClaudeStreamState(string promptId, string exactPrompt)
             // Selected SDK permits task_updated without session_id. Only a
             // task ID already entered on THIS actual stream can be updated.
             if (subtype != "task_updated" || row.TryGetProperty("session_id", out var actualSession) && actualSession.ValueKind != JsonValueKind.Null) SameSession(row);
+            if (subtype == "thinking_tokens")
+            {
+                // Bounded telemetry only: never acknowledge a prompt, alter
+                // activity/tasks/results, settle work or account a token budget.
+                var estimated = Member(row, "estimated_tokens");
+                var delta = Member(row, "estimated_tokens_delta");
+                if (!admitted || Text(row, "user_message_uuid") != promptId ||
+                    !Guid.TryParseExact(Text(row, "user_message_uuid"), "D", out _) ||
+                    !Guid.TryParseExact(Text(row, "uuid"), "D", out _) ||
+                    estimated.ValueKind != JsonValueKind.Number || !estimated.TryGetInt32(out var estimatedTokens) || estimatedTokens < 0 ||
+                    delta.ValueKind != JsonValueKind.Number || !delta.TryGetInt32(out var deltaTokens) || deltaTokens < 0)
+                    throw new IOException("Actual Claude thinking telemetry differs from the admitted prompt/profile.");
+                return;
+            }
             if (subtype == "session_state_changed")
             {
                 var state = Text(row, "state"); if (state is not ("running" or "idle" or "requires_action")) throw new IOException("Unsupported actual Claude session state."); activity = state; return;

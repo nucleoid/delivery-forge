@@ -321,4 +321,75 @@ public sealed class ClaudeStreamStateTests
         var state = Started(); Assert.Throws<IOException>(() => CommandResult(state, "foreign-prompt"));
         Assert.False(state.Settled); Assert.Throws<IOException>(state.RequireSuccess);
     }
+
+    // Sanitized shape of CLI 2.1.306 telemetry: synthetic identities and no
+    // retained account, control response, selected prompt or command content.
+    static Dictionary<string, object?> Thinking(int estimated = 50, int delta = 50) => new()
+    {
+        ["type"] = "system",
+        ["subtype"] = "thinking_tokens",
+        ["session_id"] = Session,
+        ["uuid"] = "313ba9fd-2c3b-44a9-a711-4e3cd76e87bc",
+        ["user_message_uuid"] = PromptId,
+        ["estimated_tokens"] = estimated,
+        ["estimated_tokens_delta"] = delta
+    };
+    [Fact]
+    public void Thinking_telemetry_is_inert_before_exact_replay_and_through_complete_command_correspondence()
+    {
+        var state = new ClaudeStreamState(PromptId, Prompt); state.AdmitPrompt(); Observe(state, PreInitRunning());
+        Lifecycle(state, "queued"); Lifecycle(state, "started"); Init(state);
+        foreach (var row in new[] { Thinking(50, 50), Thinking(150, 100), Thinking(318, 168) })
+        {
+            Observe(state, row); Assert.False(state.Acknowledged); Assert.False(state.Settled);
+            Assert.Throws<IOException>(state.RequireSuccess);
+        }
+        Replay(state); Assert.True(state.Acknowledged); Assert.False(state.Settled);
+        Observe(state, new { type = "system", subtype = "task_started", session_id = Session, task_id = "thinking-control-task" });
+        CommandResult(state); Lifecycle(state, "completed"); Idle(state);
+        Observe(state, Thinking(318, 0)); Assert.False(state.Settled); // telemetry cannot finish the active task
+        Observe(state, new { type = "system", subtype = "task_notification", session_id = Session, task_id = "thinking-control-task", status = "completed" });
+        state.RequireSuccess(); Observe(state, Thinking(int.MaxValue, int.MaxValue)); state.RequireSuccess();
+    }
+    [Theory]
+    [InlineData("foreign-session")]
+    [InlineData("foreign-prompt")]
+    [InlineData("not-admitted")]
+    [InlineData("pre-init")]
+    [InlineData("missing-uuid")]
+    [InlineData("malformed-uuid")]
+    [InlineData("malformed-prompt")]
+    [InlineData("negative-estimate")]
+    [InlineData("negative-delta")]
+    [InlineData("string-estimate")]
+    [InlineData("fractional-delta")]
+    [InlineData("overflow-estimate")]
+    [InlineData("missing-delta")]
+    public void Foreign_unadmitted_preinit_or_malformed_thinking_telemetry_permanently_refuses(string mutation)
+    {
+        var selectedPrompt = mutation == "malformed-prompt" ? "not-a-prompt-uuid" : PromptId;
+        var state = new ClaudeStreamState(selectedPrompt, Prompt);
+        if (mutation != "pre-init") Init(state);
+        if (mutation != "not-admitted") state.AdmitPrompt();
+        var row = Thinking();
+        switch (mutation)
+        {
+            case "foreign-session": row["session_id"] = "foreign-session"; break;
+            case "foreign-prompt": row["user_message_uuid"] = "66201fd7-2365-4b5f-86c0-4c6070f02976"; break;
+            case "not-admitted": case "pre-init": break;
+            case "missing-uuid": row.Remove("uuid"); break;
+            case "malformed-uuid": row["uuid"] = "not-an-event-uuid"; break;
+            case "malformed-prompt": row["user_message_uuid"] = selectedPrompt; break;
+            case "negative-estimate": row["estimated_tokens"] = -1; break;
+            case "negative-delta": row["estimated_tokens_delta"] = -1; break;
+            case "string-estimate": row["estimated_tokens"] = "50"; break;
+            case "fractional-delta": row["estimated_tokens_delta"] = 0.5; break;
+            case "overflow-estimate": row["estimated_tokens"] = (long)int.MaxValue + 1; break;
+            case "missing-delta": row.Remove("estimated_tokens_delta"); break;
+            default: throw new ArgumentException("Unknown synthetic telemetry mutation.");
+        }
+        Assert.Throws<IOException>(() => Observe(state, row));
+        Assert.False(state.Acknowledged); Assert.False(state.Settled); Assert.Throws<IOException>(state.RequireSuccess);
+        Assert.Throws<IOException>(() => Idle(state));
+    }
 }
