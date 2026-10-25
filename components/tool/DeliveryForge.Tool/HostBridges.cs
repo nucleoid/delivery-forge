@@ -801,7 +801,7 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
                     return await frame.LocalReal.ObserveAsync(frame.Lifetime).ConfigureAwait(false);
                 }
                 if (qualityResult is null) return reviewed;
-                return qualityResult with { Data = new { Quality = qualityResult.Data, Review = reviewed, ReviewPreparation = reviewPreparation } };
+                return reviewed with { Data = new { Quality = qualityResult.Data, Review = reviewed, ReviewPreparation = reviewPreparation } };
             }
             if (localRealGolden is not null) return ToolResult.Incomplete("LOCAL_REAL_ACCEPTED_REVIEW_REQUIRED", "Explicit local-real selection requires the actual same-original independent reviewer and protected quality; no fixture fallback.");
             if (qualityResult is not null) return reviewPreparation is null ? qualityResult : qualityResult with { Data = new { Quality = qualityResult.Data, ReviewPreparation = reviewPreparation } };
