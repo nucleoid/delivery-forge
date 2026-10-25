@@ -46,13 +46,13 @@ public sealed class BatchWindowsImageTests
         using var f = new Frame(); var pin = f.File("host.data");
         f.Images.Plan(pin, f.Original); f.Images.Plan(pin, f.Original);
         f.Images.SealAndRequireCapacity(f.Original, 0, 0); f.Images.Verify(pin, f.Original);
-        var first = f.Images.Borrow(pin, f.Original, f.Original.Token); first.Check(); first.Close(false);
+        var first = f.Images.Borrow(pin, f.Original, f.Original.Token); first.Check(TestContext.Current.CancellationToken); first.Close(false);
         Assert.True(first.IsReleased); Assert.False(first.Unknown); NoWriter(pin);
         BoundedFiles.RequireReadCapacity(f.Original, 4094, Cap - pin.Bytes - 1);
-        var next = f.Images.Borrow(pin, f.Original, f.Original.Token); next.Check(); NoWriter(pin); next.Close(false);
+        var next = f.Images.Borrow(pin, f.Original, f.Original.Token); next.Check(TestContext.Current.CancellationToken); NoWriter(pin); next.Close(false);
         // A second complete read or two file credits would make this exact bound fail.
         BoundedFiles.RequireReadCapacity(f.Original, 4094, Cap - pin.Bytes - 1);
-        Assert.Throws<IOException>(() => first.Check());
+        Assert.Throws<IOException>(() => first.Check(TestContext.Current.CancellationToken));
         f.Close(); using var exclusive = new FileStream(pin.Path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
     }
 
