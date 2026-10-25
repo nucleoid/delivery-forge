@@ -25,18 +25,18 @@ public sealed class ChangedRequiredTestCoverageTests
     }
 
     [Theory]
-    [InlineData("absent-approval")]
-    [InlineData("unknown-source")]
-    [InlineData("wrong-project")]
-    [InlineData("foreign-pdb")]
-    [InlineData("current-bytes")]
-    [InlineData("generated")]
-    [InlineData("no-points")]
-    public void Unapproved_unbound_or_unproved_test_source_cannot_disappear_from_changed_membership(string fault)
+    [InlineData("absent-approval", "Changed authored file is not in the complete captured compiler source set.")]
+    [InlineData("unknown-source", "Changed authored file is not in the complete captured compiler source set.")]
+    [InlineData("wrong-project", "Required-test inventory differs from the approved exact projects.")]
+    [InlineData("foreign-pdb", "Compiler PE/PDB GUID, age, stamp or recorded debug identity differs.")]
+    [InlineData("current-bytes", "Current required-test source differs from its captured compiler bytes.")]
+    [InlineData("generated", "Changed authored file is not in the complete captured compiler source set.")]
+    [InlineData("no-points", "Changed authored file is not in the complete captured compiler source set.")]
+    public void Unapproved_unbound_or_unproved_test_source_cannot_disappear_from_changed_membership(string fault, string expectedReason)
     {
         using var fixture = new Fixture();
         var error = Assert.Throws<EvidenceWriteException>(() => fixture.Read(fault));
-        Assert.NotEmpty(error.Message); // Both line-membership and genuine PE/PDB refusals are typed evidence failures.
+        Assert.Contains(expectedReason, error.Message, StringComparison.Ordinal);
     }
 
     [Fact]
