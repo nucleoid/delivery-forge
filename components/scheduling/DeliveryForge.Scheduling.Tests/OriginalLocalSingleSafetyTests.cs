@@ -1,5 +1,6 @@
 using DeliveryForge.Execution;
 using DeliveryForge.Execution.Git;
+using DeliveryForge.Execution.Host;
 using Xunit;
 
 namespace DeliveryForge.Scheduling.Tests;
