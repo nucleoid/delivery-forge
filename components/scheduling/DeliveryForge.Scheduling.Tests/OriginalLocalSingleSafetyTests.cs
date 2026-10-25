@@ -95,16 +95,22 @@ public sealed partial class LocalSingleTests
         Assert.False(scheduler.HasRetainedReservation); Assert.Equal(0, original.CleanupReads);
     }
 
-    [Theory]
+    public static bool OriginalOwnedGitWindows => OperatingSystem.IsWindows();
+    [Theory(Timeout = 120000, SkipUnless = nameof(OriginalOwnedGitWindows), Skip = "Actual original-owned Git requires the Windows creation-owned fixture; Linux needs a separately selected native scope.")]
     [InlineData(false)]
     [InlineData(true)]
     public async Task Completed_worker_review_failure_releases_only_settled_known_original_reservation(bool unknown)
     {
-        using var repository = new PlanningRepository(); await repository.InitializeAsync(); var plan = await repository.FreezeAsync();
+        // Preserve the actual failed/successful fixture instead of erasing its Git/record evidence.
+        using var repository = new PlanningRepository(Path.Combine(Path.GetTempPath(), "forge-completed-review-failure-" + Guid.NewGuid().ToString("N")));
+        TestContext.Current.TestOutputHelper!.WriteLine("Retained completed-review fixture: " + repository.Root);
+        await repository.InitializeAsync(); var plan = await repository.FreezeAsync();
         var worker = Worker(repository, plan, "completed-review-failure-" + Guid.NewGuid().ToString("N"));
-        var store = new RunStore(Path.Combine(repository.Root, "results")); var worktrees = new WorktreeManager();
-        await using var processes = new ProcessControl(); using var execution = new ExecutionCoordinator(store, worktrees, processes, new FixtureControl());
         var original = new SchedulingOriginal(); var parent = new SchedulingParent();
+        var originalWorktrees = new WorktreeManager(repository.GitExecutable, new DeliveryForge.Evidence.ProcessCommandExecutor(), original);
+        var worktrees = originalWorktrees.WithParentAdmission(parent, worker.RunId);
+        var store = new RunStore(Path.Combine(repository.Root, "results"));
+        await using var processes = new ProcessControl(); using var execution = new ExecutionCoordinator(store, worktrees, processes, new FixtureControl());
         execution.BindCoordinationAdmission(parent);
         // Exercise the existing internal original-owner API without widening
         // Execution's production/test friend assembly surface.

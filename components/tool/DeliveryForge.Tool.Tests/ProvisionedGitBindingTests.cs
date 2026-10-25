@@ -211,6 +211,29 @@ public sealed class ProvisionedGitBindingTests
         // result or installed acceptance is manufactured by this control.
     }
 
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Owned_provisioning_preserves_raw_LF_source_and_protected_seed_without_changing_parent_conversion_config()
+    {
+        using var fixture = await Fixture.CreateAsync(forceCheckoutConversion: true);
+        Assert.Equal("true", await fixture.GitAt(fixture.Repository, "config", "--local", "--get", "core.autocrlf"));
+        Assert.Equal("crlf", await fixture.GitAt(fixture.Repository, "config", "--local", "--get", "core.eol"));
+        foreach (var path in new[] { "subject.txt", ".forge/protected-policy.json" })
+        {
+            var expected = File.ReadAllBytes(Path.Combine(fixture.Repository, path));
+            var actual = File.ReadAllBytes(Path.Combine(fixture.Worker, path));
+            Assert.DoesNotContain((byte)'\r', expected);
+            Assert.Equal(expected, actual);
+            Assert.Contains((byte)'\n', actual);
+        }
+        var observed = await fixture.Manager.ObserveAsync(fixture.Worker, TestContext.Current.CancellationToken);
+        Assert.True(observed.IsClean);
+        Assert.Equal("true", await fixture.GitAt(fixture.Repository, "config", "--local", "--get", "core.autocrlf"));
+        Assert.Equal("crlf", await fixture.GitAt(fixture.Repository, "config", "--local", "--get", "core.eol"));
+        Assert.False(fixture.Original.HasExplicitUnknown);
+        // Actual creation-owned Git + physical byte/config regression only;
+        // this does not supply a reviewer receipt or installed host authority.
+    }
+
     sealed class ResultDirectoryPort(Fixture fixture) : IHostToolSessionPort
     {
         internal int Starts;
@@ -354,7 +377,7 @@ public sealed class ProvisionedGitBindingTests
         internal readonly string GitImage = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
             .Where(Path.IsPathFullyQualified).Select(path => Path.Combine(path, "git.exe")).First(File.Exists);
         internal WorktreeManager Manager = null!, InitialManager = null!;
-        internal static async Task<Fixture> CreateAsync()
+        internal static async Task<Fixture> CreateAsync(bool forceCheckoutConversion = false)
         {
             var value = new Fixture();
             try
@@ -363,8 +386,19 @@ public sealed class ProvisionedGitBindingTests
                 await value.Git("init", "-q", "-b", "main");
                 File.WriteAllText(Path.Combine(value.Repository, "subject.txt"), "original\n");
                 await value.Git("add", "--", "subject.txt");
+                if (forceCheckoutConversion)
+                {
+                    Directory.CreateDirectory(Path.Combine(value.Repository, ".forge"));
+                    File.WriteAllText(Path.Combine(value.Repository, ".forge", "protected-policy.json"), "{\"guard\":\"base\"}\n");
+                    await value.Git("add", "--", ".forge/protected-policy.json");
+                }
                 await value.Git("-c", "user.name=BindingFixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "original");
                 var head = await value.Git("rev-parse", "HEAD");
+                if (forceCheckoutConversion)
+                {
+                    await value.Git("config", "--local", "core.autocrlf", "true");
+                    await value.Git("config", "--local", "core.eol", "crlf");
+                }
                 value.InitialManager = new WorktreeManager(value.GitImage, value.Executor, value.Original);
                 value.Manager = value.InitialManager.WithParentAdmission(value.Parent, "owned");
                 await value.Manager.PrepareAsync(value.Repository, value.Worker, head, TestContext.Current.CancellationToken);

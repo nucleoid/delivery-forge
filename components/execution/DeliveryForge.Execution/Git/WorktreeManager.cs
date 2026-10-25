@@ -124,7 +124,10 @@ public sealed partial class WorktreeManager
             common = (await GitAsync(parentCheckout, cancellationToken, "rev-parse", "--path-format=absolute", "--git-common-dir").ConfigureAwait(false)).Trim();
             RejectSymlinkAncestors(common);
         }
-        await GitAsync(parentCheckout, cancellationToken, "worktree", "add", "--detach", destination, baseCommit).ConfigureAwait(false);
+        // Disable implicit line-ending conversion for this disposable checkout.
+        // No global/repository configuration or strict review comparison changes.
+        await GitAsync(parentCheckout, cancellationToken, "-c", "core.autocrlf=false", "-c", "core.eol=lf",
+            "worktree", "add", "--detach", destination, baseCommit).ConfigureAwait(false);
         if (common is not null)
         {
             var registered = await GitAsync(parentCheckout, cancellationToken, "worktree", "list", "--porcelain", "-z").ConfigureAwait(false);
