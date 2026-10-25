@@ -86,6 +86,11 @@ public sealed partial class InstalledHostAdmission
         if (count != methods.Length) throw new ToolUsageException("Complete actual runtime-trust RPC sequence required.");
     }
     public static InstalledHostAdmission ReadRootAccepted(AdmissionFile rootPin, TrustedConfiguration config, ToolLifetime original, AdmissionFile? actualConfigurationPin = null)
+        => ReadRootAcceptedCore(rootPin, config, original, actualConfigurationPin, null);
+    internal static InstalledHostAdmission ReadRootAcceptedForBatch(AdmissionFile rootPin, TrustedConfiguration config, ToolLifetime original,
+        AdmissionFile configurationPin, BatchWindowsImages images) => ReadRootAcceptedCore(rootPin, config, original, configurationPin, images);
+    static InstalledHostAdmission ReadRootAcceptedCore(AdmissionFile rootPin, TrustedConfiguration config, ToolLifetime original,
+        AdmissionFile? actualConfigurationPin, BatchWindowsImages? images)
     {
         var bytes = ReadExact(rootPin, original, 1048576); _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(bytes); original.Check(); var receipt = System.Text.Json.JsonSerializer.Deserialize<InstalledHostRootAcceptance>(bytes, BoundedFiles.Json) ?? throw new IOException("Root host admission is null."); original.Check();
         var os = OperatingSystem.IsWindows() ? "windows" : OperatingSystem.IsLinux() ? "linux" : throw new PlatformNotSupportedException("Installed host profile is Windows/Linux only.");
@@ -94,9 +99,10 @@ public sealed partial class InstalledHostAdmission
         // same credit. No bytes, conformance case or runtime trust is accepted
         // here; all exact content/proof checks below remain mandatory.
         if (receipt.RuntimeTrust is not null)
-            RuntimeTrust.RequireReadCapacity(receipt, rootPin, actualConfigurationPin ?? throw new ToolUsageException("Owner runtime trust requires the containing configuration pin."), config, original);
+            RuntimeTrust.RequireReadCapacity(receipt, rootPin, actualConfigurationPin ?? throw new ToolUsageException("Owner runtime trust requires the containing configuration pin."), config, original, images);
         var self = System.Reflection.Assembly.GetExecutingAssembly().Location; if (Path.GetFullPath(receipt.ToolAssembly.Path) != Path.GetFullPath(self)) throw new ToolUsageException("Actual installed Tool assembly differs from independently accepted host conformance."); _ = ReadExact(receipt.ToolAssembly, original, 16777216);
-        BoundedFiles.VerifyNativeImage(new(receipt.Host.Executable, receipt.Host.Bytes, receipt.Host.Sha256), original);
+        var image = new AdmissionFile(receipt.Host.Executable, receipt.Host.Bytes, receipt.Host.Sha256);
+        if (images is null || receipt.RuntimeTrust is null) BoundedFiles.VerifyNativeImage(image, original); else images.Verify(image, original);
         var artifacts = new HashSet<string>(StringComparer.Ordinal); long total = 0; byte[]? routeArtifact = null;
         foreach (var pin in receipt.Artifacts) { if (pin is null) throw new ToolUsageException("Missing actual conformance artifact."); if (pin.Bytes <= 0 || pin.Bytes > 1048576 || total > 33554432 - pin.Bytes || !artifacts.Add(pin.Sha256)) throw new ToolUsageException("Actual conformance artifacts exceed finite complete profile or collide."); total += pin.Bytes; var raw = ReadExact(pin, original, 1048576); if (receipt.RuntimeTrust is not null && receipt.Cases.Any(row => row is not null && row.Name == "actual_runtime_trust_route" && row.ArtifactSha256 == pin.Sha256)) routeArtifact = raw; }
         RequireConformanceCases(receipt.Cases, artifacts, receipt.RuntimeTrust is not null);
@@ -114,7 +120,7 @@ public sealed partial class InstalledHostAdmission
             new AgentCapabilityEvidence(AgentCapability.Pause,AgentCapabilityStatus.Unsupported,"No actual same-turn pause capability is issued.",reference),
             new AgentCapabilityEvidence(AgentCapability.Resume,AgentCapabilityStatus.Unsupported,"No actual same-turn resume capability is issued.",reference)};
         original.Check(); var result = new InstalledHostAdmission(receipt, new(config.Adapter, config.AdapterVersion, Array.AsReadOnly(rows)), original, config, rootPin);
-        if (receipt.RuntimeTrust is not null) result.TrustedRuntime = RuntimeTrust.Bind(result, actualConfigurationPin ?? throw new ToolUsageException("Owner runtime trust requires the actual containing configuration pin."));
+        if (receipt.RuntimeTrust is not null) result.TrustedRuntime = RuntimeTrust.Bind(result, actualConfigurationPin ?? throw new ToolUsageException("Owner runtime trust requires the actual containing configuration pin."), images);
         return result;
     }
 }

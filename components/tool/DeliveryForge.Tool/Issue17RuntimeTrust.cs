@@ -112,12 +112,13 @@ public sealed partial class InstalledHostAdmission
         readonly AdmissionFile root, configurationPin, ownerDecision;
         readonly Issue17HostInputs inputs;
         readonly StandaloneHostSelection configurationHost;
+        readonly BatchWindowsImages? images;
         string? boundWorktree, boundResult; int checks;
         // Existing RPC64 + bind/start/wait5 + reviewer entry/VerifyImage7.
         internal const int MaximumChecks = 76;
         RuntimeTrust(ToolLifetime original, TrustedConfiguration configuration, AdmissionFile root,
-            AdmissionFile configurationPin, AdmissionFile ownerDecision, Issue17HostInputs inputs, StandaloneHostSelection host)
-        { this.original = original; this.configuration = configuration; this.root = root; this.configurationPin = configurationPin; this.ownerDecision = ownerDecision; this.inputs = inputs; configurationHost = host; }
+            AdmissionFile configurationPin, AdmissionFile ownerDecision, Issue17HostInputs inputs, StandaloneHostSelection host, BatchWindowsImages? images)
+        { this.original = original; this.configuration = configuration; this.root = root; this.configurationPin = configurationPin; this.ownerDecision = ownerDecision; this.inputs = inputs; configurationHost = host; this.images = images; }
         internal bool Matches(ToolLifetime actual, IndependentClaudeReviewSelection reviewer) =>
             ReferenceEquals(original, actual) && ReferenceEquals(configuration.InstalledReview?.IndependentReviewer, reviewer);
         internal void Check(ToolLifetime actual)
@@ -157,6 +158,18 @@ public sealed partial class InstalledHostAdmission
             RefuseRepositoryConfiguration(configuration.RepositoryRoot);
             boundWorktree = worktree; boundResult = resultDirectory;
             Check(actual);
+        }
+        internal WindowsImageUse RetainWorkerImage(ToolLifetime actual, AdmissionFile pin, CancellationToken token)
+        {
+            if (!ReferenceEquals(original, actual) || boundWorktree is null || pin.Path != configurationHost.Executable ||
+                pin.Bytes != configurationHost.Bytes || pin.Sha256 != configurationHost.Sha256)
+                throw new ToolUsageException("Worker image use differs from its node-bound original selection.");
+            original.Check(); return images?.Borrow(pin, actual, token) ?? WindowsImageUse.Open(pin, actual, token);
+        }
+        internal WindowsImageUse RetainReviewerImage(ToolLifetime actual, IndependentClaudeReviewSelection reviewer, CancellationToken token)
+        {
+            if (!Matches(actual, reviewer)) throw new ToolUsageException("Reviewer image use differs from its node-bound original selection.");
+            original.Check(); return images?.Borrow(reviewer.Image, actual, token) ?? WindowsImageUse.Open(reviewer.Image, actual, token);
         }
         internal void RevokeRoute() => original.BeginFailureCleanup();
         internal void CheckReviewer(ToolLifetime actual, IndependentClaudeReviewSelection reviewer)
@@ -242,12 +255,20 @@ public sealed partial class InstalledHostAdmission
             operations = checked(operations + 4); // bounded worker/reviewer trace writes
             return new(operations, bytes);
         }
-        internal static void RequireReadCapacity(InstalledHostRootAcceptance accepted, AdmissionFile rootPin, AdmissionFile configPin, TrustedConfiguration config, ToolLifetime original)
+        internal static ReadRequirement ImageReadCapacity(InstalledHostRootAcceptance accepted, TrustedConfiguration config)
+        {
+            RequireSelectedProfile(accepted, config, accepted.Platform);
+            return new(6, checked(2 * (accepted.Host.Bytes + 1) + config.InstalledReview!.IndependentReviewer!.Image.Bytes + 1));
+        }
+        internal static void RequireReadCapacity(InstalledHostRootAcceptance accepted, AdmissionFile rootPin, AdmissionFile configPin,
+            TrustedConfiguration config, ToolLifetime original, BatchWindowsImages? images = null)
         {
             original.Check(); var plan = ReadCapacity(accepted, rootPin, configPin, config);
-            BoundedFiles.RequireReadCapacity(original, plan.Operations, plan.Bytes);
+            if (images is null) BoundedFiles.RequireReadCapacity(original, plan.Operations, plan.Bytes);
+            else images.RequireNodeCapacity(original, new(accepted.Host.Executable, accepted.Host.Bytes, accepted.Host.Sha256),
+                config.InstalledReview!.IndependentReviewer!.Image, plan, ImageReadCapacity(accepted, config));
         }
-        internal static RuntimeTrust Bind(InstalledHostAdmission containing, AdmissionFile configPin)
+        internal static RuntimeTrust Bind(InstalledHostAdmission containing, AdmissionFile configPin, BatchWindowsImages? images = null)
         {
             // This concrete object has no public constructor. Its root/config/
             // original fields are set only after all existing conformance cases.
@@ -277,7 +298,7 @@ public sealed partial class InstalledHostAdmission
             inputs.Separate(config.RepositoryRoot, config.InstalledReview.ArtifactRoot);
             foreach (var pin in new[] { root, configPin, selected.OwnerDecision })
                 foreach (var protectedRoot in new[] { config.RepositoryRoot, config.InstalledReview.ArtifactRoot }) BoundedFiles.Separate(protectedRoot, pin.Path);
-            var result = new RuntimeTrust(original, config, root, configPin, selected.OwnerDecision, inputs, accepted.Host);
+            var result = new RuntimeTrust(original, config, root, configPin, selected.OwnerDecision, inputs, accepted.Host, images);
             result.CheckReviewer(original, reviewer); return result;
         }
     }

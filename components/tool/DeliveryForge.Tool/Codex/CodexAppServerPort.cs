@@ -15,7 +15,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     readonly InstalledHostAdmission.RuntimeTrust? runtimeTrust;
     readonly bool conformanceTrustRoute;
     bool TrustProtocol => runtimeTrust is not null || conformanceTrustRoute;
-    BoundedFiles.RetainedNativeImage? trustedImage;
+    WindowsImageUse? trustedImage;
     bool trustedNativeCreationEntered, trustedNativeCreationReturned;
     HostInstructionContext? instructions;
     public void BindInstructions(HostInstructionContext context) { lock (gate) { if (startEntered || instructions is not null && !ReferenceEquals(instructions, context)) throw new WorkerEnvelopeException("Actual instructions cannot change after selection or dispatch."); instructions = context; } }
@@ -180,7 +180,8 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                 exactImage = new(selection.Executable, selection.Bytes, selection.Sha256);
             }
             if (!TrustProtocol) BoundedFiles.VerifyNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), original);
-            else trustedImage = BoundedFiles.RetainVerifiedNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), original, token);
+            else trustedImage = runtimeTrust?.RetainWorkerImage(original, new(selection.Executable, selection.Bytes, selection.Sha256), token)
+                ?? WindowsImageUse.Open(new(selection.Executable, selection.Bytes, selection.Sha256), original, token);
             var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1" };
             runtimeTrust?.Check(original); trustedImage?.Check(token);
             startup.SetStage(CodexStartupStage.NativeCreation); trustedNativeCreationEntered = true; process = OwnedDuplexProcess.Open(new(selection.Executable, ["app-server"], actual.Worktree, environment), original, linuxScope, exactImage); trustedNativeCreationReturned = true; if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
@@ -256,7 +257,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             // A failed route/pump/postcheck cannot strand a cleanly retired image.
             // A still-live/unknown owner keeps its image for its actual retirement.
             var actualRetirement = process?.OriginalRetirementTask;
-            if (trustedImage is not null && !trustedImage.IsClosed && actualRetirement is { IsCompletedSuccessfully: true } &&
+            if (trustedImage is not null && !trustedImage.IsReleased && actualRetirement is { IsCompletedSuccessfully: true } &&
                 actualRetirement.Result.KnownClosed && process is { HasUnknownIo: false })
             {
                 try { CloseTrustedImage(true, primary is not null); }
@@ -300,10 +301,10 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     }
     void CloseTrustedImage(bool knownNativeClosed, bool cleanup)
     {
-        if (trustedImage is null || trustedImage.IsClosed) return;
+        if (trustedImage is null || trustedImage.IsReleased) return;
         if (!knownNativeClosed) { trustedImage.RetainUnknown(); return; }
         try { trustedImage.Close(cleanup); }
-        catch { if (!trustedImage.IsClosed) trustedImage.RetainUnknown(); throw; }
+        catch { if (!trustedImage.IsReleased) trustedImage.RetainUnknown(); throw; }
     }
     static string Text(JsonElement value, string name) { var result = value.GetProperty(name); if (result.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(result.GetString()) || result.GetString()!.Length > 4096) throw new IOException("Invalid actual app-server " + name); return result.GetString()!; }
 }

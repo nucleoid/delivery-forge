@@ -53,7 +53,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
     sealed class Observation { internal bool Entered, Returned; internal Task<BoundedCommandCaptureResult>? Actual; }
     readonly List<Observation> observations = [];
     CancellationTokenSource? phaseCancellation;
-    BoundedFiles.RetainedNativeImage? heldImage;
+    WindowsImageUse? heldImage;
     long phaseStarted;
     bool entered, nativeBirthEntered, nativeBirthReturned; volatile bool shutdown, stopping, uncertain; int eventBytes;
     internal bool Unknown { get { lock (tasks) return uncertain || heldImage?.Unknown == true || nativeBirthEntered && !nativeBirthReturned || observations.Any(row => row.Entered && !row.Returned) || process?.HasUnknownIo == true || tasks.Any(task => !task.IsCompleted); } }
@@ -119,7 +119,8 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         Current(); runtimeTrust?.CheckReviewer(original, selection); actualUserSettings.CheckActual(); var token = phaseCancellation?.Token ?? original.Token;
         if (OperatingSystem.IsWindows())
         {
-            heldImage ??= BoundedFiles.RetainVerifiedNativeImage(selection.Image, original, token);
+            heldImage ??= runtimeTrust?.RetainReviewerImage(original, selection, token)
+                ?? WindowsImageUse.Open(selection.Image, original, token);
             heldImage.Check(token);
         }
         else BoundedFiles.VerifyNativeImage(selection.Image, original, token);
@@ -459,7 +460,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
                         catch (Exception disposition)
                         {
                             original.RecordFirstCaught("independent-review-image-disposition", disposition);
-                            if (!heldImage.IsClosed) heldImage.RetainUnknown();
+                            if (!heldImage.IsReleased) heldImage.RetainUnknown();
                             if (phaseFailure is not null) throw new AggregateException("Independent review and original image first-disposition failure.", phaseFailure, disposition);
                             throw;
                         }

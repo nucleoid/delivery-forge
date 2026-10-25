@@ -15,6 +15,7 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
         LinuxScopeSelection? Scope, FrozenPlan Plan, IReadOnlyDictionary<string, string> Prerequisites);
     readonly ProductionBatchSelection selected = CaptureSelection(containing);
     readonly ProductionBatchControl control = new();
+    readonly BatchWindowsImages? images = OperatingSystem.IsWindows() ? new(original) : null;
     readonly object stateGate = new();
     readonly List<Task> actualTasks = [];
     readonly List<StandaloneOwnerComposition> actualOwners = [];
@@ -114,8 +115,15 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             if (host.RuntimeTrust is not null)
             {
                 var readPlan = InstalledHostAdmission.RuntimeTrust.ReadCapacity(host, root.InstalledHostAdmission, selection.Configuration, config);
-                trustedReadOperations = checked(trustedReadOperations + readPlan.Operations);
-                trustedReadBytes = checked(trustedReadBytes + readPlan.Bytes);
+                var imageReads = images is null ? new InstalledHostAdmission.RuntimeTrust.ReadRequirement(0, 0)
+                    : InstalledHostAdmission.RuntimeTrust.ImageReadCapacity(host, config);
+                if (images is not null)
+                {
+                    images.Plan(new(host.Host.Executable, host.Host.Bytes, host.Host.Sha256), original);
+                    images.Plan(config.InstalledReview!.IndependentReviewer!.Image, original);
+                }
+                trustedReadOperations = checked(trustedReadOperations + readPlan.Operations - imageReads.Operations);
+                trustedReadBytes = checked(trustedReadBytes + readPlan.Bytes - imageReads.Bytes);
             }
             selections.Add((selection, config, root));
         }
@@ -136,7 +144,8 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
                 return ToolResult.Incomplete("BATCH_PLAN_RECONCILIATION_INCOMPLETE", "Every selected plan must freshly reconcile before batch creation; no host was created.", imported.Diagnostics);
             nodes.Add(new(selection, config, root, scope, imported.Plan, ReadFrozenPrerequisites(imported.Plan, selection.NodeId)));
         }
-        if (trustedReadOperations != 0) BoundedFiles.RequireReadCapacity(original, trustedReadOperations, trustedReadBytes);
+        if (images is not null) images.SealAndRequireCapacity(original, trustedReadOperations, trustedReadBytes);
+        else if (trustedReadOperations != 0) BoundedFiles.RequireReadCapacity(original, trustedReadOperations, trustedReadBytes);
         var anchorNode = nodes.Single(node => ReferenceEquals(node.Selection, anchor));
         if (containing.ExpectedBundleIdentity != anchorNode.Plan.Identity || containing.ExpectedContractIdentity != anchorNode.Plan.ContractIdentity ||
             containing.ExpectedWorkItem != anchorNode.Plan.WorkItem || containing.ExpectedPlanCeiling != anchorNode.Configuration.ExpectedPlanCeiling)
@@ -180,7 +189,9 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             await Persist().ConfigureAwait(false); // Durable selected intent before any owner/lease/worker creation.
             if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
             if (control.Paused || control.Stopped) break;
-            var admission = InstalledHostAdmission.ReadRootAccepted(node.Root.InstalledHostAdmission, node.Configuration, original, node.Selection.Configuration);
+            var admission = images is not null
+                ? InstalledHostAdmission.ReadRootAcceptedForBatch(node.Root.InstalledHostAdmission, node.Configuration, original, node.Selection.Configuration, images)
+                : InstalledHostAdmission.ReadRootAccepted(node.Root.InstalledHostAdmission, node.Configuration, original, node.Selection.Configuration);
             // Acknowledged input fences owner/coordination construction itself,
             // not merely the later native adapter start.
             if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
@@ -327,6 +338,11 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             if (actualTasks.Any(task => !task.IsCompleted) || original.HasExplicitUnknown) { original.RetainUnknown(); return; }
             remaining = actualOwners.Where(owner => !retired.Contains(owner)).ToArray();
         }
-        foreach (var owner in remaining) await owner.DisposeAsync().ConfigureAwait(false);
+        Exception? primary = null;
+        try { foreach (var owner in remaining) await owner.DisposeAsync().ConfigureAwait(false); }
+        catch (Exception error) { primary = error; }
+        try { images?.CloseAfterOwners(); }
+        catch (Exception close) { if (primary is not null) throw new AggregateException("Batch owner and retained image disposition failed.", primary, close); throw; }
+        if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
     }
 }
