@@ -96,10 +96,18 @@ public sealed class ClaudeReviewerObservationNativeTests
             if (capture is not null)
                 TestContext.Current.TestOutputHelper!.WriteLine(JsonSerializer.Serialize(new
                 {
-                    Operation = auth ? "auth-status" : "version", capture.Command.ExitCode, capture.Command.TimedOut, capture.Command.Cancelled,
-                    capture.RootExitObserved, capture.StandardOutputDrainCompleted, capture.StandardErrorDrainCompleted,
-                    capture.CaptureBoundExceeded, capture.OwnershipKind, KnownClosed = knownClosed,
-                    StdoutBytes = capture.StandardOutputBytes.Length, StderrBytes = capture.StandardErrorBytes.Length,
+                    Operation = auth ? "auth-status" : "version",
+                    capture.Command.ExitCode,
+                    capture.Command.TimedOut,
+                    capture.Command.Cancelled,
+                    capture.RootExitObserved,
+                    capture.StandardOutputDrainCompleted,
+                    capture.StandardErrorDrainCompleted,
+                    capture.CaptureBoundExceeded,
+                    capture.OwnershipKind,
+                    KnownClosed = knownClosed,
+                    StdoutBytes = capture.StandardOutputBytes.Length,
+                    StderrBytes = capture.StandardErrorBytes.Length,
                     AuthSubscriptionAndConfigDirectoryMatch = authMatches,
                     StdoutSha256 = Convert.ToHexStringLower(SHA256.HashData(capture.StandardOutputBytes)),
                     StderrSha256 = Convert.ToHexStringLower(SHA256.HashData(capture.StandardErrorBytes)),
