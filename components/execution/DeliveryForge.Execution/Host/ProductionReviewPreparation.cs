@@ -84,16 +84,42 @@ public sealed partial class ProductionReviewSourceOwner
     void VerifyImage()
     {
         Check();
-        CheckMetadataBinding();
-        parent.EnterSynchronous(RunId, () =>
+        bool VerifySelectedImage()
         {
             Plain(GitExecutable);
             using var image = new FileStream(GitExecutable, FileMode.Open, FileAccess.Read, FileShare.Read);
             if (image.Length != gitBytes || Convert.ToHexStringLower(SHA256.HashData(image)) != gitSha256)
                 throw new ReviewPreflightException("Trusted Git image changed after original selection.");
             original.CheckWork(); return true;
-        });
+        }
+        if (provisionedBinding is not null)
+        {
+            // Preserve the metadata-entry and image-entry currentness checks;
+            // only their consecutive synchronous completion is grouped.
+            Check();
+            provisionedBinding.CheckAndVerifyReviewImage(original, parent, RunId, () =>
+            {
+                Check();
+                _ = VerifySelectedImage();
+            });
+        }
+        else
+        {
+            CheckMetadataBinding();
+            parent.EnterSynchronous(RunId, VerifySelectedImage);
+        }
     }
+    internal void RequireNativeGitBinding(WorktreeManager.OwnedGitBinding actualBinding, IOwnedDuplexBudget actualOriginal,
+        ICoordinatedEffectAdmission actualParent, string actualRunId, ProcessCommandExecutor actualExecutor)
+    {
+        if (!ReferenceEquals(provisionedBinding, actualBinding) || !ReferenceEquals(original, actualOriginal) ||
+            !ReferenceEquals(parent, actualParent) || RunId != actualRunId || !ReferenceEquals(executor, actualExecutor))
+            throw new ReviewPreflightException("Native review Git requires the same retained source/binding/executor/original parent/run.");
+        Check();
+    }
+    // Observation counter only; never a completion or dispatch authority. The
+    // retained binding calls this immediately before the actual native call.
+    internal void NativeGitCaptureStarting() => Interlocked.Increment(ref activeCaptures);
     internal Task<T> EnterAsync<T>(Func<Task<T>> operation)
     {
         Check();
@@ -252,14 +278,17 @@ public sealed partial class ProductionReviewSourceOwner
             BoundedCommandCaptureResult capture;
             try
             {
-                capture = await EnterAsync(() =>
-                {
-                    CheckMetadataBinding();
-                    var allowance = Remaining();
-                    dispatchEntered = true;
-                    Interlocked.Increment(ref activeCaptures);
-                    return executor.ExecuteBoundedCaptureAsync(invocation, allowance, MaximumBytes, token, new OwnedWorkPhaseBudget(original));
-                }).ConfigureAwait(false);
+                if (provisionedBinding is not null)
+                    capture = await provisionedBinding.ExecuteReviewGitAsync(this, invocation, MaximumBytes, token, out dispatchEntered).ConfigureAwait(false);
+                else
+                    capture = await EnterAsync(() =>
+                    {
+                        CheckMetadataBinding();
+                        var allowance = Remaining();
+                        dispatchEntered = true;
+                        Interlocked.Increment(ref activeCaptures);
+                        return executor.ExecuteBoundedCaptureAsync(invocation, allowance, MaximumBytes, token, new OwnedWorkPhaseBudget(original));
+                    }).ConfigureAwait(false);
             }
             catch
             {

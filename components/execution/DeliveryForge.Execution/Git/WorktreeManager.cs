@@ -443,14 +443,15 @@ public sealed partial class WorktreeManager
             var actualExecutor = _originalExecutor;
             actualBudget.CheckWork();
             var env = start.Environment.ToDictionary(x => x.Key, x => x.Value ?? "", OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            var invocation = new CommandInvocation(_gitExecutable, start.ArgumentList.ToArray(), cwd, env) { EnvironmentIsComplete = true };
             Task<BoundedCommandCaptureResult> Birth()
             {
                 actualBudget.CheckWork();
                 binding?.Check(cleanupObservation);
                 Interlocked.Increment(ref actualOwnedGitInvocations.Value);
-                return actualExecutor.ExecuteBoundedCaptureAsync(new(_gitExecutable, start.ArgumentList.ToArray(), cwd, env) { EnvironmentIsComplete = true }, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, cancellationToken, new OwnedWorkPhaseBudget(actualBudget));
+                return actualExecutor.ExecuteBoundedCaptureAsync(invocation, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, cancellationToken, new OwnedWorkPhaseBudget(actualBudget));
             }
-            var actual = await (binding is not null && !cleanupObservation ? binding.EnterAsync(Birth) :
+            var actual = await (binding is not null && !cleanupObservation ? binding.ExecuteWorktreeGitAsync(invocation, cancellationToken) :
                 _effectAdmission is null ? Birth() : _effectAdmission.EnterAsync(_effectRunId!, Birth)).ConfigureAwait(false);
             actualBudget.CheckWork(); var command = actual.Command; var facts = command.LifecycleDiagnostics;
             if (actual.CaptureBoundExceeded || command.TimedOut || command.Cancelled || !command.OwnedProcessQuiescent || !actual.RootExitObserved || !actual.StandardOutputDrainCompleted || !actual.StandardErrorDrainCompleted || facts?.NativeFailure is not null || facts?.OwnedTree is not { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 } || OperatingSystem.IsLinux() && actual.OwnershipKind != BoundedCaptureOwnershipKind.LinuxCreationOwnedScope || command.ExitCode is null)

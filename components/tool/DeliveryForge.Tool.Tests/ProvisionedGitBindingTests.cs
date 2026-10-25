@@ -80,6 +80,81 @@ public sealed class ProvisionedGitBindingTests
     }
 
     [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Grouped_checked_git_birth_retains_actual_capture_task_and_pending_admission()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        var before = fixture.Manager.ActualOwnedGitInvocations;
+        var admissions = fixture.Parent.NativeAdmissionAttempts;
+        var effects = fixture.Parent.Inner.EnteredCount;
+        fixture.Parent.ObserveNativeReturn = true;
+        var actual = binding.ExecuteWorktreeGitAsync(fixture.VersionInvocation(), TestContext.Current.CancellationToken);
+        Assert.Same(actual, fixture.Parent.ObservedNativeTask);
+        Assert.True(fixture.Parent.UnsettledAtNativeReturn);
+        Assert.Equal(effects + 1, fixture.Parent.Inner.EnteredCount);
+        Assert.Equal(admissions + 1, fixture.Parent.NativeAdmissionAttempts);
+        var capture = await actual.WaitAsync(fixture.Original.Remaining, TestContext.Current.CancellationToken);
+        Assert.Equal(0, capture.Command.ExitCode); Assert.False(capture.Command.Cancelled); Assert.False(capture.Command.TimedOut);
+        Assert.True(capture.Command.OwnedProcessQuiescent); Assert.True(capture.RootExitObserved);
+        Assert.True(capture.StandardOutputDrainCompleted); Assert.True(capture.StandardErrorDrainCompleted);
+        Assert.False(capture.CaptureBoundExceeded);
+        Assert.True(capture.Command.LifecycleDiagnostics?.OwnedTree is { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 });
+        Assert.StartsWith("git version ", Encoding.UTF8.GetString(capture.StandardOutputBytes), StringComparison.Ordinal);
+        Assert.Empty(capture.StandardErrorBytes);
+        Assert.Equal(before + 1, fixture.Manager.ActualOwnedGitInvocations);
+        await Task.WhenAll(fixture.Parent.Inner.OriginalObservers).WaitAsync(fixture.Original.Remaining, TestContext.Current.CancellationToken);
+        Assert.True(fixture.Parent.Inner.AllKnownSettled); Assert.False(fixture.Original.HasExplicitUnknown);
+        // Actual native capture/accounting only. The pending observation above
+        // is the real parent's not-yet-returned invocation, not a fake child Task.
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Grouped_checked_git_birth_rechecks_changed_metadata_before_native_capture()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        var before = fixture.Manager.ActualOwnedGitInvocations;
+        var admissions = fixture.Parent.NativeAdmissionAttempts;
+        var effects = fixture.Parent.Inner.EnteredCount;
+        var path = Path.Combine(binding.GitDirectory, "commondir");
+        var changed = Encoding.UTF8.GetBytes(fixture.Foreign + "\n");
+        using (var metadata = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read))
+        {
+            metadata.SetLength(0); metadata.Write(changed);
+        }
+        Assert.Equal(changed, File.ReadAllBytes(path));
+        // Call the new actual native entry directly so a manager's earlier
+        // precheck cannot mask a missing in-admission metadata verification.
+        await Assert.ThrowsAsync<WorktreeBoundaryException>(async () =>
+            await binding.ExecuteWorktreeGitAsync(fixture.VersionInvocation(), TestContext.Current.CancellationToken));
+        Assert.Equal(before, fixture.Manager.ActualOwnedGitInvocations);
+        Assert.Equal(admissions + 1, fixture.Parent.NativeAdmissionAttempts);
+        Assert.Equal(effects + 1, fixture.Parent.Inner.EnteredCount);
+        Assert.False(fixture.Parent.Inner.AllKnownSettled); // Existing entered-prefix refusal remains conservative.
+        Assert.False(fixture.Original.HasExplicitUnknown);
+        // The changed fixture and failed original admission stay retained.
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Grouped_review_image_verification_refuses_foreign_original_before_body_or_admission()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        using var foreign = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var before = fixture.Manager.ActualOwnedGitInvocations;
+        var admissions = fixture.Parent.NativeAdmissionAttempts;
+        var effects = fixture.Parent.Inner.EnteredCount; var imageBodies = 0;
+        Assert.Throws<WorktreeBoundaryException>(() => binding.CheckAndVerifyReviewImage(foreign,
+            fixture.Parent, "owned", () => imageBodies++));
+        Assert.Equal(0, imageBodies); Assert.Equal(before, fixture.Manager.ActualOwnedGitInvocations);
+        Assert.Equal(admissions, fixture.Parent.NativeAdmissionAttempts); Assert.Equal(effects, fixture.Parent.Inner.EnteredCount);
+        Assert.True(fixture.Parent.Inner.AllKnownSettled); Assert.True(fixture.Parent.Current);
+        Assert.False(fixture.Original.HasExplicitUnknown); Assert.False(foreign.HasExplicitUnknown);
+        // A real second lifetime is negative DATA. No source/reviewer owner,
+        // live issuer, native completion or production authority is fabricated.
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
     public async Task Initial_readonly_manager_refuses_writer_birth_before_opening_any_lock()
     {
         using var fixture = await Fixture.CreateAsync();
@@ -343,13 +418,22 @@ public sealed class ProvisionedGitBindingTests
         internal bool RefuseWriterReturn;
         internal bool Current = true;
         internal int NativeAdmissionAttempts;
+        internal bool ObserveNativeReturn, UnsettledAtNativeReturn;
+        internal Task? ObservedNativeTask;
         internal WriterLease? ActualWriter;
         internal PostBirthParent() => Inner = new(new object(), run => Current && run == "owned", _ => Current = false);
         public void CheckCurrent(string runId) => Inner.CheckCurrent(runId);
         public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke)
         {
             NativeAdmissionAttempts++;
-            return Inner.EnterAsync(runId, invoke);
+            if (!ObserveNativeReturn) return Inner.EnterAsync(runId, invoke);
+            return Inner.EnterAsync(runId, () =>
+            {
+                var actual = invoke();
+                ObservedNativeTask = actual;
+                UnsettledAtNativeReturn = !Inner.AllKnownSettled;
+                return actual;
+            });
         }
         public T EnterSynchronous<T>(string runId, Func<T> invoke)
         {
@@ -407,6 +491,15 @@ public sealed class ProvisionedGitBindingTests
                 return value;
             }
             catch { value.Dispose(); throw; }
+        }
+        internal CommandInvocation VersionInvocation()
+        {
+            var environment = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
+                .Where(row => !((string)row.Key).StartsWith("GIT_", StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(row => (string)row.Key, row => row.Value?.ToString() ?? "", StringComparer.OrdinalIgnoreCase);
+            environment["GIT_CONFIG_NOSYSTEM"] = "1"; environment["GIT_CONFIG_GLOBAL"] = "NUL";
+            environment["GIT_CONFIG_SYSTEM"] = "NUL"; environment["GIT_TERMINAL_PROMPT"] = "0";
+            return new(GitImage, ["--version"], Worker, environment) { EnvironmentIsComplete = true };
         }
         async Task<string> Git(params string[] arguments) => await GitAt(Repository, arguments);
         internal async Task<string> GitAt(string directory, params string[] arguments)

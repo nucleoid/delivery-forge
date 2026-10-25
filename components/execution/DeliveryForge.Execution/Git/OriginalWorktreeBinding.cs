@@ -1,4 +1,5 @@
 using System.Text;
+using DeliveryForge.Execution.Host;
 using DeliveryForge.Coordination;
 using DeliveryForge.Evidence;
 
@@ -104,25 +105,86 @@ public sealed partial class WorktreeManager
                 throw new WorktreeBoundaryException("Provisioned metadata is not one exact bounded line.");
             return text;
         }
-        internal void Check(bool cleanup = false)
+        void RequireRetained()
         {
             if (!manager.ownedGit.TryGetValue(Worktree, out var retained) || !ReferenceEquals(retained, this))
                 throw new WorktreeBoundaryException("No original parent provisioning owns this Git binding.");
-            void Verify()
+        }
+        void VerifyMetadata(bool cleanup)
+        {
+            Phase(cleanup);
+            if (!Read(Path.Combine(Worktree, ".git"), cleanup).AsSpan().SequenceEqual(markerBytes) ||
+                !Read(Path.Combine(GitDirectory, "gitdir"), cleanup).AsSpan().SequenceEqual(gitdirBytes) ||
+                !Read(Path.Combine(GitDirectory, "commondir"), cleanup).AsSpan().SequenceEqual(commonBytes))
+                throw new WorktreeBoundaryException("Original provisioned Git metadata association changed.");
+            RejectSymlinkAncestors(GitDirectory); RejectSymlinkAncestors(CommonDirectory);
+            if (writer is not null && !(cleanup && writer.FirstCloseReturned) &&
+                writer.ObserveCurrentNamespaceIdentity().Outcome != WriterNamespaceIdentityOutcome.Match)
+                throw new WorktreeBoundaryException("Original provisioned writer namespace changed or is unknown.");
+            Phase(cleanup);
+        }
+        internal void Check(bool cleanup = false)
+        {
+            RequireRetained();
+            if (cleanup) VerifyMetadata(true);
+            else parent.EnterSynchronous(RunId, () => { VerifyMetadata(false); return true; });
+        }
+        // One code-owned synchronous review verification, not an admitted scope
+        // returned to a caller or authority that may flow across an await.
+        internal void CheckAndVerifyReviewImage(IOwnedDuplexBudget owner, ICoordinatedEffectAdmission admission,
+            string runId, Action verifyImage)
+        {
+            ArgumentNullException.ThrowIfNull(verifyImage);
+            if (!ReferenceEquals(owner, original) || !ReferenceEquals(parent, admission) || runId != RunId)
+                throw new WorktreeBoundaryException("Provisioned Git binding belongs to another original parent/run.");
+            RequireRetained();
+            parent.EnterSynchronous(RunId, () =>
             {
-                Phase(cleanup);
-                if (!Read(Path.Combine(Worktree, ".git"), cleanup).AsSpan().SequenceEqual(markerBytes) ||
-                    !Read(Path.Combine(GitDirectory, "gitdir"), cleanup).AsSpan().SequenceEqual(gitdirBytes) ||
-                    !Read(Path.Combine(GitDirectory, "commondir"), cleanup).AsSpan().SequenceEqual(commonBytes))
-                    throw new WorktreeBoundaryException("Original provisioned Git metadata association changed.");
-                RejectSymlinkAncestors(GitDirectory); RejectSymlinkAncestors(CommonDirectory);
-                if (writer is not null && !(cleanup && writer.FirstCloseReturned) &&
-                    writer.ObserveCurrentNamespaceIdentity().Outcome != WriterNamespaceIdentityOutcome.Match)
-                    throw new WorktreeBoundaryException("Original provisioned writer namespace changed or is unknown.");
-                Phase(cleanup);
+                VerifyMetadata(false);
+                verifyImage();
+                return true;
+            });
+        }
+        void RequireNativeInvocation(CommandInvocation invocation)
+        {
+            ArgumentNullException.ThrowIfNull(invocation);
+            if (!string.Equals(Path.GetFullPath(invocation.FileName), manager._gitExecutable, PathComparison()) ||
+                !string.Equals(Path.GetFullPath(invocation.WorkingDirectory), Worktree, PathComparison()))
+                throw new WorktreeBoundaryException("Native Git invocation differs from its retained original image/worktree.");
+            RequireRetained();
+        }
+        internal Task<BoundedCommandCaptureResult> ExecuteWorktreeGitAsync(CommandInvocation invocation, CancellationToken token)
+        {
+            RequireNativeInvocation(invocation);
+            var executor = manager._originalExecutor ?? throw new WorktreeBoundaryException("Actual original Git executor is absent.");
+            return parent.EnterAsync(RunId, () =>
+            {
+                original.CheckWork();
+                VerifyMetadata(false);
+                Interlocked.Increment(ref manager.actualOwnedGitInvocations.Value);
+                return executor.ExecuteBoundedCaptureAsync(invocation, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, token, new OwnedWorkPhaseBudget(original));
+            });
+        }
+        internal Task<BoundedCommandCaptureResult> ExecuteReviewGitAsync(ProductionReviewSourceOwner actualOwner,
+            CommandInvocation invocation, int maximumBytes, CancellationToken token, out bool dispatchEntered)
+        {
+            var entered = false;
+            try
+            {
+                RequireNativeInvocation(invocation);
+                var executor = manager._originalExecutor ?? throw new WorktreeBoundaryException("Actual original Git executor is absent.");
+                actualOwner.RequireNativeGitBinding(this, original, parent, RunId, executor);
+                return parent.EnterAsync(RunId, () =>
+                {
+                    actualOwner.Check();
+                    VerifyMetadata(false);
+                    var allowance = actualOwner.Remaining();
+                    entered = true;
+                    actualOwner.NativeGitCaptureStarting();
+                    return executor.ExecuteBoundedCaptureAsync(invocation, allowance, maximumBytes, token, new OwnedWorkPhaseBudget(original));
+                });
             }
-            if (cleanup) Verify();
-            else parent.EnterSynchronous(RunId, () => { Verify(); return true; });
+            finally { dispatchEntered = entered; }
         }
         internal bool OwnsWriter(WriterLease actual) => ReferenceEquals(writer, actual);
         internal Task<T> EnterAsync<T>(Func<Task<T>> invoke) => parent.EnterAsync(RunId, invoke);
