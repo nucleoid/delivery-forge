@@ -119,20 +119,28 @@ public static class BoundedFiles
                 throw new ToolUsageException("Selected runtime-trust reads cannot fit the remaining SAME original file credit; no host is dispatched.");
         life.Check();
     }
-    static void CloseFile(FileFrame frame)
+    static void CloseFile(FileFrame frame, bool settledOwnerRetirement = false)
     {
         var life = frame.Original; var cleanup = frame.Primary is not null || frame.CleanupRequested;
+        void EnterSameCleanup()
+        {
+            // A settled containing owner needs its existing cleanup endpoint,
+            // not a synthetic failure marker. Actual operation/close failures
+            // retain the ordinary failure-attention and disposition behavior.
+            if (!settledOwnerRetirement || frame.Primary is not null || frame.CloseFailure is not null) life.BeginFailureCleanup();
+            _ = life.CleanupRemaining;
+        }
         if (frame.Stream is not null)
         {
             try
             {
                 if (!cleanup) { try { life.Check(); } catch (Exception admission) { frame.CloseFailure = admission; cleanup = true; } }
-                if (cleanup) { life.BeginFailureCleanup(); _ = life.CleanupRemaining; }
+                if (cleanup) EnterSameCleanup();
                 frame.CloseEntered = true; frame.Stream.Dispose(); frame.CloseReturned = true;
             }
             catch (Exception error) { frame.CloseFailure = frame.CloseFailure is null ? error : new AggregateException(frame.CloseFailure, error); }
         }
-        try { if (cleanup || frame.CloseFailure is not null) { life.BeginFailureCleanup(); _ = life.CleanupRemaining; } else life.Check(); }
+        try { if (cleanup || frame.CloseFailure is not null) EnterSameCleanup(); else life.Check(); }
         catch (Exception error) { frame.Post = error; }
         if (frame.Unknown) { life.RetainUnknown(); lock (UnknownFiles) UnknownFiles.Add(frame); }
         var failures = new List<Exception>(); if (frame.Primary is not null) failures.Add(frame.Primary); if (frame.CloseFailure is not null) failures.Add(frame.CloseFailure); if (frame.Post is not null) failures.Add(frame.Post);
@@ -195,6 +203,11 @@ public static class BoundedFiles
         {
             if (frame.CloseReturned) return;
             frame.CleanupRequested |= cleanup; CloseFile(frame);
+        }
+        internal void CloseAfterSettledOwner()
+        {
+            if (frame.CloseReturned) return;
+            frame.CleanupRequested = true; CloseFile(frame, settledOwnerRetirement: true);
         }
         internal void RetainUnknown()
         {

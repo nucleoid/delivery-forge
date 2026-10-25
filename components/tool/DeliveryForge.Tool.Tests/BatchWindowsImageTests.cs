@@ -44,6 +44,7 @@ public sealed class BatchWindowsImageTests
     public void One_actual_handle_spans_two_node_uses_without_reread_or_early_physical_close()
     {
         using var f = new Frame(); var pin = f.File("host.data");
+        using var errors = new StringWriter(); f.Original.BindAttention(new(f.Original, errors));
         f.Images.Plan(pin, f.Original); f.Images.Plan(pin, f.Original);
         f.Images.SealAndRequireCapacity(f.Original, 0, 0); f.Images.Verify(pin, f.Original);
         var first = f.Images.Borrow(pin, f.Original, f.Original.Token); first.Check(TestContext.Current.CancellationToken); first.Close(false);
@@ -54,6 +55,11 @@ public sealed class BatchWindowsImageTests
         BoundedFiles.RequireReadCapacity(f.Original, 4094, Cap - pin.Bytes - 1);
         Assert.Throws<IOException>(() => first.Check(TestContext.Current.CancellationToken));
         f.Close(); using var exclusive = new FileStream(pin.Path, FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        Assert.Empty(errors.ToString()); Assert.False(f.Original.HasRetainedUnknown);
+        Assert.Throws<TimeoutException>(f.Original.Check); // SAME cleanup began; no renewed WORK.
+        f.Original.BeginFailureCleanup(); var marker = errors.ToString();
+        Assert.StartsWith("DFCLI_FAILURE|", marker);
+        f.Original.BeginFailureCleanup(); Assert.Equal(marker, errors.ToString());
     }
 
     [Fact(Timeout = 30000)]
@@ -109,5 +115,80 @@ public sealed class BatchWindowsImageTests
         Assert.True(use.Unknown); Assert.False(use.IsReleased); Assert.True(f.Original.HasExplicitUnknown);
         Assert.Throws<IOException>(() => f.Images.Borrow(pin, f.Original, f.Original.Token));
         f.Close(); NoWriter(pin); Assert.True(f.Original.HasExplicitUnknown);
+    }
+    static (InstalledHostRootAcceptance Host, TrustedConfiguration Config, AdmissionFile Root, AdmissionFile ConfigPin) Declared(Frame f, AdmissionFile worker, AdmissionFile reviewer)
+    {
+        // Cost/refusal DATA only, matching the existing DeclaredTrust seam.
+        // Never read as an accepted root or construct a host/session/reviewer.
+        var hash = new string('a', 64);
+        AdmissionFile Pin(string leaf) => new(Path.Combine(f.Root, leaf), 100, hash);
+        var host = new InstalledHostRootAcceptance("RootActualInstalledHostConformanceAcceptance-v1", "windows", "codex.cli", "observed",
+            new(worker.Path, worker.Bytes, worker.Sha256, "observed"), Pin("tool.dll"), [Pin("artifact.json")], [],
+            new("Issue17OwnerTrustedPersonalHost-v1", Pin("owner.json"), [new(Path.Combine(f.Root, "absent1"), null, null), new(Path.Combine(f.Root, "absent2"), null, null)]));
+        var review = new InstalledReviewSelection("policy.json", "evidence.json", "fixture", Pin("git.exe"), "observed", Path.Combine(f.Root, "review"),
+            IndependentReviewer: new(reviewer, "observed"));
+        return (host, new TrustedConfiguration("fixture/repo", Path.Combine(f.Root, "repo"), "main", Path.Combine(f.Root, "git.exe"), InstalledReview: review), Pin("root.json"), Pin("config.json"));
+    }
+
+    [Fact(Timeout = 30000)]
+    public void Real_read_costs_match_two_node_pending_images_at_the_original_credit_edges()
+    {
+        using var f = new Frame(); var worker = f.File("worker.data"); var reviewer = f.File("reviewer.data");
+        var data = Declared(f, worker, reviewer);
+        var complete = InstalledHostAdmission.RuntimeTrust.ReadCapacity(data.Host, data.Root, data.ConfigPin, data.Config);
+        var images = InstalledHostAdmission.RuntimeTrust.ImageReadCapacity(data.Host, data.Config);
+        Assert.Equal(6, images.Operations); Assert.Equal(2 * (worker.Bytes + 1) + reviewer.Bytes + 1, images.Bytes);
+        var nonImageOps = complete.Operations - images.Operations; var nonImageBytes = complete.Bytes - images.Bytes;
+        Assert.Equal(500, complete.Operations); Assert.Equal(494, nonImageOps); Assert.Equal(482797L, nonImageBytes);
+        f.Images.Plan(worker, f.Original); f.Images.Plan(reviewer, f.Original);
+        f.Images.SealAndRequireCapacity(f.Original, 2 * nonImageOps, 2 * nonImageBytes);
+        var priorOps = 4096 - nonImageOps - 4;
+        Assert.True(priorOps > 0 && priorOps % 2 == 0);
+        for (var operation = 0; operation < priorOps; operation += 2) _ = BoundedFiles.Read(worker.Path, f.Original);
+        f.Images.RequireNodeCapacity(f.Original, worker, reviewer, complete, images); // node1 exact operation edge, both images pending
+        f.Images.Verify(worker, f.Original); f.Images.Verify(reviewer, f.Original);
+        var first = f.Images.Borrow(worker, f.Original, f.Original.Token); first.Close(false);
+        f.Images.RequireNodeCapacity(f.Original, worker, reviewer, complete, images); // node2: both actual hashes remain owned, zero pending reads
+        var second = f.Images.Borrow(worker, f.Original, f.Original.Token); second.Close(false);
+        var actualBytes = (priorOps / 2) * (worker.Bytes + 1) + worker.Bytes + reviewer.Bytes + 2;
+        BoundedFiles.RequireReadCapacity(f.Original, nonImageOps, Cap - actualBytes);
+        Assert.Throws<ToolUsageException>(() => BoundedFiles.RequireReadCapacity(f.Original, nonImageOps, Cap - actualBytes + 1));
+        _ = BoundedFiles.Read(worker.Path, f.Original);
+        Assert.Throws<ToolUsageException>(() => f.Images.RequireNodeCapacity(f.Original, worker, reviewer, complete, images));
+        f.Close();
+
+        // Exact byte-cap plan is metadata admission only: never open these declared large extents.
+        using var edge = new Frame(); var edgeWorker = edge.File("worker.data") with { Bytes = BoundedFiles.MaximumNativeImageBytes };
+        var edgeReviewer = edge.File("reviewer.data") with { Bytes = Cap - 2 * nonImageBytes - edgeWorker.Bytes - 2 };
+        var edgeData = Declared(edge, edgeWorker, edgeReviewer);
+        var edgeComplete = InstalledHostAdmission.RuntimeTrust.ReadCapacity(edgeData.Host, edgeData.Root, edgeData.ConfigPin, edgeData.Config);
+        var edgeImages = InstalledHostAdmission.RuntimeTrust.ImageReadCapacity(edgeData.Host, edgeData.Config);
+        Assert.Equal(nonImageBytes, edgeComplete.Bytes - edgeImages.Bytes);
+        edge.Images.Plan(edgeWorker, edge.Original); edge.Images.Plan(edgeReviewer, edge.Original);
+        edge.Images.SealAndRequireCapacity(edge.Original, 2 * nonImageOps, 2 * nonImageBytes);
+        edge.Images.RequireNodeCapacity(edge.Original, edgeWorker, edgeReviewer, edgeComplete, edgeImages);
+        BoundedFiles.RequireReadCapacity(edge.Original, 4096, Cap); // admission did not consume/refund real credit
+        using var over = new Frame(); var overWorker = over.File("worker.data") with { Bytes = edgeWorker.Bytes };
+        var overReviewer = over.File("reviewer.data") with { Bytes = edgeReviewer.Bytes + 1 };
+        var overData = Declared(over, overWorker, overReviewer);
+        var overComplete = InstalledHostAdmission.RuntimeTrust.ReadCapacity(overData.Host, overData.Root, overData.ConfigPin, overData.Config);
+        var overImages = InstalledHostAdmission.RuntimeTrust.ImageReadCapacity(overData.Host, overData.Config);
+        over.Images.Plan(overWorker, over.Original); over.Images.Plan(overReviewer, over.Original);
+        Assert.Throws<ToolUsageException>(() => over.Images.SealAndRequireCapacity(over.Original,
+            2 * (overComplete.Operations - overImages.Operations), 2 * (overComplete.Bytes - overImages.Bytes)));
+    }
+
+    [Fact(Timeout = 30000)]
+    public void Owner_release_failure_preserves_the_original_cleanup_admission_failure()
+    {
+        using var f = new Frame(); var pin = f.File("host.data");
+        f.Images.Plan(pin, f.Original); f.Images.SealAndRequireCapacity(f.Original, 0, 0);
+        var first = f.Images.Borrow(pin, f.Original, f.Original.Token);
+        var second = f.Images.Borrow(pin, f.Original, f.Original.Token);
+        first.RetainUnknown(); f.Original.BeginFailureCleanup();
+        var failure = Assert.Throws<AggregateException>(() => second.Close(false));
+        Assert.Collection(failure.InnerExceptions, error => Assert.IsType<TimeoutException>(error), error => Assert.IsType<IOException>(error));
+        Assert.False(second.IsReleased); Assert.True(f.Original.HasRetainedUnknown);
+        f.Close(); NoWriter(pin);
     }
 }

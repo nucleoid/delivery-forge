@@ -12,6 +12,8 @@ internal sealed class BatchWindowsImages(ToolLifetime original)
         internal readonly HashSet<WindowsImageUse> Uses = new(ReferenceEqualityComparer.Instance);
     }
     readonly object gate = new();
+    // Case-insensitive lookup never authorizes a different exact pin spelling.
+    // Aliases remain separate acquisitions/costs; conservative refusal is intentional.
     readonly Dictionary<string, Entry> entries = new(StringComparer.OrdinalIgnoreCase);
     bool sealedPlan, closing, closed, uncertain;
     int uses;
@@ -129,7 +131,7 @@ internal sealed class BatchWindowsImages(ToolLifetime original)
         {
             if (closing) throw new IOException("Batch image first-close already entered; no retry.");
             closing = true;
-            if (uncertain || original.HasExplicitUnknown || entries.Values.Any(e => e.Uses.Count != 0))
+            if (uncertain || original.HasRetainedUnknown || entries.Values.Any(e => e.Uses.Count != 0))
             {
                 uncertain = true; original.RetainUnknown();
                 foreach (var entry in entries.Values) entry.Image?.RetainUnknown();
@@ -139,7 +141,7 @@ internal sealed class BatchWindowsImages(ToolLifetime original)
             foreach (var entry in entries.Values)
             {
                 if (entry.Image is not { } image) continue;
-                try { image.Close(true); }
+                try { image.CloseAfterSettledOwner(); }
                 catch (Exception error) { failures.Add(error); if (!image.IsClosed) image.RetainUnknown(); }
             }
             closed = entries.Values.All(e => e.Image is null || e.Image.IsClosed);
@@ -177,7 +179,12 @@ internal sealed class WindowsImageUse(BoundedFiles.RetainedNativeImage image, To
         Exception? primary = null;
         try { if (cleanup) { original.BeginFailureCleanup(); _ = original.CleanupRemaining; } else original.Check(); }
         catch (Exception error) { primary = error; }
-        owner.Release(entry!, this); released = true;
+        try { owner.Release(entry!, this); released = true; }
+        catch (Exception release)
+        {
+            if (primary is not null) throw new AggregateException("Image-use admission and owner release failed.", primary, release);
+            throw;
+        }
         try { if (cleanup || primary is not null) { original.BeginFailureCleanup(); _ = original.CleanupRemaining; } else original.Check(); }
         catch (Exception post) { if (primary is not null) throw new AggregateException("Image-use release and same-original postcheck failed.", primary, post); throw; }
         if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();

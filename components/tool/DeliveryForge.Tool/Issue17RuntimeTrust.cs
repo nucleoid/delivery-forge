@@ -211,7 +211,7 @@ public sealed partial class InstalledHostAdmission
         internal static ReadRequirement ReadCapacity(InstalledHostRootAcceptance accepted, AdmissionFile rootPin, AdmissionFile configPin, TrustedConfiguration config)
         {
             RequireSelectedProfile(accepted, config, accepted.Platform);
-            if (accepted.RuntimeTrust is not { } trust || config.InstalledReview?.IndependentReviewer is not { } reviewer)
+            if (accepted.RuntimeTrust is not { } trust || config.InstalledReview?.IndependentReviewer is null)
                 throw new ToolUsageException("Exact selected runtime-trust reviewer profile required for read admission.");
             if (trust.OwnerDecision is null || accepted.ToolAssembly is null || accepted.Host is null || trust.HostInputs is null || trust.HostInputs.Count is < 2 or > 16 || accepted.Artifacts is null || accepted.Artifacts.Count is < 1 or > 32)
                 throw new ToolUsageException("Finite complete runtime-trust read selection required.");
@@ -233,8 +233,6 @@ public sealed partial class InstalledHostAdmission
             // bounded trust rechecks and these settings/config reads. This does
             // not pre-admit the full reviewer/pipeline or its Git/receipt effects.
             Read(rootPin.Bytes, 1048576); Read(accepted.ToolAssembly.Bytes, 16777216);
-            Read(accepted.Host.Bytes, BoundedFiles.MaximumNativeImageBytes); // root conformance rehash
-            Read(accepted.Host.Bytes, BoundedFiles.MaximumNativeImageBytes); // retained actual worker image
             foreach (var artifact in accepted.Artifacts)
             {
                 if (artifact is null) throw new ToolUsageException("Missing declared conformance artifact.");
@@ -251,14 +249,18 @@ public sealed partial class InstalledHostAdmission
             for (var settings = 0; settings < 7; settings++) Read(65536, 65536);
             // The reviewer directory binding and three protected-config callbacks.
             for (var configuration = 0; configuration < 4; configuration++) Read(configPin.Bytes, 65536);
-            Read(reviewer.Image.Bytes, BoundedFiles.MaximumNativeImageBytes);
+            var imageReads = ImageReadCapacity(accepted, config);
+            operations = checked(operations + imageReads.Operations); bytes = checked(bytes + imageReads.Bytes);
             operations = checked(operations + 4); // bounded worker/reviewer trace writes
             return new(operations, bytes);
         }
         internal static ReadRequirement ImageReadCapacity(InstalledHostRootAcceptance accepted, TrustedConfiguration config)
         {
             RequireSelectedProfile(accepted, config, accepted.Platform);
-            return new(6, checked(2 * (accepted.Host.Bytes + 1) + config.InstalledReview!.IndependentReviewer!.Image.Bytes + 1));
+            var worker = accepted.Host.Bytes; var reviewer = config.InstalledReview!.IndependentReviewer!.Image.Bytes;
+            if (worker is <= 0 or > BoundedFiles.MaximumNativeImageBytes || reviewer is <= 0 or > BoundedFiles.MaximumNativeImageBytes)
+                throw new ToolUsageException("Invalid declared runtime-trust input extent.");
+            return new(6, checked(2 * (worker + 1) + reviewer + 1));
         }
         internal static void RequireReadCapacity(InstalledHostRootAcceptance accepted, AdmissionFile rootPin, AdmissionFile configPin,
             TrustedConfiguration config, ToolLifetime original, BatchWindowsImages? images = null)
