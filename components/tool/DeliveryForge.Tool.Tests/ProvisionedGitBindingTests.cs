@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using System.Text;
 using DeliveryForge.Coordination;
 using DeliveryForge.Evidence;
@@ -105,6 +106,41 @@ public sealed class ProvisionedGitBindingTests
         Assert.True(fixture.Parent.Inner.AllKnownSettled); Assert.False(fixture.Original.HasExplicitUnknown);
         // Actual native Task identity, single admission and known closure only;
         // this does not claim the native Task was still pending at invoke-return.
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Review_git_groups_current_image_with_actual_birth_without_an_extra_ledger_entry()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        var head = (await fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token)).HeadCommit;
+        var image = File.ReadAllBytes(fixture.GitImage);
+        var owner = new ProductionReviewSourceOwner(fixture.Executor, fixture.Original, fixture.Parent, "owned", fixture.Worker,
+            binding.GitDirectory, binding.CommonDirectory, fixture.GitImage, image.Length,
+            Convert.ToHexStringLower(SHA256.HashData(image)), "git version fixture", head, head, () => true,
+            "sha256:" + new string('a', 64), "sha256:" + new string('b', 64), ".forge/policy.json", 1048576, binding)
+        { MaximumBytes = 1048576 };
+        var effects = fixture.Parent.Inner.EnteredCount;
+        var admissions = fixture.Parent.NativeAdmissionAttempts;
+        fixture.Parent.ObserveNativeReturn = true;
+        Task actual = owner.GitAsync(binding.GitDirectory, ["--version"], fixture.Original.Token);
+        await actual;
+        var native = Assert.IsType<Task<BoundedCommandCaptureResult>>(fixture.Parent.ObservedNativeTask);
+        var capture = await native;
+        Assert.Equal(0, capture.Command.ExitCode);
+        Assert.True(capture.Command.OwnedProcessQuiescent); Assert.True(capture.RootExitObserved);
+        Assert.True(capture.StandardOutputDrainCompleted); Assert.True(capture.StandardErrorDrainCompleted);
+        Assert.True(capture.Command.LifecycleDiagnostics?.OwnedTree is { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 });
+        Assert.StartsWith("git version ", Encoding.UTF8.GetString(capture.StandardOutputBytes), StringComparison.Ordinal);
+        Assert.Empty(capture.StandardErrorBytes);
+        Assert.Equal(admissions + 1, fixture.Parent.NativeAdmissionAttempts);
+        await Task.WhenAll(fixture.Parent.Inner.OriginalObservers).WaitAsync(fixture.Original.Remaining, fixture.Original.Token);
+        Assert.True(fixture.Parent.Inner.AllKnownSettled);
+        Assert.True(owner.MayCleanOwnedFiles);
+        Assert.False(owner.Uncertain); Assert.False(fixture.Original.HasExplicitUnknown);
+        // Two retained effects: checked native birth and the complete postcheck.
+        // No ledger pruning/refund, saved receipt, or production acceptance.
+        Assert.Equal(effects + 2, fixture.Parent.Inner.EnteredCount);
     }
 
     [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
