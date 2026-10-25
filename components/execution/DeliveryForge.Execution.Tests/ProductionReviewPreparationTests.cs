@@ -83,16 +83,20 @@ public sealed class ProductionReviewPreparationTests : IDisposable
         Assert.Equal(0, parent.Entries);
     }
 
-    [Fact]
-    public async Task Parent_revocation_at_file_birth_refuses_read_and_never_creates_write_target()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Parent_revocation_at_file_birth_refuses_before_opening_the_stream(bool write)
     {
         var owner = Owner(); parent.AllowAsync = true;
         parent.BeforeAsync = () => parent.Revoked = true;
-        var read = await Assert.ThrowsAsync<IOException>(() => owner.ReadFileAsync(Image, 1024, CancellationToken.None));
-        Assert.Equal("File currentness revoked.", read.Message);
         var target = Path.Combine(root, "must-not-exist");
-        var write = await Assert.ThrowsAsync<IOException>(() => owner.WriteFileAsync(target, [1, 2, 3], CancellationToken.None));
-        Assert.Equal("File currentness revoked.", write.Message);
+        var failure = write
+            ? await Assert.ThrowsAsync<IOException>(() => owner.WriteFileAsync(target, [1, 2, 3], CancellationToken.None))
+            : await Assert.ThrowsAsync<IOException>(() => owner.ReadFileAsync(Image, 1024, CancellationToken.None));
+        Assert.Equal("File currentness revoked.", failure.Message);
+        Assert.Equal(1, parent.Entries); // Each independent call reached actual admission.
+        Assert.Equal(0, original.CleanupChecks); // No born stream needed first-close cleanup.
         Assert.False(File.Exists(target)); Assert.False(owner.Uncertain);
     }
 
