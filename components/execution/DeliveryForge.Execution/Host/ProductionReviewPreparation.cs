@@ -170,7 +170,11 @@ public sealed partial class ProductionReviewSourceOwner
             FileStream? file = null; byte[]? resultBytes = null; Exception? primary = null;
             try
             {
-                EnterSynchronous(() => { Plain(path); return file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.Asynchronous); });
+                // This file birth is already in the actual async admission's
+                // synchronous prefix. Keep its checks without a second row.
+                Check(); original.CheckWork(); Plain(path);
+                file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, FileOptions.Asynchronous);
+                Check();
                 var opened = file ?? throw new IOException("Owned file birth returned no stream.");
                 if (opened.Length > maximum) throw new ReviewPreflightException("Owned source/index exceeds its byte bound.");
                 using var bytes = new MemoryStream(); var buffer = new byte[65536];
@@ -198,7 +202,11 @@ public sealed partial class ProductionReviewSourceOwner
             FileStream? file = null; Exception? primary = null;
             try
             {
-                EnterSynchronous(() => { Plain(path); return file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous); });
+                Check(); original.CheckWork(); Plain(path);
+                file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.Asynchronous);
+                // Capture the exact born stream before a refused postcheck so
+                // the existing first-disposition path still closes that stream.
+                Check();
                 var opened = file ?? throw new IOException("Owned file birth returned no stream.");
                 Check(); await opened.WriteAsync(bytes, token).ConfigureAwait(false);
                 Check(); await opened.FlushAsync(token).ConfigureAwait(false);
