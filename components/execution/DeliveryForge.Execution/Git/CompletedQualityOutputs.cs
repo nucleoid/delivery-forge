@@ -42,6 +42,9 @@ internal sealed class CompletedQualityOutputs
             throw new WorktreeBoundaryException("Completed quality outputs cannot cross parent, original, worktree or revision.");
     }
 
+    // Observe the same retained actual scope; no caller flag can supply this state.
+    internal bool HasUncertainOriginals => scope.HasUncertainOriginals;
+
     internal IReadOnlyDictionary<string, string> RequireCurrentFiles(string headTree)
     {
         original.CheckWork();

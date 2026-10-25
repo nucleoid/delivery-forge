@@ -69,13 +69,9 @@ public sealed class ClaudeReviewerObservationNativeTests
                 try
                 {
                     ClaudeIndependentReviewData.RequireSubscription(capture.StandardOutputBytes);
-                    using var document = JsonDocument.Parse(capture.StandardOutputBytes);
-                    var value = document.RootElement;
-                    authMatches = value.TryGetProperty("configDirectory", out var directory) && directory.ValueKind == JsonValueKind.String &&
-                        directory.GetString() is { } observed && Path.IsPathFullyQualified(observed) &&
-                        string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(observed)),
-                            Path.TrimEndingDirectorySeparator(Path.GetFullPath(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude"))),
-                            StringComparison.OrdinalIgnoreCase);
+                    ClaudeReviewerUserSettings.RequireObservedConfigurationDirectory(capture.StandardOutputBytes,
+                        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude"));
+                    authMatches = true;
                 }
                 catch (Exception failure) when (failure is not OutOfMemoryException)
                 {

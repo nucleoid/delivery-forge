@@ -60,7 +60,7 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
     {
         selected = settings; original = life; transport = actualTransport; checkpoints = actualStore;
         renewalHandoff = new(gate, original);
-        effects = new(gate, runId => OriginalCanAdmitEffects(original) && opened && !closed && !revoked && parentRunId == runId && authority is not null && reducer is not null && reducer.MayDispatch(authority), Revoke, renewalHandoff);
+        effects = new(gate, runId => OriginalCanAdmitEffects(original) && opened && !closed && !revoked && parentRunId == runId && authority is not null && reducer is not null && reducer.MayDispatch(authority), Revoke, renewalHandoff, original);
         renewalStop = CancellationTokenSource.CreateLinkedTokenSource(life.Token);
         cancelled = life.Token.Register(() => Revoke(new OperationCanceledException("Original parent cancellation revoked admission.")));
     }

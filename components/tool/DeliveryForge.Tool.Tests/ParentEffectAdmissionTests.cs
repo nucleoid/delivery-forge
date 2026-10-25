@@ -1,3 +1,4 @@
+using System.Text.Json;
 using DeliveryForge.Coordination;
 using DeliveryForge.Tool;
 
@@ -313,6 +314,51 @@ public sealed class ParentEffectAdmissionTests
         });
         Assert.Equal(0, fixture.Admission.EnteredCount);
         if (pending is not null) { Assert.Equal(0, pending.WaitingCount); Assert.False(pending.Installed); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Exhausted_actual_effect_ledger_records_exact_refusal_before_revocation_enters_cleanup(bool asynchronous)
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        using var errors = new StringWriter();
+        var attention = new ToolFailureAttention(original, errors); original.BindAttention(attention);
+        var gate = new object(); var current = true; var revoked = 0; Exception? primary = null;
+        var admission = new ParentEffectAdmission(gate, run => current && run == "owned", error =>
+        {
+            Assert.True(Monitor.IsEntered(gate));
+            primary = error; revoked++; current = false;
+            original.Check(); Assert.Equal("", errors.ToString());
+            // Actual cleanup entry deliberately follows the ledger diagnostic.
+            original.BeginFailureCleanup();
+        }, original: original);
+        for (var index = 0; index < 1024; index++)
+            Assert.Equal(index, admission.EnterSynchronous("owned", () => index));
+        Assert.Equal(1024, admission.EnteredCount); Assert.True(admission.AllKnownSettled);
+        var births = 0;
+        var actual = Assert.Throws<IOException>(() =>
+        {
+            if (asynchronous) _ = admission.EnterAsync("owned", () => { births++; return Task.FromResult(7); });
+            else admission.EnterSynchronous("owned", () => ++births);
+        });
+        Assert.Same(primary, actual); Assert.Equal(1, revoked); Assert.Equal(0, births);
+        Assert.Equal(1024, admission.EnteredCount); Assert.True(admission.AllKnownSettled);
+        original.RecordFirstCaught("later-consequence", new InvalidOperationException("must-not-export"));
+        attention.EmitFirstCaughtOnce(); attention.EmitFirstCaughtOnce();
+        var lines = errors.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => line.TrimEnd('\r')).ToArray();
+        Assert.Equal(2, lines.Length); Assert.StartsWith("DFCLI_FAILURE|", lines[0], StringComparison.Ordinal);
+        const string prefix = "DFCLI_FIRST_CAUGHT|"; Assert.StartsWith(prefix, lines[1], StringComparison.Ordinal);
+        using var json = JsonDocument.Parse(lines[1][prefix.Length..]); var diagnostic = json.RootElement;
+        Assert.Equal("parent-effect-ledger-exhausted", diagnostic.GetProperty("Stage").GetString());
+        Assert.Equal(typeof(IOException).FullName, diagnostic.GetProperty("Type").GetString());
+        Assert.Equal(actual.HResult, diagnostic.GetProperty("HResult").GetInt32());
+        Assert.Equal(JsonValueKind.Null, diagnostic.GetProperty("InnerType").ValueKind);
+        Assert.False(diagnostic.GetProperty("CleanupAlreadyBegun").GetBoolean());
+        Assert.False(diagnostic.GetProperty("MarkerAlreadyEntered").GetBoolean());
+        Assert.DoesNotContain(actual.Message, errors.ToString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("must-not-export", errors.ToString(), StringComparison.Ordinal);
+        Assert.False(attention.Unknown); Assert.False(original.HasExplicitUnknown);
     }
 
     [Fact]

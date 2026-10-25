@@ -30,6 +30,7 @@ internal sealed class InstalledReviewHost : IDisposable
     ClaudeIndependentReviewer? independentReviewer;
     DeliveryForge.Contracts.Validation.ValidatedContract? protectedEvidencePolicy;
     bool entered, disposed, uncertain, dispositionEntered;
+    int independentEntry;
     enum SourceGitOperation { Head, Tree, FilterConfig, Status, BaseEvidence, Other }
     enum SourceGitFailure { CountBound, AdmissionThrow, DispatchThrow, Unsettled, OutputBound, TimedOut, Cancelled, UnexpectedExit, Decode }
     internal bool DispositionEntered => dispositionEntered;
@@ -112,6 +113,8 @@ internal sealed class InstalledReviewHost : IDisposable
         // Refuse this unsupported production profile before source/settings/CWD I/O.
         // RunAsync keeps the same guard as defense at its own boundary.
         if (ClaudeIndependentReviewer.UnsupportedProductionProfile(runtimeTrust, original, selection.IndependentReviewer) is { } profileRefusal) return profileRefusal;
+        if (Interlocked.CompareExchange(ref independentEntry, 1, 0) != 0)
+            throw new ToolUsageException("Actual independent reviewer cannot replay.");
         completedQuality?.BindCompletedReviewOutputs(frame, sourceOwner);
         sourceOwner.Check();
         async Task<(PatchIdentity Patch, byte[] FrozenPlan)> PrepareEvidence(CancellationToken token)

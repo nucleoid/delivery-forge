@@ -4,7 +4,7 @@ namespace DeliveryForge.Tool;
 
 // Internal implementation used by the real parent, with its SAME revocation lock and private current-authority check.
 internal sealed class ParentEffectAdmission(object originalGate, Func<string, bool> current, Action<Exception> revoke,
-    ParentRenewalHandoff? renewal = null) : ICoordinatedSynchronousEffectAdmission, ICoordinatedBoundedCurrentness
+    ParentRenewalHandoff? renewal = null, ToolLifetime? original = null) : ICoordinatedSynchronousEffectAdmission, ICoordinatedBoundedCurrentness
 {
     sealed class OriginalInvocation { internal bool Entered, Returned, Synchronous; internal Task? Task; internal Task? Observation; internal Exception? Failure; }
     readonly List<OriginalInvocation> originals = [];
@@ -79,6 +79,7 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
                     if (originals.Count >= 1024)
                     {
                         var exhausted = new IOException("Finite original parent effect ledger exhausted.");
+                        original?.RecordFirstCaught("parent-effect-ledger-exhausted", exhausted);
                         revoke(exhausted); throw exhausted;
                     }
                     // The actual completion exists before leaving admission. Renewal and
@@ -112,7 +113,9 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
                 {
                     if (originals.Count >= 1024)
                     {
-                        var exhausted = new IOException("Finite original parent effect ledger exhausted."); revoke(exhausted); throw exhausted;
+                        var exhausted = new IOException("Finite original parent effect ledger exhausted.");
+                        original?.RecordFirstCaught("parent-effect-ledger-exhausted", exhausted);
+                        revoke(exhausted); throw exhausted;
                     }
                     var row = new OriginalInvocation { Entered = true }; originals.Add(row);
                     try

@@ -11,12 +11,14 @@ public sealed partial class ProductionReviewSourceOwner
     IReadOnlyDictionary<string, string>? CurrentQualityOutputFiles(string headTree)
     {
         try { return completedQualityOutputs?.RequireCurrentFiles(headTree); }
-        catch (Exception failure) when (failure is Git.WorktreeBoundaryException or DeliveryForge.Evidence.EvidenceWriteException)
+        catch (Exception failure) when (failure is Git.WorktreeBoundaryException or DeliveryForge.Evidence.EvidenceWriteException or IOException or UnauthorizedAccessException or AggregateException)
         {
-            // Preserve the exact refusal. The installed quality owner remains
+            // Direct cancellation/deadline exceptions keep their original taxonomy.
+            // Preserve the exact refusal, including complete aggregate failures.
+            // The installed quality owner remains
             // registered on the same bridge frame and retains its own Unknown.
             throw new ReviewPreflightException("Actual completed quality output currentness refused review source preparation.",
-                failure, residualProcessUncertain: Uncertain);
+                failure, residualProcessUncertain: Uncertain || completedQualityOutputs?.HasUncertainOriginals == true);
         }
     }
     internal void BindCompletedQualityOutputs(Git.CompletedQualityOutputs actual)

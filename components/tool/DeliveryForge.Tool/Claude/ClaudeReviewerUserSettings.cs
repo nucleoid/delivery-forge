@@ -226,21 +226,29 @@ internal sealed class ClaudeReviewerUserSettings
 
     internal void RequireObservedConfigurationDirectory(byte[] actualAuthStatus)
     {
-        original.Check(); string? observed = null;
+        original.Check();
+        RequireObservedConfigurationDirectory(actualAuthStatus, directory);
+        original.Check();
+    }
+
+    // Pure DATA predicate shared by the original owner and ordinary observations.
+    // This overload does not capture settings or confer parent/reviewer authority.
+    internal static void RequireObservedConfigurationDirectory(byte[] actualAuthStatus, string selectedDirectory)
+    {
+        string? observed = null;
         try
         {
-            if (actualAuthStatus.Length > MaximumBytes) throw new JsonException();
+            if (actualAuthStatus.Length > MaximumBytes || !System.IO.Path.IsPathFullyQualified(selectedDirectory)) throw new JsonException();
             _ = CanonicalJson.Canonicalize(actualAuthStatus);
             using var doc = JsonDocument.Parse(actualAuthStatus);
             if (doc.RootElement.ValueKind == JsonValueKind.Object && doc.RootElement.TryGetProperty("configDirectory", out var value) && value.ValueKind == JsonValueKind.String)
                 observed = value.GetString();
             if (observed is null || !System.IO.Path.IsPathFullyQualified(observed) ||
-                !string.Equals(Normalize(observed), directory, PathComparison)) throw new JsonException();
+                !string.Equals(Normalize(observed), Normalize(selectedDirectory), PathComparison)) throw new JsonException();
         }
         catch (Exception failure) when (failure is not OutOfMemoryException)
         {
             throw new ToolUsageException("Actual reviewer configuration directory is unavailable or differs from the captured user-settings source.");
         }
-        original.Check();
     }
 }
