@@ -45,8 +45,12 @@ public sealed class ReviewGateReceiptEvidenceTests
         Assert.Equal("sha256:" + BoundedFiles.Sha(CanonicalJson.Canonicalize(Encoding.UTF8.GetBytes(map.GetRawText()))),
             evidence.GetProperty("ArtifactInventory").GetProperty("CanonicalIdentity").GetString());
         var oldPrompt = JsonSerializer.Serialize(raw.RootElement, BoundedFiles.Json);
-        var newPrompt = JsonSerializer.Serialize(new { CompletePlan = "unchanged plan", QualityEvidence = evidence,
-            CompletePatch = "unchanged complete patch" }, BoundedFiles.Json);
+        var newPrompt = JsonSerializer.Serialize(new
+        {
+            CompletePlan = "unchanged plan",
+            QualityEvidence = evidence,
+            CompletePatch = "unchanged complete patch"
+        }, BoundedFiles.Json);
         Assert.True(Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(oldPrompt)) > 60000);
         Assert.True(Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(newPrompt)) < 60000);
         Assert.Throws<ContractValidationException>(() => ContractValidator.ParseAndValidate(
