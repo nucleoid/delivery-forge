@@ -71,6 +71,8 @@ Never promote v1 as fallback authority after activation. Claims are written and 
 
 Host Git reads reject repository-local `filter.*`, `include.*`/`includeIf.*`, and `core.attributesFile` configuration before invoking Git, suppress system/global configuration, override hooks/fsmonitor/attributes, and verify the local config byte identity did not change across each identity/scope capture. Patch-controlled clean/smudge/process filters are never executed by the host read path.
 
+Installed independent review retains each complete canonical gate receipt and all referenced artifacts. Its review-only presentation includes the exact raw receipt path, length, SHA256 and original identity, every result field unchanged, and the complete artifact-hash inventory's canonical digest and count. This presentation is not a gate receipt or authority input. The patch identity still binds the original raw receipt bytes; the complete patch and frozen plan and the existing native prompt-size refusal remain unchanged.
+
 The built-in `ci` authority is an explicit external-issuer boundary: Delivery Forge does not produce CI receipts. A trusted host must translate an authenticated GitHub Actions/Checks result for the exact head into tool version `github-actions-v1` and format `github-checks-v1`, then append the receipt to a host-owned append-only store. Repository files and workflow-produced patch artifacts are inputs only and cannot establish authoritative receipt provenance.
 
 ## Baseline and policy ownership

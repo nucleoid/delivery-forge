@@ -128,7 +128,7 @@ internal sealed class InstalledReviewHost : IDisposable
                 var bytes = parent.EnterSynchronous(assignment.RunId, () => { token.ThrowIfCancellationRequested(); sourceOwner.Check(); return BoundedFiles.Read(gate.ReceiptPath, original); });
                 token.ThrowIfCancellationRequested();
                 identities.Add("quality-receipt:" + gate.ReceiptPath, "sha256:" + BoundedFiles.Sha(bytes));
-                using var doc = JsonDocument.Parse(bytes); qualityEvidence.Add(doc.RootElement.Clone());
+                qualityEvidence.Add(ReviewGateReceiptEvidence.Create(gate.ReceiptPath, bytes));
             }
             var patch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, assignment.BaseCommit, completion.HeadCommit, frozen.ContractIdentity, identities, token).ConfigureAwait(false);
             var planAndEvidence = JsonSerializer.SerializeToUtf8Bytes(new { FrozenPlan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), QualityEvidence = qualityEvidence, MissingQualityEvidence = actualQualityResults.Count == 0 }, BoundedFiles.Json);
