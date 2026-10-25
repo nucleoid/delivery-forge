@@ -84,14 +84,6 @@ public sealed partial class ProductionReviewSourceOwner
     void VerifyImage()
     {
         Check();
-        bool VerifySelectedImage()
-        {
-            Plain(GitExecutable);
-            using var image = new FileStream(GitExecutable, FileMode.Open, FileAccess.Read, FileShare.Read);
-            if (image.Length != gitBytes || Convert.ToHexStringLower(SHA256.HashData(image)) != gitSha256)
-                throw new ReviewPreflightException("Trusted Git image changed after original selection.");
-            original.CheckWork(); return true;
-        }
         if (provisionedBinding is not null)
         {
             // Preserve the metadata-entry and image-entry currentness checks;
@@ -108,6 +100,23 @@ public sealed partial class ProductionReviewSourceOwner
             CheckMetadataBinding();
             parent.EnterSynchronous(RunId, VerifySelectedImage);
         }
+    }
+    bool VerifySelectedImage()
+    {
+        Plain(GitExecutable);
+        using var image = new FileStream(GitExecutable, FileMode.Open, FileAccess.Read, FileShare.Read);
+        if (image.Length != gitBytes || Convert.ToHexStringLower(SHA256.HashData(image)) != gitSha256)
+            throw new ReviewPreflightException("Trusted Git image changed after original selection.");
+        original.CheckWork(); return true;
+    }
+    // Only the retained native task calls this after its actual capture returns.
+    // The binding rechecks its metadata and the same complete image hash; its
+    // pending original admission already owns this post-validation operation.
+    internal void VerifyCompletedNativeGitImage(WorktreeManager.OwnedGitBinding actualBinding, IOwnedDuplexBudget actualOriginal,
+        ICoordinatedEffectAdmission actualParent, string actualRunId, ProcessCommandExecutor actualExecutor)
+    {
+        RequireNativeGitBinding(actualBinding, actualOriginal, actualParent, actualRunId, actualExecutor);
+        _ = VerifySelectedImage(); Check();
     }
     internal void RequireNativeGitBinding(WorktreeManager.OwnedGitBinding actualBinding, IOwnedDuplexBudget actualOriginal,
         ICoordinatedEffectAdmission actualParent, string actualRunId, ProcessCommandExecutor actualExecutor)
@@ -300,7 +309,7 @@ public sealed partial class ProductionReviewSourceOwner
             }
             catch
             {
-                if (dispatchEntered) { uncertain = true; parent.RetainUncertain(RunId, "Original review Git dispatch/capture did not return."); }
+                if (dispatchEntered) { uncertain = true; parent.RetainUncertain(RunId, "Original review Git dispatch/capture/post-validation did not complete."); }
                 throw;
             }
             var facts = capture.Command.LifecycleDiagnostics;
@@ -314,7 +323,7 @@ public sealed partial class ProductionReviewSourceOwner
                 failure.Data["ReviewGitPreparationCapture"] = ReviewGitPreparationCaptureData.FromCapture(capture);
                 throw failure;
             }
-            VerifyImage();
+            if (provisionedBinding is null) VerifyImage();
             commandSucceeded = true;
             return new(capture.Command.ExitCode!.Value, capture.StandardOutputBytes, capture.StandardErrorBytes);
         }

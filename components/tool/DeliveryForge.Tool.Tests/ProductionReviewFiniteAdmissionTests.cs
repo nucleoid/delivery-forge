@@ -49,8 +49,10 @@ public sealed class ProductionReviewFiniteAdmissionTests
         Assert.Equal(before + 1, parent.EnteredCount);
     }
 
-    [Fact(Timeout = 180000, SkipUnless = nameof(Windows), Skip = "Linux native source preparation requires its separately selected owned scope.")]
-    public async Task Actual_linked_worktree_prepares_with_the_real_finite_parent_without_multiplicative_metadata_effects()
+    [Theory(Timeout = 180000, SkipUnless = nameof(Windows), Skip = "Linux native source preparation requires its separately selected owned scope.")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Actual_linked_worktree_prepares_with_the_real_finite_parent_without_multiplicative_metadata_effects(bool allGoldenChecks)
     {
         var root = Path.Combine(Path.GetTempPath(), "forge-linked-review-" + Guid.NewGuid().ToString("N"));
         var repository = Path.Combine(root, "repository"); var worker = Path.Combine(root, "worker");
@@ -117,16 +119,16 @@ public sealed class ProductionReviewFiniteAdmissionTests
             await File.WriteAllTextAsync(Path.Combine(repository, "review.json"), policy, TestContext.Current.CancellationToken);
             // One existing commit adds many ACTUAL distinct loose object bytes;
             // the former ~10 admitted effects/object exhausts the real1024 cap.
-            for (var index = 0; index < 256; index++)
+            for (var index = 0; index < (allGoldenChecks ? 0 : 256); index++)
                 await File.WriteAllTextAsync(Path.Combine(repository, $"inventory-{index}.txt"), $"distinct-owned-object-{index}\n", TestContext.Current.CancellationToken);
-            for (var index = 0; index < 12; index++)
+            for (var index = 0; index < (allGoldenChecks ? 2 : 12); index++)
             {
                 // Retain these genuine historical Git objects. The
                 // current source is separately extended below to507 tracked
                 // entries, exercising BOTH exact object and source groups.
-                if (index == 1)
+                if (!allGoldenChecks && index == 1)
                     for (var file = 0; file < 256; file++) File.Delete(Path.Combine(repository, $"inventory-{file}.txt"));
-                if (index == 2)
+                if (!allGoldenChecks && index == 2)
                 {
                     for (var file = 0; file < 504; file++)
                         await File.WriteAllTextAsync(Path.Combine(repository, $"census-{file}.txt"),
@@ -152,10 +154,13 @@ public sealed class ProductionReviewFiniteAdmissionTests
             var commonGit = await Git(worker, "rev-parse", "--path-format=absolute", "--git-common-dir");
             Assert.True(File.Exists(Path.Combine(worker, ".git"))); Assert.NotEqual(workerGit, commonGit);
             var objectFiles = Directory.EnumerateFiles(Path.Combine(commonGit, "objects"), "*", SearchOption.AllDirectories).Count();
-            Assert.True(objectFiles >= 507);
-            Assert.Equal(507, Directory.EnumerateFiles(worker).Count(path => Path.GetFileName(path) != ".git"));
-            Assert.Equal("complete-source-0\n", await File.ReadAllTextAsync(Path.Combine(worker, "census-0.txt"), TestContext.Current.CancellationToken));
-            Assert.Equal("$Format:%H$\n", await File.ReadAllTextAsync(Path.Combine(worker, "census-1.txt"), TestContext.Current.CancellationToken));
+            Assert.True(objectFiles >= (allGoldenChecks ? 6 : 507));
+            Assert.Equal(allGoldenChecks ? 2 : 507, Directory.EnumerateFiles(worker).Count(path => Path.GetFileName(path) != ".git"));
+            if (!allGoldenChecks)
+            {
+                Assert.Equal("complete-source-0\n", await File.ReadAllTextAsync(Path.Combine(worker, "census-0.txt"), TestContext.Current.CancellationToken));
+                Assert.Equal("$Format:%H$\n", await File.ReadAllTextAsync(Path.Combine(worker, "census-1.txt"), TestContext.Current.CancellationToken));
+            }
             DirectoryInfo? source = new(Environment.CurrentDirectory);
             while (source is not null && !File.Exists(Path.Combine(source.FullName, "DeliveryForge.slnx"))) source = source.Parent;
             Assert.NotNull(source);
@@ -173,22 +178,24 @@ public sealed class ProductionReviewFiniteAdmissionTests
                 baseCommit, head, () => true, planIdentity, evidenceIdentity, "review.json", 1048576, provisioned);
             using var bootstrap = await ReviewAuthorityHost.CreateProductionFromOwnedSourceAsync(owner, planBytes, evidenceBytes,
                 "review.json", 1048576, TestContext.Current.CancellationToken);
-            // Exercise all five fresh source computations through the public
-            // actual bootstrap/export boundary. This is source conformance;
-            // quality, reviewer and full installed-run costs are not included.
+            // The small-source row retains all sixteen fresh computations from
+            // bootstrap/reviewer plus the twelve golden evidence callbacks.
+            // It is a real native source-control budget regression, not a
+            // substitute for quality/reviewer/full installed acceptance.
             var counts = new List<int> { parent.EnteredCount };
             var patch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, baseCommit, head,
                 planIdentity, new Dictionary<string, string>(), TestContext.Current.CancellationToken);
             counts.Add(parent.EnteredCount);
-            for (var export = 0; export < 3; export++)
+            for (var export = 0; export < (allGoldenChecks ? 14 : 3); export++)
             {
+                TestContext.Current.TestOutputHelper!.WriteLine($"Before fresh export {export}: {parent.EnteredCount}/1024 retained effects.");
                 var bytes = await GitPatchIdentity.ExportVerifiedPatchAsync(bootstrap.ObjectView, patch, TestContext.Current.CancellationToken);
                 Assert.Equal(patch.PatchSha256, "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes)));
                 counts.Add(parent.EnteredCount);
             }
-            Assert.Equal(5, counts.Count);
+            Assert.Equal(allGoldenChecks ? 16 : 5, counts.Count);
             for (var index = 1; index < counts.Count; index++) Assert.True(counts[index] > counts[index - 1]);
-            TestContext.Current.TestOutputHelper!.WriteLine("Actual five source-computation cumulative effects=" + string.Join(",", counts) + "/1024; excludes quality/reviewer/full installed run.");
+            TestContext.Current.TestOutputHelper!.WriteLine("Actual source-computation cumulative effects=" + string.Join(",", counts) + "/1024; excludes quality/reviewer/full installed run.");
             Assert.Equal(baseCommit, bootstrap.Policy.SourceRevision); Assert.Equal(head, bootstrap.ObjectView.FrozenHeadCommit);
             Assert.True(current); Assert.False(owner.Uncertain); Assert.False(original.HasExplicitUnknown);
             Assert.InRange(parent.EnteredCount, 1, 1023); Assert.True(parent.AllKnownSettled);

@@ -174,14 +174,36 @@ public sealed partial class WorktreeManager
                 RequireNativeInvocation(invocation);
                 var executor = manager._originalExecutor ?? throw new WorktreeBoundaryException("Actual original Git executor is absent.");
                 actualOwner.RequireNativeGitBinding(this, original, parent, RunId, executor);
-                return parent.EnterAsync(RunId, () =>
+                return parent.EnterAsync(RunId, async () =>
                 {
                     actualOwner.Check();
                     VerifyMetadata(false);
                     var allowance = actualOwner.Remaining();
                     entered = true;
                     actualOwner.NativeGitCaptureStarting();
-                    return executor.ExecuteBoundedCaptureAsync(invocation, allowance, maximumBytes, token, new OwnedWorkPhaseBudget(original));
+                    var capture = await executor.ExecuteBoundedCaptureAsync(invocation, allowance, maximumBytes, token, new OwnedWorkPhaseBudget(original)).ConfigureAwait(false);
+                    // Even an already-completed native Task must leave the
+                    // admission factory's monitor before file/hash postchecks.
+                    await Task.Yield();
+                    var facts = capture.Command.LifecycleDiagnostics;
+                    if (!capture.Command.OwnedProcessQuiescent || !capture.RootExitObserved || !capture.StandardOutputDrainCompleted || !capture.StandardErrorDrainCompleted ||
+                        facts?.NativeFailure is not null || facts?.OwnedTree is not { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 } ||
+                        OperatingSystem.IsLinux() && capture.OwnershipKind != BoundedCaptureOwnershipKind.LinuxCreationOwnedScope ||
+                        capture.Command.Cancelled || capture.Command.TimedOut || capture.CaptureBoundExceeded || capture.Command.ExitCode != 0)
+                        return capture; // Preserve the outer original failure classification before any post-I/O.
+                    try
+                    {
+                        actualOwner.Check();
+                        RequireNativeInvocation(invocation);
+                        VerifyMetadata(false);
+                        actualOwner.VerifyCompletedNativeGitImage(this, original, parent, RunId, executor);
+                    }
+                    catch (Exception failure)
+                    {
+                        failure.Data["ReviewGitPreparationCapture"] = ReviewGitPreparationCaptureData.FromCapture(capture);
+                        throw;
+                    }
+                    return capture;
                 });
             }
             finally { dispatchEntered = entered; }

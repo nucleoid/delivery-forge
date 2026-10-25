@@ -303,8 +303,11 @@ public sealed partial class WorktreeManager
             throw new WorktreeBoundaryException("Observed path is not the exact assigned worktree root.");
         var statusText = await GitAsync(worktree, cancellationToken, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching").ConfigureAwait(false);
         var status = statusText.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries);
-        var head = (await GitAsync(worktree, cancellationToken, "rev-parse", "HEAD^{commit}").ConfigureAwait(false)).Trim();
-        var tree = (await GitAsync(worktree, cancellationToken, "rev-parse", "HEAD^{tree}").ConfigureAwait(false)).Trim();
+        var identity = (await GitAsync(worktree, cancellationToken, "rev-parse", "HEAD^{commit}", "HEAD^{tree}").ConfigureAwait(false))
+            .TrimEnd('\r', '\n').Split('\n').Select(row => row.TrimEnd('\r')).ToArray();
+        if (identity.Length != 2 || identity.Any(row => row.Length is not (40 or 64) || row.Any(c => !char.IsAsciiHexDigitLower(c))))
+            throw new WorktreeBoundaryException("Exact assigned HEAD and tree identities required.");
+        var head = identity[0]; var tree = identity[1];
         return new WorktreeObservation(root, head, tree, status.Length == 0, status, CaptureSnapshot(worktree));
     }
 

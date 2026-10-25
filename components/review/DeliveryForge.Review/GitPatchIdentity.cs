@@ -220,8 +220,15 @@ public static partial class GitPatchIdentity
         if (!string.Equals(shallow, "false", StringComparison.Ordinal))
             throw new ReviewPreflightException("Shallow controlled object evidence is incomplete.");
 
-        var exactBase = Text(await ControlledGit(context, ["rev-parse", "--verify", $"{baseCommit}^{{commit}}"], cancellationToken));
-        var exactHead = Text(await ControlledGit(context, ["rev-parse", "--verify", $"{headCommit}^{{commit}}"], cancellationToken));
+        // These four fixed full-OID expressions share one bounded native query.
+        // --verify accepts only one operand; require the complete ordered output
+        // instead, including refusal of missing, extra or malformed scalar rows.
+        var resolved = Text(await ControlledGit(context, ["rev-parse", "--end-of-options",
+            $"{baseCommit}^{{commit}}", $"{headCommit}^{{commit}}", $"{baseCommit}^{{tree}}", $"{headCommit}^{{tree}}"], cancellationToken))
+            .Split('\n').Select(row => row.TrimEnd('\r')).ToArray();
+        if (resolved.Length != 4 || resolved.Any(row => !GitObjectPattern().IsMatch(row)))
+            throw new ReviewPreflightException("Exact ordered controlled base/head commit and tree identities required.");
+        var exactBase = resolved[0]; var exactHead = resolved[1];
         if (!string.Equals(exactBase, baseCommit, StringComparison.Ordinal) ||
             !string.Equals(exactHead, headCommit, StringComparison.Ordinal))
             throw new ReviewPreflightException("Base or head did not resolve to the exact supplied commit in controlled objects.");
@@ -229,8 +236,7 @@ public static partial class GitPatchIdentity
             throw new ReviewPreflightException("Requested head is not the parent-owned immutable source snapshot.");
 
         await ControlledGit(context, ["merge-base", "--is-ancestor", baseCommit, headCommit], cancellationToken);
-        var baseTree = Text(await ControlledGit(context, ["rev-parse", $"{baseCommit}^{{tree}}"], cancellationToken));
-        var headTree = Text(await ControlledGit(context, ["rev-parse", $"{headCommit}^{{tree}}"], cancellationToken));
+        var baseTree = resolved[2]; var headTree = resolved[3];
         var before = await VerifySourceSnapshotAsync(context, headCommit, headTree, cancellationToken);
 
         var args = DiffArguments.Concat([baseCommit, headCommit, "--"]).ToArray();
