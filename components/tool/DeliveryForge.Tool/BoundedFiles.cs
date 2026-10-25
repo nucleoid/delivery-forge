@@ -92,9 +92,17 @@ public static class BoundedFiles
         life.Check(); var credit = Credits.GetValue(life, _ => new());
         lock (credit.Gate)
         {
-            if (credit.Operations >= 4096 || bytes < 0) throw new IOException("Original finite file-operation credit exhausted before effect.");
+            if (credit.Operations >= 4096 || bytes < 0)
+            {
+                var error = new IOException("Original finite file-operation credit exhausted before effect.");
+                life.RecordFirstCaught("original-file-operation-credit", error); throw error;
+            }
             var maximum = write ? 268435456L : MaximumOriginalReadBytes; var used = write ? credit.Writes : credit.Reads;
-            if (bytes > maximum - used) throw new IOException("Original cumulative complete file-byte credit exhausted before allocation/effect.");
+            if (bytes > maximum - used)
+            {
+                var error = new IOException("Original cumulative complete file-byte credit exhausted before allocation/effect.");
+                life.RecordFirstCaught(write ? "original-file-write-credit" : "original-file-read-credit", error); throw error;
+            }
             credit.Operations++; if (write) credit.Writes += bytes; else credit.Reads += bytes;
         }
         life.Check();

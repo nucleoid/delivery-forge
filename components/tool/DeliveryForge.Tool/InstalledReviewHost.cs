@@ -109,10 +109,10 @@ internal sealed class InstalledReviewHost : IDisposable
             throw new WorkerEnvelopeException("Same original immutable source preparation and completed author required.");
         if (actualAuthorFamily != "gpt") return ToolResult.Incomplete("ACTUAL_AUTHOR_FAMILY_REQUIRED", "The completed native author did not expose unambiguous opposite-family provenance.");
         if (independentReviewer is not null) throw new ToolUsageException("Actual independent reviewer cannot replay.");
-        completedQuality?.BindCompletedReviewOutputs(frame, sourceOwner);
         // Refuse this unsupported production profile before source/settings/CWD I/O.
         // RunAsync keeps the same guard as defense at its own boundary.
         if (ClaudeIndependentReviewer.UnsupportedProductionProfile(runtimeTrust, original, selection.IndependentReviewer) is { } profileRefusal) return profileRefusal;
+        completedQuality?.BindCompletedReviewOutputs(frame, sourceOwner);
         sourceOwner.Check();
         async Task<(PatchIdentity Patch, byte[] FrozenPlan)> PrepareEvidence(CancellationToken token)
         {

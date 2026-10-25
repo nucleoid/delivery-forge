@@ -207,6 +207,12 @@ public sealed class ProductionReviewPreparationTests : IDisposable
         Assert.Equal(frozenPlan.Identity, bootstrap.RootContext.PlanIdentity); Assert.Equal(evidence.Identity, bootstrap.RootContext.EvidencePolicyIdentity);
         Assert.Equal(headCommit, bootstrap.ObjectView.FrozenHeadCommit);
         Assert.False(owner.Uncertain);
+        // Unbound review keeps its established empty-directory compatibility.
+        Directory.CreateDirectory(Path.Combine(fixture.Root, "shallow-empty-control"));
+        var emptyDirectoryPatch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, baseCommit, headCommit,
+            frozenPlan.Identity, new Dictionary<string, string>(), bound.Token);
+        Assert.Equal(headCommit, emptyDirectoryPatch.HeadCommit);
+        Assert.False(owner.Uncertain);
         // Empty directories yield no files; traversal must still stop at its depth bound.
         var emptyRoot = Path.Combine(fixture.Root, "empty-depth-control"); var deepest = emptyRoot;
         for (var depth = 1; depth <= 65; depth++) deepest = Path.Combine(deepest, "d");
