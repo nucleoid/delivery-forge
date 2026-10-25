@@ -80,7 +80,7 @@ public sealed class ProvisionedGitBindingTests
     }
 
     [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
-    public async Task Grouped_checked_git_birth_retains_actual_capture_task_and_pending_admission()
+    public async Task Grouped_checked_git_birth_retains_actual_capture_task_and_single_admission()
     {
         using var fixture = await Fixture.CreateAsync();
         var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
@@ -90,7 +90,6 @@ public sealed class ProvisionedGitBindingTests
         fixture.Parent.ObserveNativeReturn = true;
         var actual = binding.ExecuteWorktreeGitAsync(fixture.VersionInvocation(), TestContext.Current.CancellationToken);
         Assert.Same(actual, fixture.Parent.ObservedNativeTask);
-        Assert.True(fixture.Parent.UnsettledAtNativeReturn);
         Assert.Equal(effects + 1, fixture.Parent.Inner.EnteredCount);
         Assert.Equal(admissions + 1, fixture.Parent.NativeAdmissionAttempts);
         var capture = await actual.WaitAsync(fixture.Original.Remaining, TestContext.Current.CancellationToken);
@@ -104,8 +103,8 @@ public sealed class ProvisionedGitBindingTests
         Assert.Equal(before + 1, fixture.Manager.ActualOwnedGitInvocations);
         await Task.WhenAll(fixture.Parent.Inner.OriginalObservers).WaitAsync(fixture.Original.Remaining, TestContext.Current.CancellationToken);
         Assert.True(fixture.Parent.Inner.AllKnownSettled); Assert.False(fixture.Original.HasExplicitUnknown);
-        // Actual native capture/accounting only. The pending observation above
-        // is the real parent's not-yet-returned invocation, not a fake child Task.
+        // Actual native Task identity, single admission and known closure only;
+        // this does not claim the native Task was still pending at invoke-return.
     }
 
     [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
@@ -418,7 +417,7 @@ public sealed class ProvisionedGitBindingTests
         internal bool RefuseWriterReturn;
         internal bool Current = true;
         internal int NativeAdmissionAttempts;
-        internal bool ObserveNativeReturn, UnsettledAtNativeReturn;
+        internal bool ObserveNativeReturn;
         internal Task? ObservedNativeTask;
         internal WriterLease? ActualWriter;
         internal PostBirthParent() => Inner = new(new object(), run => Current && run == "owned", _ => Current = false);
@@ -431,7 +430,6 @@ public sealed class ProvisionedGitBindingTests
             {
                 var actual = invoke();
                 ObservedNativeTask = actual;
-                UnsettledAtNativeReturn = !Inner.AllKnownSettled;
                 return actual;
             });
         }

@@ -139,6 +139,16 @@ public sealed class ProductionReviewFiniteAdmissionTests
                 baseCommit, head, () => true, planIdentity, evidenceIdentity, "review.json", 1048576, provisioned);
             using var bootstrap = await ReviewAuthorityHost.CreateProductionFromOwnedSourceAsync(owner, planBytes, evidenceBytes,
                 "review.json", 1048576, TestContext.Current.CancellationToken);
+            // Exercise the retained review entry directly after the real
+            // bootstrap has selected its finite capture bound. Both full image
+            // verifications and the actual native capture remain enrolled:
+            // two synchronous groups plus the SAME native capture Task.
+            var beforeReviewGit = parent.EnteredCount;
+            var version = await owner.GitAsync(workerGit, ["--version"], TestContext.Current.CancellationToken);
+            Assert.Equal(beforeReviewGit + 3, parent.EnteredCount);
+            Assert.Equal(0, version.ExitCode);
+            Assert.StartsWith("git version ", Encoding.UTF8.GetString(version.StandardOutput), StringComparison.Ordinal);
+            Assert.Empty(version.StandardError);
             Assert.Equal(baseCommit, bootstrap.Policy.SourceRevision); Assert.Equal(head, bootstrap.ObjectView.FrozenHeadCommit);
             Assert.True(current); Assert.False(owner.Uncertain); Assert.False(original.HasExplicitUnknown);
             Assert.InRange(parent.EnteredCount, 1, 1023); Assert.True(parent.AllKnownSettled);
