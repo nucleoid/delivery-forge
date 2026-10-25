@@ -137,6 +137,12 @@ internal static class ClaudeIndependentReviewData
     internal static (string RawVerdict, string Verdict, IReadOnlyList<ReviewFinding> Findings) ParseReport(string text)
     {
         if (text.Length is < 1 or > 32768) throw new IOException("Complete reviewer report exceeds its finite profile.");
+        // Presentation only: consume one entire exact JSON fence, never scan
+        // for a report or discard prose. The raw native result is unchanged.
+        if (text.Length >= 14 && text.StartsWith("```json\r\n", StringComparison.Ordinal) && text.EndsWith("\r\n```", StringComparison.Ordinal))
+            text = text[9..^5];
+        else if (text.Length >= 12 && text.StartsWith("```json\n", StringComparison.Ordinal) && text.EndsWith("\n```", StringComparison.Ordinal) && !text.EndsWith("\r\n```", StringComparison.Ordinal))
+            text = text[8..^4];
         var bytes = System.Text.Encoding.UTF8.GetBytes(text); _ = CanonicalJson.Canonicalize(bytes);
         using var doc = JsonDocument.Parse(bytes); var root = doc.RootElement;
         if (root.ValueKind != JsonValueKind.Object || root.EnumerateObject().Any(p => p.Name is not ("verdict" or "findings")))

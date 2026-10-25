@@ -92,4 +92,62 @@ public sealed class ClaudeIndependentReviewDataTests
     {
         Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequireSubscription(Encoding.UTF8.GetBytes(text)));
     }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("\n")]
+    [InlineData("\r\n")]
+    public void Raw_or_one_entire_json_fence_keeps_the_same_complete_strict_report(string newline)
+    {
+        const string raw = "{\"verdict\":\"needs-attention\",\"findings\":[{\"code\":\"MISSING_GATE_EVIDENCE\",\"severity\":\"medium\",\"message\":\"Required evidence is absent\",\"location\":\"source.txt:1\"}]}";
+        var presented = newline.Length == 0 ? raw : "```json" + newline + raw + newline + "```";
+        var report = ClaudeIndependentReviewData.ParseReport(presented);
+        Assert.Equal("needs-attention", report.RawVerdict); Assert.Equal("FAIL", report.Verdict);
+        var finding = Assert.Single(report.Findings);
+        Assert.Equal("MISSING_GATE_EVIDENCE", finding.Code); Assert.Equal("medium", finding.Severity);
+        Assert.Equal("Required evidence is absent", finding.Message); Assert.Equal("source.txt:1", finding.Location);
+    }
+    [Theory]
+    [InlineData("prose-before")]
+    [InlineData("prose-after")]
+    [InlineData("multiple-fences")]
+    [InlineData("nested-fence")]
+    [InlineData("unknown-language")]
+    [InlineData("unknown-member")]
+    [InlineData("duplicate-member")]
+    [InlineData("trailing-json")]
+    [InlineData("outer-whitespace")]
+    [InlineData("mixed-fence-newline")]
+    [InlineData("mixed-fence-newline-reverse")]
+    [InlineData("empty-fence")]
+    [InlineData("overlapping-fence")]
+    public void Fenced_presentation_never_selects_a_report_from_prose_or_bypasses_strict_inner_validation(string mutation)
+    {
+        const string raw = "{\"verdict\":\"ship\",\"findings\":[]}";
+        var fenced = "```json\n" + raw + "\n```";
+        var text = mutation switch
+        {
+            "prose-before" => "Selected report:\n" + fenced,
+            "prose-after" => fenced + "\nAdditional report prose",
+            "multiple-fences" => fenced + "\n" + fenced,
+            "nested-fence" => "```json\n" + fenced + "\n```",
+            "unknown-language" => "```JSON\n" + raw + "\n```",
+            "unknown-member" => "```json\n{\"verdict\":\"ship\",\"findings\":[],\"productionAccepted\":true}\n```",
+            "duplicate-member" => "```json\n{\"verdict\":\"ship\",\"verdict\":\"ship\",\"findings\":[]}\n```",
+            "trailing-json" => "```json\n" + raw + "{}\n```",
+            "outer-whitespace" => " " + fenced,
+            "empty-fence" => "```json\n\n```",
+            "overlapping-fence" => "```json\n```",
+            "mixed-fence-newline-reverse" => "```json\n" + raw + "\r\n```",
+            "mixed-fence-newline" => "```json\r\n" + raw + "\n```",
+            _ => throw new ArgumentException("Unknown synthetic presentation mutation.")
+        };
+        Assert.ThrowsAny<Exception>(() => ClaudeIndependentReviewData.ParseReport(text));
+    }
+    [Fact]
+    public void Fenced_presentation_keeps_the_original_total_report_length_limit()
+    {
+        var text = "```json\n" + new string(' ', 32768) + "\n```";
+        Assert.Throws<IOException>(() => ClaudeIndependentReviewData.ParseReport(text));
+    }
 }
