@@ -245,8 +245,11 @@ internal sealed class InstalledToolInvocation(
             else
             {
                 if (changedDiff is null) throw new EvidenceWriteException("The original current diff was not retained.");
+                using var approved = ProducerJson.Read(approvedConfiguration);
                 _lines = ChangedLineCoverage.ReadCompilerBound(changedDiff, body, invocation.WorkingDirectory,
-                    locator => { InstalledToolProfile.Relative(locator); return files.Read(Path.Combine(_bundleRoot, locator), 128 * 1024 * 1024); }, files);
+                    locator => { InstalledToolProfile.Relative(locator); return files.Read(Path.Combine(_bundleRoot, locator), 128 * 1024 * 1024); }, files,
+                    approved.RootElement.GetProperty("testProjects").EnumerateArray().Select(project => project.GetString() ??
+                        throw new EvidenceWriteException("Approved test project is null.")).ToArray());
             }
         }
     }

@@ -19,7 +19,8 @@ internal static partial class ChangedLineCoverage
         Func<string, byte[]> readArtifact, InstalledToolFiles files) => ReadCore(diff, manifest, repository, readArtifact, files, false);
 
     internal static Result ReadCompilerBound(byte[] diff, JsonElement manifest, string repository,
-        Func<string, byte[]> readArtifact, InstalledToolFiles files) => ReadCore(diff, manifest, repository, readArtifact, files, true);
+        Func<string, byte[]> readArtifact, InstalledToolFiles files, IReadOnlyList<string>? approvedTestProjects = null) =>
+        ReadCore(diff, manifest, repository, readArtifact, files, true, approvedTestProjects: approvedTestProjects);
 
     internal static InitialBaselineLineCoverage ReadCurrentCompilerBound(JsonElement manifest, string repository,
         Func<string, byte[]> readArtifact, InstalledToolFiles files)
@@ -33,7 +34,8 @@ internal static partial class ChangedLineCoverage
             result.Reason.Replace("Changed", "Full-current", StringComparison.Ordinal).Replace("changed", "full-current", StringComparison.Ordinal));
     }
     private static Result ReadCore(byte[] diff, JsonElement manifest, string repository,
-        Func<string, byte[]> readArtifact, InstalledToolFiles files, bool requireCompilerCensus, bool fullCurrent = false)
+        Func<string, byte[]> readArtifact, InstalledToolFiles files, bool requireCompilerCensus, bool fullCurrent = false,
+        IReadOnlyList<string>? approvedTestProjects = null)
     {
         files.Check();
         var changes = fullCurrent ? new Dictionary<string, HashSet<int>>(InstalledToolFiles.PathComparer) : ReadHunks(diff);
@@ -334,8 +336,11 @@ internal static partial class ChangedLineCoverage
             }
             coveredContexts.Add(contextId);
         }
+        HashSet<string>? requiredTestSources = null;
         foreach (var path in changes.Keys)
-            if (!sources.Values.Any(set => set.Values.Any(s => comparer.Equals(s.RepositoryPath, path))))
+            if (!sources.Values.Any(set => set.Values.Any(s => comparer.Equals(s.RepositoryPath, path))) &&
+                !(requiredTestSources ??= ReadRequiredTestChangedSources(artifacts, builds, executions.Values, repository,
+                    changes.Keys, approvedTestProjects, readArtifact, files)).Contains(path))
                 throw Refuse("Changed authored file is not in the complete captured compiler source set.");
         var unmeasured = new HashSet<string>(comparer);
         // Raw report DATA has no independent executable-line inventory. In compiler
