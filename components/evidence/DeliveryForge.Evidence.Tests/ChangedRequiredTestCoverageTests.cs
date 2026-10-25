@@ -155,32 +155,68 @@ public sealed class ChangedRequiredTestCoverageTests
             JsonObject Artifact(string id, string kind, byte[] bytes, bool production = false)
             {
                 values.Add(id, bytes);
-                var node = new JsonObject { ["id"] = id, ["kind"] = kind, ["locator"] = id,
-                    ["length"] = bytes.Length, ["sha256"] = Hash(bytes) };
+                var node = new JsonObject
+                {
+                    ["id"] = id,
+                    ["kind"] = kind,
+                    ["locator"] = id,
+                    ["length"] = bytes.Length,
+                    ["sha256"] = Hash(bytes)
+                };
                 if (production) { node["contextId"] = Context; node["buildId"] = buildId; }
                 artifacts.Add(node); return node;
             }
             JsonObject Input(string logical, string repository, string locator, byte[] bytes) => new()
             {
-                ["role"] = "source", ["logicalPath"] = logical, ["repositoryPath"] = repository, ["locator"] = locator,
-                ["length"] = bytes.Length, ["sha256"] = Hash(bytes), ["generated"] = false, ["encoding"] = "utf-8"
+                ["role"] = "source",
+                ["logicalPath"] = logical,
+                ["repositoryPath"] = repository,
+                ["locator"] = locator,
+                ["length"] = bytes.Length,
+                ["sha256"] = Hash(bytes),
+                ["generated"] = false,
+                ["encoding"] = "utf-8"
             };
             values.Add("source", source); values.Add("declarations", declarations);
-            var context = new JsonObject { ["id"] = Context, ["project"] = "Library/Library.csproj",
+            var context = new JsonObject
+            {
+                ["id"] = Context,
+                ["project"] = "Library/Library.csproj",
                 ["inputs"] = new JsonArray(Input("census/Subject.cs", "Library/census/Subject.cs", "source", source),
-                    Input("census/Declarations.cs", "Library/census/Declarations.cs", "declarations", declarations)) };
-            var compilerBuild = new JsonObject { ["id"] = buildId, ["contextId"] = Context,
-                ["moduleIdentity"] = build.ModuleIdentity, ["mvid"] = build.Mvid, ["debugIdentity"] = build.DebugIdentity,
-                ["assemblySha256"] = Hash(pe), ["pdbSha256"] = Hash(pdb) };
+                    Input("census/Declarations.cs", "Library/census/Declarations.cs", "declarations", declarations))
+            };
+            var compilerBuild = new JsonObject
+            {
+                ["id"] = buildId,
+                ["contextId"] = Context,
+                ["moduleIdentity"] = build.ModuleIdentity,
+                ["mvid"] = build.Mvid,
+                ["debugIdentity"] = build.DebugIdentity,
+                ["assemblySha256"] = Hash(pe),
+                ["pdbSha256"] = Hash(pdb)
+            };
             Artifact("production-pe", "assembly", pe, true); Artifact("production-pdb", "pdb", pdb, true);
             var testPdb = fault == "foreign-pdb" ? foreignPdb : pdb;
             Artifact(prefix + "-pe", "required-test-assembly", pe);
             Artifact(prefix + "-pdb", "required-test-pdb", testPdb);
-            var execution = new JsonObject { ["id"] = executionId, ["contextId"] = Context, ["buildId"] = buildId,
-                ["completed"] = true, ["exitCode"] = 0, ["testProject"] = project,
-                ["totalTests"] = 1, ["passedTests"] = 1, ["failedTests"] = 0, ["skippedTests"] = 0,
-                ["testModuleIdentity"] = build.ModuleIdentity, ["testMvid"] = build.Mvid,
-                ["testDebugIdentity"] = build.DebugIdentity, ["testAssemblySha256"] = Hash(pe), ["testPdbSha256"] = Hash(testPdb) };
+            var execution = new JsonObject
+            {
+                ["id"] = executionId,
+                ["contextId"] = Context,
+                ["buildId"] = buildId,
+                ["completed"] = true,
+                ["exitCode"] = 0,
+                ["testProject"] = project,
+                ["totalTests"] = 1,
+                ["passedTests"] = 1,
+                ["failedTests"] = 0,
+                ["skippedTests"] = 0,
+                ["testModuleIdentity"] = build.ModuleIdentity,
+                ["testMvid"] = build.Mvid,
+                ["testDebugIdentity"] = build.DebugIdentity,
+                ["testAssemblySha256"] = Hash(pe),
+                ["testPdbSha256"] = Hash(testPdb)
+            };
             var methods = new[] { Line("CENSUS_FIRST"), Line("CENSUS_EXCLUDED"), Line("CENSUS_LAST") }.Select(line =>
                 new XElement("Method", new XElement("FileRef", new XAttribute("uid", "1")), new XElement("SequencePoints",
                     new XElement("SequencePoint", new XAttribute("fileid", "1"), new XAttribute("sl", line),
@@ -197,22 +233,34 @@ public sealed class ChangedRequiredTestCoverageTests
             {
                 var id = "test-source-" + TestGraph + "-" + index;
                 Artifact(id, "test-compiler-source", bytes);
-                closureInputs.Add(new JsonObject { ["role"] = "compiler-source", ["logicalPath"] = "census/" + name,
-                    ["locator"] = id, ["sha256"] = Hash(bytes), ["length"] = bytes.Length,
-                    ["generated"] = fault == "generated" && index == 0 });
+                closureInputs.Add(new JsonObject
+                {
+                    ["role"] = "compiler-source",
+                    ["logicalPath"] = "census/" + name,
+                    ["locator"] = id,
+                    ["sha256"] = Hash(bytes),
+                    ["length"] = bytes.Length,
+                    ["generated"] = fault == "generated" && index == 0
+                });
             }
             Artifact("test-closure-" + TestGraph, "test-compiler-input-closure", JsonSerializer.SerializeToUtf8Bytes(new
             { provider = "validated-csc-inputs-v1", project, inputs = closureInputs, reusableRecipe = false }));
             Artifact("required-test-inventory", "required-test-inventory", JsonSerializer.SerializeToUtf8Bytes(new
             {
-                provider = "finite-sdk-required-test-inventory-v1", reusableRecipe = false,
+                provider = "finite-sdk-required-test-inventory-v1",
+                reusableRecipe = false,
                 tests = new[] { new { graphId = TestGraph, project = fault == "wrong-project" ? "Wrong/Tests.csproj" : project,
                     trx = prefix + "-trx", assembly = prefix + "-pe", pdb = prefix + "-pdb", child = prefix + "-child",
                     moduleIdentity = build.ModuleIdentity, mvid = build.Mvid, debugIdentity = build.DebugIdentity,
                     passed = 1, rawExitCode = 0, modules = new[] { new { graphId = ProductionGraph, artifact = prefix + "-coverage-" + ProductionGraph } } } }
             }));
-            var manifestNode = new JsonObject { ["contexts"] = new JsonArray(context), ["builds"] = new JsonArray(compilerBuild),
-                ["executions"] = new JsonArray(execution), ["artifacts"] = artifacts };
+            var manifestNode = new JsonObject
+            {
+                ["contexts"] = new JsonArray(context),
+                ["builds"] = new JsonArray(compilerBuild),
+                ["executions"] = new JsonArray(execution),
+                ["artifacts"] = artifacts
+            };
             using var manifest = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(manifestNode));
             static string Hunk(string path, byte[] bytes)
             {
