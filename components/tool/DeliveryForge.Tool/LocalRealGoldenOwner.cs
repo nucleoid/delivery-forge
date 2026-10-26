@@ -16,7 +16,7 @@ public sealed record LocalRealGoldenSelection(string ArtifactRoot);
 internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, AdmissionFile configurationPin, ToolLifetime original)
 {
     readonly LocalRealGoldenSelection selection = configuration.LocalRealGolden ?? throw new ToolUsageException("No explicit local-real selection.");
-    FrozenPlan? frozen; FrozenWorkerPlan? assignment; bool entered;
+    FrozenPlan? frozen; FrozenWorkerPlan? assignment; TrustedConfiguration? boundConfiguration; bool entered;
     internal static void Validate(LocalRealGoldenSelection value) => BoundedFiles.Plain(value.ArtifactRoot, true);
     internal void Bind(FrozenPlan plan, FrozenWorkerPlan worker, TrustedConfiguration config, ToolLifetime life)
     {
@@ -39,7 +39,14 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
             BoundedFiles.Separate(review.ArtifactRoot, selection.ArtifactRoot); BoundedFiles.Separate(review.GitImage.Path, selection.ArtifactRoot);
             if (review.IndependentReviewer is { } reviewer) BoundedFiles.Separate(reviewer.Image.Path, selection.ArtifactRoot);
         }
-        frozen = plan; assignment = worker;
+        frozen = plan; assignment = worker; boundConfiguration = config;
+    }
+    // Exact configuration object supplied by the real Bind path. This check
+    // conveys no completion, lease, producer result or execution authority.
+    internal void RequireQualityConfiguration(HostBridgeFrame frame, InstalledQualityHost quality)
+    {
+        if (boundConfiguration is null) throw new WorkerEnvelopeException("Actual local-real configuration has not bound.");
+        quality.RequireLocalRealConfiguration(frame, boundConfiguration, configurationPin, original);
     }
     internal async Task<ToolResult> RunAsync(HostBridgeFrame frame, ParentCoordinationHost parent,
         InstalledQualityHost? quality, InstalledReviewHost? review, Func<bool> nativeCompletedAndQuiet, string actualStoreRoot)
@@ -51,7 +58,7 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
             return ToolResult.Incomplete("LOCAL_REAL_PR_CEILING_REQUIRED", "Local fake publication still requires the original immutable PR ceiling and protected policy; no ceiling is raised.");
         void CheckOwner()
         {
-            quality.RequireLocalRealConfiguration(frame, configuration, configurationPin, original);
+            RequireQualityConfiguration(frame, quality);
             original.Check(); parent.CheckCurrent(frame.RunId);
             if (!ReferenceEquals(frame.Lifetime, original) || frame.RunId != assignment.RunId || !frame.OwnerCompleted || frame.OwnerStopped ||
                 frame.Primary is not null || frame.Post is not null || frame.InvocationUnknown || frame.EnteredTasks.Any(task => !task.IsCompleted) ||

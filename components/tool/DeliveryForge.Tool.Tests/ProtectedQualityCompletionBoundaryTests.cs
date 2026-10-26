@@ -70,6 +70,77 @@ public sealed class ProtectedQualityCompletionBoundaryTests
         Assert.False(Directory.Exists(data.Selection.Registry!.ArtifactRoot));
     }
 
+    public static bool Windows => OperatingSystem.IsWindows();
+
+    [Fact(SkipUnless = nameof(Windows), Skip = "No Linux native scope is invented for this object-binding DATA component.")]
+    public async Task Golden_uses_actual_bound_configuration_after_independent_deserialization()
+    {
+        var data = new Data();
+        var repository = Path.Combine(data.Root, "repository"); Directory.CreateDirectory(repository);
+        var git = Path.Combine(data.Root, "inert-git.data"); File.WriteAllBytes(git, [1]);
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var identity = "sha256:" + new string('a', 64); var contractIdentity = "sha256:" + new string('b', 64);
+        var configPath = Path.Combine(data.Root, "config.json");
+        var supplied = new TrustedConfiguration("fixture/config-binding", repository, "refs/heads/main", git,
+            AdapterVersion: "object-binding-DATA", MaximumCeiling: "pr", OperationSeconds: 30,
+            ExpectedBundleIdentity: identity, ExpectedContractIdentity: contractIdentity, ExpectedWorkItem: "#1", ExpectedPlanCeiling: "pr",
+            InstalledQuality: data.Selection, LocalRealGolden: new(Path.Combine(data.Root, "golden")));
+        File.WriteAllBytes(configPath, System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(supplied, BoundedFiles.Json));
+        var composition = TrustedConfiguration.LoadBound(configPath, original, out var pin);
+        var bound = TrustedConfiguration.LoadSelected(configPath, original, pin);
+        var equalButForeign = TrustedConfiguration.LoadSelected(configPath, original, pin);
+        Assert.NotSame(composition, bound); Assert.NotSame(bound, equalButForeign);
+        Assert.Equal(composition.Repository, bound.Repository);
+        Assert.Equal(composition.ExpectedBundleIdentity, bound.ExpectedBundleIdentity);
+        // Explicit test-only frozen-plan DATA. Reflection avoids minting or
+        // pretending to have reader provenance/DownstreamReady/native ownership.
+        // The actual Bind methods below consume only the exact identity/gate data.
+        var constructor = Assert.Single(typeof(DeliveryForge.Planning.FrozenPlan).GetConstructors(
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic));
+        var canonical = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            plan = new { gates = data.Selection.Gates.Select(gate => new { id = gate.GateId }).ToArray() }
+        });
+        var frozen = Assert.IsType<DeliveryForge.Planning.FrozenPlan>(constructor.Invoke(new object?[]
+        {
+            identity, contractIdentity, "DATA", "DATA", "sha256:" + new string('c', 64), null,
+            composition.Repository, "#1", repository, "refs/heads/main", false, false,
+            data.Expected.BaseCommit, new string('d', 40), canonical, canonical, false,
+            new[] { "Object-binding DATA only; no reader provenance, completion or runtime authority." }
+        }));
+        Assert.False(frozen.DownstreamReady);
+        var worker = new FrozenWorkerPlan("run-" + new string('a', 32), contractIdentity, frozen.BaseCommit,
+            composition.Repository, repository, Path.Combine(data.Root, "assigned"), Path.Combine(data.Root, "results"),
+            "unissued-DATA-writer", ["source.cs"], [], "codex.cli", "object-binding-DATA", [], "pr");
+        await using var processes = new ProcessControl();
+        using var coordinator = new ExecutionCoordinator(new RunStore(Path.Combine(data.Root, "store")), new WorktreeManager(), processes);
+        var frame = new HostBridgeFrame(worker.RunId, original, coordinator, () => false, false)
+        {
+            Request = WorkerEnvelope.PrepareWorker(worker)
+        };
+        var quality = new InstalledQualityHost(composition, pin, original, new WorktreeManager());
+        var golden = new LocalRealGoldenOwner(composition, pin, original);
+        Assert.Throws<WorkerEnvelopeException>(() => golden.RequireQualityConfiguration(frame, quality));
+        // Same order as the actual bridge composition: quality then golden.
+        quality.Bind(frozen, worker, bound, original);
+        golden.Bind(frozen, worker, bound, original);
+        Assert.True(quality.MatchesRetained(frame, bound, original));
+        Assert.False(quality.MatchesRetained(frame, composition, original));
+        Assert.False(quality.MatchesRetained(frame, equalButForeign, original));
+        golden.RequireQualityConfiguration(frame, quality);
+        var foreignQuality = new InstalledQualityHost(composition, pin, original, new WorktreeManager());
+        foreignQuality.Bind(frozen, worker, equalButForeign, original);
+        Assert.Throws<WorkerEnvelopeException>(() => golden.RequireQualityConfiguration(frame, foreignQuality));
+        var foreignFrame = new HostBridgeFrame("run-" + new string('b', 32), original, coordinator, () => false, false)
+        {
+            Request = frame.Request
+        };
+        Assert.Throws<WorkerEnvelopeException>(() => golden.RequireQualityConfiguration(foreignFrame, quality));
+        Assert.False(frame.OwnerCompleted); Assert.Null(frame.Completion);
+        Assert.Empty(frame.EnteredTasks); Assert.False(Directory.Exists(data.Selection.ArtifactRoot));
+        Assert.False(Directory.Exists(supplied.LocalRealGolden!.ArtifactRoot));
+    }
+
     [Theory]
     [InlineData("fixture")]
     [InlineData("no-baseline")]

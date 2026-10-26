@@ -375,16 +375,21 @@ public sealed partial class ProductionReviewSourceOwner
         {
             EnterSynchronous(() =>
             {
-                foreach (var path in batch)
+                for (var index = 0; index < batch.Length; index++)
                 {
+                    var path = batch[index];
                     Check();
                     if (!MayCleanOwnedFiles) throw new ReviewPreflightException("Original native scope is active; scratch retained.", residualProcessUncertain: true);
                     Plain(path); if (File.Exists(path)) File.Delete(path);
-                    Check(); view.ScratchRetired(path);
+                    Check();
+                    // Keep the last path registered through the admission's
+                    // closing currentness check and this operation's postcheck.
+                    if (index < batch.Length - 1) view.ScratchRetired(path);
                 }
                 return true;
             });
             Check();
+            view.ScratchRetired(batch[^1]);
         }
         catch (Exception failure)
         {
