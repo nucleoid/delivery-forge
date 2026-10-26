@@ -531,4 +531,88 @@ public sealed class ProductionBatchTests
         public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke) { Entries++; return invoke(); }
         public void RetainUncertain(string runId, string reason) => throw new IOException(reason);
     }
+
+    [Fact(Timeout = 150000)]
+    public async Task Equal_batch_reservations_do_not_shrink_the_shared_original_or_refuse_the_next_leaf()
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(1200), TestContext.Current.CancellationToken);
+        var work = original.WorkLimit; var whole = original.WholeLimit; var started = original.OriginalStarted; var token = original.Token;
+        var root = Path.Combine(Path.GetTempPath(), "forge-batch-reservation-deadline-" + Guid.NewGuid().ToString("N"));
+        TestContext.Current.TestOutputHelper!.WriteLine("Retained batch reservation fixture: " + root);
+        var repository = Path.Combine(root, "parent"); Directory.CreateDirectory(repository);
+        var gitName = OperatingSystem.IsWindows() ? "git.exe" : "git";
+        var git = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator).Where(Path.IsPathFullyQualified)
+            .Select(path => Path.Combine(path, gitName)).First(File.Exists);
+        var executor = new ProcessCommandExecutor();
+        async Task Git(params string[] arguments)
+        {
+            var nullPath = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+            var argv = new[] { "--no-replace-objects", "-c", "core.hooksPath=" + nullPath, "-c", "core.fsmonitor=false", "-c", "user.name=DeadlineFixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false" }.Concat(arguments).ToArray();
+            var result = await executor.ExecuteAsync(new(git, argv, repository, new Dictionary<string, string>
+            {
+                ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_GLOBAL"] = nullPath, ["GIT_CONFIG_SYSTEM"] = nullPath,
+                ["GIT_NO_REPLACE_OBJECTS"] = "1", ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_OPTIONAL_LOCKS"] = "0"
+            }), original.Remaining, original.Token);
+            original.Check(); Assert.True(result.OwnedProcessQuiescent && result.ExitCode == 0 && !result.TimedOut && !result.Cancelled, root + ": " + result.StandardError);
+        }
+        await File.WriteAllTextAsync(Path.Combine(repository, "tracked.txt"), "actual unchanged deadline evidence\n", original.Token);
+        await Git("init", "-q", "-b", "main"); await Git("add", "--", "tracked.txt"); await Git("commit", "-q", "-m", "reservation deadline base");
+        var reader = new GitRepositoryContextReader(git, executor, original);
+        var context = await reader.ReadAsync(repository, "refs/heads/main", original.Token);
+        var source = await reader.ReadFileAsync(context, "tracked.txt", original.Token); var now = DateTimeOffset.UtcNow;
+        var request = new PlanningRequest("fixture/reservation", "#1", "implement", "Exercise shared reservation deadlines", ["tracked.txt"], [], ["No shared endpoint refill"], "implement");
+        EvidenceItem[] evidence = [EvidenceItem.FromRepositoryFile(source, now, [])];
+        var frozen = PlanFreezer.Freeze(new PlanDraft(request, context, evidence, [new("tracked.txt", "text", "edit")], [new("#1", [], "root")],
+            [new("test", new("dotnet", [PlanCommandArgument.Literal("test")]), "PASS")],
+            new("additive", "none", "none", "none", "none", "none", "receipt", "revert", []), [], IntakePlanner.Assess(request, evidence)), "deadline-fixture", now);
+        var store = new RunStore(Path.Combine(root, "store")); var worktrees = new WorktreeManager(git);
+        await using var processes = new ProcessControl(); using var coordinator = new ExecutionCoordinator(store, worktrees, processes);
+        var selected = Selection(); var budget = ResourceBudget.Measure(Slots, selected.Policy);
+        var parentConfig = new TrustedConfiguration(request.Repository, repository, "refs/heads/main", git, MaximumCeiling: "implement", OperationSeconds: 1200, ProductionBatch: selected);
+        var internalInstance = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
+        var bind = typeof(LocalSingleScheduler).GetMethod("BindOriginal", internalInstance)!;
+        var remaining = typeof(LocalSingleScheduler).GetProperty("RemainingReservationTime", internalInstance)!;
+        var complete = typeof(LocalSingleScheduler).GetMethod("ReleaseCompletedUnprovisionedObservedAsync", internalInstance)!;
+        var cleanup = typeof(LocalSingleScheduler).GetMethod("ReleaseUnprovisionedObservedAsync", internalInstance)!;
+        foreach (var node in selected.Nodes)
+        {
+            var worker = new FrozenWorkerPlan("deadline-" + node.NodeId, frozen.ContractIdentity, frozen.BaseCommit, frozen.Repository, repository,
+                Path.Combine(root, "assigned-" + node.NodeId), Path.Combine(root, "results-" + node.NodeId), "fixture-writer", ["tracked.txt"], [], "codex.cli", "fixture", [AgentCapability.Launch, AgentCapability.CompletionEvidence]);
+            var scheduler = LocalSingleScheduler.Create(frozen, worker, node.Demand, budget, store, coordinator, worktrees, reader);
+            bind.Invoke(scheduler, [original, new ReservationParentFixture(), (Func<Task?>)(() => Task.CompletedTask), (Func<bool>)(() => true), (Func<bool>)(() => false)]);
+            var ticket = await scheduler.ReserveAsync(original.Token); var released = false;
+            try
+            {
+                var elapsedBefore = System.Diagnostics.Stopwatch.GetElapsedTime(original.OriginalStarted);
+                var localRemaining = (TimeSpan)remaining.GetValue(scheduler)!;
+                original.RestrictWork(elapsedBefore + localRemaining);
+                Assert.Equal(work, original.WorkLimit); // Old doubly-clipped remainder shrinks this by the sample gap.
+                Assert.Equal(whole, original.WholeLimit); Assert.Equal(started, original.OriginalStarted); Assert.Equal(token, original.Token);
+                var leaf = parentConfig with
+                {
+                    ProductionBatch = null, StandaloneRoot = Pin("deadline-root-" + node.NodeId), ExpectedBundleIdentity = frozen.Identity,
+                    ExpectedContractIdentity = frozen.ContractIdentity, ExpectedWorkItem = "#1", ExpectedPlanCeiling = "implement",
+                    Coordination = new(new Uri("https://example.invalid/mcp"), "project", "principal", Path.Combine(root, "key"), Path.Combine(root, "checkpoint-" + node.NodeId), Pin("deployment")),
+                    LocalSingle = new(selected.Policy, node.Demand)
+                };
+                ProductionBatchOwner.ValidateLeaf(parentConfig, selected, node, leaf, original);
+                Assert.True(node.Demand.TimeLimit <= original.WorkLimit && selected.Policy.MaximumTime <= original.WorkLimit);
+                await Assert.IsAssignableFrom<Task>(complete.Invoke(scheduler, [ticket, (Func<bool>)(() => true), original.Token])); released = true;
+                Assert.False(Directory.Exists(worker.Worktree));
+            }
+            finally
+            {
+                if (!released) await Assert.IsAssignableFrom<Task>(cleanup.Invoke(scheduler, [ticket, (Func<bool>)(() => true)]));
+            }
+        }
+        original.Check(); Assert.False(original.HasExplicitUnknown);
+    }
+
+    sealed class ReservationParentFixture : ICoordinatedSynchronousEffectAdmission
+    {
+        public void CheckCurrent(string runId) { }
+        public T EnterSynchronous<T>(string runId, Func<T> invoke) => invoke();
+        public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke) => invoke();
+        public void RetainUncertain(string runId, string reason) => throw new IOException(reason);
+    }
 }
