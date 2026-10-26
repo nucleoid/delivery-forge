@@ -99,7 +99,7 @@ internal sealed class InstalledQualityHost
     internal bool MatchesRetained(HostBridgeFrame frame, TrustedConfiguration? config, ToolLifetime? life) =>
         ReferenceEquals(life, original) && ReferenceEquals(config, boundConfiguration) && frozen is not null && assignment is not null &&
         frame.RunId == assignment.RunId && ReferenceEquals(frame.Lifetime, original) && frame.Request?.PlanIdentity == assignment.PlanIdentity;
-    async Task CurrentAsync(HostBridgeFrame frame, AgentCompletionReceipt actualCompletion, ParentCoordinationHost parent)
+    void RequireCurrentInputs(HostBridgeFrame frame, AgentCompletionReceipt actualCompletion, ParentCoordinationHost parent)
     {
         original.Check();
         if (tools is null || tools.HasUncertainOriginals || frozen is null || assignment is null || !ReferenceEquals(frame.Completion, actualCompletion) ||
@@ -117,7 +117,12 @@ internal sealed class InstalledQualityHost
             }
             return true;
         });
-        var actualGit = admittedCurrentness ?? throw new WorkerEnvelopeException("Same-parent currentness Git view is absent."); var observation = await actualGit.ObserveAsync(assignment.Worktree, original.Token).ConfigureAwait(false);
+    }
+    async Task CurrentAsync(HostBridgeFrame frame, AgentCompletionReceipt actualCompletion, ParentCoordinationHost parent)
+    {
+        RequireCurrentInputs(frame, actualCompletion, parent);
+        var run = assignment!;
+        var actualGit = admittedCurrentness ?? throw new WorkerEnvelopeException("Same-parent currentness Git view is absent."); var observation = await actualGit.ObserveAsync(run.Worktree, original.Token).ConfigureAwait(false);
         original.Check();
         if (observation.HeadCommit != actualCompletion.HeadCommit || observation.TreeId != actualCompletion.TreeId)
             throw new WorkerEnvelopeException("Current committed worker H/tree changed before installed quality effect.");
@@ -127,7 +132,7 @@ internal sealed class InstalledQualityHost
             if (!observation.IsClean) throw new WorkerEnvelopeException("Current committed worker source is not clean before installed quality effect.");
             completedWorkerSnapshot ??= observation.Snapshot;
         }
-        await actualGit.EnsureDescendsFromAsync(assignment.Worktree, assignment.BaseCommit, observation.HeadCommit, original.Token).ConfigureAwait(false);
+        await actualGit.EnsureDescendsFromAsync(run.Worktree, run.BaseCommit, observation.HeadCommit, original.Token).ConfigureAwait(false);
         original.Check();
     }
     internal async Task<ToolResult> RunCompletedAsync(HostBridgeFrame frame, ParentCoordinationHost parent)
@@ -247,13 +252,36 @@ internal sealed class InstalledQualityHost
         if (!ReferenceEquals(protectedCompletedFrame, frame) || protectedCompletedWorker is null ||
             selection.Registry is null || protectedCompletion is not { } accepted) return null;
         await CurrentAsync(frame, protectedCompletedWorker, parent).ConfigureAwait(false);
+        return ReadCompletedEvidence(frame, parent, accepted);
+    }
+
+    internal async Task<(IReadOnlyList<DeliveryForge.Contracts.Validation.ValidatedContract> Gates,
+        Claude.ClaudeIndependentReviewer.AcceptedLocalRevision Accepted,
+        DeliveryForge.Contracts.Validation.ValidatedContract Policy)?> LocalRealEvidenceWithReviewAsync(
+        HostBridgeFrame frame, ParentCoordinationHost parent, InstalledReviewHost review)
+    {
+        if (!ReferenceEquals(protectedCompletedFrame, frame) || protectedCompletedWorker is null ||
+            selection.Registry is null || protectedCompletion is not { } accepted) return null;
+        RequireCurrentInputs(frame, protectedCompletedWorker, parent);
+        // The exact review owner was bound to this instance's completed outputs.
+        // Its fresh export checks HEAD/index, ancestry, complete physical source,
+        // generated outputs and both patch directions. Do that full proof once
+        // for this pair; no cached currentness or caller waiver is accepted.
+        var reviewed = await review.LocalRealEvidenceForQualityAsync(frame, parent, this).ConfigureAwait(false);
+        if (reviewed is null) return null;
+        return (ReadCompletedEvidence(frame, parent, accepted), reviewed.Value.Accepted, reviewed.Value.Policy);
+    }
+
+    IReadOnlyList<DeliveryForge.Contracts.Validation.ValidatedContract> ReadCompletedEvidence(
+        HostBridgeFrame frame, ParentCoordinationHost parent, ProtectedCompletion accepted)
+    {
         if (!ReferenceEquals(accepted.Registry, selection.Registry) || accepted.PolicyIdentity != selection.PolicyIdentity ||
             results.Count != accepted.Results.Count || results.Where((row, index) => !ReferenceEquals(row, accepted.Results[index])).Any() ||
             selection.Gates.Any(gate => !gateResults.TryGetValue(gate.GateId, out var result) ||
                 !accepted.Results.Any(row => ReferenceEquals(row, result))))
             throw new WorkerEnvelopeException("Local-real requires the same private actual protected comparison and gate objects.");
         ValidateProtectedQualityTuple(selection, accepted.Comparison,
-            new(assignment!.BaseCommit, protectedCompletedWorker.HeadCommit, protectedCompletedWorker.TreeId, true), accepted.Results);
+            new(assignment!.BaseCommit, protectedCompletedWorker!.HeadCommit, protectedCompletedWorker.TreeId, true), accepted.Results);
         return parent.EnterSynchronous(frame.RunId, () =>
         {
             var receipts = selection.Gates.Select(gate => DeliveryForge.Contracts.Validation.ContractValidator.ParseAndValidate(

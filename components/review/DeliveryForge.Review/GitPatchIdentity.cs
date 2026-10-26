@@ -216,19 +216,15 @@ public static partial class GitPatchIdentity
         if (!string.Equals(version, context.ExpectedGitVersion, StringComparison.Ordinal))
             throw new ReviewPreflightException("Trusted Git version does not match the frozen host context.");
 
-        var shallow = Text(await ControlledGit(context, ["rev-parse", "--is-shallow-repository"], cancellationToken));
-        if (!string.Equals(shallow, "false", StringComparison.Ordinal))
-            throw new ReviewPreflightException("Shallow controlled object evidence is incomplete.");
-
-        // These four fixed full-OID expressions share one bounded native query.
+        // The shallow scalar and four fixed full-OID expressions share one query.
         // --verify accepts only one operand; require the complete ordered output
         // instead, including refusal of missing, extra or malformed scalar rows.
-        var resolved = Text(await ControlledGit(context, ["rev-parse",
+        var resolved = Text(await ControlledGit(context, ["rev-parse", "--is-shallow-repository",
             $"{baseCommit}^{{commit}}", $"{headCommit}^{{commit}}", $"{baseCommit}^{{tree}}", $"{headCommit}^{{tree}}"], cancellationToken))
             .Split('\n').Select(row => row.TrimEnd('\r')).ToArray();
-        if (resolved.Length != 4 || resolved.Any(row => !GitObjectPattern().IsMatch(row)))
+        if (resolved.Length != 5 || resolved[0] != "false" || resolved.Skip(1).Any(row => !GitObjectPattern().IsMatch(row)))
             throw new ReviewPreflightException("Exact ordered controlled base/head commit and tree identities required.");
-        var exactBase = resolved[0]; var exactHead = resolved[1];
+        var exactBase = resolved[1]; var exactHead = resolved[2];
         if (!string.Equals(exactBase, baseCommit, StringComparison.Ordinal) ||
             !string.Equals(exactHead, headCommit, StringComparison.Ordinal))
             throw new ReviewPreflightException("Base or head did not resolve to the exact supplied commit in controlled objects.");
@@ -236,7 +232,7 @@ public static partial class GitPatchIdentity
             throw new ReviewPreflightException("Requested head is not the parent-owned immutable source snapshot.");
 
         await ControlledGit(context, ["merge-base", "--is-ancestor", baseCommit, headCommit], cancellationToken);
-        var baseTree = resolved[2]; var headTree = resolved[3];
+        var baseTree = resolved[3]; var headTree = resolved[4];
         var before = await VerifySourceSnapshotAsync(context, headCommit, headTree, cancellationToken);
 
         var args = DiffArguments.Concat([baseCommit, headCommit, "--"]).ToArray();

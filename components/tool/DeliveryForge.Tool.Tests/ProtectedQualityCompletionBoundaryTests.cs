@@ -49,6 +49,15 @@ public sealed class ProtectedQualityCompletionBoundaryTests
             // Passing a pure tuple validator cannot populate the private actual-worker,
             // current-execution and closed-protected-issuer state required by this API.
             Assert.Null(await host.LocalRealEvidenceAsync(null!, null!));
+            Assert.Null(await host.LocalRealEvidenceWithReviewAsync(null!, null!, null!));
+            var git = new AdmissionFile(Path.Combine(data.Root, "unissued-git.exe"), 1, new('c', 64));
+            var reviewSelection = new InstalledReviewSelection("quality/review.json", data.Selection.PolicyRelativePath,
+                data.Selection.PolicyIdentity, git, "git version 2.50.0", Path.Combine(data.Root, "review-artifacts"));
+            using var review = new InstalledReviewHost(config with { GitExecutable = git.Path, InstalledReview = reviewSelection },
+                configurationPin, original, new ProcessCommandExecutor());
+            // DATA-only quality completion cannot substitute for the review's
+            // private retained source/output binding, even on the paired path.
+            await Assert.ThrowsAsync<WorkerEnvelopeException>(() => review.LocalRealEvidenceForQualityAsync(null!, null!, host));
         }
         else
         {

@@ -59,11 +59,9 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
             parent.EnterSynchronous(frame.RunId, () => { _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536); return true; });
         }
         Current();
-        var gates = await quality.LocalRealEvidenceAsync(frame, parent).ConfigureAwait(false);
-        if (gates is null) return ToolResult.Incomplete("LOCAL_REAL_PROTECTED_BASELINE_REQUIRED", "Complete actual gates and an independently approved exact protected baseline comparison are required; no registry waiver.");
-        var reviewed = await review.LocalRealEvidenceAsync(frame, parent).ConfigureAwait(false);
-        if (reviewed is null) return ToolResult.Incomplete("LOCAL_REAL_ACCEPTED_REVIEW_REQUIRED", "Same-original production issuer acceptance from the actual independent runtime reviewer is required.");
-        var accepted = reviewed.Value.Accepted; var policy = reviewed.Value.Policy;
+        var paired = await quality.LocalRealEvidenceWithReviewAsync(frame, parent, review).ConfigureAwait(false);
+        if (paired is null) return ToolResult.Incomplete("LOCAL_REAL_ACCEPTED_PROTECTED_EVIDENCE_REQUIRED", "Complete actual protected quality and same-original production-accepted independent review are required; no registry waiver.");
+        var gates = paired.Value.Gates; var accepted = paired.Value.Accepted; var policy = paired.Value.Policy;
         if (accepted.Patch.PlanIdentity != frozen.ContractIdentity || policy.Identity != configuration.InstalledQuality?.PolicyIdentity)
             throw new WorkerEnvelopeException("Actual quality/review protected policy or frozen plan differs.");
         var evidence = new TransitionEvidence(TrustedConfiguration.Ceiling(assignment.AuthorizationCeiling), assignment.BaseCommit,
@@ -71,10 +69,9 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
         async Task Verify()
         {
             Current();
-            var currentGates = await quality.LocalRealEvidenceAsync(frame, parent).ConfigureAwait(false);
-            var currentReview = await review.LocalRealEvidenceAsync(frame, parent).ConfigureAwait(false);
-            if (currentGates is null || currentReview is null || !ReferenceEquals(currentReview.Value.Accepted, accepted) ||
-                currentReview.Value.Policy.Identity != policy.Identity || !gates.Select(row => row.Identity).SequenceEqual(currentGates.Select(row => row.Identity)))
+            var current = await quality.LocalRealEvidenceWithReviewAsync(frame, parent, review).ConfigureAwait(false);
+            if (current is null || !ReferenceEquals(current.Value.Accepted, accepted) ||
+                current.Value.Policy.Identity != policy.Identity || !gates.Select(row => row.Identity).SequenceEqual(current.Value.Gates.Select(row => row.Identity)))
                 throw new WorkerEnvelopeException("Private live local-real acceptance/current immutable evidence changed.");
             Current();
         }

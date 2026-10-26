@@ -28,6 +28,7 @@ internal sealed class InstalledReviewHost : IDisposable
     FrozenPlan? frozen; FrozenWorkerPlan? assignment; TrustedConfiguration? boundConfiguration;
     ProductionReviewSourceOwner? sourceOwner; ProductionReviewBootstrap? bootstrap;
     ClaudeIndependentReviewer? independentReviewer;
+    InstalledQualityHost? boundCompletedQuality;
     DeliveryForge.Contracts.Validation.ValidatedContract? protectedEvidencePolicy;
     bool entered, disposed, uncertain, dispositionEntered;
     int independentEntry;
@@ -116,6 +117,7 @@ internal sealed class InstalledReviewHost : IDisposable
         if (Interlocked.CompareExchange(ref independentEntry, 1, 0) != 0)
             throw new ToolUsageException("Actual independent reviewer cannot replay.");
         completedQuality?.BindCompletedReviewOutputs(frame, sourceOwner);
+        boundCompletedQuality = completedQuality;
         sourceOwner.Check();
         async Task<(PatchIdentity Patch, byte[] FrozenPlan)> PrepareEvidence(CancellationToken token)
         {
@@ -403,6 +405,13 @@ internal sealed class InstalledReviewHost : IDisposable
         bootstrap?.Dispose();
         disposed = bootstrap is null || bootstrap.ActualDispositionReturned;
         if (!disposed) throw new IOException("Original review callback did not return its disposition; exact view retained.");
+    }
+    internal Task<(ClaudeIndependentReviewer.AcceptedLocalRevision Accepted, DeliveryForge.Contracts.Validation.ValidatedContract Policy)?> LocalRealEvidenceForQualityAsync(
+        HostBridgeFrame frame, ParentCoordinationHost parent, InstalledQualityHost quality)
+    {
+        if (!ReferenceEquals(boundCompletedQuality, quality))
+            throw new WorkerEnvelopeException("Fresh paired evidence requires the exact private quality owner bound to this review source.");
+        return LocalRealEvidenceAsync(frame, parent);
     }
     internal async Task<(ClaudeIndependentReviewer.AcceptedLocalRevision Accepted, DeliveryForge.Contracts.Validation.ValidatedContract Policy)?> LocalRealEvidenceAsync(HostBridgeFrame frame, ParentCoordinationHost parent)
     {
