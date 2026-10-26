@@ -79,13 +79,21 @@ public sealed class ReviewGateReceiptEvidenceTests
         var image = "sha256:" + new string('a', 64);
         var profile = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            Tool = "crap4csharp", Fixture = false, InstallationRoot = root,
+            Tool = "crap4csharp",
+            Fixture = false,
+            InstallationRoot = root,
             ExecutableRelativePath = entrypoint,
             Payload = new[] { new { Path = entrypoint, Bytes = 123L, Sha256 = image } },
-            Version = "0.1.0-private+selected-source", SourceCommit = new string('b', 40),
-            PackageVersion = "0.1.0-private", PackageSha256 = "sha256:" + new string('c', 64),
-            ConfigurationRelativePath = "quality/crap.json", ConfigurationSha256 = "sha256:" + new string('d', 64),
-            SdkVersion = "10.0.401", Framework = "net10.0", Runner = "vstest", Collector = "coverlet.collector/6.0.4",
+            Version = "0.1.0-private+selected-source",
+            SourceCommit = new string('b', 40),
+            PackageVersion = "0.1.0-private",
+            PackageSha256 = "sha256:" + new string('c', 64),
+            ConfigurationRelativePath = "quality/crap.json",
+            ConfigurationSha256 = "sha256:" + new string('d', 64),
+            SdkVersion = "10.0.401",
+            Framework = "net10.0",
+            Runner = "vstest",
+            Collector = "coverlet.collector/6.0.4",
             Environment = new { DO_NOT_EXPORT = "private-environment-DATA" },
             Limitations = new[] { "Private selected fixture scope; no source-build receipt or publication authority." }
         });

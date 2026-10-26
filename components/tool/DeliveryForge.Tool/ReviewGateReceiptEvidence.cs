@@ -61,7 +61,10 @@ internal static class ReviewGateReceiptEvidence
         return JsonSerializer.SerializeToElement(new
         {
             Kind = "ParentSelectedCompletedQualityToolData-v1",
-            selected.GateId, selected.Tool, selected.Scope, selected.ProjectRelativePath,
+            selected.GateId,
+            selected.Tool,
+            selected.Scope,
+            selected.ProjectRelativePath,
             Profile = new { selected.Profile.Bytes, Sha256 = "sha256:" + selected.Profile.Sha256 },
             Producer = new
             {
@@ -76,7 +79,8 @@ internal static class ReviewGateReceiptEvidence
                 Runner = profile.GetProperty("Runner").GetString(),
                 Collector = profile.GetProperty("Collector").GetString()
             },
-            actual.ProductionCapable, actual.Fixture,
+            actual.ProductionCapable,
+            actual.Fixture,
             ParentSelectedLimitations = profile.GetProperty("Limitations").Clone(),
             Qualification = "Exact parent-selected profile metadata and the completed gate's observed executable/version binding; no independent source-build receipt or production/publication authority is asserted.",
             Omitted = new[] { "Absolute installation/package paths", "Environment", "Complete payload inventory (retained by profile digest)", "Independent source-build history (not imported)" }
