@@ -1,3 +1,4 @@
+using DeliveryForge.Contracts.Models;
 using DeliveryForge.Evidence;
 using DeliveryForge.Execution;
 using DeliveryForge.Execution.Git;
