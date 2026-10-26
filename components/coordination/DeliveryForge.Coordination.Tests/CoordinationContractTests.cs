@@ -1947,6 +1947,130 @@ public sealed class CoordinationContractTests
         Assert.Single(transport.ReleaseRequests);
     }
 
+    [Fact(Timeout = 120_000)]
+    public async Task Actual_file_checkpoints_close_four_leases_after_fourteen_renewal_rounds()
+    {
+        var token = TestContext.Current.CancellationToken;
+        var root = Path.Combine(Path.GetTempPath(), "delivery-forge-four-lease-checkpoints-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var clock = new FakeMonotonicClock("file-checkpoint-" + Guid.NewGuid().ToString("N"));
+        var transport = new IdempotentCoordinationFixture(() => ServerNow + clock.Elapsed);
+        var source = new RecordingQuiescenceSource(clock, [true, true, true, true]);
+        var owner = new LeaseOwner("principal-1", Guid.NewGuid().ToString("D"));
+        CoordinationResource[] resources =
+        [
+            CoordinationResource.GitHubIssue("delivery-forge", "fixture", "checkpoint", 17),
+            CoordinationResource.GitHubBranch("delivery-forge", "fixture", "checkpoint", "refs/heads/fixture"),
+            CoordinationResource.GitHubWorkspace("delivery-forge", "fixture", "checkpoint", "/fixture/checkpoint-workspace"),
+            CoordinationResource.GitHubRepositoryWrite("delivery-forge", "fixture", "checkpoint")
+        ];
+        var closedIoFrames = 0;
+        Microsoft.Win32.SafeHandles.SafeFileHandle? writer = null;
+        async ValueTask CloseActualIo(FileStream stream)
+        {
+            var original = stream.SafeFileHandle;
+            await stream.DisposeAsync();
+            Assert.True(original.IsClosed);
+            Interlocked.Increment(ref closedIoFrames); // Observation only, never a new allowance.
+        }
+        var store = new FileCoordinationCheckpointStore(root, null, CloseActualIo, stream => writer = stream.SafeFileHandle);
+        Exception? primary = null;
+        try
+        {
+            await store.BindParentAsync(new ParentCheckpointBinding(1, "fixture-parent-" + Guid.NewGuid().ToString("N"),
+                owner.RunId, "fixture-bundle", "fixture-contract", "fixture/checkpoint", "#17", resources[0], resources[1..]), token);
+            var adapter = await CreateAdapterAsync(transport, clock, source, checkpoints: store);
+            var held = await adapter.AcquireAllAsync(resources, owner, ContinuumCoordinationAdapter.DefaultTtl, token);
+            var authority = Assert.IsType<DispatchAuthority>(held.Authority);
+            var lifecycleId = authority.LifecycleId;
+            Assert.True(adapter.MayDispatch(authority));
+            Assert.Equal(4, transport.AcquireRequests.Count);
+            for (var round = 0; round < 14; round++)
+            {
+                clock.Advance(TimeSpan.FromSeconds(1)); // Logical contract time; no physical wait or fresh budget.
+                var prior = authority;
+                var renewed = await adapter.RenewAllAsync(prior, token);
+                authority = Assert.IsType<DispatchAuthority>(renewed.Authority);
+                Assert.False(adapter.MayDispatch(prior));
+                Assert.True(adapter.MayDispatch(authority));
+            }
+            Assert.Equal(56, transport.RenewRequests.Count);
+            var released = await adapter.ReleaseAllAsync(authority, token);
+            Assert.False(adapter.MayDispatch(authority));
+            Assert.True(released.Snapshot.Phase == CoordinationLifecyclePhase.Closed,
+                $"Retained root={root}; phase={released.Snapshot.Phase}; closedIO={closedIoFrames}; physicalRecords={Directory.EnumerateFiles(root, "*-record.json", SearchOption.AllDirectories).Count()}; actualReleaseRequests={transport.ReleaseRequests.Count}");
+            Assert.Equal(LeaseOwnership.Released, released.Snapshot.Ownership);
+            Assert.Null(released.Continuation);
+            Assert.Equal(4, transport.ReleaseRequests.Count);
+            Assert.Equal(4, source.Observations);
+            Assert.Equal(4, released.QuiescenceEvidence.Count);
+            Assert.All(released.QuiescenceEvidence, evidence => Assert.True(evidence.Quiescent));
+
+            // Read real immutable files directly, without adding another full-prefix store observation.
+            var paths = Directory.GetFiles(Path.Combine(root, lifecycleId), "*-record.json").Order(StringComparer.Ordinal).ToArray();
+            Assert.Equal(132, paths.Length); // 4*2 acquire + 56*2 renew + 4*3 release.
+            var rows = new List<CoordinationCheckpointRecord>();
+            foreach (var path in paths)
+            {
+                var bytes = await File.ReadAllBytesAsync(path, token);
+                var row = System.Text.Json.JsonSerializer.Deserialize<CoordinationCheckpointRecord>(bytes);
+                Assert.NotNull(row);
+                var hash = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(bytes));
+                Assert.Equal($"{row.RecordSequence:D12}-sha256-{hash}-record.json", Path.GetFileName(path));
+                rows.Add(row);
+            }
+            Assert.Equal(Enumerable.Range(1, 132).Select(value => (long)value), rows.Select(row => row.RecordSequence));
+            Assert.Single(rows.Select(row => row.WriterEpoch).Distinct(StringComparer.Ordinal));
+            Assert.Equal(64, rows.Select(row => row.OperationSequence).Distinct().Count());
+            Assert.Equal(4, rows.Count(row => row.Prepared?.Kind == CoordinationIntentKind.Acquire));
+            Assert.Equal(56, rows.Count(row => row.Prepared?.Kind == CoordinationIntentKind.Renew));
+            Assert.Equal(4, rows.Count(row => row.Prepared?.Kind == CoordinationIntentKind.Release));
+            Assert.Equal(4, rows.Count(row => row.Progress?.AdapterCode == "release-observed"));
+            Assert.Equal(4, rows.Count(row => row.Progress?.AdapterCode == "released"));
+            foreach (var operation in rows.GroupBy(row => row.OperationSequence))
+            {
+                var prepared = Assert.Single(operation.Where(row => row.Prepared is not null)).Prepared!;
+                var progress = operation.Where(row => row.Progress is not null).OrderBy(row => row.ProgressRevision).ToArray();
+                Assert.Equal(prepared.Kind == CoordinationIntentKind.Release ? 2 : 1, progress.Length);
+                Assert.Equal(Enumerable.Range(1, progress.Length).Select(value => (long)value), progress.Select(row => row.ProgressRevision));
+                Assert.All(progress, row => Assert.Equal(owner, row.Progress!.Lease!.Owner));
+                Assert.All(progress, row => Assert.Equal(prepared.Resource, row.Progress!.Lease!.Resource));
+                if (prepared.Kind == CoordinationIntentKind.Release)
+                {
+                    Assert.Equal("release-observed", progress[0].Progress!.AdapterCode);
+                    Assert.True(progress[0].Progress!.Quiescence!.Quiescent);
+                    Assert.Equal("released", progress[1].Progress!.AdapterCode);
+                }
+            }
+        }
+        catch (Exception failure)
+        {
+            primary = failure;
+            failure.Data["RetainedFreshCheckpointRoot"] = root;
+            failure.Data["ActualClosedCheckpointIoFrames"] = closedIoFrames;
+            failure.Data["ActualCheckpointRecordCount"] = Directory.EnumerateFiles(root, "*-record.json", SearchOption.AllDirectories).Count();
+            failure.Data["ActualReleaseTransportRequests"] = transport.ReleaseRequests.Count;
+            throw;
+        }
+        finally
+        {
+            try
+            {
+                await store.DisposeAsync();
+                Assert.NotNull(writer);
+                Assert.True(writer.IsClosed);
+            }
+            catch (Exception cleanup)
+            {
+                cleanup.Data["RetainedFreshCheckpointRoot"] = root;
+                cleanup.Data["ActualClosedCheckpointIoFrames"] = closedIoFrames;
+                if (primary is not null) throw new AggregateException("Actual checkpoint regression primary and first disposition", primary, cleanup);
+                throw;
+            }
+            // Retain the fresh directory on success and failure. No recursive deletion or restart/adoption.
+        }
+    }
+
     private static readonly DateTimeOffset ServerNow = new(2026, 10, 9, 0, 0, 0, TimeSpan.Zero);
     private static readonly LeaseOwner Owner = new("principal-1", "run-1");
 
