@@ -49,7 +49,9 @@ public sealed class PlanImportFilesystemTests
         // Remove only this exact empty owned target, never recurse through the link.
         Directory.Delete(target);
         var dangling = new FileInfo(link);
-        Assert.False(Directory.Exists(link));
+        Assert.False(Directory.Exists(target));
+        // Windows can report the junction itself as existing after its target
+        // is gone. Check the missing target and the reparse entry separately.
         Assert.False(dangling.Exists);
         Assert.NotEqual((FileAttributes)(-1), dangling.Attributes);
         Assert.True((dangling.Attributes & FileAttributes.ReparsePoint) != 0);
