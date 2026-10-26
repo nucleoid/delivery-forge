@@ -172,4 +172,143 @@ public sealed class ReviewGateReceiptEvidenceTests
         Assert.Throws<DeliveryForge.Execution.WorkerEnvelopeException>(() => ReviewGateReceiptEvidence.RequireRetainedResults([data.Result], [data.Result with { }]));
     }
 
+
+    // Pure presentation DATA: these rows cannot issue a provider/completed-frame authority.
+    static (byte[] Receipt, DeliveryForge.Evidence.GateRunResult Actual, Dictionary<string, byte[]> Artifacts) RequiredTestsData(string changed = "")
+    {
+        var data = ProducerData(); var graph = new string('a', 64); var build = new string('b', 64);
+        var count = changed == "count" ? 6 : 7;
+        var ns = changed == "namespace" ? "urn:foreign" : "http://microsoft.com/schemas/VisualStudio/TeamTest/2010";
+        var list = "00000000-0000-0000-0000-000000000099";
+        string TestId(int i) => $"00000000-0000-0000-0000-{i + 1:000000000000}";
+        string ExecutionId(int i) => $"00000000-0000-0000-0001-{i + 1:000000000000}";
+        string Name(int i) => "case-" + (changed == "duplicate-name" ? 0 : i);
+        var results = string.Concat(Enumerable.Range(0, count).Select(i => $"<UnitTestResult testId='{TestId(i)}' executionId='{ExecutionId(i)}' testListId='{list}' testName='{Name(i)}' outcome='Passed'/>"));
+        if (changed == "nested") results += "<InnerResults>" + results + "</InnerResults>";
+        var definitions = string.Concat(Enumerable.Range(0, count).Select(i => $"<UnitTest id='{TestId(i)}' name='{Name(i)}'><Execution id='{ExecutionId(changed == "definition" ? 0 : i)}'/></UnitTest>"));
+        var entries = string.Concat(Enumerable.Range(0, count).Select(i => $"<TestEntry testId='{TestId(i)}' executionId='{ExecutionId(i)}' testListId='{list}'/>"));
+        var trx = Encoding.UTF8.GetBytes((changed == "entity" ? "<!DOCTYPE TestRun [<!ENTITY x SYSTEM 'file:///not-a-test-input'>]>" : "") +
+            $"<TestRun xmlns='{ns}'><Results>{results}</Results><TestDefinitions>{definitions}</TestDefinitions><TestEntries>{entries}</TestEntries>" +
+            $"<ResultSummary outcome='{(changed == "summary" ? "Failed" : "Completed")}'><Counters total='7' executed='7' passed='7' failed='0' error='{(changed == "error-counter" ? 1 : 0)}'/></ResultSummary></TestRun>");
+        var inventory = JsonSerializer.SerializeToUtf8Bytes(new { provider = "finite-sdk-required-test-inventory-v1", reusableRecipe = false,
+            tests = new[] { new { graphId = graph, project = "Tests/Tests.csproj", trx = "required-test-" + (changed == "graph" ? build : graph) + "-trx", passed = 7, rawExitCode = 0 } } });
+        if (changed == "duplicate-json") inventory = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(inventory).Replace("\"provider\":", "\"provider\":\"foreign\",\"provider\":", StringComparison.Ordinal));
+        var artifacts = new Dictionary<string, byte[]>(StringComparer.Ordinal)
+        {
+            ["producer-bundle/inputs/results.bin"] = trx,
+            ["producer-bundle/inputs/inventory.bin"] = inventory
+        };
+        var manifest = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            revision = new { @base = data.Result.After.BaseCommit, head = data.Result.After.HeadCommit },
+            capture = new { actualBindingComplete = true, captureConsistent = true },
+            artifacts = new[]
+            {
+                new { id = "required-test-inventory", kind = "required-test-inventory", locator = "inputs/inventory.bin", length = inventory.Length, sha256 = BoundedFiles.Sha(inventory), format = "json" },
+                new { id = "required-test-" + graph + "-trx", kind = "required-test-result", locator = changed == "traversal" ? "../results.bin" : "inputs/results.bin", length = changed == "oversize" ? 16 * 1024 * 1024 + 1 : trx.Length, sha256 = BoundedFiles.Sha(trx), format = "trx" }
+            },
+            executions = new[] { new { id = "test-" + build + "-" + graph, buildId = "build-" + build, testProject = "Tests/Tests.csproj", completed = true, exitCode = 0,
+                totalTests = 7, passedTests = 7, failedTests = 0, skippedTests = 0 } }
+        });
+        if (changed != "missing-manifest") artifacts.Add("producer-bundle/manifest.json", manifest);
+        var hashes = artifacts.ToDictionary(row => row.Key, row => "sha256:" + BoundedFiles.Sha(row.Value), StringComparer.Ordinal);
+        var receipt = JsonNode.Parse(Receipt())!.AsObject();
+        receipt["artifactHashes"] = JsonSerializer.SerializeToNode(hashes);
+        receipt["baseCommit"] = data.Result.After.BaseCommit; receipt["headCommit"] = data.Result.After.HeadCommit;
+        receipt["treeId"] = data.Result.After.TreeId; receipt["policyIdentity"] = data.Result.PolicyIdentity;
+        receipt["identity"] = CanonicalJson.ComputeIdentity(JsonSerializer.SerializeToUtf8Bytes(receipt));
+        var actual = data.Result with { ArtifactHashes = hashes };
+        if (changed == "head") actual = actual with { Before = actual.Before with { HeadCommit = new string('9', 40) }, After = actual.After with { HeadCommit = new string('9', 40) } };
+        if (changed == "nonpass") actual = actual with { Outcome = DeliveryForge.Evidence.GateOutcome.Fail };
+        if (changed == "fixture") actual = actual with { Fixture = true };
+        var drift = changed switch { "trx-drift" => "producer-bundle/inputs/results.bin", "manifest-drift" => "producer-bundle/manifest.json", "inventory-drift" => "producer-bundle/inputs/inventory.bin", _ => null };
+        if (drift is not null) artifacts[drift] = [.. artifacts[drift], (byte)' '];
+        return (JsonSerializer.SerializeToUtf8Bytes(receipt), actual, artifacts);
+    }
+
+    [Fact]
+    public void Required_test_presentation_keeps_all_seven_supplied_named_outcomes_and_exact_artifact_identity()
+    {
+        var data = RequiredTestsData(); var reads = 0;
+        var projected = ReviewGateReceiptEvidence.Create("retained/receipts/current.json", data.Receipt, data.Actual,
+            (relative, maximum) => { reads++; Assert.True(data.Artifacts[relative].Length <= maximum); return data.Artifacts[relative]; });
+        var required = projected.GetProperty("RequiredTests");
+        Assert.True(required.GetProperty("Presented").GetBoolean());
+        Assert.Contains("Producer-reported", required.GetProperty("Qualification").GetString(), StringComparison.Ordinal);
+        Assert.Contains("does not independently verify", required.GetProperty("Qualification").GetString(), StringComparison.Ordinal);
+        var test = Assert.Single(required.GetProperty("Tests").EnumerateArray());
+        Assert.Equal(7, test.GetProperty("CompleteCaseCount").GetInt32());
+        Assert.Equal(7, test.GetProperty("Cases").GetArrayLength());
+        Assert.All(test.GetProperty("Cases").EnumerateArray(), row => Assert.Equal("Passed", row.GetProperty("Outcome").GetString()));
+        Assert.Equal("sha256:" + BoundedFiles.Sha(data.Artifacts["producer-bundle/inputs/results.bin"]), test.GetProperty("Sha256").GetString());
+        Assert.Equal(3, reads);
+    }
+
+    [Theory]
+    [InlineData("trx-drift")]
+    [InlineData("manifest-drift")]
+    [InlineData("inventory-drift")]
+    [InlineData("head")]
+    [InlineData("traversal")]
+    public void Required_test_artifact_ownership_or_currentness_failures_still_escape(string changed)
+    {
+        var data = RequiredTestsData(changed);
+        Assert.Throws<DeliveryForge.Execution.WorkerEnvelopeException>(() => ReviewGateReceiptEvidence.Create("retained/receipts/current.json", data.Receipt, data.Actual,
+            (relative, _) => data.Artifacts[relative]));
+    }
+
+    [Theory]
+    [InlineData("graph")]
+    [InlineData("count")]
+    [InlineData("entity")]
+    [InlineData("duplicate-name")]
+    [InlineData("definition")]
+    [InlineData("namespace")]
+    [InlineData("nested")]
+    [InlineData("summary")]
+    [InlineData("error-counter")]
+    [InlineData("duplicate-json")]
+    [InlineData("oversize")]
+    [InlineData("missing-manifest")]
+    [InlineData("nonpass")]
+    [InlineData("fixture")]
+    public void Unsupported_required_test_presentation_is_explicit_unavailable_without_issuing_outcomes(string changed)
+    {
+        var data = RequiredTestsData(changed); var reads = 0;
+        var evidence = ReviewGateReceiptEvidence.Create("retained/receipts/current.json", data.Receipt, data.Actual,
+            (relative, _) => { reads++; return data.Artifacts[relative]; });
+        var required = evidence.GetProperty("RequiredTests");
+        Assert.False(required.GetProperty("Presented").GetBoolean());
+        Assert.False(required.TryGetProperty("Tests", out _));
+        Assert.False(string.IsNullOrWhiteSpace(required.GetProperty("Reason").GetString()));
+        Assert.Equal("ReviewGateReceiptEvidence-v1", evidence.GetProperty("Kind").GetString());
+        Assert.Equal("sha256:" + BoundedFiles.Sha(data.Receipt), evidence.GetProperty("RawReceipt").GetProperty("Sha256").GetString());
+        if (changed is "missing-manifest" or "nonpass" or "fixture") Assert.Equal(0, reads);
+        if (changed == "oversize") Assert.Equal(2, reads);
+    }
+
+    [Theory]
+    [InlineData("io")]
+    [InlineData("ownership")]
+    [InlineData("cancellation")]
+    [InlineData("budget")]
+    [InlineData("xml-from-owner")]
+    [InlineData("json-from-owner")]
+    public void Admitted_callback_failures_are_never_reclassified_as_optional_presentation(string changed)
+    {
+        var data = RequiredTestsData();
+        Exception failure = changed switch
+        {
+            "io" => new IOException("first-close DATA"),
+            "ownership" => new DeliveryForge.Execution.WorkerEnvelopeException("owner DATA"),
+            "cancellation" => new OperationCanceledException("cancel DATA"),
+            "budget" => new TimeoutException("budget DATA"),
+            "xml-from-owner" => new System.Xml.XmlException("callback DATA"),
+            _ => new JsonException("callback DATA")
+        };
+        var observed = Record.Exception(() => ReviewGateReceiptEvidence.Create("retained/receipts/current.json", data.Receipt, data.Actual,
+            (_, _) => throw failure));
+        Assert.Same(failure, observed);
+    }
+
 }

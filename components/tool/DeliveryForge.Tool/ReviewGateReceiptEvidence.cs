@@ -7,9 +7,10 @@ namespace DeliveryForge.Tool;
 
 // Review presentation only. The original canonical receipt and every artifact
 // remain retained; this wrapper cannot be parsed or consumed as a gate receipt.
-internal static class ReviewGateReceiptEvidence
+internal static partial class ReviewGateReceiptEvidence
 {
-    internal static JsonElement Create(string path, byte[] exactReceipt)
+    internal static JsonElement Create(string path, byte[] exactReceipt,
+        DeliveryForge.Evidence.GateRunResult? actual = null, Func<string, int, byte[]>? readArtifact = null)
     {
         var validated = ContractValidator.ParseAndValidate(exactReceipt);
         if (validated.SchemaName != "gate-receipt")
@@ -32,6 +33,7 @@ internal static class ReviewGateReceiptEvidence
                 Identity = validated.Identity
             },
             ReceiptFields = fields,
+            RequiredTests = actual is not null && readArtifact is not null ? RequiredTestOutcomes(actual, root, readArtifact) : (JsonElement?)null,
             ArtifactInventory = new
             {
                 Count = artifacts.EnumerateObject().Count(),

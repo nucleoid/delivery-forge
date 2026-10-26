@@ -138,10 +138,21 @@ internal sealed class InstalledReviewHost : IDisposable
                 var bytes = parent.EnterSynchronous(assignment.RunId, () => { token.ThrowIfCancellationRequested(); sourceOwner.Check(); return BoundedFiles.Read(gate.ReceiptPath, original); });
                 token.ThrowIfCancellationRequested();
                 identities.Add("quality-receipt:" + gate.ReceiptPath, "sha256:" + BoundedFiles.Sha(bytes));
-                qualityEvidence.Add(ReviewGateReceiptEvidence.Create(gate.ReceiptPath, bytes));
+                qualityEvidence.Add(ReviewGateReceiptEvidence.Create(gate.ReceiptPath, bytes, gate, (relative, maximum) =>
+                {
+                    var receiptDirectory = Path.GetDirectoryName(gate.ReceiptPath)!;
+                    if (Path.GetFileName(receiptDirectory) != "receipts") throw new WorkerEnvelopeException("Actual quality receipt directory differs.");
+                    var artifact = Path.Combine(Path.GetDirectoryName(receiptDirectory)!, relative);
+                    return parent.EnterSynchronous(assignment.RunId, () =>
+                    {
+                        token.ThrowIfCancellationRequested(); sourceOwner.Check();
+                        var retained = BoundedFiles.Read(artifact, original, maximum);
+                        token.ThrowIfCancellationRequested(); sourceOwner.Check(); return retained;
+                    });
+                }));
             }
             var patch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, assignment.BaseCommit, completion.HeadCommit, frozen.ContractIdentity, identities, token).ConfigureAwait(false);
-            var planAndEvidence = JsonSerializer.SerializeToUtf8Bytes(new { FrozenPlan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), QualityEvidence = qualityEvidence, QualityToolProvenance = qualityToolProvenance, MissingQualityEvidence = actualQualityResults.Count == 0 }, BoundedFiles.Json);
+            var planAndEvidence = JsonSerializer.SerializeToUtf8Bytes(new { FrozenPlan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), QualityEvidence = qualityEvidence, QualityToolProvenance = qualityToolProvenance, SourceAndGateScope = qualityToolProvenance is null ? null : new { SourceRealm = bootstrap.ObjectView.SourceRealm.ToString(), Qualification = "SourceRealm describes the source/object-view ownership authority, independently of gate ProductionCapable flags. The completed quality binding supplies separate gate measurements and ProtectedComparison DATA; its exact registry/scope approval does not certify producers universally. Preserve all reported limitations and authority flags." }, MissingQualityEvidence = actualQualityResults.Count == 0 }, BoundedFiles.Json);
             token.ThrowIfCancellationRequested(); sourceOwner.Check(); return (patch, planAndEvidence);
         }
         var userSettings = parent.EnterSynchronous(assignment.RunId, () =>
