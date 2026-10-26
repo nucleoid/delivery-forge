@@ -223,7 +223,7 @@ public static partial class GitPatchIdentity
         // These four fixed full-OID expressions share one bounded native query.
         // --verify accepts only one operand; require the complete ordered output
         // instead, including refusal of missing, extra or malformed scalar rows.
-        var resolved = Text(await ControlledGit(context, ["rev-parse", "--end-of-options",
+        var resolved = Text(await ControlledGit(context, ["rev-parse",
             $"{baseCommit}^{{commit}}", $"{headCommit}^{{commit}}", $"{baseCommit}^{{tree}}", $"{headCommit}^{{tree}}"], cancellationToken))
             .Split('\n').Select(row => row.TrimEnd('\r')).ToArray();
         if (resolved.Length != 4 || resolved.Any(row => !GitObjectPattern().IsMatch(row)))

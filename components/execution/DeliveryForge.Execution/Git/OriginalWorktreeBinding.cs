@@ -184,7 +184,7 @@ public sealed partial class WorktreeManager
                     var capture = await executor.ExecuteBoundedCaptureAsync(invocation, allowance, maximumBytes, token, new OwnedWorkPhaseBudget(original)).ConfigureAwait(false);
                     // Even an already-completed native Task must leave the
                     // admission factory's monitor before file/hash postchecks.
-                    await Task.Yield();
+                    await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
                     var facts = capture.Command.LifecycleDiagnostics;
                     if (!capture.Command.OwnedProcessQuiescent || !capture.RootExitObserved || !capture.StandardOutputDrainCompleted || !capture.StandardErrorDrainCompleted ||
                         facts?.NativeFailure is not null || facts?.OwnedTree is not { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 } ||
