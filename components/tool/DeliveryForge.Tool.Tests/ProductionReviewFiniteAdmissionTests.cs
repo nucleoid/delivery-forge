@@ -179,7 +179,7 @@ public sealed class ProductionReviewFiniteAdmissionTests
                 """;
             await File.WriteAllTextAsync(Path.Combine(repository, "review.json"), policy, TestContext.Current.CancellationToken);
             // One existing commit adds many ACTUAL distinct loose object bytes;
-            // the former ~10 admitted effects/object exhausts the real1024 cap.
+            // retain a stricter 1024-effect source-path regression budget below parent capacity.
             for (var index = 0; index < (allGoldenChecks ? 0 : 256); index++)
                 await File.WriteAllTextAsync(Path.Combine(repository, $"inventory-{index}.txt"), $"distinct-owned-object-{index}\n", TestContext.Current.CancellationToken);
             for (var index = 0; index < (allGoldenChecks ? 2 : 12); index++)
@@ -275,18 +275,18 @@ public sealed class ProductionReviewFiniteAdmissionTests
             counts.Add(parent.EnteredCount);
             for (var export = 0; export < (allGoldenChecks ? 11 : 3); export++)
             {
-                TestContext.Current.TestOutputHelper!.WriteLine($"Before fresh export {export}: {parent.EnteredCount}/1024 retained effects.");
+                TestContext.Current.TestOutputHelper!.WriteLine($"Before fresh export {export}: {parent.EnteredCount} retained effects; source-path regression budget1024, parent capacity{ParentEffectAdmission.MaximumOriginalInvocations}.");
                 var bytes = await GitPatchIdentity.ExportVerifiedPatchAsync(bootstrap.ObjectView, patch, TestContext.Current.CancellationToken);
                 Assert.Equal(patch.PatchSha256, "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes)));
                 counts.Add(parent.EnteredCount);
             }
             Assert.Equal(allGoldenChecks ? 13 : 5, counts.Count);
             for (var index = 1; index < counts.Count; index++) Assert.True(counts[index] > counts[index - 1]);
-            TestContext.Current.TestOutputHelper!.WriteLine("Actual source-computation cumulative effects=" + string.Join(",", counts) + "/1024; excludes quality/reviewer/full installed run.");
+            TestContext.Current.TestOutputHelper!.WriteLine("Actual source-computation cumulative effects=" + string.Join(",", counts) + "; source-path regression budget1024; excludes quality/reviewer/full installed run.");
             Assert.Equal(baseCommit, bootstrap.Policy.SourceRevision); Assert.Equal(head, bootstrap.ObjectView.FrozenHeadCommit);
             Assert.True(current); Assert.False(owner.Uncertain); Assert.False(original.HasExplicitUnknown);
             Assert.InRange(parent.EnteredCount, 1, 1023); Assert.True(parent.AllKnownSettled);
-            TestContext.Current.TestOutputHelper!.WriteLine($"Actual linked object files={objectFiles}; finite parent effects={parent.EnteredCount}/1024.");
+            TestContext.Current.TestOutputHelper!.WriteLine($"Actual linked object files={objectFiles}; retained parent effects={parent.EnteredCount}/{ParentEffectAdmission.MaximumOriginalInvocations}.");
             var controlledView = bootstrap.ObjectView.ControlledGitDirectory;
             if (!allGoldenChecks)
             {
@@ -344,11 +344,11 @@ public sealed class ProductionReviewFiniteAdmissionTests
                 Path.Combine(root, ".git"), Path.Combine(root, ".git"), image, bytes.Length, Convert.ToHexStringLower(SHA256.HashData(bytes)),
                 "git version inert", new('a', 40), new('b', 40), () => true, "sha256:" + new string('a', 64),
                 "sha256:" + new string('b', 64), "review.json", 1024);
-            while (parent.EnteredCount < 1024) parent.EnterSynchronous("owned", () => true);
+            while (parent.EnteredCount < ParentEffectAdmission.MaximumOriginalInvocations) parent.EnterSynchronous("owned", () => true);
             var target = Path.Combine(root, "must-not-be-born");
             await Assert.ThrowsAsync<IOException>(() => owner.WriteFileAsync(target, [1], TestContext.Current.CancellationToken));
             Assert.False(File.Exists(target)); Assert.False(owner.Uncertain); Assert.False(original.HasExplicitUnknown);
-            Assert.False(current); Assert.Equal(1024, parent.EnteredCount); Assert.True(parent.AllKnownSettled);
+            Assert.False(current); Assert.Equal(ParentEffectAdmission.MaximumOriginalInvocations, parent.EnteredCount); Assert.True(parent.AllKnownSettled);
         }
         finally { _ = original.CleanupRemaining; Directory.Delete(root, recursive: true); }
     }
