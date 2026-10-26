@@ -192,7 +192,8 @@ public sealed class ReviewGateReceiptEvidenceTests
             $"<ResultSummary outcome='{(changed == "summary" ? "Failed" : "Completed")}'><Counters total='7' executed='7' passed='7' failed='0' error='{(changed == "error-counter" ? 1 : 0)}'/></ResultSummary></TestRun>");
         var inventory = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            provider = "finite-sdk-required-test-inventory-v1", reusableRecipe = false,
+            provider = "finite-sdk-required-test-inventory-v1",
+            reusableRecipe = false,
             tests = new[] { new { graphId = graph, project = "Tests/Tests.csproj", trx = "required-test-" + (changed == "graph" ? build : graph) + "-trx", passed = 7, rawExitCode = 0 } }
         });
         if (changed == "duplicate-json") inventory = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(inventory).Replace("\"provider\":", "\"provider\":\"foreign\",\"provider\":", StringComparison.Ordinal));
