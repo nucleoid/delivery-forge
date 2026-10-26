@@ -2029,7 +2029,7 @@ public sealed class CoordinationContractTests
             Assert.Equal(4, rows.Count(row => row.Progress?.AdapterCode == "released"));
             foreach (var operation in rows.GroupBy(row => row.OperationSequence))
             {
-                var prepared = Assert.Single(operation.Where(row => row.Prepared is not null)).Prepared!;
+                var prepared = Assert.Single(operation, row => row.Prepared is not null).Prepared!;
                 var progress = operation.Where(row => row.Progress is not null).OrderBy(row => row.ProgressRevision).ToArray();
                 Assert.Equal(prepared.Kind == CoordinationIntentKind.Release ? 2 : 1, progress.Length);
                 Assert.Equal(Enumerable.Range(1, progress.Length).Select(value => (long)value), progress.Select(row => row.ProgressRevision));
