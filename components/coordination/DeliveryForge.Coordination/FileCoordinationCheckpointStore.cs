@@ -281,7 +281,18 @@ public sealed class FileCoordinationCheckpointStore : ICoordinationCheckpointSto
         var cursor = Path.GetFullPath(path);
         for (var depth = 0; !string.IsNullOrEmpty(cursor); depth++)
         {
-            if (depth >= 64 || ((File.Exists(cursor) || Directory.Exists(cursor)) && (File.GetAttributes(cursor) & FileAttributes.ReparsePoint) != 0))
+            if (OperatingSystem.IsWindows())
+            {
+                if (depth >= 64)
+                    throw new CoordinationProtocolException("Parent coordination checkpoint path is redirected.");
+                // One fresh observation of this entry, including a dangling
+                // reparse entry. Missing ordinary paths report -1 attributes;
+                // the unchanged required directory/file opens reject absence.
+                var attributes = new FileInfo(cursor).Attributes;
+                if (attributes != (FileAttributes)(-1) && (attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new CoordinationProtocolException("Parent coordination checkpoint path is redirected.");
+            }
+            else if (depth >= 64 || ((File.Exists(cursor) || Directory.Exists(cursor)) && (File.GetAttributes(cursor) & FileAttributes.ReparsePoint) != 0))
                 throw new CoordinationProtocolException("Parent coordination checkpoint path is redirected.");
             cursor = Path.GetDirectoryName(cursor);
         }
