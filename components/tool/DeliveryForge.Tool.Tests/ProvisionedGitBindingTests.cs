@@ -69,6 +69,7 @@ public sealed class ProvisionedGitBindingTests
         using var fixture = await Fixture.CreateAsync();
         var before = fixture.InitialManager.ActualOwnedGitInvocations;
         var admittedBefore = fixture.Parent.NativeAdmissionAttempts;
+        var effectsBefore = fixture.Parent.Inner.EnteredCount;
         // The initial manager has no admission field, as in the real native
         // port. The shared binding must enroll its actual task through parent.
         var observed = await fixture.InitialManager.ObserveAsync(fixture.Worker, TestContext.Current.CancellationToken);
@@ -76,6 +77,7 @@ public sealed class ProvisionedGitBindingTests
         var actualBirths = fixture.InitialManager.ActualOwnedGitInvocations - before;
         Assert.True(actualBirths > 0);
         Assert.Equal(actualBirths, (long)(fixture.Parent.NativeAdmissionAttempts - admittedBefore));
+        Assert.Equal(1 + actualBirths, (long)(fixture.Parent.Inner.EnteredCount - effectsBefore));
         Assert.False(fixture.Original.HasExplicitUnknown);
     }
 

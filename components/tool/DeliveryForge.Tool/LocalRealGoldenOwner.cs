@@ -78,7 +78,9 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
                 throw new WorkerEnvelopeException("Private live local-real acceptance/current immutable evidence changed.");
             Current();
         }
-        await Verify().ConfigureAwait(false);
+        // The full pair above is already fresh; only immutable managed evidence
+        // was assembled since it returned. Keep the live guard before effects.
+        Current();
         // The production receiver rejects Test/fixture acceptance before even a
         // local result directory or journal can be created.
         WorkflowTransition.EnsureAllowed(WorkflowState.Evaluating, WorkflowState.IndependentReview, evidence, accepted.Receiver);
@@ -102,7 +104,10 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
             original, parent, Verify, journal).ConfigureAwait(false);
         if (published.Outcome != PublicationOutcome.PublishedFixture || published.Realm != PublicationRealm.Fixture || published.Receipt is null)
             throw new WorkerEnvelopeException("Exact completed local-only publication readback required before local-real summary DATA.");
-        await Verify().ConfigureAwait(false);
+        // ExecuteAsync ends with the same full Verify after confirmed readback.
+        // Only its immutable result tuple was inspected here, so retain the live
+        // guard without recomputing the identical pair before this summary.
+        Current();
         var path = Path.Combine(output, "local-real-receipt.json");
         parent.EnterSynchronous(frame.RunId, () =>
         {

@@ -51,7 +51,10 @@ internal static class LocalRealFakePublication
             await journal.AppendAdmittedAsync(row, original.Token).ConfigureAwait(false);
             Current();
         }
-        await Verify().ConfigureAwait(false); // No journal or fake mutation before both genuine barriers.
+        // The journal lookup is read-only private state. Check the genuine
+        // barriers now; Append(Prepared) does the full live Verify after that
+        // lookup and before the first durable journal or fake mutation.
+        Barrier();
         var target = new PublicationTarget("local-real/no-network", "refs/heads/local-real/" + runId, "refs/heads/local-real-base");
         var key = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(runId + "\0" + revision + "\0local-fake-pr")));
         if (await journal.ReadAdmittedAsync(key, original.Token).ConfigureAwait(false) is not null)

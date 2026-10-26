@@ -178,22 +178,23 @@ public sealed class ProductionReviewFiniteAdmissionTests
                 baseCommit, head, () => true, planIdentity, evidenceIdentity, "review.json", 1048576, provisioned);
             using var bootstrap = await ReviewAuthorityHost.CreateProductionFromOwnedSourceAsync(owner, planBytes, evidenceBytes,
                 "review.json", 1048576, TestContext.Current.CancellationToken);
-            // The small-source row retains all sixteen fresh computations from
-            // bootstrap/reviewer plus the twelve golden evidence callbacks.
+            // The small-source row retains all thirteen fresh computations from
+            // bootstrap/reviewer plus the nine golden evidence callbacks. The
+            // three fused checks straddled only immutable managed data/lookup.
             // It is a real native source-control budget regression, not a
             // substitute for quality/reviewer/full installed acceptance.
             var counts = new List<int> { parent.EnteredCount };
             var patch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, baseCommit, head,
                 planIdentity, new Dictionary<string, string>(), TestContext.Current.CancellationToken);
             counts.Add(parent.EnteredCount);
-            for (var export = 0; export < (allGoldenChecks ? 14 : 3); export++)
+            for (var export = 0; export < (allGoldenChecks ? 11 : 3); export++)
             {
                 TestContext.Current.TestOutputHelper!.WriteLine($"Before fresh export {export}: {parent.EnteredCount}/1024 retained effects.");
                 var bytes = await GitPatchIdentity.ExportVerifiedPatchAsync(bootstrap.ObjectView, patch, TestContext.Current.CancellationToken);
                 Assert.Equal(patch.PatchSha256, "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes)));
                 counts.Add(parent.EnteredCount);
             }
-            Assert.Equal(allGoldenChecks ? 16 : 5, counts.Count);
+            Assert.Equal(allGoldenChecks ? 13 : 5, counts.Count);
             for (var index = 1; index < counts.Count; index++) Assert.True(counts[index] > counts[index - 1]);
             TestContext.Current.TestOutputHelper!.WriteLine("Actual source-computation cumulative effects=" + string.Join(",", counts) + "/1024; excludes quality/reviewer/full installed run.");
             Assert.Equal(baseCommit, bootstrap.Policy.SourceRevision); Assert.Equal(head, bootstrap.ObjectView.FrozenHeadCommit);

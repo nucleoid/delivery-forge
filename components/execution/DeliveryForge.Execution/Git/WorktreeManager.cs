@@ -384,7 +384,10 @@ public sealed partial class WorktreeManager
         string cwd, CancellationToken cancellationToken, bool disableFilters, params string[] arguments)
     {
         ownedGit.TryGetValue(Path.GetFullPath(cwd), out var binding);
-        binding?.Check(cleanupObservation); // Before even the effective-config probe.
+        // Normal bound probes and commands each recheck the complete binding
+        // in their actual native-admission prefix. The intervening argv/env
+        // preparation is managed data; do not enroll that same check twice.
+        if (cleanupObservation) binding?.Check(true);
         var filterNames = new HashSet<string>(StringComparer.Ordinal);
         if (disableFilters)
         {
