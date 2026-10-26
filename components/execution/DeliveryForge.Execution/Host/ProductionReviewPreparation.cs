@@ -198,11 +198,18 @@ public sealed partial class ProductionReviewSourceOwner
                 Check(); resultBytes = bytes.ToArray();
             }
             catch (Exception failure) { primary = failure; }
+            // A missing target before FileStream construction created no handle.
+            // Settle that actual admission successfully, then rethrow the refusal
+            // outside it. Other failures and every entered first-close path keep
+            // their existing conservative uncertainty semantics.
+            if (file is null && (primary is FileNotFoundException or DirectoryNotFoundException))
+                return (Bytes: (byte[]?)null, MissingBeforeOpen: primary);
             var close = file is null ? null : CloseResource(file, ref primary);
             ThrowFailures(primary, close);
-            return resultBytes ?? throw new IOException("Owned source read returned no bytes.");
+            return (Bytes: (byte[]?)(resultBytes ?? throw new IOException("Owned source read returned no bytes.")), MissingBeforeOpen: (Exception?)null);
         }).ConfigureAwait(false);
-        Check(); return result;
+        if (result.MissingBeforeOpen is { } missing) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(missing).Throw();
+        Check(); return result.Bytes!;
     }
     internal async Task WriteFileAsync(string path, byte[] bytes, CancellationToken token)
     {

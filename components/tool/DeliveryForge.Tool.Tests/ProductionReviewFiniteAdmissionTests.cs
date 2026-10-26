@@ -49,6 +49,32 @@ public sealed class ProductionReviewFiniteAdmissionTests
         Assert.Equal(before + 1, parent.EnteredCount);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Missing_actual_index_read_has_no_resource_birth_or_false_unknown(bool missingDirectory)
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-missing-index-" + Guid.NewGuid().ToString("N"));
+        var metadata = Path.Combine(root, ".git"); Directory.CreateDirectory(metadata);
+        var image = Path.Combine(root, "inert-image.data"); byte[] bytes = [1];
+        await File.WriteAllBytesAsync(image, bytes, TestContext.Current.CancellationToken);
+        var index = Path.Combine(metadata, "index");
+        await File.WriteAllBytesAsync(index, bytes, TestContext.Current.CancellationToken);
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var current = true;
+        var parent = new ParentEffectAdmission(new object(), run => current && run == "owned", _ => current = false);
+        var owner = new ProductionReviewSourceOwner(new ProcessCommandExecutor(), original, parent, "owned", root,
+            metadata, metadata, image, bytes.Length, Convert.ToHexStringLower(SHA256.HashData(bytes)), "git version inert",
+            new('a', 40), new('b', 40), () => true, "sha256:" + new string('a', 64), "sha256:" + new string('b', 64), "review.json", 1024);
+        File.Delete(index);
+        if (missingDirectory) Directory.Delete(metadata);
+        await Assert.ThrowsAnyAsync<IOException>(() => owner.ReadFileAsync(index, 1024, TestContext.Current.CancellationToken));
+        await Task.WhenAll(parent.OriginalObservers).WaitAsync(original.Remaining, TestContext.Current.CancellationToken);
+        Assert.Equal(1, parent.EnteredCount); Assert.True(parent.AllKnownSettled); Assert.True(current);
+        Assert.False(owner.Uncertain); Assert.False(original.HasExplicitUnknown); Assert.False(File.Exists(index));
+        TestContext.Current.TestOutputHelper!.WriteLine("Retained missing-index no-birth fixture: " + root);
+    }
+
     [Theory(Timeout = 180000, SkipUnless = nameof(Windows), Skip = "Linux native source preparation requires its separately selected owned scope.")]
     [InlineData(false)]
     [InlineData(true)]

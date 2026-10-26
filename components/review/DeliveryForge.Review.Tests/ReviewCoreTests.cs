@@ -101,9 +101,11 @@ public sealed class ReviewCoreTests
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
             controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
             TestContext.Current.CancellationToken));
+        File.Delete(Path.Combine(repository.Path, "dirty.txt"));
         File.Delete(Path.Combine(repository.Path, ".git", "index"));
-        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ExportVerifiedPatchAsync(
+        var missingIndex = await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ExportVerifiedPatchAsync(
             controlled, identity, TestContext.Current.CancellationToken));
+        Assert.IsType<FileNotFoundException>(missingIndex.InnerException);
     }
 
     [Fact]
