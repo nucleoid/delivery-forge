@@ -53,7 +53,9 @@ internal static class ReviewGateReceiptEvidence
             .Single(file => file.GetProperty("Path").GetString() == entrypoint);
         var expectedPath = Path.GetFullPath(Path.Combine(profile.GetProperty("InstallationRoot").GetString()!, entrypoint));
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
-        if (profile.GetProperty("Tool").GetString() != selected.Tool || profile.GetProperty("Fixture").GetBoolean() ||
+        // Match the installed profile loader's optional bool default.
+        if (profile.GetProperty("Tool").GetString() != selected.Tool ||
+            (profile.TryGetProperty("Fixture", out var fixture) && fixture.GetBoolean()) ||
             actual.Fixture || actual.SourceChanged || actual.Outcome != DeliveryForge.Evidence.GateOutcome.Pass ||
             !string.Equals(expectedPath, Path.GetFullPath(actual.Invocation.FileName), comparison) ||
             actual.CapabilityIdentity != executable.GetProperty("Sha256").GetString())

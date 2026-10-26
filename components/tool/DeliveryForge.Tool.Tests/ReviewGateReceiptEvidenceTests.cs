@@ -125,6 +125,19 @@ public sealed class ReviewGateReceiptEvidenceTests
         Assert.True(Encoding.UTF8.GetByteCount(projection.GetRawText()) < 4096);
     }
 
+    [Fact]
+    public void Omitted_fixture_flag_keeps_the_installed_profile_loaders_false_default()
+    {
+        var data = ProducerData();
+        var profile = JsonNode.Parse(data.Profile)!.AsObject();
+        Assert.True(profile.Remove("Fixture"));
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(profile);
+        var gate = data.Gate with { Profile = new(data.Gate.Profile.Path, bytes.LongLength, BoundedFiles.Sha(bytes)) };
+        var projection = ReviewGateReceiptEvidence.CreateToolProvenance(gate, bytes, data.Result);
+        Assert.False(projection.GetProperty("Fixture").GetBoolean());
+        Assert.Equal(data.Result.CapabilityIdentity, projection.GetProperty("Observed").GetProperty("ExecutableSha256").GetString());
+    }
+
     [Theory]
     [InlineData("profile")]
     [InlineData("image")]
