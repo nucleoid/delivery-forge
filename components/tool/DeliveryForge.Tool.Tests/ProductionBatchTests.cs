@@ -550,8 +550,12 @@ public sealed class ProductionBatchTests
             var argv = new[] { "--no-replace-objects", "-c", "core.hooksPath=" + nullPath, "-c", "core.fsmonitor=false", "-c", "user.name=DeadlineFixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false" }.Concat(arguments).ToArray();
             var result = await executor.ExecuteAsync(new(git, argv, repository, new Dictionary<string, string>
             {
-                ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_GLOBAL"] = nullPath, ["GIT_CONFIG_SYSTEM"] = nullPath,
-                ["GIT_NO_REPLACE_OBJECTS"] = "1", ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_OPTIONAL_LOCKS"] = "0"
+                ["GIT_CONFIG_NOSYSTEM"] = "1",
+                ["GIT_CONFIG_GLOBAL"] = nullPath,
+                ["GIT_CONFIG_SYSTEM"] = nullPath,
+                ["GIT_NO_REPLACE_OBJECTS"] = "1",
+                ["GIT_TERMINAL_PROMPT"] = "0",
+                ["GIT_OPTIONAL_LOCKS"] = "0"
             }), original.Remaining, original.Token);
             original.Check(); Assert.True(result.OwnedProcessQuiescent && result.ExitCode == 0 && !result.TimedOut && !result.Cancelled, root + ": " + result.StandardError);
         }
@@ -587,8 +591,12 @@ public sealed class ProductionBatchTests
                 Assert.Equal(whole, original.WholeLimit); Assert.Equal(started, original.OriginalStarted); Assert.Equal(token, original.Token);
                 var leaf = parentConfig with
                 {
-                    ProductionBatch = null, StandaloneRoot = Pin("deadline-root-" + node.NodeId), ExpectedBundleIdentity = frozen.Identity,
-                    ExpectedContractIdentity = frozen.ContractIdentity, ExpectedWorkItem = "#1", ExpectedPlanCeiling = "implement",
+                    ProductionBatch = null,
+                    StandaloneRoot = Pin("deadline-root-" + node.NodeId),
+                    ExpectedBundleIdentity = frozen.Identity,
+                    ExpectedContractIdentity = frozen.ContractIdentity,
+                    ExpectedWorkItem = "#1",
+                    ExpectedPlanCeiling = "implement",
                     Coordination = new(new Uri("https://example.invalid/mcp"), "project", "principal", Path.Combine(root, "key"), Path.Combine(root, "checkpoint-" + node.NodeId), Pin("deployment")),
                     LocalSingle = new(selected.Policy, node.Demand)
                 };
