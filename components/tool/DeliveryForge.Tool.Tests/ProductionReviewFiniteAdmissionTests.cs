@@ -66,11 +66,12 @@ public sealed class ProductionReviewFiniteAdmissionTests
         var owner = new ProductionReviewSourceOwner(new ProcessCommandExecutor(), original, parent, "owned", root,
             metadata, metadata, image, bytes.Length, Convert.ToHexStringLower(SHA256.HashData(bytes)), "git version inert",
             new('a', 40), new('b', 40), () => true, "sha256:" + new string('a', 64), "sha256:" + new string('b', 64), "review.json", 1024);
+        var before = parent.EnteredCount;
         File.Delete(index);
         if (missingDirectory) Directory.Delete(metadata);
         await Assert.ThrowsAnyAsync<IOException>(() => owner.ReadFileAsync(index, 1024, TestContext.Current.CancellationToken));
         await Task.WhenAll(parent.OriginalObservers).WaitAsync(original.Remaining, TestContext.Current.CancellationToken);
-        Assert.Equal(1, parent.EnteredCount); Assert.True(parent.AllKnownSettled); Assert.True(current);
+        Assert.Equal(before + 1, parent.EnteredCount); Assert.True(parent.AllKnownSettled); Assert.True(current);
         Assert.False(owner.Uncertain); Assert.False(original.HasExplicitUnknown); Assert.False(File.Exists(index));
         TestContext.Current.TestOutputHelper!.WriteLine("Retained missing-index no-birth fixture: " + root);
     }
