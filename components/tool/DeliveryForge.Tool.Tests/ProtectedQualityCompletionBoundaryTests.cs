@@ -1,7 +1,7 @@
-using DeliveryForge.Contracts.Models;
 using DeliveryForge.Evidence;
 using DeliveryForge.Execution;
 using DeliveryForge.Execution.Git;
+using DeliveryForge.Execution.Host;
 
 namespace DeliveryForge.Tool.Tests;
 
