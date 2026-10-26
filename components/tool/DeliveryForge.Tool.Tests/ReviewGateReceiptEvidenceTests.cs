@@ -111,12 +111,14 @@ public sealed class ReviewGateReceiptEvidenceTests
     {
         var data = ProducerData();
         var projection = ReviewGateReceiptEvidence.CreateToolProvenance(data.Gate, data.Profile, data.Result);
-        var producer = projection.GetProperty("Producer");
+        var producer = projection.GetProperty("ProfileDeclared");
         Assert.Equal("0.1.0-private+selected-source", producer.GetProperty("Version").GetString());
-        Assert.Equal(data.Result.CapabilityIdentity, producer.GetProperty("Executable").GetProperty("Sha256").GetString());
+        Assert.Equal(data.Result.CapabilityIdentity, projection.GetProperty("Observed").GetProperty("ExecutableSha256").GetString());
+        Assert.Equal("producer.exe", projection.GetProperty("Observed").GetProperty("EntrypointRelativePath").GetString());
         Assert.Equal("sha256:" + data.Gate.Profile.Sha256, projection.GetProperty("Profile").GetProperty("Sha256").GetString());
         Assert.Equal("producer.exe", producer.GetProperty("Executable").GetProperty("RelativePath").GetString());
         Assert.False(projection.GetProperty("ProductionCapable").GetBoolean());
+        Assert.DoesNotContain("SourceBuildVerified", projection.GetRawText(), StringComparison.Ordinal);
         Assert.Contains("not imported", projection.GetProperty("Omitted").GetRawText(), StringComparison.Ordinal);
         Assert.DoesNotContain("private-environment-DATA", projection.GetRawText(), StringComparison.Ordinal);
         Assert.DoesNotContain("InstallationRoot", projection.GetRawText(), StringComparison.Ordinal);
@@ -127,15 +129,26 @@ public sealed class ReviewGateReceiptEvidenceTests
     [InlineData("profile")]
     [InlineData("image")]
     [InlineData("entrypoint")]
+    [InlineData("tool")]
+    [InlineData("fixture")]
+    [InlineData("source-changed")]
+    [InlineData("fail")]
+    [InlineData("error")]
     public void Changed_profile_or_actual_image_cannot_be_presented_as_the_selected_producer(string changed)
     {
         var data = ProducerData();
         var profile = data.Profile;
         var actual = data.Result;
+        var gate = data.Gate;
         if (changed == "profile") profile = [.. profile, (byte)' '];
         if (changed == "image") actual = actual with { CapabilityIdentity = "sha256:" + new string('f', 64) };
         if (changed == "entrypoint") actual = actual with { Invocation = actual.Invocation with { FileName = Path.Combine(actual.Invocation.WorkingDirectory, "foreign.exe") } };
-        Assert.Throws<IOException>(() => ReviewGateReceiptEvidence.CreateToolProvenance(data.Gate, profile, actual));
+        if (changed == "tool") gate = gate with { Tool = "mutate4csharp" };
+        if (changed == "fixture") actual = actual with { Fixture = true };
+        if (changed == "source-changed") actual = actual with { SourceChanged = true };
+        if (changed == "fail") actual = actual with { Outcome = DeliveryForge.Evidence.GateOutcome.Fail };
+        if (changed == "error") actual = actual with { Outcome = DeliveryForge.Evidence.GateOutcome.Error };
+        Assert.Throws<DeliveryForge.Execution.WorkerEnvelopeException>(() => ReviewGateReceiptEvidence.CreateToolProvenance(gate, profile, actual));
     }
 
     [Fact]
@@ -143,7 +156,7 @@ public sealed class ReviewGateReceiptEvidenceTests
     {
         var data = ProducerData();
         ReviewGateReceiptEvidence.RequireRetainedResults([data.Result], [data.Result]);
-        Assert.Throws<IOException>(() => ReviewGateReceiptEvidence.RequireRetainedResults([data.Result], [data.Result with { }]));
+        Assert.Throws<DeliveryForge.Execution.WorkerEnvelopeException>(() => ReviewGateReceiptEvidence.RequireRetainedResults([data.Result], [data.Result with { }]));
     }
 
 }

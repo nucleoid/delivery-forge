@@ -561,15 +561,16 @@ public sealed class ProductionBatchTests
         await File.WriteAllTextAsync(Path.Combine(repository, "tracked.txt"), "actual unchanged deadline evidence\n", cancellation);
         await Git("init", "-q", "-b", "main"); await Git("add", "--", "tracked.txt"); await Git("commit", "-q", "-m", "reservation deadline base");
         // Planning setup uses the existing unowned fixture reader; the real original below owns both scheduler reservations.
-        var reader = new GitRepositoryContextReader(git);
-        var context = await reader.ReadAsync(repository, "refs/heads/main", cancellation);
-        var source = await reader.ReadFileAsync(context, "tracked.txt", cancellation); var now = DateTimeOffset.UtcNow;
+        var planningReader = new GitRepositoryContextReader(git);
+        var context = await planningReader.ReadAsync(repository, "refs/heads/main", cancellation);
+        var source = await planningReader.ReadFileAsync(context, "tracked.txt", cancellation); var now = DateTimeOffset.UtcNow;
         var request = new PlanningRequest("fixture/reservation", "#1", "implement", "Exercise shared reservation deadlines", ["tracked.txt"], [], ["No shared endpoint refill"], "implement");
         EvidenceItem[] evidence = [EvidenceItem.FromRepositoryFile(source, now, [])];
         var frozen = PlanFreezer.Freeze(new PlanDraft(request, context, evidence, [new("tracked.txt", "text", "edit")], [new("#1", [], "root")],
             [new("test", new("dotnet", [PlanCommandArgument.Literal("test")]), "PASS")],
             new("additive", "none", "none", "none", "none", "none", "receipt", "revert", []), [], IntakePlanner.Assess(request, evidence)), "deadline-fixture", now);
         using var original = new ToolLifetime(TimeSpan.FromSeconds(1200), cancellation);
+        var reader = new GitRepositoryContextReader(git, executor, original);
         var work = original.WorkLimit; var whole = original.WholeLimit; var started = original.OriginalStarted; var token = original.Token;
         var store = new RunStore(Path.Combine(root, "store")); var worktrees = new WorktreeManager(git);
         await using var processes = new ProcessControl(); using var coordinator = new ExecutionCoordinator(store, worktrees, processes);

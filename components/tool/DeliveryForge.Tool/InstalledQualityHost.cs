@@ -21,7 +21,7 @@ internal sealed class InstalledQualityHost
     FrozenPlan? frozen; FrozenWorkerPlan? assignment; TrustedConfiguration? boundConfiguration; bool entered;
     readonly List<GateRunResult> results = [];
     internal IReadOnlyList<GateRunResult> RetainedResults => results.ToArray();
-    sealed record CompletedQualityBinding(GateRunResult Result, AdmissionFile Receipt, JsonElement ToolProvenance);
+    sealed record CompletedQualityBinding(GateRunResult Result, AdmissionFile Receipt, byte[] ProfileBytes);
     readonly Dictionary<string, CompletedQualityBinding> gateBindings = new(StringComparer.Ordinal);
     HostBridgeFrame? protectedCompletedFrame;
     AgentCompletionReceipt? protectedCompletedWorker;
@@ -179,10 +179,8 @@ internal sealed class InstalledQualityHost
                     selectedProfile.Profile, gate.GateId, new(run.BaseCommit, completion.HeadCommit, completion.TreeId, true), gate.Scope,
                     gate.ProjectRelativePath, TimeSpan.FromSeconds(gate.MaximumSeconds), output, original.Token,
                     gate.Tool == "crap4csharp" ? selection.Registry : null).ConfigureAwait(false);
-                var provenance = actualResult.Outcome == GateOutcome.Pass
-                    ? ReviewGateReceiptEvidence.CreateToolProvenance(gate, selectedProfile.Bytes, actualResult)
-                    : (JsonElement?)null;
-                return (Result: actualResult, Provenance: provenance);
+                // Retain the actual completed result before review-only presentation can refuse.
+                return (Result: actualResult, ProfileBytes: selectedProfile.Bytes);
             }).ConfigureAwait(false);
             var result = completedGate.Result;
             results.Add(result);
@@ -199,7 +197,7 @@ internal sealed class InstalledQualityHost
                     _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
                     _ = InstalledHostAdmission.ReadExact(gate.Profile, original, 1048576);
                     var bytes = BoundedFiles.Read(result.ReceiptPath, original, 1048576);
-                    gateBindings.Add(gate.GateId, new(result, new(result.ReceiptPath, bytes.LongLength, BoundedFiles.Sha(bytes)), completedGate.Provenance ?? default));
+                    gateBindings.Add(gate.GateId, new(result, new(result.ReceiptPath, bytes.LongLength, BoundedFiles.Sha(bytes)), completedGate.ProfileBytes));
                     BoundedFiles.WriteNew(Path.Combine(output, gate.GateId + "-settled.json"), JsonSerializer.SerializeToUtf8Bytes(new { run.RunId, run.PlanIdentity, run.BaseCommit, completion.HeadCommit, completion.TreeId, gate.GateId, Outcome = result.Outcome.ToString(), result.Fixture, result.ProductionCapable, Receipt = new AdmissionFile(result.ReceiptPath, bytes.LongLength, BoundedFiles.Sha(bytes)), BaselineApproved = false, ProductionAuthority = false }), original);
                     return true;
                 });
@@ -269,7 +267,7 @@ internal sealed class InstalledQualityHost
         ValidateProtectedQualityTuple(selection, accepted.Comparison,
             new(assignment!.BaseCommit, protectedCompletedWorker.HeadCommit, protectedCompletedWorker.TreeId, true), accepted.Results);
         if (selection.Gates.Any(gate => !gateBindings.TryGetValue(gate.GateId, out var binding) ||
-            !accepted.Results.Any(row => ReferenceEquals(row, binding.Result)) || binding.ToolProvenance.ValueKind != JsonValueKind.Object))
+            !accepted.Results.Any(row => ReferenceEquals(row, binding.Result)) || binding.ProfileBytes is null))
             throw new WorkerEnvelopeException("Actual completed tool provenance binding is absent or changed.");
         return JsonSerializer.SerializeToElement(new
         {
@@ -277,7 +275,10 @@ internal sealed class InstalledQualityHost
             Configuration = new { configurationPin.Bytes, Sha256 = "sha256:" + configurationPin.Sha256 },
             selection.PolicyIdentity,
             ProtectedComparison = new { accepted.Comparison.Outcome, accepted.Comparison.RegistryCommit, accepted.Comparison.RegistryIdentity },
-            Gates = selection.Gates.Select(gate => gateBindings[gate.GateId].ToolProvenance).ToArray(),
+            // A presentation refusal now belongs only to review; the actual gate
+            // result, receipt and settled record have already been retained.
+            Gates = selection.Gates.Select(gate => ReviewGateReceiptEvidence.CreateToolProvenance(
+                gate, gateBindings[gate.GateId].ProfileBytes, gateBindings[gate.GateId].Result)).ToArray(),
             Qualification = "Parent-selected private installed producer metadata, actual completed gate bindings and separately checked protected comparison. Source-build history and full production certification are not asserted.",
             PublicationAuthority = false
         }, BoundedFiles.Json);

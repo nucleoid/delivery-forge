@@ -45,7 +45,7 @@ internal static class ReviewGateReceiptEvidence
         byte[] exactProfile, DeliveryForge.Evidence.GateRunResult actual)
     {
         if (exactProfile.LongLength != selected.Profile.Bytes || BoundedFiles.Sha(exactProfile) != selected.Profile.Sha256)
-            throw new IOException("Review producer profile differs from its parent-selected pin.");
+            throw new DeliveryForge.Execution.WorkerEnvelopeException("Review producer profile differs from its parent-selected pin.");
         using var document = JsonDocument.Parse(exactProfile);
         var profile = document.RootElement;
         var entrypoint = profile.GetProperty("ExecutableRelativePath").GetString()!;
@@ -57,7 +57,7 @@ internal static class ReviewGateReceiptEvidence
             actual.Fixture || actual.SourceChanged || actual.Outcome != DeliveryForge.Evidence.GateOutcome.Pass ||
             !string.Equals(expectedPath, Path.GetFullPath(actual.Invocation.FileName), comparison) ||
             actual.CapabilityIdentity != executable.GetProperty("Sha256").GetString())
-            throw new IOException("Review producer image does not match the actual selected gate.");
+            throw new DeliveryForge.Execution.WorkerEnvelopeException("Review producer image does not match the actual selected gate.");
         return JsonSerializer.SerializeToElement(new
         {
             Kind = "ParentSelectedCompletedQualityToolData-v1",
@@ -66,23 +66,26 @@ internal static class ReviewGateReceiptEvidence
             selected.Scope,
             selected.ProjectRelativePath,
             Profile = new { selected.Profile.Bytes, Sha256 = "sha256:" + selected.Profile.Sha256 },
-            Producer = new
+            ProfileDeclared = new
             {
                 Version = profile.GetProperty("Version").GetString(),
                 SourceCommit = profile.GetProperty("SourceCommit").GetString(),
                 PackageVersion = profile.GetProperty("PackageVersion").GetString(),
                 PackageSha256 = profile.GetProperty("PackageSha256").GetString(),
-                Executable = new { RelativePath = entrypoint, Bytes = executable.GetProperty("Bytes").GetInt64(), Sha256 = actual.CapabilityIdentity },
+                Executable = new { RelativePath = entrypoint, Bytes = executable.GetProperty("Bytes").GetInt64(), Sha256 = executable.GetProperty("Sha256").GetString() },
                 Configuration = new { RelativePath = profile.GetProperty("ConfigurationRelativePath").GetString(), Sha256 = profile.GetProperty("ConfigurationSha256").GetString() },
                 SdkVersion = profile.GetProperty("SdkVersion").GetString(),
                 Framework = profile.GetProperty("Framework").GetString(),
                 Runner = profile.GetProperty("Runner").GetString(),
                 Collector = profile.GetProperty("Collector").GetString()
             },
+            Observed = new { ExecutableSha256 = actual.CapabilityIdentity, EntrypointRelativePath = entrypoint },
             actual.ProductionCapable,
             actual.Fixture,
+            // Valid large profiles can exceed the unchanged complete-prompt
+            // limit. Preserve all limitations; review refuses rather than truncates.
             ParentSelectedLimitations = profile.GetProperty("Limitations").Clone(),
-            Qualification = "Exact parent-selected profile metadata and the completed gate's observed executable/version binding; no independent source-build receipt or production/publication authority is asserted.",
+            Qualification = "ProfileDeclared is parent-selected metadata, not source-build history. The original provider separately matched its observed version to ProfileDeclared.Version before completing this gate; this projection adds no version probe. Observed contains only the matched actual executable identity/entrypoint. No independent build receipt or production/publication authority is asserted.",
             Omitted = new[] { "Absolute installation/package paths", "Environment", "Complete payload inventory (retained by profile digest)", "Independent source-build history (not imported)" }
         }, BoundedFiles.Json);
     }
@@ -91,7 +94,7 @@ internal static class ReviewGateReceiptEvidence
         IReadOnlyList<DeliveryForge.Evidence.GateRunResult> supplied)
     {
         if (retained.Count != supplied.Count || retained.Where((row, index) => !ReferenceEquals(row, supplied[index])).Any())
-            throw new IOException("Review provenance requires the same actual retained gate result objects.");
+            throw new DeliveryForge.Execution.WorkerEnvelopeException("Review provenance requires the same actual retained gate result objects.");
     }
 
 }
