@@ -1947,8 +1947,11 @@ public sealed class CoordinationContractTests
         Assert.Single(transport.ReleaseRequests);
     }
 
-    [Fact(Timeout = 120_000)]
-    public async Task Actual_file_checkpoints_close_four_leases_after_fourteen_renewal_rounds()
+    [Theory(Timeout = 120_000)]
+    [InlineData(14, 132, 9_313)]
+    [InlineData(18, 164, 14_193)]
+    public async Task Actual_file_checkpoints_close_four_leases_after_bounded_renewal_rounds(
+        int renewalRounds, int expectedRecords, int expectedClosedIoFrames)
     {
         var token = TestContext.Current.CancellationToken;
         var root = Path.Combine(Path.GetTempPath(), "delivery-forge-four-lease-checkpoints-" + Guid.NewGuid().ToString("N"));
@@ -1985,7 +1988,7 @@ public sealed class CoordinationContractTests
             var lifecycleId = authority.LifecycleId;
             Assert.True(adapter.MayDispatch(authority));
             Assert.Equal(4, transport.AcquireRequests.Count);
-            for (var round = 0; round < 14; round++)
+            for (var round = 0; round < renewalRounds; round++)
             {
                 clock.Advance(TimeSpan.FromSeconds(1)); // Logical contract time; no physical wait or fresh budget.
                 var prior = authority;
@@ -1994,7 +1997,7 @@ public sealed class CoordinationContractTests
                 Assert.False(adapter.MayDispatch(prior));
                 Assert.True(adapter.MayDispatch(authority));
             }
-            Assert.Equal(56, transport.RenewRequests.Count);
+            Assert.Equal(4 * renewalRounds, transport.RenewRequests.Count);
             var released = await adapter.ReleaseAllAsync(authority, token);
             Assert.False(adapter.MayDispatch(authority));
             Assert.True(released.Snapshot.Phase == CoordinationLifecyclePhase.Closed,
@@ -2005,10 +2008,11 @@ public sealed class CoordinationContractTests
             Assert.Equal(4, source.Observations);
             Assert.Equal(4, released.QuiescenceEvidence.Count);
             Assert.All(released.QuiescenceEvidence, evidence => Assert.True(evidence.Quiescent));
+            Assert.Equal(expectedClosedIoFrames, closedIoFrames); // Actual first-close observations, not a new allowance.
 
             // Read real immutable files directly, without adding another full-prefix store observation.
             var paths = Directory.GetFiles(Path.Combine(root, lifecycleId), "*-record.json").Order(StringComparer.Ordinal).ToArray();
-            Assert.Equal(132, paths.Length); // 4*2 acquire + 56*2 renew + 4*3 release.
+            Assert.Equal(expectedRecords, paths.Length); // 4*2 acquire + (4*rounds)*2 renew + 4*3 release.
             var rows = new List<CoordinationCheckpointRecord>();
             foreach (var path in paths)
             {
@@ -2019,11 +2023,11 @@ public sealed class CoordinationContractTests
                 Assert.Equal($"{row.RecordSequence:D12}-sha256-{hash}-record.json", Path.GetFileName(path));
                 rows.Add(row);
             }
-            Assert.Equal(Enumerable.Range(1, 132).Select(value => (long)value), rows.Select(row => row.RecordSequence));
+            Assert.Equal(Enumerable.Range(1, expectedRecords).Select(value => (long)value), rows.Select(row => row.RecordSequence));
             Assert.Single(rows.Select(row => row.WriterEpoch).Distinct(StringComparer.Ordinal));
-            Assert.Equal(64, rows.Select(row => row.OperationSequence).Distinct().Count());
+            Assert.Equal(8 + 4 * renewalRounds, rows.Select(row => row.OperationSequence).Distinct().Count());
             Assert.Equal(4, rows.Count(row => row.Prepared?.Kind == CoordinationIntentKind.Acquire));
-            Assert.Equal(56, rows.Count(row => row.Prepared?.Kind == CoordinationIntentKind.Renew));
+            Assert.Equal(4 * renewalRounds, rows.Count(row => row.Prepared?.Kind == CoordinationIntentKind.Renew));
             Assert.Equal(4, rows.Count(row => row.Prepared?.Kind == CoordinationIntentKind.Release));
             Assert.Equal(4, rows.Count(row => row.Progress?.AdapterCode == "release-observed"));
             Assert.Equal(4, rows.Count(row => row.Progress?.AdapterCode == "released"));

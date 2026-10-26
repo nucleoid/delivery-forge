@@ -122,9 +122,9 @@ internal sealed class StandaloneEntrypoint
         // Unknown native/task frames are never disposed, restored or converted
         // into a normal exit. The same actual caller is passively retained for
         // its containing owner to reconcile; this is a failed, over-budget state.
-        if (!original.HasRetainedUnknown && composition is not null) { try { await composition.DisposeAsync().ConfigureAwait(false); } catch (Exception error) { secondary.Add(error); } }
-        if (!original.HasRetainedUnknown && batch is not null) { try { await batch.DisposeAsync().ConfigureAwait(false); } catch (Exception error) { secondary.Add(error); } }
-        if (!original.HasRetainedUnknown && resources is not null) { try { resources.Close(); } catch (Exception error) { secondary.Add(error); } }
+        if (!original.HasRetainedUnknown && composition is not null) { try { await composition.DisposeAsync().ConfigureAwait(false); } catch (Exception error) { original.RecordFirstCaught("standalone-owner-close", error); secondary.Add(error); } }
+        if (!original.HasRetainedUnknown && batch is not null) { try { await batch.DisposeAsync().ConfigureAwait(false); } catch (Exception error) { original.RecordFirstCaught("standalone-batch-close", error); secondary.Add(error); } }
+        if (!original.HasRetainedUnknown && resources is not null) { try { resources.Close(); } catch (Exception error) { original.RecordFirstCaught("standalone-resource-close", error); secondary.Add(error); } }
         attention.EmitFirstCaughtOnce(); // Root terminal-delivery boundary only, after existing marker/cleanup admission.
         if (original.HasRetainedUnknown || attention.Unknown) return await HoldUnknown().ConfigureAwait(false);
         if (secondary.Count != 0) { if (primary is null) primary = secondary[0]; var all = new List<Exception> { primary }; all.AddRange(secondary.Where(e => !ReferenceEquals(e, primary))); primary = all.Count == 1 ? primary : new AggregateException("Actual root failure and independent first dispositions.", all); exit = 1; }

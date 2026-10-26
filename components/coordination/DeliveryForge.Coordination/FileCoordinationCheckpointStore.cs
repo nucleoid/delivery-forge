@@ -253,7 +253,7 @@ public sealed class FileCoordinationCheckpointStore : ICoordinationCheckpointSto
 
     private IoFrame Frame()
     {
-        if (_io.Count >= 8192) throw new CoordinationUncertainException("Finite retained local IO ledger exhausted.");
+        if (_io.Count >= 16384) throw new CoordinationUncertainException("Finite retained local IO ledger exhausted.");
         var frame = new IoFrame(); _io.Add(frame); return frame;
     }
 
