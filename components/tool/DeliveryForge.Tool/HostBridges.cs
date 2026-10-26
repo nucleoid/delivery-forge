@@ -739,6 +739,11 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
                 frame.Scheduler = scheduler;
                 scheduler.BindOriginal(frame.Lifetime, coordination, () => frame.Worker.Actual, () => ObservePipelineSettled(plan.RunId) && NativeCompletedAndQuiet(frame), () => frame.Lifetime.HasExplicitUnknown);
                 frame.Reservation = await frame.Enter(() => scheduler.ReserveAsync(frame.Lifetime.Token)).ConfigureAwait(false);
+                // Sample original elapsed BEFORE the same immutable reservation
+                // remainder. The sum is conservative, never a fresh node budget.
+                var elapsedBeforeReservationSample = System.Diagnostics.Stopwatch.GetElapsedTime(frame.Lifetime.OriginalStarted);
+                var remainingReservation = scheduler.RemainingReservationTime;
+                frame.Lifetime.RestrictWork(elapsedBeforeReservationSample + remainingReservation);
                 request = await frame.Enter(() => scheduler.ProvisionAndPrepareAsync(frame.Reservation, frame.Lifetime.Token)).ConfigureAwait(false);
             }
             else request = (await frame.Enter(() => coordinator.PrepareWorkerAsync(plan, frame.Lifetime.Token)).ConfigureAwait(false)).Request;

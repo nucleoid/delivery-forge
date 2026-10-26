@@ -18,6 +18,24 @@ public sealed class ToolLifetime : IDisposable, DeliveryForge.Evidence.IOwnedDup
         linked = CancellationTokenSource.CreateLinkedTokenSource(token); linked.CancelAfter(work);
     }
     public void Restrict(TimeSpan maximum) { lock (gate) { ObjectDisposedException.ThrowIf(disposed, this); if (maximum <= TimeSpan.Zero || maximum > total) throw new ArgumentOutOfRangeException(nameof(maximum)); if (maximum == total) return; total = maximum; var candidate = TimeSpan.FromTicks(Math.Min(TimeSpan.FromSeconds(1100).Ticks, maximum.Ticks - Math.Min(maximum.Ticks / 4, TimeSpan.FromSeconds(60).Ticks))); if (candidate < work) work = candidate; var left = work - Stopwatch.GetElapsedTime(started); if (left <= TimeSpan.Zero) throw new TimeoutException("Restricted original endpoint already expired."); linked.CancelAfter(left); } }
+    // Absolute WORK offset from this SAME original start. Never alter whole,
+    // the earliest cleanup start, or create/refill an original/token source.
+    internal void RestrictWork(TimeSpan maximumWork)
+    {
+        lock (gate)
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            linked.Token.ThrowIfCancellationRequested();
+            if (cleanup != 0) throw new TimeoutException("Original cleanup cannot reopen WORK.");
+            if (maximumWork <= TimeSpan.Zero) throw new ArgumentOutOfRangeException(nameof(maximumWork));
+            var next = maximumWork < work ? maximumWork : work;
+            var left = next - Stopwatch.GetElapsedTime(started);
+            if (left <= TimeSpan.Zero) throw new TimeoutException("Selected original WORK endpoint already expired.");
+            if (next == work) return;
+            work = next;
+            linked.CancelAfter(left);
+        }
+    }
     public long OriginalStarted => started;
     public TimeSpan WholeLimit { get { lock (gate) return total; } }
     public TimeSpan WorkLimit { get { lock (gate) return work; } }

@@ -12,6 +12,7 @@ public sealed partial class LocalSingleScheduler
     Func<bool>? actualSettled;
     Func<bool>? actualOriginalUnknown;
     bool provisioningEntered, preparationEntered;
+    internal TimeSpan RemainingReservationTime => Remaining();
     internal bool HasRetainedReservation => _laneHeld || _ticket is not null || _resources is not null;
     internal void BindOriginal(IOwnedDuplexBudget owner, ICoordinatedSynchronousEffectAdmission admission, Func<Task?> pipeline, Func<bool> settled, Func<bool> originalUnknown)
     {
@@ -80,17 +81,17 @@ public sealed partial class LocalSingleScheduler
         var terminalEntered = false;
         try
         {
-            CheckOriginal();
+            _ = Remaining();
             if (original is null || !ReferenceEquals(ticket, _ticket) || !_laneHeld || !_prepared || _uncertain || !_nativeQuiescenceKnown ||
                 _store.HasUnsettledOriginalFiles || actualOriginalUnknown?.Invoke() != false ||
                 actualPipeline?.Invoke() is not { IsCompletedSuccessfully: true } || actualSettled?.Invoke() != true || _execution.HasPendingControlOperations(_worker.RunId))
                 throw new SchedulingException("Only the exact settled original pipeline can release its actual completed reservation.");
             terminalEntered = true;
             await PersistAsync("completed", token).ConfigureAwait(false);
-            CheckOriginal();
+            _ = Remaining();
             if (actualSettled!.Invoke() != true) throw new SchedulingException("Original settlement changed before writer disposition.");
             await releaseActualWriter().ConfigureAwait(false);
-            CheckOriginal();
+            _ = Remaining();
             if (_store.HasUnsettledOriginalFiles || actualOriginalUnknown?.Invoke() != false || actualSettled?.Invoke() != true || _execution.HasPendingControlOperations(_worker.RunId))
                 throw new SchedulingException("Original completed disposition acquired uncertainty; capacity remains retained.");
             MarkObservedClosed(); Release();
