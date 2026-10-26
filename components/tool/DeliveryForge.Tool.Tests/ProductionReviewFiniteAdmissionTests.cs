@@ -16,6 +16,40 @@ public sealed class ProductionReviewFiniteAdmissionTests
 {
     public static bool Windows => OperatingSystem.IsWindows();
 
+    [Fact(Timeout = 150000)]
+    public async Task Actual_file_reads_cross_the_old_ledger_bound_with_all_originals_retained()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-file-ledger-growth-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(root, ".git"));
+        var image = Path.Combine(root, "inert-image.data");
+        byte[] bytes = Encoding.UTF8.GetBytes("actual bounded file; never launched");
+        await File.WriteAllBytesAsync(image, bytes, TestContext.Current.CancellationToken);
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(120), TestContext.Current.CancellationToken);
+        var current = true;
+        var parent = new ParentEffectAdmission(new object(), run => current && run == "owned", _ => current = false);
+        var owner = new ProductionReviewSourceOwner(new ProcessCommandExecutor(), original, parent, "owned", root,
+            Path.Combine(root, ".git"), Path.Combine(root, ".git"), image, bytes.Length,
+            Convert.ToHexStringLower(SHA256.HashData(bytes)), "git version inert", new('a', 40), new('b', 40), () => true,
+            "sha256:" + new string('a', 64), "sha256:" + new string('b', 64), "review.json", 1024);
+        var before = parent.EnteredCount;
+        var heapBefore = GC.GetTotalMemory(forceFullCollection: true);
+        for (var index = 0; index < 1025; index++)
+            Assert.Equal(bytes, await owner.ReadFileAsync(image, 1024, TestContext.Current.CancellationToken));
+        await Task.WhenAll(parent.OriginalObservers).WaitAsync(original.Remaining, TestContext.Current.CancellationToken);
+        Assert.Equal(before + 1025, parent.EnteredCount);
+        Assert.Equal(parent.EnteredCount, parent.OriginalObservers.Count);
+        Assert.True(parent.AllKnownSettled); Assert.True(current);
+        Assert.False(owner.Uncertain); Assert.False(original.HasExplicitUnknown);
+        using (var exclusive = new FileStream(image, FileMode.Open, FileAccess.ReadWrite, FileShare.None))
+        {
+            var actual = new byte[bytes.Length]; exclusive.ReadExactly(actual);
+            Assert.Equal(bytes, actual); Assert.Equal(bytes.Length, exclusive.Length);
+        }
+        var heapAfter = GC.GetTotalMemory(forceFullCollection: true);
+        TestContext.Current.TestOutputHelper!.WriteLine($"Retained actual fixture: {root}; records={parent.EnteredCount}; managedHeapBefore={heapBefore}; managedHeapAfter={heapAfter}. These observed process heap samples are not a worst-case Task-result memory bound.");
+        GC.KeepAlive(parent); GC.KeepAlive(owner);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

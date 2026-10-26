@@ -333,9 +333,10 @@ public sealed class ParentEffectAdmissionTests
             // Actual cleanup entry deliberately follows the ledger diagnostic.
             original.BeginFailureCleanup();
         }, original: original);
-        for (var index = 0; index < 1024; index++)
+        Assert.Equal(4096, ParentEffectAdmission.MaximumOriginalInvocations);
+        for (var index = 0; index < 4096; index++)
             Assert.Equal(index, admission.EnterSynchronous("owned", () => index));
-        Assert.Equal(1024, admission.EnteredCount); Assert.True(admission.AllKnownSettled);
+        Assert.Equal(4096, admission.EnteredCount); Assert.Equal(4096, admission.OriginalObservers.Count); Assert.True(admission.AllKnownSettled);
         var births = 0;
         var actual = Assert.Throws<IOException>(() =>
         {
@@ -343,7 +344,7 @@ public sealed class ParentEffectAdmissionTests
             else admission.EnterSynchronous("owned", () => ++births);
         });
         Assert.Same(primary, actual); Assert.Equal(1, revoked); Assert.Equal(0, births);
-        Assert.Equal(1024, admission.EnteredCount); Assert.True(admission.AllKnownSettled);
+        Assert.Equal(4096, admission.EnteredCount); Assert.Equal(4096, admission.OriginalObservers.Count); Assert.True(admission.AllKnownSettled);
         original.RecordFirstCaught("later-consequence", new InvalidOperationException("must-not-export"));
         attention.EmitFirstCaughtOnce(); attention.EmitFirstCaughtOnce();
         var lines = errors.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => line.TrimEnd('\r')).ToArray();

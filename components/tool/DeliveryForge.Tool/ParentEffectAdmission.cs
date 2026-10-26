@@ -6,6 +6,9 @@ namespace DeliveryForge.Tool;
 internal sealed class ParentEffectAdmission(object originalGate, Func<string, bool> current, Action<Exception> revoke,
     ParentRenewalHandoff? renewal = null, ToolLifetime? original = null) : ICoordinatedSynchronousEffectAdmission, ICoordinatedBoundedCurrentness
 {
+    // Cumulative retained bookkeeping, independent of the original's CPU,
+    // memory, time and token limits. Never prune completed or failed entries.
+    internal const int MaximumOriginalInvocations = 4096;
     sealed class OriginalInvocation { internal bool Entered, Returned, Synchronous; internal Task? Task; internal Task? Observation; internal Exception? Failure; }
     readonly List<OriginalInvocation> originals = [];
     bool retainedUncertain;
@@ -76,7 +79,7 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
                 pending = PendingOrCurrent(runId);
                 if (pending is null)
                 {
-                    if (originals.Count >= 1024)
+                    if (originals.Count >= MaximumOriginalInvocations)
                     {
                         var exhausted = new IOException("Finite original parent effect ledger exhausted.");
                         original?.RecordFirstCaught("parent-effect-ledger-exhausted", exhausted);
@@ -111,7 +114,7 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
                 pending = PendingOrCurrent(runId);
                 if (pending is null)
                 {
-                    if (originals.Count >= 1024)
+                    if (originals.Count >= MaximumOriginalInvocations)
                     {
                         var exhausted = new IOException("Finite original parent effect ledger exhausted.");
                         original?.RecordFirstCaught("parent-effect-ledger-exhausted", exhausted);
