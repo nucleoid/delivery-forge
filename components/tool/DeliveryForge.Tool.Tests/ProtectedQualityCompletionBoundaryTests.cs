@@ -111,7 +111,8 @@ public sealed class ProtectedQualityCompletionBoundaryTests
         Assert.False(frozen.DownstreamReady);
         var worker = new FrozenWorkerPlan("run-" + new string('a', 32), contractIdentity, frozen.BaseCommit,
             composition.Repository, repository, Path.Combine(data.Root, "assigned"), Path.Combine(data.Root, "results"),
-            "unissued-DATA-writer", ["source.cs"], [], "codex.cli", "object-binding-DATA", [], "pr");
+            "unissued-DATA-writer", ["source.cs"], [], "codex.cli", "object-binding-DATA",
+            [AgentCapability.Launch, AgentCapability.CompletionEvidence], "pr");
         await using var processes = new ProcessControl();
         using var coordinator = new ExecutionCoordinator(new RunStore(Path.Combine(data.Root, "store")), new WorktreeManager(), processes);
         var frame = new HostBridgeFrame(worker.RunId, original, coordinator, () => false, false)
