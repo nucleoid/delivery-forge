@@ -10,7 +10,8 @@ namespace DeliveryForge.Tool;
 internal static partial class ReviewGateReceiptEvidence
 {
     internal static JsonElement Create(string path, byte[] exactReceipt,
-        DeliveryForge.Evidence.GateRunResult? actual = null, Func<string, int, byte[]>? readArtifact = null)
+        DeliveryForge.Evidence.GateRunResult? actual = null, Func<string, int, byte[]?>? readArtifact = null,
+        RequiredTestsBudget? requiredTestsBudget = null, Func<int, long, bool>? hasReadCapacity = null)
     {
         var validated = ContractValidator.ParseAndValidate(exactReceipt);
         if (validated.SchemaName != "gate-receipt")
@@ -33,7 +34,9 @@ internal static partial class ReviewGateReceiptEvidence
                 Identity = validated.Identity
             },
             ReceiptFields = fields,
-            RequiredTests = actual is not null && readArtifact is not null ? RequiredTestOutcomes(actual, root, readArtifact) : (JsonElement?)null,
+            RequiredTests = actual is not null && readArtifact is not null
+                ? RequiredTestOutcomes(actual, root, readArtifact, requiredTestsBudget ?? new(), hasReadCapacity)
+                : Unavailable("no-completed-quality-binding"),
             ArtifactInventory = new
             {
                 Count = artifacts.EnumerateObject().Count(),

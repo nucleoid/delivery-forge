@@ -11,16 +11,54 @@ namespace DeliveryForge.Tool;
 internal static partial class ReviewGateReceiptEvidence
 {
     const int ReviewArtifactMaximum = 16 * 1024 * 1024;
+    // One shared presentation budget for ALL gates in this review. This is a
+    // restrictive subset of the producer contract, not a new read allowance.
+    internal sealed class RequiredTestsBudget
+    {
+        internal int ReadsRemaining { get; private set; } = 3;
+        internal int BytesRemaining { get; private set; } = 256 * 1024;
+        internal int CasesRemaining { get; private set; } = 16;
+        // Completed installed quality validates exactly two gates. Count up to
+        // two entire fixed unavailable markers inside the SAME 8 KiB envelope,
+        // even when a presented result also fits (conservative double reserve).
+        int encodedRemaining = 8 * 1024 - 2 * 1024;
+        internal void ReadCompleted(int bytes) { ReadsRemaining--; BytesRemaining -= bytes; }
+        internal void CasesSelected(int count) { Need(count <= CasesRemaining, "case-list-exceeds-review-profile"); CasesRemaining -= count; }
+        internal void Include(JsonElement projection)
+        {
+            // Same relative nesting/indentation and second JSON string encoding
+            // used by QualityEvidence inside the full native prompt. Counting the
+            // small carrier each time is conservative across multiple gates.
+            var encoded = EncodedBytes(projection);
+            Need(encoded <= encodedRemaining, "case-list-exceeds-review-profile");
+            encodedRemaining -= encoded;
+        }
+        internal static int EncodedBytes(JsonElement projection)
+        {
+            var carrier = JsonSerializer.Serialize(new { QualityEvidence = new[] { new { RequiredTests = projection } } }, BoundedFiles.Json);
+            return Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(carrier));
+        }
+    }
     const string CaseQualification = "Producer-reported retained TRX claims, digest-bound to the actual receipt and cross-checked against producer inventory/execution DATA. The gate does not independently verify these per-case outcomes; this presentation issues no authority or certification.";
     sealed class PresentationUnavailable(string reason) : Exception(reason) { }
-    static JsonElement Unavailable(string reason) => JsonSerializer.SerializeToElement(new
-    { Presented = false, Reason = reason, Qualification = CaseQualification }, BoundedFiles.Json);
+    internal static JsonElement Unavailable(string reason)
+    {
+        // Only fixed diagnostic codes, never arbitrary producer text. Keep the
+        // ENTIRE escaped unavailable contribution inside its reserved 1 KiB.
+        if (reason.Length > 64 || reason.Any(c => c is not (>= 'a' and <= 'z' or >= '0' and <= '9' or '-')))
+            reason = "unsupported-presentation";
+        var marker = JsonSerializer.SerializeToElement(new
+        { Presented = false, Reason = reason, Qualification = CaseQualification }, BoundedFiles.Json);
+        if (RequiredTestsBudget.EncodedBytes(marker) > 1024)
+            throw new InvalidOperationException("Fixed required-test unavailable marker exceeds its closed profile.");
+        return marker;
+    }
 
     // Presentation only. Callback I/O, ownership/currentness, cancellation and
     // budget failures escape unchanged. Only locally classified DATA failures
     // become unavailable; no caught failure can issue a passing gate or review.
     internal static JsonElement RequiredTestOutcomes(GateRunResult actual, JsonElement receipt,
-        Func<string, int, byte[]> readArtifact)
+        Func<string, int, byte[]?> readArtifact, RequiredTestsBudget budget, Func<int, long, bool>? hasReadCapacity = null)
     {
         if (actual.Outcome != GateOutcome.Pass || actual.Fixture || actual.SourceChanged || actual.Before != actual.After)
             return Unavailable("not-current-nonfixture-pass");
@@ -38,16 +76,23 @@ internal static partial class ReviewGateReceiptEvidence
             if (!relative.StartsWith("producer-bundle/", StringComparison.Ordinal) || relative.Contains('\\') || relative.Contains(':') ||
                 relative.Split('/').Any(part => part is "" or "." or "..") || !hashes.TryGetProperty(relative, out var expected))
                 throw new WorkerEnvelopeException("Required-test artifact is outside the retained receipt inventory.");
+            Need(budget.ReadsRemaining > 0 && budget.BytesRemaining > 0, "artifact-read-profile-exceeded");
+            Need(hasReadCapacity is null || hasReadCapacity(checked(2 * budget.ReadsRemaining), checked((long)budget.BytesRemaining + budget.ReadsRemaining)), "artifact-read-credit-unavailable");
+            maximum = Math.Min(maximum, budget.BytesRemaining);
             var bytes = readArtifact(relative, maximum);
+            Need(bytes is not null, "artifact-presentation-size-unsupported");
+            budget.ReadCompleted(bytes!.Length);
             if (bytes.Length > maximum || "sha256:" + BoundedFiles.Sha(bytes) != expected.GetString())
                 throw new WorkerEnvelopeException("Required-test artifact bytes differ from the actual receipt.");
             return bytes;
         }
         try
         {
-            // FreshManifestCapture emits this inventory/TRX contract; the root
-            // name is reserved by ArtifactCaptureAdapter. Same 8 MiB JSON profile
-            // as Evidence.ProducerJson, without changing its internal visibility.
+            // All-pass, scored-context-linked presentation SUBSET only. Successful
+            // producer shapes with skips or no scored reachability are explicitly
+            // unavailable here. ArtifactCaptureAdapter reserves the root name.
+            // JSON parsing retains the existing ProducerJson profile, while the
+            // smaller shared read profile can decline before parsing.
             using var manifest = PresentationJson(Read("producer-bundle/manifest.json", 8 * 1024 * 1024));
             var body = manifest.RootElement; var revision = Member(body, "revision");
             Need(Text(revision, "base") == actual.After.BaseCommit && Text(revision, "head") == actual.After.HeadCommit &&
@@ -58,7 +103,7 @@ internal static partial class ReviewGateReceiptEvidence
             byte[] Artifact(JsonElement row)
             {
                 var length = Integer(row, "length");
-                Need(length is > 0 and <= ReviewArtifactMaximum, "artifact-presentation-size-unsupported");
+                Need(length is > 0 and <= ReviewArtifactMaximum && length <= budget.BytesRemaining, "artifact-presentation-size-unsupported");
                 var bytes = Read("producer-bundle/" + Text(row, "locator"), ReviewArtifactMaximum);
                 if (bytes.LongLength != length || BoundedFiles.Sha(bytes) != Text(row, "sha256"))
                     throw new WorkerEnvelopeException("Required-test artifact extent or manifest hash differs.");
@@ -86,12 +131,15 @@ internal static partial class ReviewGateReceiptEvidence
                     Integer(row, "failedTests") == 0 && Integer(row, "skippedTests") == 0), "execution-counts-unsupported");
                 var matches = artifacts.Where(row => Text(row, "id") == id && Text(row, "kind") == "required-test-result" && Text(row, "format") == "trx").ToArray();
                 Need(matches.Length == 1, "graph-trx-unavailable");
+                budget.CasesSelected((int)passed);
                 var raw = Artifact(matches[0]); var cases = TrxCases(raw, (int)passed);
                 projected.Add(new { Project = project, GraphId = graph, ArtifactId = id, Bytes = raw.LongLength,
                     Sha256 = "sha256:" + BoundedFiles.Sha(raw), CompleteCaseCount = cases.Length, Cases = cases });
             }
             Need(seen.Count > 0, "required-test-members-unavailable");
-            return JsonSerializer.SerializeToElement(new { Presented = true, Qualification = CaseQualification, Tests = projected }, BoundedFiles.Json);
+            var presentation = JsonSerializer.SerializeToElement(new { Presented = true, Qualification = CaseQualification, Tests = projected }, BoundedFiles.Json);
+            budget.Include(presentation);
+            return presentation;
         }
         catch (PresentationUnavailable error) { return Unavailable(error.Message); }
     }

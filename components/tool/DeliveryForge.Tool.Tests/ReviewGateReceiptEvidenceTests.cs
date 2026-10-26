@@ -174,27 +174,27 @@ public sealed class ReviewGateReceiptEvidenceTests
 
 
     // Pure presentation DATA: these rows cannot issue a provider/completed-frame authority.
-    static (byte[] Receipt, DeliveryForge.Evidence.GateRunResult Actual, Dictionary<string, byte[]> Artifacts) RequiredTestsData(string changed = "")
+    static (byte[] Receipt, DeliveryForge.Evidence.GateRunResult Actual, Dictionary<string, byte[]> Artifacts) RequiredTestsData(string changed = "", int total = 7, string prefix = "case-")
     {
         var data = ProducerData(); var graph = new string('a', 64); var build = new string('b', 64);
-        var count = changed == "count" ? 6 : 7;
+        var count = changed == "count" ? total - 1 : total;
         var ns = changed == "namespace" ? "urn:foreign" : "http://microsoft.com/schemas/VisualStudio/TeamTest/2010";
         var list = "00000000-0000-0000-0000-000000000099";
         string TestId(int i) => $"00000000-0000-0000-0000-{i + 1:000000000000}";
         string ExecutionId(int i) => $"00000000-0000-0000-0001-{i + 1:000000000000}";
-        string Name(int i) => "case-" + (changed == "duplicate-name" ? 0 : i);
+        string Name(int i) => prefix + (changed == "duplicate-name" ? 0 : i);
         var results = string.Concat(Enumerable.Range(0, count).Select(i => $"<UnitTestResult testId='{TestId(i)}' executionId='{ExecutionId(i)}' testListId='{list}' testName='{Name(i)}' outcome='Passed'/>"));
         if (changed == "nested") results += "<InnerResults>" + results + "</InnerResults>";
         var definitions = string.Concat(Enumerable.Range(0, count).Select(i => $"<UnitTest id='{TestId(i)}' name='{Name(i)}'><Execution id='{ExecutionId(changed == "definition" ? 0 : i)}'/></UnitTest>"));
         var entries = string.Concat(Enumerable.Range(0, count).Select(i => $"<TestEntry testId='{TestId(i)}' executionId='{ExecutionId(i)}' testListId='{list}'/>"));
         var trx = Encoding.UTF8.GetBytes((changed == "entity" ? "<!DOCTYPE TestRun [<!ENTITY x SYSTEM 'file:///not-a-test-input'>]>" : "") +
             $"<TestRun xmlns='{ns}'><Results>{results}</Results><TestDefinitions>{definitions}</TestDefinitions><TestEntries>{entries}</TestEntries>" +
-            $"<ResultSummary outcome='{(changed == "summary" ? "Failed" : "Completed")}'><Counters total='7' executed='7' passed='7' failed='0' error='{(changed == "error-counter" ? 1 : 0)}'/></ResultSummary></TestRun>");
+            $"<ResultSummary outcome='{(changed == "summary" ? "Failed" : "Completed")}'><Counters total='{total}' executed='{total}' passed='{total}' failed='0' error='{(changed == "error-counter" ? 1 : 0)}'/></ResultSummary></TestRun>");
         var inventory = JsonSerializer.SerializeToUtf8Bytes(new
         {
             provider = "finite-sdk-required-test-inventory-v1",
             reusableRecipe = false,
-            tests = new[] { new { graphId = graph, project = "Tests/Tests.csproj", trx = "required-test-" + (changed == "graph" ? build : graph) + "-trx", passed = 7, rawExitCode = 0 } }
+            tests = new[] { new { graphId = graph, project = "Tests/Tests.csproj", trx = "required-test-" + (changed == "graph" ? build : graph) + "-trx", passed = total, rawExitCode = 0 } }
         });
         if (changed == "duplicate-json") inventory = Encoding.UTF8.GetBytes(Encoding.UTF8.GetString(inventory).Replace("\"provider\":", "\"provider\":\"foreign\",\"provider\":", StringComparison.Ordinal));
         var artifacts = new Dictionary<string, byte[]>(StringComparer.Ordinal)
@@ -212,7 +212,7 @@ public sealed class ReviewGateReceiptEvidenceTests
                 new { id = "required-test-" + graph + "-trx", kind = "required-test-result", locator = changed == "traversal" ? "../results.bin" : "inputs/results.bin", length = changed == "oversize" ? 16 * 1024 * 1024 + 1 : trx.Length, sha256 = BoundedFiles.Sha(trx), format = "trx" }
             },
             executions = new[] { new { id = "test-" + build + "-" + graph, buildId = "build-" + build, testProject = "Tests/Tests.csproj", completed = true, exitCode = 0,
-                totalTests = 7, passedTests = 7, failedTests = 0, skippedTests = 0 } }
+                totalTests = total, passedTests = total, failedTests = 0, skippedTests = 0 } }
         });
         if (changed != "missing-manifest") artifacts.Add("producer-bundle/manifest.json", manifest);
         var hashes = artifacts.ToDictionary(row => row.Key, row => "sha256:" + BoundedFiles.Sha(row.Value), StringComparer.Ordinal);
@@ -246,6 +246,7 @@ public sealed class ReviewGateReceiptEvidenceTests
         Assert.All(test.GetProperty("Cases").EnumerateArray(), row => Assert.Equal("Passed", row.GetProperty("Outcome").GetString()));
         Assert.Equal("sha256:" + BoundedFiles.Sha(data.Artifacts["producer-bundle/inputs/results.bin"]), test.GetProperty("Sha256").GetString());
         Assert.Equal(3, reads);
+        Assert.True(ReviewGateReceiptEvidence.RequiredTestsBudget.EncodedBytes(required) <= 6 * 1024);
     }
 
     [Theory]
@@ -312,6 +313,36 @@ public sealed class ReviewGateReceiptEvidenceTests
         };
         var observed = Record.Exception(() => ReviewGateReceiptEvidence.Create("retained/receipts/current.json", data.Receipt, data.Actual,
             (_, _) => throw failure));
+        Assert.Same(failure, observed);
+    }
+
+    [Theory]
+    [InlineData(17, false)]
+    [InlineData(7, true)]
+    public void Required_case_count_or_encoded_contribution_over_profile_is_unavailable_without_truncation(int count, bool longNames)
+    {
+        var data = RequiredTestsData(total: count, prefix: longNames ? new string('é', 200) : "case-");
+        var reads = 0;
+        var evidence = ReviewGateReceiptEvidence.Create("retained/receipts/current.json", data.Receipt, data.Actual,
+            (relative, _) => { reads++; return data.Artifacts[relative]; });
+        var required = evidence.GetProperty("RequiredTests");
+        Assert.False(required.GetProperty("Presented").GetBoolean());
+        Assert.Equal("case-list-exceeds-review-profile", required.GetProperty("Reason").GetString());
+        Assert.False(required.TryGetProperty("Tests", out _));
+        Assert.Equal(longNames ? 3 : 2, reads);
+        Assert.True(ReviewGateReceiptEvidence.RequiredTestsBudget.EncodedBytes(required) <= 1024);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Third_admitted_artifact_read_failure_keeps_its_actual_exception_after_manifest_and_inventory_parsing(bool cancellation)
+    {
+        var data = RequiredTestsData(); var reads = 0;
+        Exception failure = cancellation ? new OperationCanceledException("actual third-read DATA") : new IOException("actual third-read DATA");
+        var observed = Record.Exception(() => ReviewGateReceiptEvidence.Create("retained/receipts/current.json", data.Receipt, data.Actual,
+            (relative, _) => ++reads == 3 ? throw failure : data.Artifacts[relative]));
+        Assert.Equal(3, reads);
         Assert.Same(failure, observed);
     }
 

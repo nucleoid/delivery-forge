@@ -133,11 +133,31 @@ internal sealed class InstalledReviewHost : IDisposable
             if (qualityToolProvenance is { } selectedTools)
                 identities.Add("quality-tool-selection", "sha256:" + BoundedFiles.Sha(JsonSerializer.SerializeToUtf8Bytes(selectedTools, BoundedFiles.Json)));
             var qualityEvidence = new List<JsonElement>();
+            var requiredTestsBudget = new ReviewGateReceiptEvidence.RequiredTestsBudget();
+            var reviewerReadOperations = OperatingSystem.IsLinux() ? 15 : 0;
+            var reviewerReadBytes = OperatingSystem.IsLinux() ? checked(12 * (selection.IndependentReviewer!.Image.Bytes + 1)) : 0;
+            bool HasPresentationReadCapacity(int operations, long readBytes)
+            {
+                token.ThrowIfCancellationRequested(); sourceOwner.Check(); original.Check();
+                var available = true;
+                // RequireReadCapacity only throws ToolUsageException for this
+                // nonmutating finite capacity check; Check throws cancellation,
+                // timeout/disposal instead, and those MUST propagate unchanged.
+                try { BoundedFiles.RequireReadCapacity(original, checked(operations + reviewerReadOperations), checked(readBytes + reviewerReadBytes)); }
+                catch (ToolUsageException) { available = false; }
+                token.ThrowIfCancellationRequested(); sourceOwner.Check(); original.Check();
+                return available;
+            }
             foreach (var gate in actualQualityResults)
             {
                 var bytes = parent.EnterSynchronous(assignment.RunId, () => { token.ThrowIfCancellationRequested(); sourceOwner.Check(); return BoundedFiles.Read(gate.ReceiptPath, original); });
                 token.ThrowIfCancellationRequested();
                 identities.Add("quality-receipt:" + gate.ReceiptPath, "sha256:" + BoundedFiles.Sha(bytes));
+                if (completedQuality is null)
+                {
+                    qualityEvidence.Add(ReviewGateReceiptEvidence.Create(gate.ReceiptPath, bytes));
+                    continue;
+                }
                 qualityEvidence.Add(ReviewGateReceiptEvidence.Create(gate.ReceiptPath, bytes, gate, (relative, maximum) =>
                 {
                     var receiptDirectory = Path.GetDirectoryName(gate.ReceiptPath)!;
@@ -146,14 +166,26 @@ internal sealed class InstalledReviewHost : IDisposable
                     return parent.EnterSynchronous(assignment.RunId, () =>
                     {
                         token.ThrowIfCancellationRequested(); sourceOwner.Check();
-                        var retained = BoundedFiles.Read(artifact, original, maximum);
-                        token.ThrowIfCancellationRequested(); sourceOwner.Check(); return retained;
+                        // No handle is born for the explicit size-only decline.
+                        // Plain/metadata/currentness/admission failures still escape.
+                        var plain = BoundedFiles.Plain(artifact);
+                        var length = new FileInfo(plain).Length;
+                        token.ThrowIfCancellationRequested(); sourceOwner.Check(); original.Check();
+                        if (length > maximum) return null;
+                        var retained = BoundedFiles.Read(plain, original, maximum);
+                        token.ThrowIfCancellationRequested(); sourceOwner.Check();
+                        // This post-read reserve check is NOT optional and is not
+                        // caught: racing use or actual original failure must escape.
+                        BoundedFiles.RequireReadCapacity(original, reviewerReadOperations, reviewerReadBytes);
+                        return retained;
                     });
-                }));
+                }, requiredTestsBudget, HasPresentationReadCapacity));
             }
             var patch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, assignment.BaseCommit, completion.HeadCommit, frozen.ContractIdentity, identities, token).ConfigureAwait(false);
             var planAndEvidence = JsonSerializer.SerializeToUtf8Bytes(new { FrozenPlan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), QualityEvidence = qualityEvidence, QualityToolProvenance = qualityToolProvenance, SourceAndGateScope = qualityToolProvenance is null ? null : new { SourceRealm = bootstrap.ObjectView.SourceRealm.ToString(), Qualification = "SourceRealm describes the source/object-view ownership authority, independently of gate ProductionCapable flags. The completed quality binding supplies separate gate measurements and ProtectedComparison DATA; its exact registry/scope approval does not certify producers universally. Preserve all reported limitations and authority flags." }, MissingQualityEvidence = actualQualityResults.Count == 0 }, BoundedFiles.Json);
-            token.ThrowIfCancellationRequested(); sourceOwner.Check(); return (patch, planAndEvidence);
+            token.ThrowIfCancellationRequested(); sourceOwner.Check();
+            BoundedFiles.RequireReadCapacity(original, reviewerReadOperations, reviewerReadBytes);
+            return (patch, planAndEvidence);
         }
         var userSettings = parent.EnterSynchronous(assignment.RunId, () =>
         {
