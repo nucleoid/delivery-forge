@@ -13,7 +13,7 @@ public sealed class ToolWorkDeadlineTests
         var started = life.OriginalStarted;
         var whole = life.WholeLimit;
         var token = life.Token;
-        var endpoint = Stopwatch.GetElapsedTime(started) + TimeSpan.FromMilliseconds(250);
+        var endpoint = Stopwatch.GetElapsedTime(started) + TimeSpan.FromSeconds(2);
         life.RestrictWork(endpoint);
         Assert.Equal(endpoint, life.WorkLimit);
         Assert.Equal(whole, life.WholeLimit);

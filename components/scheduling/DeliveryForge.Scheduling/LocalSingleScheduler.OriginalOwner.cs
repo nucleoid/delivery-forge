@@ -12,7 +12,17 @@ public sealed partial class LocalSingleScheduler
     Func<bool>? actualSettled;
     Func<bool>? actualOriginalUnknown;
     bool provisioningEntered, preparationEntered;
-    internal TimeSpan RemainingReservationTime => Remaining();
+    internal TimeSpan RemainingReservationTime
+    {
+        get
+        {
+            CheckOriginal();
+            // Keep the local reservation independent of the original endpoint.
+            // The caller applies its min without sampling that original twice.
+            return (_timeBudget ?? throw new SchedulingException("No positively observed local lifetime has been adopted."))
+                .Remaining(Stopwatch.GetElapsedTime(_allocatedAt), DateTimeOffset.UtcNow);
+        }
+    }
     internal bool HasRetainedReservation => _laneHeld || _ticket is not null || _resources is not null;
     internal void BindOriginal(IOwnedDuplexBudget owner, ICoordinatedSynchronousEffectAdmission admission, Func<Task?> pipeline, Func<bool> settled, Func<bool> originalUnknown)
     {
@@ -27,13 +37,13 @@ public sealed partial class LocalSingleScheduler
         await WaitSerialAsync(token).ConfigureAwait(false);
         try
         {
-            CheckOriginal();
+            _ = Remaining();
             if (!ReferenceEquals(ticket, _ticket) || !CanReleaseUnprovisioned || actualPipeline?.Invoke() is not { IsCompletedSuccessfully: true } ||
                 actualSettled?.Invoke() != true || !actualNoWorkerStart() || _execution.HasPendingControlOperations(_worker.RunId))
                 throw new SchedulingException("Only this settled original gate-only pipeline can release its unused reservation.");
             // No writer, preparation or native worker exists to stop. The same
             // original WORK endpoint remains in force for parent finalization.
-            CheckOriginal(); MarkObservedClosed(); Release();
+            _ = Remaining(); MarkObservedClosed(); Release();
         }
         finally { _serial.Release(); }
     }

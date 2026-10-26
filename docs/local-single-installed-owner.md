@@ -22,8 +22,11 @@ The frozen dependency integration conditions must resolve to integrated commits.
 Every scheduler wait and deadline is clipped to the existing original WORK
 endpoint. Store effects, provisioning Git and dependency-read Git are admitted
 by the same parent. No scheduler stopwatch can renew ToolLifetime. The live
-reservation spans the worker, installed quality, independent review and fixture
-publication phases.
+reservation spans the worker, installed quality, independent review, fixture
+publication and forward parent disposition. Both the immutable reservation
+endpoint and the original WORK endpoint bound that complete forward path,
+including lease release and transport/checkpoint disposition. Completion near an
+endpoint does not promise enough remaining WORK for those dispositions.
 
 After the exact retained pipeline task settles, a private completion path checks
 the same native/IO/control closure, immutable completed receipt, live writer and
@@ -31,6 +34,14 @@ current parent. It records completion, disposes that actual writer and releases
 the reservation without sending Stop after LocalComplete. Known stopped runs
 instead use their same original cleanup allowance and actual stopped record;
 uncertain tasks, processes, writer disposition or finalization retain capacity.
+A scheduler `completed` observation is not root terminal success. The root can
+report success only after its remaining forward dispositions actually settle.
+After either WORK endpoint expires, only the same original cleanup allowance may
+settle already-created tasks and owners; it cannot reopen WORK or turn a late
+pipeline into success. Late outcomes remain failed or INCOMPLETE. If expiry or
+failure follows persisted completion or an entered writer disposition, uncertain
+completion retains capacity and the original owners. Neither the journal row nor
+a fresh process can adopt those live owners or invoke the private release path.
 Saved checkpoints cannot invoke these private same-process release paths.
 If the actual base check refuses before provisioning or preparation was entered,
 the exact settled no-start pipeline can release its ticket under that same
@@ -41,5 +52,6 @@ uncertain reservation persistence retain capacity and failure evidence.
 fixture controls are not installed behavioral acceptance or cold recovery proof.
 The next acceptance is a fresh installed local-real run with an independently
 approved finite LocalSingle policy, plus failed/blocked/stop behavior under that
-same original. Normal restore must update Tool/Tool.Tests lock graphs for the new
-Scheduling project reference before the next locked restore and build.
+same original. Tool directly references Scheduling, and both Tool and Tool.Tests
+lock graphs include that project. Keep that direct reference and both lock graphs
+consistent for normal locked restore and build.

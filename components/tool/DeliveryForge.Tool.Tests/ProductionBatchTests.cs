@@ -571,7 +571,6 @@ public sealed class ProductionBatchTests
         var parentConfig = new TrustedConfiguration(request.Repository, repository, "refs/heads/main", git, MaximumCeiling: "implement", OperationSeconds: 1200, ProductionBatch: selected);
         var internalInstance = System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance;
         var bind = typeof(LocalSingleScheduler).GetMethod("BindOriginal", internalInstance)!;
-        var remaining = typeof(LocalSingleScheduler).GetProperty("RemainingReservationTime", internalInstance)!;
         var complete = typeof(LocalSingleScheduler).GetMethod("ReleaseCompletedUnprovisionedObservedAsync", internalInstance)!;
         var cleanup = typeof(LocalSingleScheduler).GetMethod("ReleaseUnprovisionedObservedAsync", internalInstance)!;
         foreach (var node in selected.Nodes)
@@ -583,10 +582,8 @@ public sealed class ProductionBatchTests
             var ticket = await scheduler.ReserveAsync(original.Token); var released = false;
             try
             {
-                var elapsedBefore = System.Diagnostics.Stopwatch.GetElapsedTime(original.OriginalStarted);
-                var localRemaining = (TimeSpan)remaining.GetValue(scheduler)!;
-                original.RestrictWork(elapsedBefore + localRemaining);
-                Assert.Equal(work, original.WorkLimit); // Old doubly-clipped remainder shrinks this by the sample gap.
+                OwnerHostBridge.RestrictReservationWork(original, scheduler);
+                Assert.Equal(work, original.WorkLimit); // The actual common bridge helper must not shrink an equal-duration parent.
                 Assert.Equal(whole, original.WholeLimit); Assert.Equal(started, original.OriginalStarted); Assert.Equal(token, original.Token);
                 var leaf = parentConfig with
                 {

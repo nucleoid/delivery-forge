@@ -83,4 +83,62 @@ public sealed class BatchDispositionDeadlineTests
         Assert.Collection(combined.InnerExceptions, error => Assert.Same(primary, error), error => Assert.IsType<TimeoutException>(error));
         Assert.False(actual.Task.IsCompleted); Assert.True(original.HasExplicitUnknown);
     }
+
+    [Theory(Timeout = 15000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Clamped_work_requires_forward_disposition_before_endpoint_and_cleanup_does_not_promote_late_success(bool observeAfterEndpoint)
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var root = Directory.CreateTempSubdirectory("df-clamped-checkpoint-close-").FullName;
+        TestContext.Current.TestOutputHelper!.WriteLine("Retained clamped-disposition fixture: " + root);
+        var store = new DeliveryForge.Coordination.FileCoordinationCheckpointStore(root);
+        try
+        {
+            var claim = await store.ClaimWriterAsync(Guid.NewGuid().ToString("D"), Guid.NewGuid().ToString("D"), null, TestContext.Current.CancellationToken);
+            Assert.Empty(await store.ReadLifecycleAsync(claim.LifecycleId, TestContext.Current.CancellationToken));
+        }
+        catch (Exception primary)
+        {
+            try { await store.DisposeAsync(); }
+            catch (Exception cleanup) { throw new AggregateException("Actual checkpoint setup and first disposition failed.", primary, cleanup); }
+            throw;
+        }
+        var started = original.OriginalStarted;
+        var whole = original.WholeLimit;
+        var token = original.Token;
+        // This exercises the same real ToolLifetime and disposition waiter.
+        // It does not invent a LocalSingle reservation, live lease, completed
+        // worker or full HostBridge run; that wiring needs the selected golden.
+        var endpoint = System.Diagnostics.Stopwatch.GetElapsedTime(started) + TimeSpan.FromSeconds(5);
+        original.RestrictWork(endpoint);
+        Assert.Equal(endpoint, original.WorkLimit);
+        var actualClose = store.DisposeAsync().AsTask(); // Exactly one creator call.
+        if (observeAfterEndpoint)
+        {
+            using var wait = CancellationTokenSource.CreateLinkedTokenSource(token, TestContext.Current.CancellationToken);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => Task.Delay(Timeout.InfiniteTimeSpan, wait.Token));
+            Assert.True(token.IsCancellationRequested);
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(() => ParentCoordinationHost.WaitActualDispositionTaskAsync(actualClose, original, false));
+            Assert.False(original.HasExplicitUnknown);
+            var firstCleanup = original.CleanupRemaining;
+            await ParentCoordinationHost.WaitActualDispositionTaskAsync(actualClose, original, true);
+            Assert.True(actualClose.IsCompletedSuccessfully);
+            Assert.True(original.CleanupRemaining <= firstCleanup);
+            Assert.ThrowsAny<OperationCanceledException>(original.CheckWork);
+        }
+        else
+        {
+            await ParentCoordinationHost.WaitActualDispositionTaskAsync(actualClose, original, false);
+            original.CheckWork();
+        }
+        Assert.True(actualClose.IsCompletedSuccessfully);
+        Assert.Equal(started, original.OriginalStarted);
+        Assert.Equal(whole, original.WholeLimit);
+        Assert.Equal(token, original.Token);
+        Assert.False(original.HasExplicitUnknown);
+        // Physical exclusive-writer first close, not just a completed fixture Task.
+        using var reacquired = new FileStream(Path.Combine(root, "parent-writer.lock"), FileMode.Open, FileAccess.ReadWrite, FileShare.None);
+        Assert.False(reacquired.SafeFileHandle.IsClosed);
+    }
 }

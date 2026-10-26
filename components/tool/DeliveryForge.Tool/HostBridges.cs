@@ -283,6 +283,15 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
     {
         lock (registration) { if (batchControl is not null || frames.Count != 0) throw new ToolUsageException("Batch birth restriction binds the idle bridge once."); batchControl = actual; }
     }
+    internal static void RestrictReservationWork(ToolLifetime original, LocalSingleScheduler scheduler)
+    {
+        var elapsedBeforeReservationSample = System.Diagnostics.Stopwatch.GetElapsedTime(original.OriginalStarted);
+        var remainingReservation = scheduler.RemainingReservationTime;
+        // Keep the current local monotonic/wall minimum. The earlier sample is
+        // conservative even after a pause; a later leaf cannot refill WORK.
+        original.RestrictWork(elapsedBeforeReservationSample + remainingReservation);
+    }
+
     internal void BindLocalSingleFactory(Func<FrozenPlan, FrozenWorkerPlan, ParentCoordinationHost, LocalSingleScheduler> factory)
     {
         lock (registration) { if (localSingleFactory is not null || contractFixtureProvisioning is not null || frames.Count != 0) throw new ToolUsageException("LocalSingle binds once before dispatch."); localSingleFactory = factory; }
@@ -739,11 +748,7 @@ public sealed partial class OwnerHostBridge(ExecutionCoordinator coordinator, Na
                 frame.Scheduler = scheduler;
                 scheduler.BindOriginal(frame.Lifetime, coordination, () => frame.Worker.Actual, () => ObservePipelineSettled(plan.RunId) && NativeCompletedAndQuiet(frame), () => frame.Lifetime.HasExplicitUnknown);
                 frame.Reservation = await frame.Enter(() => scheduler.ReserveAsync(frame.Lifetime.Token)).ConfigureAwait(false);
-                // Sample original elapsed BEFORE the same immutable reservation
-                // remainder. The sum is conservative, never a fresh node budget.
-                var elapsedBeforeReservationSample = System.Diagnostics.Stopwatch.GetElapsedTime(frame.Lifetime.OriginalStarted);
-                var remainingReservation = scheduler.RemainingReservationTime;
-                frame.Lifetime.RestrictWork(elapsedBeforeReservationSample + remainingReservation);
+                RestrictReservationWork(frame.Lifetime, scheduler);
                 request = await frame.Enter(() => scheduler.ProvisionAndPrepareAsync(frame.Reservation, frame.Lifetime.Token)).ConfigureAwait(false);
             }
             else request = (await frame.Enter(() => coordinator.PrepareWorkerAsync(plan, frame.Lifetime.Token)).ConfigureAwait(false)).Request;

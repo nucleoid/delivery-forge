@@ -40,6 +40,7 @@ public sealed partial class OwnerHostBridge
                         scheduler.BindOriginal(original, coordination, () => frame.Quality.Actual,
                             () => NoWorker() && ObservePipelineSettled(frame.RunId), () => original.HasExplicitUnknown);
                         frame.Reservation = await frame.Enter(() => scheduler.ReserveAsync(original.Token)).ConfigureAwait(false);
+                        RestrictReservationWork(original, scheduler);
                     }
                     return await historicalQuality.RunAsync(frame, coordination, NoWorker).ConfigureAwait(false);
                 }
