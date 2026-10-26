@@ -91,11 +91,19 @@ public sealed class ReviewCoreTests
         Assert.Contains("git version", identity.GitVersion, StringComparison.Ordinal);
         Assert.Equal(Identity('e'), identity.PlanIdentity);
         Assert.Equal(Identity('a'), identity.ArtifactIdentities["tests"]);
+        Assert.Equal(bytes, await GitPatchIdentity.ExportVerifiedPatchAsync(controlled, identity, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ExportVerifiedPatchAsync(
+            controlled, identity with { PatchSha256 = Identity('9') }, TestContext.Current.CancellationToken));
 
         repository.Write("dirty.txt", "dirty"u8.ToArray());
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ExportVerifiedPatchAsync(
+            controlled, identity, TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
             controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
             TestContext.Current.CancellationToken));
+        File.Delete(Path.Combine(repository.Path, ".git", "index"));
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ExportVerifiedPatchAsync(
+            controlled, identity, TestContext.Current.CancellationToken));
     }
 
     [Fact]

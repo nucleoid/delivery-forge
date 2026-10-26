@@ -49,16 +49,24 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
         if (quality is null || review is null) return ToolResult.Incomplete("LOCAL_REAL_PRODUCERS_REQUIRED", "Actual worker, protected quality/baseline and independent runtime review owners are required.");
         if (TrustedConfiguration.Ceiling(assignment.AuthorizationCeiling) < AuthorizationCeiling.Pr)
             return ToolResult.Incomplete("LOCAL_REAL_PR_CEILING_REQUIRED", "Local fake publication still requires the original immutable PR ceiling and protected policy; no ceiling is raised.");
-        void Current()
+        void CheckOwner()
         {
             original.Check(); parent.CheckCurrent(frame.RunId);
             if (!ReferenceEquals(frame.Lifetime, original) || frame.RunId != assignment.RunId || !frame.OwnerCompleted || frame.OwnerStopped ||
                 frame.Primary is not null || frame.Post is not null || frame.InvocationUnknown || frame.EnteredTasks.Any(task => !task.IsCompleted) ||
                 frame.Quality.Unknown || frame.IndependentReview.Unknown || quality.Unknown || review.Unknown || !nativeCompletedAndQuiet())
                 throw new WorkerEnvelopeException("Same actual settled worker/quality/review original is required for local-real acceptance.");
-            parent.EnterSynchronous(frame.RunId, () => { _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536); return true; });
         }
-        Current();
+        void CurrentWithinAdmittedEffect()
+        {
+            CheckOwner();
+            _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
+        }
+        void Current()
+        {
+            parent.EnterSynchronous(frame.RunId, () => { CurrentWithinAdmittedEffect(); return true; });
+        }
+        CheckOwner();
         var paired = await quality.LocalRealEvidenceWithReviewAsync(frame, parent, review).ConfigureAwait(false);
         if (paired is null) return ToolResult.Incomplete("LOCAL_REAL_ACCEPTED_PROTECTED_EVIDENCE_REQUIRED", "Complete actual protected quality and same-original production-accepted independent review are required; no registry waiver.");
         var gates = paired.Value.Gates; var accepted = paired.Value.Accepted; var policy = paired.Value.Policy;
@@ -68,7 +76,10 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
             accepted.Patch.HeadCommit, accepted.Patch.HeadTree, policy, gates, ReviewReceipt: accepted.Receipt);
         async Task Verify()
         {
-            Current();
+            // The pair's very next operation reads this same actual config,
+            // profiles and owner approval under admission. Keep the owner guard
+            // here without a duplicate, adjacent configuration-only row.
+            CheckOwner();
             var current = await quality.LocalRealEvidenceWithReviewAsync(frame, parent, review).ConfigureAwait(false);
             if (current is null || !ReferenceEquals(current.Value.Accepted, accepted) ||
                 current.Value.Policy.Identity != policy.Identity || !gates.Select(row => row.Identity).SequenceEqual(current.Value.Gates.Select(row => row.Identity)))
@@ -86,17 +97,19 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
         BoundedFiles.Separate(actualStoreRoot, output);
         parent.EnterSynchronous(frame.RunId, () =>
         {
-            Current(); BoundedFiles.Plain(output, true);
+            CurrentWithinAdmittedEffect(); BoundedFiles.Plain(output, true);
             if (Directory.Exists(output) || File.Exists(output)) throw new IOException("Fresh local-real result namespace required; no adoption.");
             Directory.CreateDirectory(output); original.Check(); return true;
         });
         parent.EnterSynchronous(frame.RunId, () =>
         {
-            Current(); BoundedFiles.WriteNew(Path.Combine(output, "selection.json"), JsonSerializer.SerializeToUtf8Bytes(
+            CurrentWithinAdmittedEffect(); BoundedFiles.WriteNew(Path.Combine(output, "selection.json"), JsonSerializer.SerializeToUtf8Bytes(
                 new RunSelection(frame.RunId, actualStoreRoot, assignment.Repository, assignment.ParentCheckout, assignment.AuthorizationCeiling, assignment.PlanIdentity), BoundedFiles.Json), original);
-            Current(); return true;
+            CurrentWithinAdmittedEffect(); return true;
         });
-        var journal = new LocalJournal(output, original, parent, frame.RunId, Current);
+        // This journal invokes the same full guard only inside its own admitted
+        // synchronous file effect; do not enroll a second row for that guard.
+        var journal = new LocalJournal(output, original, parent, frame.RunId, CurrentWithinAdmittedEffect);
         var published = await LocalRealFakePublication.ExecuteAsync(frame.RunId, frozen.Identity, evidence, accepted.Receiver,
             original, parent, Verify, journal).ConfigureAwait(false);
         if (published.Outcome != PublicationOutcome.PublishedFixture || published.Realm != PublicationRealm.Fixture || published.Receipt is null)
@@ -108,7 +121,7 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
         var path = Path.Combine(output, "local-real-receipt.json");
         parent.EnterSynchronous(frame.RunId, () =>
         {
-            Current();
+            CurrentWithinAdmittedEffect();
             BoundedFiles.WriteNew(path, JsonSerializer.SerializeToUtf8Bytes(new
             {
                 Kind = "ActualInstalledLocalRealChainData-v1",
@@ -135,7 +148,7 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
                 SchedulingCertified = false,
                 WholeIssueCertified = false
             }, BoundedFiles.Json), original);
-            Current(); return true;
+            CurrentWithinAdmittedEffect(); return true;
         });
         await Verify().ConfigureAwait(false);
         return new("COMPLETE", "ACTUAL_LOCAL_REAL_CHAIN_PASSED", "Actual worker, protected quality/baseline and production-accepted independent review passed with local fake publication; scheduling, recovery and production publication remain separate.", new { frame.RunId, Receipt = path, RunDirectory = output, FakePublication = true, RemoteWrites = 0, RecoveryCertified = false, SchedulingCertified = false });

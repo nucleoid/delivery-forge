@@ -69,7 +69,10 @@ internal static class LocalRealFakePublication
             await Append(intent with { State = PublicationIntentState.Sent }).ConfigureAwait(false); sent = true;
             await Verify().ConfigureAwait(false);
             var mutation = await parent.EnterAsync(runId, () => adapter.CreateOrUpdatePrAsync(new(intent, intent.BaseCommit), original.Token)).ConfigureAwait(false);
-            await Verify().ConfigureAwait(false);
+            // Both operations use ONLY this private in-memory adapter. Keep
+            // live production barriers between them; the full source proof
+            // below follows readback and precedes every durable receipt write.
+            Barrier();
             var readback = await parent.EnterAsync(runId, () => adapter.ReadAsync(target, key, original.Token)).ConfigureAwait(false);
             Current();
             if (mutation.Outcome != GitHostMutationOutcome.Confirmed || mutation.ResultId is null ||

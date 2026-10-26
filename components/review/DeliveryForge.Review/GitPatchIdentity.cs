@@ -178,12 +178,13 @@ public static partial class GitPatchIdentity
 
     public static async Task<byte[]> ExportVerifiedPatchAsync(ControlledGitEvidenceContext context, PatchIdentity expected, CancellationToken cancellationToken = default)
     {
-        var current = await ComputeAsync(context, expected.BaseCommit, expected.HeadCommit, expected.PlanIdentity, expected.ArtifactIdentities, cancellationToken).ConfigureAwait(false);
-        if (!ReviewNormalizer.SameIdentity(current, expected)) throw new ReviewPreflightException("Current owned patch differs from the exact review request.");
-        var patch = await ControlledGit(context, DiffArguments.Concat([expected.BaseCommit, expected.HeadCommit, "--"]).ToArray(), cancellationToken).ConfigureAwait(false);
-        if ("sha256:" + Convert.ToHexStringLower(SHA256.HashData(patch.StandardOutput)) != expected.PatchSha256)
+        var current = await ComputeCoreAsync(context, expected.BaseCommit, expected.HeadCommit, expected.PlanIdentity, expected.ArtifactIdentities, cancellationToken).ConfigureAwait(false);
+        if (!ReviewNormalizer.SameIdentity(current.Identity, expected)) throw new ReviewPreflightException("Current owned patch differs from the exact review request.");
+        if ("sha256:" + Convert.ToHexStringLower(SHA256.HashData(current.Patch)) != expected.PatchSha256)
             throw new ReviewPreflightException("Complete exported patch differs from its bound identity.");
-        return patch.StandardOutput;
+        cancellationToken.ThrowIfCancellationRequested();
+        if (context.SourceRealm == ReviewAuthorityRealm.Production) context.CheckOwnedWork?.Invoke();
+        return current.Patch;
     }
 
     public static async Task<PatchIdentity> ComputeAsync(
@@ -193,6 +194,13 @@ public static partial class GitPatchIdentity
         string planIdentity,
         IReadOnlyDictionary<string, string> artifactIdentities,
         CancellationToken cancellationToken = default)
+        => (await ComputeCoreAsync(context, baseCommit, headCommit, planIdentity, artifactIdentities, cancellationToken).ConfigureAwait(false)).Identity;
+
+    // Return bytes from this invocation's actual diff only after reconstruction
+    // and both full source checks. No cross-invocation snapshot is retained.
+    private static async Task<(PatchIdentity Identity, byte[] Patch)> ComputeCoreAsync(
+        ControlledGitEvidenceContext context, string baseCommit, string headCommit, string planIdentity,
+        IReadOnlyDictionary<string, string> artifactIdentities, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(context);
         ArgumentNullException.ThrowIfNull(artifactIdentities);
@@ -255,7 +263,7 @@ public static partial class GitPatchIdentity
             $"--work-tree={context.SourceRoot}",
             .. args
         ];
-        return ReviewNormalizer.Freeze(new PatchIdentity(
+        return (ReviewNormalizer.Freeze(new PatchIdentity(
             baseCommit,
             headCommit,
             headTree,
@@ -264,7 +272,7 @@ public static partial class GitPatchIdentity
             artifactIdentities.OrderBy(pair => pair.Key, StringComparer.Ordinal)
                 .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal),
             version,
-            recorded));
+            recorded)), patch.StandardOutput);
     }
 
     private static async Task ValidateControlledMetadataAsync(ControlledGitEvidenceContext context, CancellationToken token)
@@ -373,11 +381,19 @@ public static partial class GitPatchIdentity
             throw new ReviewPreflightException("Worker HEAD changed after the parent-owned source snapshot was frozen.");
 
         var indexPath = Path.Combine(context.WorkerGitDirectory, "index");
-        if (!(context.SourceRealm == ReviewAuthorityRealm.Production ? context.EnterOwnedSynchronous(() => File.Exists(indexPath)) : File.Exists(indexPath)))
-            throw new ReviewPreflightException("Worker index is unavailable for source snapshot verification.");
-        var indexBytes = context.SourceRealm == ReviewAuthorityRealm.Production
-            ? await ReadOwnedBoundedAsync(context, indexPath, 16 * 1024 * 1024, cancellationToken).ConfigureAwait(false)
-            : await File.ReadAllBytesAsync(indexPath, cancellationToken);
+        // The actual bounded open below refuses a missing index. A separate
+        // positive File.Exists observation grants no authority to that open.
+        byte[] indexBytes;
+        try
+        {
+            indexBytes = context.SourceRealm == ReviewAuthorityRealm.Production
+                ? await ReadOwnedBoundedAsync(context, indexPath, 16 * 1024 * 1024, cancellationToken).ConfigureAwait(false)
+                : await File.ReadAllBytesAsync(indexPath, cancellationToken);
+        }
+        catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException)
+        {
+            throw new ReviewPreflightException("Worker index is unavailable for source snapshot verification.", error);
+        }
         var currentIndexHash = SHA256.HashData(indexBytes);
         if (!CryptographicOperations.FixedTimeEquals(currentIndexHash, context.WorkerIndexHash))
             throw new ReviewPreflightException("Worker index changed after the parent-owned source snapshot was frozen.");
