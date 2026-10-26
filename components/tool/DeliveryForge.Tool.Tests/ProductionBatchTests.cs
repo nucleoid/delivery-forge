@@ -570,7 +570,10 @@ public sealed class ProductionBatchTests
             [new("test", new("dotnet", [PlanCommandArgument.Literal("test")]), "PASS")],
             new("additive", "none", "none", "none", "none", "none", "receipt", "revert", []), [], IntakePlanner.Assess(request, evidence)), "deadline-fixture", now);
         using var original = new ToolLifetime(TimeSpan.FromSeconds(1200), cancellation);
-        var reader = new GitRepositoryContextReader(git, executor, original);
+        // Ordinary Linux CI has no admitted creation-owned native scope. Its real
+        // Git fixture exercises the shared scheduler clock, not Linux native ownership.
+        // Windows retains the production-equivalent original-bound Git reader.
+        var reader = OperatingSystem.IsLinux() ? planningReader : new GitRepositoryContextReader(git, executor, original);
         var work = original.WorkLimit; var whole = original.WholeLimit; var started = original.OriginalStarted; var token = original.Token;
         var store = new RunStore(Path.Combine(root, "store")); var worktrees = new WorktreeManager(git);
         await using var processes = new ProcessControl(); using var coordinator = new ExecutionCoordinator(store, worktrees, processes);
