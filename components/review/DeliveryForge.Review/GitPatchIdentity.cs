@@ -58,7 +58,8 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         Func<string, int, CancellationToken, Task<byte[]>>? readOwnedFile = null,
         OwnedReviewSourceSnapshot? ownedSourceSnapshot = null,
         Action? disposeOwnedWork = null,
-        Action<bool>? checkDisposition = null)
+        Action<bool>? checkDisposition = null,
+        Action<ControlledGitEvidenceContext, IReadOnlyList<string>>? retireOwnedIndexScratch = null)
     {
         SourceRoot = Path.GetFullPath(sourceRoot);
         WorkerGitDirectory = Path.GetFullPath(workerGitDirectory);
@@ -80,6 +81,7 @@ public sealed class ControlledGitEvidenceContext : IDisposable
         MayCleanOwnedFiles = mayCleanOwnedFiles;
         CheckOwnedWork = checkOwnedWork;
         DeleteOwnedScratch = deleteOwnedScratch;
+        RetireOwnedIndexScratch = retireOwnedIndexScratch;
         OwnedSynchronous = ownedSynchronous;
         ReadOwnedFile = readOwnedFile;
         OwnedSourceSnapshot = ownedSourceSnapshot;
@@ -102,6 +104,7 @@ public sealed class ControlledGitEvidenceContext : IDisposable
     internal Func<bool>? MayCleanOwnedFiles { get; }
     internal Action? CheckOwnedWork { get; }
     internal Action<string>? DeleteOwnedScratch { get; }
+    internal Action<ControlledGitEvidenceContext, IReadOnlyList<string>>? RetireOwnedIndexScratch { get; }
     internal Func<Func<object?>, object?>? OwnedSynchronous { get; }
     internal Func<string, int, CancellationToken, Task<byte[]>>? ReadOwnedFile { get; }
     internal OwnedReviewSourceSnapshot? OwnedSourceSnapshot { get; }
@@ -539,13 +542,17 @@ public static partial class GitPatchIdentity
                     // Failed verification deliberately keeps its bounded evidence.
                     if (verified)
                     {
-                        if (context.MayCleanOwnedFiles?.Invoke() != true || context.DeleteOwnedScratch is null)
+                        if (context.MayCleanOwnedFiles?.Invoke() != true ||
+                            context.RetireOwnedIndexScratch is null && context.DeleteOwnedScratch is null)
                             throw new ReviewPreflightException("Original patch scratch remains retained; retirement is not authorized.");
-                        foreach (var path in paths)
-                        {
-                            context.DeleteOwnedScratch(path);
-                            context.ScratchRetired(path);
-                        }
+                        if (context.RetireOwnedIndexScratch is { } retire)
+                            retire(context, paths);
+                        else
+                            foreach (var path in paths)
+                            {
+                                context.DeleteOwnedScratch!(path);
+                                context.ScratchRetired(path);
+                            }
                     }
                 }
                 else

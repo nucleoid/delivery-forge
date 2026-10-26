@@ -51,6 +51,7 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
             return ToolResult.Incomplete("LOCAL_REAL_PR_CEILING_REQUIRED", "Local fake publication still requires the original immutable PR ceiling and protected policy; no ceiling is raised.");
         void CheckOwner()
         {
+            quality.RequireLocalRealConfiguration(frame, configuration, configurationPin, original);
             original.Check(); parent.CheckCurrent(frame.RunId);
             if (!ReferenceEquals(frame.Lifetime, original) || frame.RunId != assignment.RunId || !frame.OwnerCompleted || frame.OwnerStopped ||
                 frame.Primary is not null || frame.Post is not null || frame.InvocationUnknown || frame.EnteredTasks.Any(task => !task.IsCompleted) ||
@@ -61,10 +62,6 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
         {
             CheckOwner();
             _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
-        }
-        void Current()
-        {
-            parent.EnterSynchronous(frame.RunId, () => { CurrentWithinAdmittedEffect(); return true; });
         }
         CheckOwner();
         var paired = await quality.LocalRealEvidenceWithReviewAsync(frame, parent, review).ConfigureAwait(false);
@@ -84,11 +81,13 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
             if (current is null || !ReferenceEquals(current.Value.Accepted, accepted) ||
                 current.Value.Policy.Identity != policy.Identity || !gates.Select(row => row.Identity).SequenceEqual(current.Value.Gates.Select(row => row.Identity)))
                 throw new WorkerEnvelopeException("Private live local-real acceptance/current immutable evidence changed.");
-            Current();
+            // ReadCompletedEvidence just read this exact config after its
+            // receipts in the same admission. Keep the owner barrier here.
+            CheckOwner();
         }
-        // The full pair above is already fresh; only immutable managed evidence
-        // was assembled since it returned. Keep the live guard before effects.
-        Current();
+        // The directory admission below reads the same config before birth;
+        // only managed transition/path checks intervene.
+        CheckOwner();
         // The production receiver rejects Test/fixture acceptance before even a
         // local result directory or journal can be created.
         WorkflowTransition.EnsureAllowed(WorkflowState.Evaluating, WorkflowState.IndependentReview, evidence, accepted.Receiver);
@@ -117,7 +116,7 @@ internal sealed class LocalRealGoldenOwner(TrustedConfiguration configuration, A
         // ExecuteAsync ends with the same full Verify after confirmed readback.
         // Only its immutable result tuple was inspected here, so retain the live
         // guard without recomputing the identical pair before this summary.
-        Current();
+        CheckOwner();
         var path = Path.Combine(output, "local-real-receipt.json");
         parent.EnterSynchronous(frame.RunId, () =>
         {

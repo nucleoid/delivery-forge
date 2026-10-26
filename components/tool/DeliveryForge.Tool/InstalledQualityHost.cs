@@ -99,6 +99,12 @@ internal sealed class InstalledQualityHost
     internal bool MatchesRetained(HostBridgeFrame frame, TrustedConfiguration? config, ToolLifetime? life) =>
         ReferenceEquals(life, original) && ReferenceEquals(config, boundConfiguration) && frozen is not null && assignment is not null &&
         frame.RunId == assignment.RunId && ReferenceEquals(frame.Lifetime, original) && frame.Request?.PlanIdentity == assignment.PlanIdentity;
+    internal void RequireLocalRealConfiguration(HostBridgeFrame frame, TrustedConfiguration actualConfiguration,
+        AdmissionFile actualPin, ToolLifetime actualOriginal)
+    {
+        if (!MatchesRetained(frame, actualConfiguration, actualOriginal) || configurationPin != actualPin)
+            throw new WorkerEnvelopeException("Local-real pair requires the same original frame/configuration pin.");
+    }
     void RequireCurrentInputs(HostBridgeFrame frame, AgentCompletionReceipt actualCompletion, ParentCoordinationHost parent)
     {
         original.Check();
@@ -286,6 +292,9 @@ internal sealed class InstalledQualityHost
         {
             var receipts = selection.Gates.Select(gate => DeliveryForge.Contracts.Validation.ContractValidator.ParseAndValidate(
                 InstalledHostAdmission.ReadExact(gateReceiptPins[gate.GateId], original, 1048576))).ToArray();
+            // Closing same-config observation for the fresh quality/review pair;
+            // no mutable effect intervenes before the caller's owner barrier.
+            _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
             original.Check(); return Array.AsReadOnly(receipts);
         });
     }

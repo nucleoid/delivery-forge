@@ -210,6 +210,31 @@ public sealed class ProductionReviewFiniteAdmissionTests
             // three fused checks straddled only immutable managed data/lookup.
             // It is a real native source-control budget regression, not a
             // substitute for quality/reviewer/full installed acceptance.
+            // This is the actual retained native bootstrap, not a constructed
+            // DATA context or a new owner factory. Reflection only registers
+            // test scratch DATA on that existing private context.
+            var registerScratch = typeof(ControlledGitEvidenceContext).GetMethod("RegisterScratch",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+            Assert.NotNull(registerScratch);
+            string[] IndexScratch()
+            {
+                var reverse = Path.Combine(bootstrap.ObjectView.ControlledGitDirectory, "delivery-forge-review-index-" + Guid.NewGuid().ToString("N"));
+                var forward = Path.Combine(bootstrap.ObjectView.ControlledGitDirectory, "delivery-forge-review-index-" + Guid.NewGuid().ToString("N"));
+                var selected = new[] { reverse, reverse + ".lock", forward, forward + ".lock" };
+                foreach (var path in selected) File.WriteAllText(path, "actual owned index retirement bytes");
+                _ = registerScratch.Invoke(bootstrap.ObjectView, [selected]);
+                return selected;
+            }
+            if (allGoldenChecks)
+            {
+                var selected = IndexScratch(); var before = parent.EnteredCount;
+                owner.RetireIndexScratchSet(bootstrap.ObjectView, selected);
+                await Task.WhenAll(parent.OriginalObservers).WaitAsync(original.Remaining, original.Token);
+                Assert.Equal(before + 1, parent.EnteredCount);
+                Assert.Empty(bootstrap.ObjectView.RetainedScratchPaths);
+                Assert.All(selected, path => Assert.False(File.Exists(path)));
+                Assert.True(parent.AllKnownSettled); Assert.True(current); Assert.False(owner.Uncertain);
+            }
             var counts = new List<int> { parent.EnteredCount };
             var patch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, baseCommit, head,
                 planIdentity, new Dictionary<string, string>(), TestContext.Current.CancellationToken);
@@ -229,6 +254,28 @@ public sealed class ProductionReviewFiniteAdmissionTests
             Assert.InRange(parent.EnteredCount, 1, 1023); Assert.True(parent.AllKnownSettled);
             TestContext.Current.TestOutputHelper!.WriteLine($"Actual linked object files={objectFiles}; finite parent effects={parent.EnteredCount}/1024.");
             var controlledView = bootstrap.ObjectView.ControlledGitDirectory;
+            if (!allGoldenChecks)
+            {
+                // Windows denies the THIRD actual deletion while the exact
+                // test-owned stream is open without FileShare.Delete. The
+                // successful prefix must retire, and failure/suffix survive.
+                var selected = IndexScratch(); var before = parent.EnteredCount;
+                using (var held = new FileStream(selected[2], FileMode.Open, FileAccess.Read, FileShare.Read))
+                {
+                    var failure = Assert.ThrowsAny<IOException>(() => owner.RetireIndexScratchSet(bootstrap.ObjectView, selected));
+                    Assert.Equal(before + 1, parent.EnteredCount);
+                    Assert.False(File.Exists(selected[0])); Assert.False(File.Exists(selected[1]));
+                    Assert.True(File.Exists(selected[2])); Assert.True(File.Exists(selected[3]));
+                    Assert.Equal(selected.Skip(2).Order(StringComparer.Ordinal),
+                        bootstrap.ObjectView.RetainedScratchPaths.Order(StringComparer.Ordinal));
+                    Assert.Equal(bootstrap.ObjectView.RetainedScratchPaths.Order(StringComparer.Ordinal),
+                        Assert.IsType<string[]>(failure.Data["RetainedProductionReviewScratch"]).Order(StringComparer.Ordinal));
+                }
+                bootstrap.Dispose(); Assert.False(bootstrap.ActualDispositionReturned);
+                Assert.True(Directory.Exists(controlledView));
+                TestContext.Current.TestOutputHelper!.WriteLine("Expected failed retirement; exact view and suffix retained: " + controlledView);
+                return;
+            }
             bootstrap.DisposeDuringWork(); bootstrap.DisposeDuringWork(); bootstrap.Dispose();
             original.Check(); Assert.False(Directory.Exists(controlledView));
             Assert.True(parent.AllKnownSettled); Assert.False(original.HasExplicitUnknown);

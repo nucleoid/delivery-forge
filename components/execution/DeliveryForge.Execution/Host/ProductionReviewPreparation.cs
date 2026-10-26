@@ -352,6 +352,45 @@ public sealed partial class ProductionReviewSourceOwner
         }
         catch (Exception failure) { failure.Data["RetainedProductionReviewScratch"] = path; throw; }
     }
+    // Only the two registered reconstruction indices and their lock companions.
+    // This groups synchronous retirement, never native dispatch or an admitted
+    // scope that can escape across an await. Each path keeps its own postcheck.
+    internal void RetireIndexScratchSet(ControlledGitEvidenceContext view, IReadOnlyList<string> paths)
+    {
+        ArgumentNullException.ThrowIfNull(view); ArgumentNullException.ThrowIfNull(paths);
+        Check();
+        var batch = paths.ToArray();
+        const string prefix = "delivery-forge-review-index-";
+        static bool Stem(string name) => name.StartsWith(prefix, StringComparison.Ordinal) &&
+            name.Length == prefix.Length + 32 && name.Skip(prefix.Length).All(char.IsAsciiHexDigitLower);
+        var registered = view.RetainedScratchPaths.ToHashSet(StringComparer.Ordinal);
+        if (controlled is null || !ReferenceEquals(view.OwnedGit?.Target, this) ||
+            !SamePath(view.ControlledGitDirectory, controlled) || batch.Length != 4 ||
+            batch.Distinct(StringComparer.Ordinal).Count() != 4 ||
+            !Stem(Path.GetFileName(batch[0])) || !Stem(Path.GetFileName(batch[2])) ||
+            batch[1] != batch[0] + ".lock" || batch[3] != batch[2] + ".lock" ||
+            batch.Any(path => !registered.Contains(path) || !SamePath(Path.GetDirectoryName(path)!, controlled)))
+            throw new ReviewPreflightException("Exact original registered index scratch set required.");
+        try
+        {
+            EnterSynchronous(() =>
+            {
+                foreach (var path in batch)
+                {
+                    Check();
+                    if (!MayCleanOwnedFiles) throw new ReviewPreflightException("Original native scope is active; scratch retained.", residualProcessUncertain: true);
+                    Plain(path); if (File.Exists(path)) File.Delete(path);
+                    Check(); view.ScratchRetired(path);
+                }
+                return true;
+            });
+            Check();
+        }
+        catch (Exception failure)
+        {
+            failure.Data["RetainedProductionReviewScratch"] = view.RetainedScratchPaths.ToArray(); throw;
+        }
+    }
     // Pre-claim lifecycle validation, not a promise of retryable WORK. Its
     // actual admitted synchronous WORK refusal may revoke parent WORK while
     // leaving disposition unclaimed for an existing valid cleanup path.
@@ -624,7 +663,7 @@ public sealed partial class ReviewAuthorityHost
                     SHA256.HashData(index), issuer, () => owner.DisposeView(controlled), ownedGit: owner.GitAsync,
                     mayCleanOwnedFiles: () => owner.MayCleanOwnedFiles, checkOwnedWork: owner.Check, deleteOwnedScratch: owner.DeleteScratch,
                     ownedSynchronous: owner.EnterSynchronousObject, readOwnedFile: owner.ReadFileAsync, ownedSourceSnapshot: owner.VerifySourceSnapshotAsync, disposeOwnedWork: () => owner.DisposeView(controlled, cleanup: false),
-                    checkDisposition: owner.CheckViewDisposition);
+                    checkDisposition: owner.CheckViewDisposition, retireOwnedIndexScratch: owner.RetireIndexScratchSet);
                 _ = await GitPatchIdentity.ComputeAsync(view, owner.BaseCommit, owner.HeadCommit, plan.Identity, new Dictionary<string, string>(), cancellationToken).ConfigureAwait(false);
                 var source = new ProtectedReviewSourceContext(view, owner.BaseCommit, rootId);
                 var policy = await new ProtectedReviewPolicyResolver(source).ResolveBoundedAsync(relativePolicyPath, TimeSpan.FromSeconds(15), cancellationToken).ConfigureAwait(false);
