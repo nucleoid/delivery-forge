@@ -21,8 +21,8 @@ internal sealed class InstalledQualityHost
     FrozenPlan? frozen; FrozenWorkerPlan? assignment; TrustedConfiguration? boundConfiguration; bool entered;
     readonly List<GateRunResult> results = [];
     internal IReadOnlyList<GateRunResult> RetainedResults => results.ToArray();
-    readonly Dictionary<string, GateRunResult> gateResults = new(StringComparer.Ordinal);
-    readonly Dictionary<string, AdmissionFile> gateReceiptPins = new(StringComparer.Ordinal);
+    sealed record CompletedQualityBinding(GateRunResult Result, AdmissionFile Receipt, JsonElement ToolProvenance);
+    readonly Dictionary<string, CompletedQualityBinding> gateBindings = new(StringComparer.Ordinal);
     HostBridgeFrame? protectedCompletedFrame;
     AgentCompletionReceipt? protectedCompletedWorker;
     FileSnapshot? completedWorkerSnapshot;
@@ -163,25 +163,29 @@ internal sealed class InstalledQualityHost
         // The actual containing frame enrolls each complete parent-admitted Task before await.
         foreach (var gate in selection.Gates)
         {
-            var result = await frame.Enter(async () =>
+            var completedGate = await frame.Enter(async () =>
             {
                 await CurrentAsync(frame, completion, parent).ConfigureAwait(false);
                 var selectedProfile = parent.EnterSynchronous(run.RunId, () =>
                 {
                     _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
-                    _ = InstalledHostAdmission.ReadExact(gate.Profile, original, 1048576);
+                    var profileBytes = InstalledHostAdmission.ReadExact(gate.Profile, original, 1048576);
                     var profile = actualTools.LoadProfile(gate.Profile.Path, "sha256:" + gate.Profile.Sha256);
                     if (profile.Fixture || profile.Tool != gate.Tool) throw new ToolUsageException("Exact nonfixture selected producer required; no fixture flag flip.");
                     BoundedFiles.WriteNew(Path.Combine(output, gate.GateId + "-started.json"), JsonSerializer.SerializeToUtf8Bytes(new { run.RunId, run.PlanIdentity, run.BaseCommit, completion.HeadCommit, completion.TreeId, gate.GateId, gate.Profile, Policy = selection.PolicyIdentity }), original);
-                    return profile;
+                    return (Profile: profile, Bytes: profileBytes);
                 });
-                return await actualTools.RunAsync(run.Worktree, run.BaseCommit, selection.PolicyRelativePath, selection.PolicyIdentity,
-                    selectedProfile, gate.GateId, new(run.BaseCommit, completion.HeadCommit, completion.TreeId, true), gate.Scope,
+                var actualResult = await actualTools.RunAsync(run.Worktree, run.BaseCommit, selection.PolicyRelativePath, selection.PolicyIdentity,
+                    selectedProfile.Profile, gate.GateId, new(run.BaseCommit, completion.HeadCommit, completion.TreeId, true), gate.Scope,
                     gate.ProjectRelativePath, TimeSpan.FromSeconds(gate.MaximumSeconds), output, original.Token,
                     gate.Tool == "crap4csharp" ? selection.Registry : null).ConfigureAwait(false);
+                var provenance = actualResult.Outcome == GateOutcome.Pass
+                    ? ReviewGateReceiptEvidence.CreateToolProvenance(gate, selectedProfile.Bytes, actualResult)
+                    : (JsonElement?)null;
+                return (Result: actualResult, Provenance: provenance);
             }).ConfigureAwait(false);
+            var result = completedGate.Result;
             results.Add(result);
-            gateResults.Add(gate.GateId, result);
             if (gate.Tool == "crap4csharp" && !result.SourceChanged && !result.Fixture &&
                 result.Outcome is GateOutcome.Pass or GateOutcome.Fail or GateOutcome.NotApplicable)
                 completedOutputs = new(actualTools, result, original, parent, run.RunId, run.Worktree,
@@ -195,7 +199,7 @@ internal sealed class InstalledQualityHost
                     _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);
                     _ = InstalledHostAdmission.ReadExact(gate.Profile, original, 1048576);
                     var bytes = BoundedFiles.Read(result.ReceiptPath, original, 1048576);
-                    gateReceiptPins.Add(gate.GateId, new(result.ReceiptPath, bytes.LongLength, BoundedFiles.Sha(bytes)));
+                    gateBindings.Add(gate.GateId, new(result, new(result.ReceiptPath, bytes.LongLength, BoundedFiles.Sha(bytes)), completedGate.Provenance ?? default));
                     BoundedFiles.WriteNew(Path.Combine(output, gate.GateId + "-settled.json"), JsonSerializer.SerializeToUtf8Bytes(new { run.RunId, run.PlanIdentity, run.BaseCommit, completion.HeadCommit, completion.TreeId, gate.GateId, Outcome = result.Outcome.ToString(), result.Fixture, result.ProductionCapable, Receipt = new AdmissionFile(result.ReceiptPath, bytes.LongLength, BoundedFiles.Sha(bytes)), BaselineApproved = false, ProductionAuthority = false }), original);
                     return true;
                 });
@@ -211,7 +215,7 @@ internal sealed class InstalledQualityHost
         if (selection.Registry is null)
             return ToolResult.Incomplete("PROTECTED_BASELINE_REGISTRY_REQUIRED", "Current installed gates are advisory until an independent owner approves the exact complete protected registry artifact identity.", new { run.RunId, Receipts = results.Select(r => r.ReceiptPath).ToArray() });
         var crapGateId = selection.Gates.Single(g => g.Tool == "crap4csharp").GateId;
-        var crapResult = gateResults[crapGateId];
+        var crapResult = gateBindings[crapGateId].Result;
         var comparison = await frame.Enter(async () =>
         {
             await CurrentAsync(frame, completion, parent).ConfigureAwait(false);
@@ -253,6 +257,32 @@ internal sealed class InstalledQualityHost
         sourceOwner.BindCompletedQualityOutputs(completedOutputs);
     }
 
+    // Presentation from the existing private completed bindings; no new profile,
+    // image or Git reads, and no caller JSON may populate this cache.
+    internal JsonElement CompletedReviewToolProvenance(HostBridgeFrame frame, IReadOnlyList<GateRunResult> supplied)
+    {
+        original.Check();
+        if (!ReferenceEquals(protectedCompletedFrame, frame) || protectedCompletedWorker is null ||
+            protectedCompletion is not { } accepted || !ReferenceEquals(frame.Lifetime, original))
+            throw new WorkerEnvelopeException("Review tool provenance requires the same protected completed quality original.");
+        ReviewGateReceiptEvidence.RequireRetainedResults(accepted.Results, supplied);
+        ValidateProtectedQualityTuple(selection, accepted.Comparison,
+            new(assignment!.BaseCommit, protectedCompletedWorker.HeadCommit, protectedCompletedWorker.TreeId, true), accepted.Results);
+        if (selection.Gates.Any(gate => !gateBindings.TryGetValue(gate.GateId, out var binding) ||
+            !accepted.Results.Any(row => ReferenceEquals(row, binding.Result)) || binding.ToolProvenance.ValueKind != JsonValueKind.Object))
+            throw new WorkerEnvelopeException("Actual completed tool provenance binding is absent or changed.");
+        return JsonSerializer.SerializeToElement(new
+        {
+            Kind = "SameOriginalParentSelectedQualityTools-v1",
+            Configuration = new { configurationPin.Bytes, Sha256 = "sha256:" + configurationPin.Sha256 },
+            selection.PolicyIdentity,
+            ProtectedComparison = new { accepted.Comparison.Outcome, accepted.Comparison.RegistryCommit, accepted.Comparison.RegistryIdentity },
+            Gates = selection.Gates.Select(gate => gateBindings[gate.GateId].ToolProvenance).ToArray(),
+            Qualification = "Parent-selected private installed producer metadata, actual completed gate bindings and separately checked protected comparison. Source-build history and full production certification are not asserted.",
+            PublicationAuthority = false
+        }, BoundedFiles.Json);
+    }
+
     internal async Task<IReadOnlyList<DeliveryForge.Contracts.Validation.ValidatedContract>?> LocalRealEvidenceAsync(HostBridgeFrame frame, ParentCoordinationHost parent)
     {
         if (!ReferenceEquals(protectedCompletedFrame, frame) || protectedCompletedWorker is null ||
@@ -283,15 +313,15 @@ internal sealed class InstalledQualityHost
     {
         if (!ReferenceEquals(accepted.Registry, selection.Registry) || accepted.PolicyIdentity != selection.PolicyIdentity ||
             results.Count != accepted.Results.Count || results.Where((row, index) => !ReferenceEquals(row, accepted.Results[index])).Any() ||
-            selection.Gates.Any(gate => !gateResults.TryGetValue(gate.GateId, out var result) ||
-                !accepted.Results.Any(row => ReferenceEquals(row, result))))
+            selection.Gates.Any(gate => !gateBindings.TryGetValue(gate.GateId, out var binding) ||
+                !accepted.Results.Any(row => ReferenceEquals(row, binding.Result))))
             throw new WorkerEnvelopeException("Local-real requires the same private actual protected comparison and gate objects.");
         ValidateProtectedQualityTuple(selection, accepted.Comparison,
             new(assignment!.BaseCommit, protectedCompletedWorker!.HeadCommit, protectedCompletedWorker.TreeId, true), accepted.Results);
         return parent.EnterSynchronous(frame.RunId, () =>
         {
             var receipts = selection.Gates.Select(gate => DeliveryForge.Contracts.Validation.ContractValidator.ParseAndValidate(
-                InstalledHostAdmission.ReadExact(gateReceiptPins[gate.GateId], original, 1048576))).ToArray();
+                InstalledHostAdmission.ReadExact(gateBindings[gate.GateId].Receipt, original, 1048576))).ToArray();
             // Closing same-config observation for the fresh quality/review pair;
             // no mutable effect intervenes before the caller's owner barrier.
             _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536);

@@ -129,6 +129,9 @@ internal sealed class InstalledReviewHost : IDisposable
                 ["evidence-policy"] = bootstrap.RootContext.EvidencePolicyIdentity,
                 ["trusted-configuration"] = "sha256:" + configurationPin.Sha256
             };
+            var qualityToolProvenance = completedQuality?.CompletedReviewToolProvenance(frame, actualQualityResults);
+            if (qualityToolProvenance is { } selectedTools)
+                identities.Add("quality-tool-selection", "sha256:" + BoundedFiles.Sha(JsonSerializer.SerializeToUtf8Bytes(selectedTools, BoundedFiles.Json)));
             var qualityEvidence = new List<JsonElement>();
             foreach (var gate in actualQualityResults)
             {
@@ -138,7 +141,7 @@ internal sealed class InstalledReviewHost : IDisposable
                 qualityEvidence.Add(ReviewGateReceiptEvidence.Create(gate.ReceiptPath, bytes));
             }
             var patch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, assignment.BaseCommit, completion.HeadCommit, frozen.ContractIdentity, identities, token).ConfigureAwait(false);
-            var planAndEvidence = JsonSerializer.SerializeToUtf8Bytes(new { FrozenPlan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), QualityEvidence = qualityEvidence, MissingQualityEvidence = actualQualityResults.Count == 0 }, BoundedFiles.Json);
+            var planAndEvidence = JsonSerializer.SerializeToUtf8Bytes(new { FrozenPlan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), QualityEvidence = qualityEvidence, QualityToolProvenance = qualityToolProvenance, MissingQualityEvidence = actualQualityResults.Count == 0 }, BoundedFiles.Json);
             token.ThrowIfCancellationRequested(); sourceOwner.Check(); return (patch, planAndEvidence);
         }
         var userSettings = parent.EnterSynchronous(assignment.RunId, () =>

@@ -535,8 +535,7 @@ public sealed class ProductionBatchTests
     [Fact(Timeout = 150000)]
     public async Task Equal_batch_reservations_do_not_shrink_the_shared_original_or_refuse_the_next_leaf()
     {
-        using var original = new ToolLifetime(TimeSpan.FromSeconds(1200), TestContext.Current.CancellationToken);
-        var work = original.WorkLimit; var whole = original.WholeLimit; var started = original.OriginalStarted; var token = original.Token;
+        var cancellation = TestContext.Current.CancellationToken;
         var root = Path.Combine(Path.GetTempPath(), "forge-batch-reservation-deadline-" + Guid.NewGuid().ToString("N"));
         TestContext.Current.TestOutputHelper!.WriteLine("Retained batch reservation fixture: " + root);
         var repository = Path.Combine(root, "parent"); Directory.CreateDirectory(repository);
@@ -556,19 +555,22 @@ public sealed class ProductionBatchTests
                 ["GIT_NO_REPLACE_OBJECTS"] = "1",
                 ["GIT_TERMINAL_PROMPT"] = "0",
                 ["GIT_OPTIONAL_LOCKS"] = "0"
-            }), original.Remaining, original.Token);
-            original.Check(); Assert.True(result.OwnedProcessQuiescent && result.ExitCode == 0 && !result.TimedOut && !result.Cancelled, root + ": " + result.StandardError);
+            }), TimeSpan.FromSeconds(30), cancellation);
+            Assert.True(result.OwnedProcessQuiescent && result.ExitCode == 0 && !result.TimedOut && !result.Cancelled, root + ": " + result.StandardError);
         }
-        await File.WriteAllTextAsync(Path.Combine(repository, "tracked.txt"), "actual unchanged deadline evidence\n", original.Token);
+        await File.WriteAllTextAsync(Path.Combine(repository, "tracked.txt"), "actual unchanged deadline evidence\n", cancellation);
         await Git("init", "-q", "-b", "main"); await Git("add", "--", "tracked.txt"); await Git("commit", "-q", "-m", "reservation deadline base");
-        var reader = new GitRepositoryContextReader(git, executor, original);
-        var context = await reader.ReadAsync(repository, "refs/heads/main", original.Token);
-        var source = await reader.ReadFileAsync(context, "tracked.txt", original.Token); var now = DateTimeOffset.UtcNow;
+        // Planning setup uses the existing unowned fixture reader; the real original below owns both scheduler reservations.
+        var reader = new GitRepositoryContextReader(git);
+        var context = await reader.ReadAsync(repository, "refs/heads/main", cancellation);
+        var source = await reader.ReadFileAsync(context, "tracked.txt", cancellation); var now = DateTimeOffset.UtcNow;
         var request = new PlanningRequest("fixture/reservation", "#1", "implement", "Exercise shared reservation deadlines", ["tracked.txt"], [], ["No shared endpoint refill"], "implement");
         EvidenceItem[] evidence = [EvidenceItem.FromRepositoryFile(source, now, [])];
         var frozen = PlanFreezer.Freeze(new PlanDraft(request, context, evidence, [new("tracked.txt", "text", "edit")], [new("#1", [], "root")],
             [new("test", new("dotnet", [PlanCommandArgument.Literal("test")]), "PASS")],
             new("additive", "none", "none", "none", "none", "none", "receipt", "revert", []), [], IntakePlanner.Assess(request, evidence)), "deadline-fixture", now);
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(1200), cancellation);
+        var work = original.WorkLimit; var whole = original.WholeLimit; var started = original.OriginalStarted; var token = original.Token;
         var store = new RunStore(Path.Combine(root, "store")); var worktrees = new WorktreeManager(git);
         await using var processes = new ProcessControl(); using var coordinator = new ExecutionCoordinator(store, worktrees, processes);
         var selected = Selection(); var budget = ResourceBudget.Measure(Slots, selected.Policy);

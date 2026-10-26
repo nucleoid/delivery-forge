@@ -70,4 +70,72 @@ public sealed class ReviewGateReceiptEvidenceTests
         Assert.NotEqual(before.GetProperty("ArtifactInventory").GetProperty("CanonicalIdentity").GetString(),
             after.GetProperty("ArtifactInventory").GetProperty("CanonicalIdentity").GetString());
     }
+    // Pure presentation/refusal controls; these tuples cannot issue a completed
+    // installed host binding, accepted quality gate, baseline or native authority.
+    static (InstalledQualityGateSelection Gate, byte[] Profile, DeliveryForge.Evidence.GateRunResult Result) ProducerData()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-review-producer-DATA");
+        var entrypoint = "producer.exe";
+        var image = "sha256:" + new string('a', 64);
+        var profile = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            Tool = "crap4csharp", Fixture = false, InstallationRoot = root,
+            ExecutableRelativePath = entrypoint,
+            Payload = new[] { new { Path = entrypoint, Bytes = 123L, Sha256 = image } },
+            Version = "0.1.0-private+selected-source", SourceCommit = new string('b', 40),
+            PackageVersion = "0.1.0-private", PackageSha256 = "sha256:" + new string('c', 64),
+            ConfigurationRelativePath = "quality/crap.json", ConfigurationSha256 = "sha256:" + new string('d', 64),
+            SdkVersion = "10.0.401", Framework = "net10.0", Runner = "vstest", Collector = "coverlet.collector/6.0.4",
+            Environment = new { DO_NOT_EXPORT = "private-environment-DATA" },
+            Limitations = new[] { "Private selected fixture scope; no source-build receipt or publication authority." }
+        });
+        var gate = new InstalledQualityGateSelection("crap", "crap4csharp",
+            new(Path.Combine(root, "profile.json"), profile.LongLength, BoundedFiles.Sha(profile)), "all", "Tests/Tests.csproj", 450);
+        var repository = new DeliveryForge.Evidence.RepositoryIdentity(new('1', 40), new('2', 40), new('3', 40), true);
+        var actual = new DeliveryForge.Evidence.GateRunResult(DeliveryForge.Evidence.GateOutcome.Pass, "DATA only", false, false, [], false,
+            new(Path.Combine(root, entrypoint), [], root), new(0, "", "", false, false, DateTimeOffset.UtcNow, DateTimeOffset.UtcNow),
+            repository, repository, "sha256:" + new string('e', 64), image, "DATA", "all", new Dictionary<string, string>(), "unissued.json", null);
+        return (gate, profile, actual);
+    }
+
+    [Fact]
+    public void Selected_private_producer_metadata_is_visible_without_exporting_installation_or_environment()
+    {
+        var data = ProducerData();
+        var projection = ReviewGateReceiptEvidence.CreateToolProvenance(data.Gate, data.Profile, data.Result);
+        var producer = projection.GetProperty("Producer");
+        Assert.Equal("0.1.0-private+selected-source", producer.GetProperty("Version").GetString());
+        Assert.Equal(data.Result.CapabilityIdentity, producer.GetProperty("Executable").GetProperty("Sha256").GetString());
+        Assert.Equal("sha256:" + data.Gate.Profile.Sha256, projection.GetProperty("Profile").GetProperty("Sha256").GetString());
+        Assert.Equal("producer.exe", producer.GetProperty("Executable").GetProperty("RelativePath").GetString());
+        Assert.False(projection.GetProperty("ProductionCapable").GetBoolean());
+        Assert.Contains("not imported", projection.GetProperty("Omitted").GetRawText(), StringComparison.Ordinal);
+        Assert.DoesNotContain("private-environment-DATA", projection.GetRawText(), StringComparison.Ordinal);
+        Assert.DoesNotContain("InstallationRoot", projection.GetRawText(), StringComparison.Ordinal);
+        Assert.True(Encoding.UTF8.GetByteCount(projection.GetRawText()) < 4096);
+    }
+
+    [Theory]
+    [InlineData("profile")]
+    [InlineData("image")]
+    [InlineData("entrypoint")]
+    public void Changed_profile_or_actual_image_cannot_be_presented_as_the_selected_producer(string changed)
+    {
+        var data = ProducerData();
+        var profile = data.Profile;
+        var actual = data.Result;
+        if (changed == "profile") profile = [.. profile, (byte)' '];
+        if (changed == "image") actual = actual with { CapabilityIdentity = "sha256:" + new string('f', 64) };
+        if (changed == "entrypoint") actual = actual with { Invocation = actual.Invocation with { FileName = Path.Combine(actual.Invocation.WorkingDirectory, "foreign.exe") } };
+        Assert.Throws<IOException>(() => ReviewGateReceiptEvidence.CreateToolProvenance(data.Gate, profile, actual));
+    }
+
+    [Fact]
+    public void A_value_equal_result_copy_cannot_replace_the_actual_retained_gate_reference()
+    {
+        var data = ProducerData();
+        ReviewGateReceiptEvidence.RequireRetainedResults([data.Result], [data.Result]);
+        Assert.Throws<IOException>(() => ReviewGateReceiptEvidence.RequireRetainedResults([data.Result], [data.Result with { }]));
+    }
+
 }
