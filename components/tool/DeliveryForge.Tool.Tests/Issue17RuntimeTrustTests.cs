@@ -272,8 +272,11 @@ public sealed class Issue17RuntimeTrustTests
         if (reviewerImage)
         {
             var review = config.InstalledReview!; var selectedReviewer = review.IndependentReviewer!;
-            config = config with { InstalledReview = review with
-            { IndependentReviewer = selectedReviewer with { Image = selectedReviewer.Image with { Bytes = oversized } } } };
+            config = config with
+            {
+                InstalledReview = review with
+                { IndependentReviewer = selectedReviewer with { Image = selectedReviewer.Image with { Bytes = oversized } } }
+            };
         }
         else host = host with { Host = host.Host with { Bytes = oversized } };
         Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RuntimeTrust.ImageReadCapacity(host, config));
