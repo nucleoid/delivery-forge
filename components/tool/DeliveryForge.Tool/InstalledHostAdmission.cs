@@ -85,6 +85,29 @@ public sealed partial class InstalledHostAdmission
         }
         if (count != methods.Length) throw new ToolUsageException("Complete actual runtime-trust RPC sequence required.");
     }
+    // Inspect the already-read bytes only. Legacy non-JSON/absent-marker
+    // artifacts retain their admission semantics; marked traces must be confined.
+    internal static void RequireNonDfaConformanceArtifact(byte[] bytes)
+    {
+        JsonDocument document;
+        try { document = JsonDocument.Parse(bytes); }
+        catch (JsonException)
+        {
+            if (bytes.AsSpan().IndexOf("\"ConformanceDangerFullAccess\""u8) >= 0)
+                throw new ToolUsageException("Malformed marked conformance artifact.");
+            return; // Legacy binary/non-JSON artifact without the explicit marker.
+        }
+        using (document)
+        {
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("ConformanceDangerFullAccess", out var marker)) return;
+            try { _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(bytes); }
+            catch (DeliveryForge.Contracts.Serialization.ContractJsonException)
+            { throw new ToolUsageException("Malformed marked conformance artifact."); }
+            if (marker.ValueKind != JsonValueKind.False)
+                throw new ToolUsageException("Sandbox-relaxed conformance cannot admit a production host.");
+        }
+    }
     public static InstalledHostAdmission ReadRootAccepted(AdmissionFile rootPin, TrustedConfiguration config, ToolLifetime original, AdmissionFile? actualConfigurationPin = null)
         => ReadRootAcceptedCore(rootPin, config, original, actualConfigurationPin, null);
     internal static InstalledHostAdmission ReadRootAcceptedForBatch(AdmissionFile rootPin, TrustedConfiguration config, ToolLifetime original,
@@ -104,7 +127,7 @@ public sealed partial class InstalledHostAdmission
         var image = new AdmissionFile(receipt.Host.Executable, receipt.Host.Bytes, receipt.Host.Sha256);
         if (images is null || receipt.RuntimeTrust is null) BoundedFiles.VerifyNativeImage(image, original); else images.Verify(image, original);
         var artifacts = new HashSet<string>(StringComparer.Ordinal); long total = 0; byte[]? routeArtifact = null;
-        foreach (var pin in receipt.Artifacts) { if (pin is null) throw new ToolUsageException("Missing actual conformance artifact."); if (pin.Bytes <= 0 || pin.Bytes > 1048576 || total > 33554432 - pin.Bytes || !artifacts.Add(pin.Sha256)) throw new ToolUsageException("Actual conformance artifacts exceed finite complete profile or collide."); total += pin.Bytes; var raw = ReadExact(pin, original, 1048576); if (receipt.RuntimeTrust is not null && receipt.Cases.Any(row => row is not null && row.Name == "actual_runtime_trust_route" && row.ArtifactSha256 == pin.Sha256)) routeArtifact = raw; }
+        foreach (var pin in receipt.Artifacts) { if (pin is null) throw new ToolUsageException("Missing actual conformance artifact."); if (pin.Bytes <= 0 || pin.Bytes > 1048576 || total > 33554432 - pin.Bytes || !artifacts.Add(pin.Sha256)) throw new ToolUsageException("Actual conformance artifacts exceed finite complete profile or collide."); total += pin.Bytes; var raw = ReadExact(pin, original, 1048576); RequireNonDfaConformanceArtifact(raw); if (receipt.RuntimeTrust is not null && receipt.Cases.Any(row => row is not null && row.Name == "actual_runtime_trust_route" && row.ArtifactSha256 == pin.Sha256)) routeArtifact = raw; }
         RequireConformanceCases(receipt.Cases, artifacts, receipt.RuntimeTrust is not null);
         if (receipt.RuntimeTrust is not null)
         {

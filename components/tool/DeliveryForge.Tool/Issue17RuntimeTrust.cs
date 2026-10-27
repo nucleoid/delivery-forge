@@ -166,7 +166,7 @@ public sealed partial class InstalledHostAdmission
                 _ = ReadExact(root, original, 1048576);
                 _ = ReadExact(configurationPin, original, 65536);
                 _ = ReadExact(ownerDecision, original, 65536);
-                if ((pendingWorktree ?? boundWorktree) is { } checkedWorktree) RefuseRepositoryConfiguration(checkedWorktree);
+                if ((pendingWorktree ?? Volatile.Read(ref boundWorktree)) is { } checkedWorktree) RefuseRepositoryConfiguration(checkedWorktree);
                 RefuseRepositoryConfiguration(configuration.RepositoryRoot);
             }
             catch (Exception primary)
