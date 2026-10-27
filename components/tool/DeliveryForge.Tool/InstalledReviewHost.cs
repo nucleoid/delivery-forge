@@ -129,6 +129,8 @@ internal sealed class InstalledReviewHost : IDisposable
                 ["evidence-policy"] = bootstrap.RootContext.EvidencePolicyIdentity,
                 ["trusted-configuration"] = "sha256:" + configurationPin.Sha256
             };
+            if (actualQualityResults.Count > 2)
+                throw new WorkerEnvelopeException("The bounded independent-review presentation supports at most two actual quality gates.");
             var qualityToolProvenance = completedQuality?.CompletedReviewToolProvenance(frame, actualQualityResults);
             if (qualityToolProvenance is { } selectedTools)
                 identities.Add("quality-tool-selection", "sha256:" + BoundedFiles.Sha(JsonSerializer.SerializeToUtf8Bytes(selectedTools, BoundedFiles.Json)));
@@ -148,11 +150,17 @@ internal sealed class InstalledReviewHost : IDisposable
                 token.ThrowIfCancellationRequested(); sourceOwner.Check(); original.Check();
                 return available;
             }
+            var retainedReceipts = new List<(GateRunResult Gate, byte[] Bytes)>();
             foreach (var gate in actualQualityResults)
             {
                 var bytes = parent.EnterSynchronous(assignment.RunId, () => { token.ThrowIfCancellationRequested(); sourceOwner.Check(); return BoundedFiles.Read(gate.ReceiptPath, original); });
                 token.ThrowIfCancellationRequested();
                 identities.Add("quality-receipt:" + gate.ReceiptPath, "sha256:" + BoundedFiles.Sha(bytes));
+                retainedReceipts.Add((gate, bytes));
+            }
+            // Spend all mandatory receipt reads before optional artifact presentation.
+            foreach (var (gate, bytes) in retainedReceipts)
+            {
                 if (completedQuality is null)
                 {
                     qualityEvidence.Add(ReviewGateReceiptEvidence.Create(gate.ReceiptPath, bytes));

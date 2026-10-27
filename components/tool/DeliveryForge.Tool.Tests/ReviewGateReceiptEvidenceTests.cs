@@ -318,6 +318,7 @@ public sealed class ReviewGateReceiptEvidenceTests
 
     [Theory]
     [InlineData(17, false)]
+    [InlineData(16, false)]
     [InlineData(7, true)]
     public void Required_case_count_or_encoded_contribution_over_profile_is_unavailable_without_truncation(int count, bool longNames)
     {
@@ -329,7 +330,7 @@ public sealed class ReviewGateReceiptEvidenceTests
         Assert.False(required.GetProperty("Presented").GetBoolean());
         Assert.Equal("case-list-exceeds-review-profile", required.GetProperty("Reason").GetString());
         Assert.False(required.TryGetProperty("Tests", out _));
-        Assert.Equal(longNames ? 3 : 2, reads);
+        Assert.Equal(count > 16 ? 2 : 3, reads);
         Assert.True(ReviewGateReceiptEvidence.RequiredTestsBudget.EncodedBytes(required) <= 1024);
     }
 
@@ -344,6 +345,101 @@ public sealed class ReviewGateReceiptEvidenceTests
             (relative, _) => ++reads == 3 ? throw failure : data.Artifacts[relative]));
         Assert.Equal(3, reads);
         Assert.Same(failure, observed);
+    }
+
+    [Fact]
+    public void Required_test_capacity_decline_keeps_all_artifact_io_outside_admission()
+    {
+        var data = RequiredTestsData(); var reads = 0;
+        var budget = new ReviewGateReceiptEvidence.RequiredTestsBudget();
+        var evidence = ReviewGateReceiptEvidence.Create("retained/receipts/current.json", data.Receipt, data.Actual,
+            (relative, _) => { reads++; return data.Artifacts[relative]; }, budget, (_, _) => false);
+        var required = evidence.GetProperty("RequiredTests");
+        Assert.False(required.GetProperty("Presented").GetBoolean());
+        Assert.Equal("artifact-read-credit-unavailable", required.GetProperty("Reason").GetString());
+        Assert.False(required.TryGetProperty("Tests", out _));
+        Assert.Equal(0, reads);
+    }
+
+    [Theory]
+    [InlineData("cancel")]
+    [InlineData("timeout")]
+    [InlineData("disposed")]
+    public void Required_test_capacity_owner_failure_escapes_after_two_admitted_reads(string kind)
+    {
+        var data = RequiredTestsData(); var reads = 0; var checks = 0;
+        Exception failure = kind switch
+        {
+            "cancel" => new OperationCanceledException("actual capacity owner DATA"),
+            "timeout" => new TimeoutException("actual capacity owner DATA"),
+            _ => new ObjectDisposedException("actual capacity owner DATA")
+        };
+        var observed = Record.Exception(() => ReviewGateReceiptEvidence.Create("retained/receipts/current.json", data.Receipt, data.Actual,
+            (relative, _) => { reads++; return data.Artifacts[relative]; }, new(),
+            (_, _) => ++checks == 3 ? throw failure : true));
+        Assert.Equal(2, reads);
+        Assert.Same(failure, observed);
+    }
+
+    [Theory]
+    [InlineData("producer-bundle/inputs/inventory.bin", 2)]
+    [InlineData("producer-bundle/inputs/results.bin", 3)]
+    public void Declined_hash_bound_declared_artifact_escapes_instead_of_hiding_extent_drift(string declined, int expectedReads)
+    {
+        var data = RequiredTestsData(); var reads = 0;
+        var error = Assert.Throws<DeliveryForge.Execution.WorkerEnvelopeException>(() =>
+            ReviewGateReceiptEvidence.Create("retained/receipts/current.json", data.Receipt, data.Actual,
+                (relative, maximum) =>
+                {
+                    reads++;
+                    Assert.True(data.Artifacts[relative].Length <= maximum);
+                    return relative == declined ? null : data.Artifacts[relative];
+                }));
+        Assert.Equal(expectedReads, reads);
+        Assert.Contains("extent or manifest hash differs", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Manifest_without_a_declared_extent_can_decline_its_optional_size_profile()
+    {
+        var data = RequiredTestsData(); var reads = 0;
+        var evidence = ReviewGateReceiptEvidence.Create("retained/receipts/current.json", data.Receipt, data.Actual,
+            (_, _) => { reads++; return null; });
+        var required = evidence.GetProperty("RequiredTests");
+        Assert.Equal(1, reads);
+        Assert.False(required.GetProperty("Presented").GetBoolean());
+        Assert.Equal("artifact-presentation-size-unsupported", required.GetProperty("Reason").GetString());
+        Assert.False(required.TryGetProperty("Tests", out _));
+    }
+
+    [Fact]
+    public void Two_gate_presentations_share_one_read_budget_and_fit_the_actual_nested_prompt_contribution()
+    {
+        var data = RequiredTestsData(); var reads = 0;
+        var budget = new ReviewGateReceiptEvidence.RequiredTestsBudget();
+        JsonElement Create() => ReviewGateReceiptEvidence.Create("retained/receipts/current.json", data.Receipt, data.Actual,
+            (relative, _) => { reads++; return data.Artifacts[relative]; }, budget);
+        var first = Create();
+        Assert.True(first.GetProperty("RequiredTests").GetProperty("Presented").GetBoolean());
+        Assert.Equal(3, reads);
+        var second = Create();
+        Assert.Equal(3, reads);
+        Assert.False(second.GetProperty("RequiredTests").GetProperty("Presented").GetBoolean());
+        Assert.Equal("artifact-read-profile-exceeded", second.GetProperty("RequiredTests").GetProperty("Reason").GetString());
+        Assert.False(second.GetProperty("RequiredTests").TryGetProperty("Tests", out _));
+
+        // Independently measure the real nesting and the second string encoding,
+        // subtracting the same complete carrier with only RequiredTests removed.
+        // Do not reuse RequiredTestsBudget.EncodedBytes for this acceptance check.
+        var quality = new[] { first, second };
+        var without = quality.Select(row => row.EnumerateObject()
+            .Where(field => field.Name != "RequiredTests")
+            .ToDictionary(field => field.Name, field => field.Value.Clone(), StringComparer.Ordinal)).ToArray();
+        var frozenPlan = JsonSerializer.SerializeToElement(new { Kind = "presentation-size-control" });
+        byte[] PromptCarrier(object rows) => JsonSerializer.SerializeToUtf8Bytes(new
+        { prompt = JsonSerializer.Serialize(new { FrozenPlan = frozenPlan, QualityEvidence = rows }, BoundedFiles.Json) });
+        var contribution = PromptCarrier(quality).Length - PromptCarrier(without).Length;
+        Assert.InRange(contribution, 1, 8 * 1024);
     }
 
 }

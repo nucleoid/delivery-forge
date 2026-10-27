@@ -40,6 +40,7 @@ internal static partial class ReviewGateReceiptEvidence
         }
     }
     const string CaseQualification = "Producer-reported retained TRX claims, digest-bound to the actual receipt and cross-checked against producer inventory/execution DATA. The gate does not independently verify these per-case outcomes; this presentation issues no authority or certification.";
+    const string UnavailableQualification = "Optional bounded per-case presentation is unavailable. This absence is not a test failure or a missing gate: the gate outcome, retained receipt and limitations are reported separately. No per-case verification or certification is supplied; assess any material evidence gap from the retained gate evidence.";
     sealed class PresentationUnavailable(string reason) : Exception(reason) { }
     internal static JsonElement Unavailable(string reason)
     {
@@ -48,7 +49,7 @@ internal static partial class ReviewGateReceiptEvidence
         if (reason.Length > 64 || reason.Any(c => c is not (>= 'a' and <= 'z' or >= '0' and <= '9' or '-')))
             reason = "unsupported-presentation";
         var marker = JsonSerializer.SerializeToElement(new
-        { Presented = false, Reason = reason, Qualification = CaseQualification }, BoundedFiles.Json);
+        { Presented = false, Reason = reason, Qualification = UnavailableQualification }, BoundedFiles.Json);
         if (RequiredTestsBudget.EncodedBytes(marker) > 1024)
             throw new InvalidOperationException("Fixed required-test unavailable marker exceeds its closed profile.");
         return marker;
@@ -71,7 +72,7 @@ internal static partial class ReviewGateReceiptEvidence
             hashes.EnumerateObject().Any(row => !actual.ArtifactHashes.TryGetValue(row.Name, out var hash) || hash != row.Value.GetString()))
             throw new WorkerEnvelopeException("Required-test presentation requires the same actual current gate tuple and receipt inventory.");
         if (!hashes.TryGetProperty("producer-bundle/manifest.json", out _)) return Unavailable("no-producer-manifest");
-        byte[] Read(string relative, int maximum)
+        byte[] Read(string relative, int maximum, long? declaredLength = null)
         {
             if (!relative.StartsWith("producer-bundle/", StringComparison.Ordinal) || relative.Contains('\\') || relative.Contains(':') ||
                 relative.Split('/').Any(part => part is "" or "." or "..") || !hashes.TryGetProperty(relative, out var expected))
@@ -80,6 +81,8 @@ internal static partial class ReviewGateReceiptEvidence
             Need(hasReadCapacity is null || hasReadCapacity(checked(2 * budget.ReadsRemaining), checked((long)budget.BytesRemaining + budget.ReadsRemaining)), "artifact-read-credit-unavailable");
             maximum = Math.Min(maximum, budget.BytesRemaining);
             var bytes = readArtifact(relative, maximum);
+            if (bytes is null && declaredLength is { } length && length <= maximum)
+                throw new WorkerEnvelopeException("Required-test artifact extent or manifest hash differs.");
             Need(bytes is not null, "artifact-presentation-size-unsupported");
             budget.ReadCompleted(bytes!.Length);
             if (bytes.Length > maximum || "sha256:" + BoundedFiles.Sha(bytes) != expected.GetString())
@@ -104,7 +107,7 @@ internal static partial class ReviewGateReceiptEvidence
             {
                 var length = Integer(row, "length");
                 Need(length is > 0 and <= ReviewArtifactMaximum && length <= budget.BytesRemaining, "artifact-presentation-size-unsupported");
-                var bytes = Read("producer-bundle/" + Text(row, "locator"), ReviewArtifactMaximum);
+                var bytes = Read("producer-bundle/" + Text(row, "locator"), ReviewArtifactMaximum, length);
                 if (bytes.LongLength != length || BoundedFiles.Sha(bytes) != Text(row, "sha256"))
                     throw new WorkerEnvelopeException("Required-test artifact extent or manifest hash differs.");
                 return bytes;
