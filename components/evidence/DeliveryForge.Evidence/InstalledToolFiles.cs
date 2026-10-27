@@ -237,9 +237,19 @@ internal sealed class InstalledToolFiles(TimeSpan budget, CancellationToken toke
     {
         if (!Path.IsPathFullyQualified(path)) throw new EvidenceWriteException("An absolute physical path is required.");
         for (var current = Path.GetFullPath(path); current is not null; current = Path.GetDirectoryName(current))
-            if (File.Exists(current) || Directory.Exists(current))
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                // A fresh attributes observation avoids two redundant Exists
+                // queries and still inspects a dangling reparse entry itself.
+                var attributes = new FileInfo(current).Attributes;
+                if (attributes != (FileAttributes)(-1) && (attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new EvidenceWriteException("Linked evidence/payload/input paths are unsupported.");
+            }
+            else if (File.Exists(current) || Directory.Exists(current))
                 if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
                     throw new EvidenceWriteException("Linked evidence/payload/input paths are unsupported.");
+        }
     }
 
     // Each actual stream is rooted before constructor entry. Ordinary managed exceptions are

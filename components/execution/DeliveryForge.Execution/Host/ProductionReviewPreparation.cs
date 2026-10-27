@@ -500,8 +500,18 @@ public sealed partial class ProductionReviewSourceOwner
         if (!Path.IsPathFullyQualified(path)) throw new ReviewPreflightException("Absolute owned source path required.");
         for (FileSystemInfo? item = Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path); item is not null;
             item = item is DirectoryInfo directory ? directory.Parent : ((FileInfo)item).Directory)
-            if (item.LinkTarget is not null || item.Exists && (item.Attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                // Inspect the entry itself, including a dangling reparse point.
+                // Missing ordinary entries remain subject to the required open.
+                var attributes = item.Attributes;
+                if (attributes != (FileAttributes)(-1) && (attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new ReviewPreflightException("Owned source path is redirected.");
+            }
+            else if (item.LinkTarget is not null || item.Exists && (item.Attributes & FileAttributes.ReparsePoint) != 0)
                 throw new ReviewPreflightException("Owned source path is redirected.");
+        }
     }
 }
 
