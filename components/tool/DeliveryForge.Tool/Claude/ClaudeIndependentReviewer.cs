@@ -139,7 +139,9 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
     // Safe mode leaves administrator-managed policy active. This selected CLI
     // exposes no authoritative complete effective-policy/code-effect contract.
     // File/registry absence, a DTO or a source reviewer cannot supply that proof.
-    internal static ToolResult? UnsupportedProductionProfile(InstalledHostAdmission.RuntimeTrust? runtimeTrust = null, ToolLifetime? original = null, IndependentClaudeReviewSelection? selection = null) => UnsupportedPlatform() ??
+    internal static ToolResult? UnsupportedProductionProfile(InstalledHostAdmission.RuntimeTrust? runtimeTrust = null, ToolLifetime? original = null, IndependentClaudeReviewSelection? selection = null, LinuxScopeSelection? linuxScope = null) =>
+        OperatingSystem.IsLinux() && runtimeTrust is not null && original is not null && selection is not null &&
+        runtimeTrust.MatchesLinuxScope(original, selection, linuxScope) ? null : UnsupportedPlatform() ??
         (OperatingSystem.IsWindows() && runtimeTrust is not null && original is not null && selection is not null && runtimeTrust.Matches(original, selection) ? null : OperatingSystem.IsWindows()
             ? ToolResult.Incomplete("INDEPENDENT_REVIEW_MANAGED_POLICY_UNPROVEN",
                 "The selected Claude CLI does not expose authoritative complete effective managed-policy and code-effect provenance. Production independent review is unavailable until a supported contract or separately explicit owner trust-policy decision exists; no settings, authentication or models are changed.")
@@ -258,8 +260,9 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             return ToolResult.Incomplete("INDEPENDENT_REVIEW_POLICY_REQUIRED", "Actual author provenance and protected opposite-family source policy are required.");
         // Refuse unsupported production profiles before subscription checks,
         // budget reservation, evidence preparation or any native observation.
-        // Linux image identity and Windows managed policy remain distinct gaps.
-        if (UnsupportedProductionProfile(runtimeTrust, original, selection) is { } profileRefusal) return profileRefusal;
+        // Unbound Linux and Windows managed policy remain refused; only the exact
+        // containing admission and SAME worker-bound Linux scope can pass.
+        if (UnsupportedProductionProfile(runtimeTrust, original, selection, linuxScope) is { } profileRefusal) return profileRefusal;
         ClaudeIndependentReviewData.RequireSubscriptionEnvironment(Environment.GetEnvironmentVariable);
         var ledger = ReviewBudgetLedger.FromTrustedPolicy(bootstrap.Policy);
         if (!ledger.TryReserve(new(bootstrap.Policy.Budget.MaximumDuration, bootstrap.Policy.Budget.MaximumTokens, bootstrap.Policy.Budget.MaximumCost), out var reservation, out var decision))

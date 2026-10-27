@@ -113,7 +113,7 @@ public sealed class Issue17RuntimeTrustTests
         File.WriteAllBytes(file, [1, 2, 3]);
         Assert.Equal(new byte[] { 1, 2, 3 }, BoundedFiles.Read(file, life)); // two existing operations, four read bytes
         Assert.Throws<ToolUsageException>(() => BoundedFiles.RequireReadCapacity(life, 4095, 0));
-        var readLimit = OperatingSystem.IsLinux() ? 2147483648L : 1073741824L;
+        var readLimit = OperatingSystem.IsLinux() ? 6821420144L : 1073741824L;
         Assert.Throws<ToolUsageException>(() => BoundedFiles.RequireReadCapacity(life, 0, readLimit - 3));
         BoundedFiles.RequireReadCapacity(life, 4094, readLimit - 4);
         BoundedFiles.RequireReadCapacity(life, 4094, readLimit - 4); // admission neither consumes nor refunds
@@ -225,7 +225,7 @@ public sealed class Issue17RuntimeTrustTests
     [Theory]
     [InlineData("no-reviewer")]
     [InlineData("other-worker")]
-    [InlineData("linux")]
+    [InlineData("platform-mismatch")]
     public void Invalid_trust_node_profile_is_refused_without_opening_selected_files(string mismatch)
     {
         var selected = DeclaredTrust(2);
@@ -235,12 +235,49 @@ public sealed class Issue17RuntimeTrustTests
             "other-worker" => selected.Config with { Adapter = "claude-code.cli" },
             _ => selected.Config
         };
-        Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RuntimeTrust.RequireSelectedProfile(selected.Host, config, mismatch == "linux" ? "linux" : "windows"));
-        var host = mismatch == "linux" ? selected.Host with { Platform = "linux" } : selected.Host;
+        Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RuntimeTrust.RequireSelectedProfile(selected.Host, config, mismatch == "platform-mismatch" ? "linux" : "windows"));
+        var host = mismatch == "platform-mismatch" ? selected.Host with { Platform = "unsupported" } : selected.Host;
         Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RuntimeTrust.ReadCapacity(host, selected.Root, selected.ConfigPin, config));
         Assert.False(Directory.Exists(Path.GetDirectoryName(selected.Root.Path)));
         // Default roots retain their existing profile admission, without trust.
         InstalledHostAdmission.RuntimeTrust.RequireSelectedProfile(selected.Host with { RuntimeTrust = null }, config, "linux");
+    }
+
+    [Theory]
+    [InlineData("windows", 6, 884304643L)]
+    [InlineData("linux", 20, 4673936496L)]
+    public void Selected_platform_image_admission_counts_complete_reads_without_opening_images(string platform, int operations, long bytes)
+    {
+        var selected = DeclaredTrust(2);
+        var host = selected.Host with { Platform = platform, Host = selected.Host.Host with { Bytes = 296885960 } };
+        var review = selected.Config.InstalledReview!;
+        var selectedReviewer = review.IndependentReviewer!;
+        var reviewer = selectedReviewer with { Image = selectedReviewer.Image with { Bytes = 290532720 } };
+        var config = selected.Config with { InstalledReview = review with { IndependentReviewer = reviewer } };
+        var requirement = InstalledHostAdmission.RuntimeTrust.ImageReadCapacity(host, config);
+        Assert.Equal(operations, requirement.Operations); Assert.Equal(bytes, requirement.Bytes);
+        Assert.False(Directory.Exists(Path.GetDirectoryName(selected.Root.Path)));
+        // Cost DATA only: no root, conformance artifact, image or authority was read/issued.
+        Assert.NotNull(ClaudeIndependentReviewer.UnsupportedProductionProfile());
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Linux_declared_image_beyond_kernel_extent_refuses_before_file_access(bool reviewerImage)
+    {
+        var selected = DeclaredTrust(2);
+        var host = selected.Host with { Platform = "linux" };
+        var config = selected.Config;
+        var oversized = DeliveryForge.Evidence.OwnedDuplexProcess.MaximumExactLinuxImageBytes + 1;
+        if (reviewerImage)
+        {
+            var review = config.InstalledReview!; var selectedReviewer = review.IndependentReviewer!;
+            config = config with { InstalledReview = review with
+            { IndependentReviewer = selectedReviewer with { Image = selectedReviewer.Image with { Bytes = oversized } } } };
+        }
+        else host = host with { Host = host.Host with { Bytes = oversized } };
+        Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RuntimeTrust.ImageReadCapacity(host, config));
+        Assert.False(Directory.Exists(Path.GetDirectoryName(selected.Root.Path)));
     }
 
     [Theory]

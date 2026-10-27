@@ -113,7 +113,7 @@ internal sealed class InstalledReviewHost : IDisposable
         if (independentReviewer is not null) throw new ToolUsageException("Actual independent reviewer cannot replay.");
         // Refuse this unsupported production profile before source/settings/CWD I/O.
         // RunAsync keeps the same guard as defense at its own boundary.
-        if (ClaudeIndependentReviewer.UnsupportedProductionProfile(runtimeTrust, original, selection.IndependentReviewer) is { } profileRefusal) return profileRefusal;
+        if (ClaudeIndependentReviewer.UnsupportedProductionProfile(runtimeTrust, original, selection.IndependentReviewer, linuxScope) is { } profileRefusal) return profileRefusal;
         if (Interlocked.CompareExchange(ref independentEntry, 1, 0) != 0)
             throw new ToolUsageException("Actual independent reviewer cannot replay.");
         completedQuality?.BindCompletedReviewOutputs(frame, sourceOwner);

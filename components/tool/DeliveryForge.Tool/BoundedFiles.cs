@@ -102,9 +102,9 @@ public static class BoundedFiles
     sealed class FileCredits { internal readonly object Gate = new(); internal int Operations; internal long Reads, Writes; }
     static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ToolLifetime, FileCredits> Credits = new();
     static readonly List<FileFrame> UnknownFiles = [];
-    // Approved platform byte policy; ALL Linux originals use two GiB. Other
-    // platforms keep one GiB. The existing per-original counters never reset.
-    static long MaximumOriginalReadBytes => OperatingSystem.IsLinux() ? 2147483648L : 1073741824L;
+    // Approved platform byte policy; ALL Linux originals use 6821420144 bytes.
+    // Other platforms keep one GiB. The same cumulative counters never reset.
+    static long MaximumOriginalReadBytes => OperatingSystem.IsLinux() ? 6821420144L : 1073741824L;
     static void Credit(ToolLifetime life, long bytes, bool write)
     {
         life.Check(); var credit = Credits.GetValue(life, _ => new());

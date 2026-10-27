@@ -53,7 +53,7 @@ public sealed class CommandLineTests
         var error = await Assert.ThrowsAsync<ToolUsageException>(() => application.ExecuteAsync(new(mode, options), original.Token));
         Assert.Equal("Command options must be a stable exact-key selection for the selected mode.", error.Message);
         Assert.Empty(application.RetainedExternalCalls); Assert.False(File.Exists(config));
-        BoundedFiles.RequireReadCapacity(original, 4096, OperatingSystem.IsLinux() ? 2147483648L : 1073741824L); // No configuration/file effect was admitted.
+        BoundedFiles.RequireReadCapacity(original, 4096, OperatingSystem.IsLinux() ? 6821420144L : 1073741824L); // No configuration/file effect was admitted.
     }
     [Theory]
     [InlineData("throw")]
@@ -69,7 +69,7 @@ public sealed class CommandLineTests
         Assert.Equal("Command options must be a stable exact-key selection for the selected mode.", error.Message);
         Assert.DoesNotContain("secret-sentinel", error.ToString()); Assert.Null(error.InnerException);
         Assert.Empty(application.RetainedExternalCalls);
-        BoundedFiles.RequireReadCapacity(original, 4096, OperatingSystem.IsLinux() ? 2147483648L : 1073741824L);
+        BoundedFiles.RequireReadCapacity(original, 4096, OperatingSystem.IsLinux() ? 6821420144L : 1073741824L);
     }
     [Theory]
     [InlineData(ToolMode.Plan)]
@@ -90,7 +90,7 @@ public sealed class CommandLineTests
     [Fact]
     public void Original_file_read_credit_has_platform_boundary_and_preserves_prior_complete_debits()
     {
-        var maximum = OperatingSystem.IsLinux() ? 2147483648L : 1073741824L;
+        var maximum = OperatingSystem.IsLinux() ? 6821420144L : 1073741824L;
         using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         using var other = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         BoundedFiles.RequireReadCapacity(original, 4096, maximum);

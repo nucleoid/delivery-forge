@@ -49,8 +49,10 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     internal CodexAppServerPort(CodexAppServerSelection selection, WorktreeManager actualGit, AgentAdapterProfile acceptedProfile, LinuxScopeSelection? linuxScope, InstalledHostAdmission.RuntimeTrust? runtimeTrust, bool conformanceTrustRoute = false)
     {
         ArgumentNullException.ThrowIfNull(selection); ArgumentNullException.ThrowIfNull(acceptedProfile);
-        if (conformanceTrustRoute && (!OperatingSystem.IsWindows() || runtimeTrust is not null || acceptedProfile.Capabilities is null || acceptedProfile.Capabilities.Any(row => row is null || row.Status != AgentCapabilityStatus.Unverified)))
-            throw new ToolUsageException("Trust-route conformance requires the existing Windows UNVERIFIED native producer; it cannot grant runtime trust.");
+        if (conformanceTrustRoute && ((!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) ||
+            OperatingSystem.IsLinux() && linuxScope is null || runtimeTrust is not null || acceptedProfile.Capabilities is null ||
+            acceptedProfile.Capabilities.Any(row => row is null || row.Status != AgentCapabilityStatus.Unverified)))
+            throw new ToolUsageException("Trust-route conformance requires the existing Windows/Linux UNVERIFIED native producer and concrete Linux scope; it cannot grant runtime trust.");
         this.conformanceTrustRoute = conformanceTrustRoute; this.runtimeTrust = runtimeTrust; this.linuxScope = linuxScope;
         if (acceptedProfile.Capabilities is null || acceptedProfile.Capabilities.Count is < 1 or > 6 || acceptedProfile.Capabilities.Any(row => row is null) || string.IsNullOrWhiteSpace(selection.Version) || selection.Version.Length > 256) throw new ToolUsageException("Finite complete actual native version/profile required BEFORE capability snapshot.");
         if (acceptedProfile.AdapterId != "codex.cli" || acceptedProfile.AdapterVersion != selection.Version || acceptedProfile.Capabilities.Any(x => (x.Capability is AgentCapability.Pause or AgentCapability.Resume) && x.Status == AgentCapabilityStatus.Supported)) throw new ToolUsageException("Stable app-server has interrupt, not same-turn pause/resume; exact accepted Codex version required.");
@@ -168,7 +170,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         try
         {
             if (actual.AdapterId != "codex.cli" || actual.AdapterVersion != selection.Version || remaining <= TimeSpan.Zero || remaining > original.WorkLimit) throw new WorkerEnvelopeException("Actual request/version/deadline differs from containing original.");
-            runtimeTrust?.BindWorker(original, selection, actual.Worktree, actual.ResultDirectory);
+            runtimeTrust?.BindWorker(original, selection, actual.Worktree, actual.ResultDirectory, linuxScope);
             startup!.SetStage(CodexStartupStage.NativeImageVerification);
             // Reserve the actual gate copy and independent sealed-fd verification
             // before pathname hashing or native birth; no ordinary Linux fallback.
@@ -179,7 +181,9 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                 BoundedFiles.ReserveExactLinuxImageReads(new(selection.Executable, selection.Bytes, selection.Sha256), original);
                 exactImage = new(selection.Executable, selection.Bytes, selection.Sha256);
             }
-            if (!TrustProtocol) BoundedFiles.VerifyNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), original);
+            // Linux retains its complete pathname verification plus the existing
+            // creation-owned gate copy/sealed-fd proof; never borrow Windows handles.
+            if (!TrustProtocol || !OperatingSystem.IsWindows()) BoundedFiles.VerifyNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), original);
             else trustedImage = runtimeTrust?.RetainWorkerImage(original, new(selection.Executable, selection.Bytes, selection.Sha256), token)
                 ?? WindowsImageUse.Open(new(selection.Executable, selection.Bytes, selection.Sha256), original, token);
             var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1" };

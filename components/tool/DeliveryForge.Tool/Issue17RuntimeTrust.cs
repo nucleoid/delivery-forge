@@ -1,3 +1,4 @@
+using DeliveryForge.Evidence;
 using DeliveryForge.Tool.Claude;
 
 namespace DeliveryForge.Tool;
@@ -113,7 +114,8 @@ public sealed partial class InstalledHostAdmission
         readonly Issue17HostInputs inputs;
         readonly StandaloneHostSelection configurationHost;
         readonly BatchWindowsImages? images;
-        string? boundWorktree, boundResult; int checks;
+        string? boundWorktree, boundResult; LinuxScopeSelection? boundLinuxScope; int checks;
+        static StringComparer PathComparer => OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
         // Existing RPC64 + bind/start/wait5 + reviewer entry/VerifyImage7.
         internal const int MaximumChecks = 76;
         RuntimeTrust(ToolLifetime original, TrustedConfiguration configuration, AdmissionFile root,
@@ -121,6 +123,9 @@ public sealed partial class InstalledHostAdmission
         { this.original = original; this.configuration = configuration; this.root = root; this.configurationPin = configurationPin; this.ownerDecision = ownerDecision; this.inputs = inputs; configurationHost = host; this.images = images; }
         internal bool Matches(ToolLifetime actual, IndependentClaudeReviewSelection reviewer) =>
             ReferenceEquals(original, actual) && ReferenceEquals(configuration.InstalledReview?.IndependentReviewer, reviewer);
+        internal bool MatchesLinuxScope(ToolLifetime actual, IndependentClaudeReviewSelection reviewer, LinuxScopeSelection? scope) =>
+            OperatingSystem.IsLinux() && boundWorktree is not null && boundLinuxScope is not null &&
+            ReferenceEquals(boundLinuxScope, scope) && Matches(actual, reviewer);
         internal void Check(ToolLifetime actual)
         {
             if (!ReferenceEquals(original, actual)) throw new ToolUsageException("Owner-trusted runtime cannot cross original owners.");
@@ -144,19 +149,22 @@ public sealed partial class InstalledHostAdmission
                 throw;
             }
         }
-        internal void BindWorker(ToolLifetime actual, Codex.CodexAppServerSelection image, string worktree, string resultDirectory)
+        internal void BindWorker(ToolLifetime actual, Codex.CodexAppServerSelection image, string worktree, string resultDirectory, LinuxScopeSelection? scope = null)
         {
             Check(actual);
             if (configuration.Adapter != "codex.cli" || image.Executable != configurationHost.Executable || image.Bytes != configurationHost.Bytes || image.Sha256 != configurationHost.Sha256 || image.Version != configurationHost.Version)
                 throw new ToolUsageException("Owner trust is bound to the exact root-selected GPT worker image.");
             if (boundWorktree is not null && (boundWorktree != worktree || boundResult != resultDirectory))
                 throw new ToolUsageException("Owner runtime trust cannot be rebound to another worker.");
+            if (OperatingSystem.IsLinux() && (scope is null || boundLinuxScope is not null && !ReferenceEquals(boundLinuxScope, scope)))
+                throw new ToolUsageException("Linux owner trust requires the same concrete worker scope; no scope adoption or rebind.");
             inputs.Separate(configuration.RepositoryRoot, worktree, resultDirectory);
             // Repository/ancestor Codex configuration is not part of this host-only
             // trust decision. Refuse it rather than silently importing new policy.
             RefuseRepositoryConfiguration(worktree);
             RefuseRepositoryConfiguration(configuration.RepositoryRoot);
             boundWorktree = worktree; boundResult = resultDirectory;
+            if (OperatingSystem.IsLinux()) boundLinuxScope = scope;
             Check(actual);
         }
         internal WindowsImageUse RetainWorkerImage(ToolLifetime actual, AdmissionFile pin, CancellationToken token)
@@ -181,7 +189,7 @@ public sealed partial class InstalledHostAdmission
         {
             original.Check();
             var expected = Path.Combine(ClaudeReviewerUserSettings.ActualDirectory(), "settings.json");
-            if (!Matches(actual, reviewer) || !StringComparer.OrdinalIgnoreCase.Equals(Path.GetFullPath(path), Path.GetFullPath(expected)))
+            if (!Matches(actual, reviewer) || !PathComparer.Equals(Path.GetFullPath(path), Path.GetFullPath(expected)))
                 throw new ToolUsageException("Reviewer settings must belong to the same selected original and reviewer.");
             inputs.RequireSelectedBytes(actual, path, current);
             original.Check();
@@ -203,9 +211,9 @@ public sealed partial class InstalledHostAdmission
         internal static void RequireSelectedProfile(InstalledHostRootAcceptance accepted, TrustedConfiguration config, string platform)
         {
             if (accepted.RuntimeTrust is null) return;
-            if (platform != "windows" || accepted.Platform != "windows" || accepted.Adapter != "codex.cli" || config.Adapter != "codex.cli" ||
+            if (platform is not ("windows" or "linux") || accepted.Platform != platform || accepted.Adapter != "codex.cli" || config.Adapter != "codex.cli" ||
                 accepted.RuntimeTrust.Kind != "Issue17OwnerTrustedPersonalHost-v1" || config.InstalledReview?.IndependentReviewer is null)
-                throw new ToolUsageException("The scoped issue17 trust profile requires the selected Windows GPT worker and independent Claude reviewer.");
+                throw new ToolUsageException("The scoped issue17 trust profile requires the selected Windows/Linux GPT worker and independent Claude reviewer.");
         }
         internal readonly record struct ReadRequirement(int Operations, long Bytes);
         internal static ReadRequirement ReadCapacity(InstalledHostRootAcceptance accepted, AdmissionFile rootPin, AdmissionFile configPin, TrustedConfiguration config)
@@ -260,12 +268,24 @@ public sealed partial class InstalledHostAdmission
             var worker = accepted.Host.Bytes; var reviewer = config.InstalledReview!.IndependentReviewer!.Image.Bytes;
             if (worker is <= 0 or > BoundedFiles.MaximumNativeImageBytes || reviewer is <= 0 or > BoundedFiles.MaximumNativeImageBytes)
                 throw new ToolUsageException("Invalid declared runtime-trust input extent.");
+            if (accepted.Platform == "linux")
+            {
+                if (worker < 64 || worker > OwnedDuplexProcess.MaximumExactLinuxImageBytes ||
+                    reviewer < 64 || reviewer > OwnedDuplexProcess.MaximumExactLinuxImageBytes)
+                    throw new ToolUsageException("Selected Linux trust images exceed the existing exact-image kernel profile.");
+                // Two worker pathname hashes + one gate copy + one sealed-fd hash;
+                // six reviewer pathname hashes + three copies + three sealed hashes.
+                // These remain real cumulative debits, not a cache or new bucket.
+                return new(20, checked(4 * (worker + 1) + 12 * (reviewer + 1)));
+            }
             return new(6, checked(2 * (worker + 1) + reviewer + 1));
         }
         internal static void RequireReadCapacity(InstalledHostRootAcceptance accepted, AdmissionFile rootPin, AdmissionFile configPin,
             TrustedConfiguration config, ToolLifetime original, BatchWindowsImages? images = null)
         {
-            original.Check(); var plan = ReadCapacity(accepted, rootPin, configPin, config);
+            original.Check();
+            if (accepted.Platform == "linux" && images is not null) throw new ToolUsageException("Windows held-image borrowing cannot admit a Linux original.");
+            var plan = ReadCapacity(accepted, rootPin, configPin, config);
             if (images is null) BoundedFiles.RequireReadCapacity(original, plan.Operations, plan.Bytes);
             else images.RequireNodeCapacity(original, new(accepted.Host.Executable, accepted.Host.Bytes, accepted.Host.Sha256),
                 config.InstalledReview!.IndependentReviewer!.Image, plan, ImageReadCapacity(accepted, config));
@@ -277,9 +297,10 @@ public sealed partial class InstalledHostAdmission
             var accepted = containing.actual; var root = containing.actualRoot;
             var config = containing.actualConfiguration; var original = containing.actualOriginal;
             var selected = accepted.RuntimeTrust ?? throw new ToolUsageException("No explicit issue17 owner trust selection.");
-            if (!OperatingSystem.IsWindows() || selected.Kind != "Issue17OwnerTrustedPersonalHost-v1" || config.Adapter != "codex.cli" ||
+            RequireSelectedProfile(accepted, config, OperatingSystem.IsWindows() ? "windows" : OperatingSystem.IsLinux() ? "linux" : "unsupported");
+            if (OperatingSystem.IsLinux() && images is not null || selected.Kind != "Issue17OwnerTrustedPersonalHost-v1" || config.Adapter != "codex.cli" ||
                 config.InstalledReview?.IndependentReviewer is not { } reviewer)
-                throw new ToolUsageException("The scoped issue17 trust profile requires the selected Windows GPT worker and independent Claude reviewer.");
+                throw new ToolUsageException("The scoped issue17 trust profile requires the selected Windows/Linux GPT worker and independent Claude reviewer.");
             _ = ReadExact(selected.OwnerDecision, original, 65536); _ = ReadExact(configPin, original, 65536);
             var parsed = TrustedConfiguration.LoadSelected(configPin.Path, original, configPin);
             if (!System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(config, BoundedFiles.Json).AsSpan().SequenceEqual(
@@ -291,7 +312,7 @@ public sealed partial class InstalledHostAdmission
             if (explicitHome is null)
                 foreach (var name in new[] { "HOME", "USERPROFILE" })
                     if (Environment.GetEnvironmentVariable(name) is { } inherited && (!Path.IsPathFullyQualified(inherited) ||
-                        !StringComparer.OrdinalIgnoreCase.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(inherited)), Path.TrimEndingDirectorySeparator(Path.GetFullPath(user)))))
+                        !PathComparer.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(inherited)), Path.TrimEndingDirectorySeparator(Path.GetFullPath(user)))))
                         throw new ToolUsageException("Ambiguous Codex home selection is outside the owner-trusted profile.");
             var home = explicitHome ?? Path.Combine(user, ".codex");
             if (!Path.IsPathFullyQualified(home)) throw new ToolUsageException("Absolute selected Codex home required; no config override is introduced.");

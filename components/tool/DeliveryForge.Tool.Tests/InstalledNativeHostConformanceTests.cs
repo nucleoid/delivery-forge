@@ -228,8 +228,9 @@ public sealed class InstalledNativeHostConformanceTests
             var path = Environment.GetEnvironmentVariable(fixtureKey) ?? throw new IOException("Fresh Root-admitted real native conformance fixture required; no model/CLI fallback.");
             var rawFixture = BoundedFiles.Read(path, frame.Original, 65536); var expectedFixtureHash = Environment.GetEnvironmentVariable(fixtureKey + "_SHA256") ?? throw new IOException("Independent complete fixture hash required."); Assert.Equal(expectedFixtureHash, BoundedFiles.Sha(rawFixture)); _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(rawFixture); frame.Original.Check(); frame.Selected = JsonSerializer.Deserialize<Fixture>(rawFixture, BoundedFiles.Json) ?? throw new IOException("Actual probe fixture null."); var f = frame.Selected;
             if (f.Kind != "RootAdmittedNativeConformanceProvisioningFixture-v2" || f.CaseKind != (stop ? "stop" : "completion") || f.PlanBundle is null || f.Expectations is null || f.Adapter != adapter || f.Host is null || string.IsNullOrWhiteSpace(f.Host.Version) || f.Host.Version == "unverified" || f.Host.Version.Length > 256 || f.RelativePath is null || f.RelativePath.Length is < 1 or > 256 || f.RelativePath.Contains('\\') || Path.IsPathFullyQualified(f.RelativePath) || f.RelativePath.Split('/').Any(v => v is "" or "." or "..") || f.ExpectedText is null || f.ExpectedText.Length is < 1 or > 4096 || f.ExpectedText.Contains('\0')) throw new IOException("Exact finite independently prepared real-host task fixture required.");
-            if (f.ObserveRuntimeTrustRoute && (adapter != "codex.cli" || !OperatingSystem.IsWindows()))
-                throw new IOException("Trust-route conformance selects only the existing Windows Codex UNVERIFIED producer; no authority is granted.");
+            if (f.ObserveRuntimeTrustRoute && (adapter != "codex.cli" || !OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() ||
+                OperatingSystem.IsLinux() && f.LinuxScopeProfile is null))
+                throw new IOException("Trust-route conformance selects only the existing Windows/Linux Codex UNVERIFIED producer with an actual Linux scope; no authority is granted.");
             if (f.LinuxOwnerTrustedHelper is not null && !stop && f.CaseKind == "completion" && OperatingSystem.IsLinux() && adapter == "codex.cli" && f.Host.Version == "0.163.0-alpha.10.2")
             {
                 if (f.Host.Bytes != 296885960 || f.Host.Sha256 != "70ea33b7094a4c20c007d09b83bb50e33debb9bbf99bf066709f9eb85bad524a") throw new IOException("Exact measured RouteA primary image required.");
@@ -523,7 +524,7 @@ public sealed class InstalledNativeHostConformanceTests
     static async Task ActualStop(string adapter, bool requireInterruptSuccess)
     {
         using var affinity = new OwnedDuplexProcessTests.Affinity(); await using var frame = Frame.Prepare(adapter, true);
-        if (!requireInterruptSuccess) Assert.True(frame.Selected.ObserveRuntimeTrustRoute, "Contract-specific Stop requires the actual selected Windows Codex trust route.");
+        if (!requireInterruptSuccess) Assert.True(frame.Selected.ObserveRuntimeTrustRoute, "Contract-specific Stop requires the actual selected Codex trust route.");
         var accepted = await frame.Start(true); var binding = Frame.Binding(accepted);
         if (frame.Selected.ObserveRuntimeTrustRoute)
         {
