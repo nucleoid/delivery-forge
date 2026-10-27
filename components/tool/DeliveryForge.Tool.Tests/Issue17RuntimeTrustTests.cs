@@ -280,6 +280,62 @@ public sealed class Issue17RuntimeTrustTests
         Assert.False(Directory.Exists(Path.GetDirectoryName(selected.Root.Path)));
     }
 
+    // The state below is DATA only, not a RuntimeTrust or native admission.
+    static DeliveryForge.Evidence.LinuxScopeSelection BindingScope()
+    {
+        var image = new DeliveryForge.Evidence.LinuxScopeImage("/selected/not-opened", 64, new string('a', 64));
+        return new(image, image, "data-only", "data-only", image, [], image);
+    }
+    [Fact]
+    public void Linux_scope_binding_requires_worker_and_nonnull_scope_before_matching()
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var binding = new LinuxWorkerScopeBinding(original); var scope = BindingScope(); var entered = false;
+        Assert.False(binding.Matches(original, scope));
+        Assert.Throws<ToolUsageException>(() => binding.Bind(original, "worker", "result", null, () => entered = true));
+        Assert.False(entered); Assert.False(binding.Matches(original, scope));
+    }
+    [Fact]
+    public void Linux_scope_binding_matches_only_exact_original_and_scope_after_successful_check()
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        using var foreign = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var binding = new LinuxWorkerScopeBinding(original); var scope = BindingScope(); var checkedBeforeCommit = false;
+        binding.Bind(original, "worker", "result", scope, () =>
+        {
+            Assert.False(binding.Matches(original, scope)); checkedBeforeCommit = true;
+        });
+        Assert.True(checkedBeforeCommit); Assert.True(binding.Matches(original, scope));
+        Assert.False(binding.Matches(original, scope with { }));
+        Assert.False(binding.Matches(foreign, scope)); Assert.False(binding.Matches(original, null));
+        Assert.Empty(typeof(InstalledHostAdmission.RuntimeTrust).GetConstructors());
+    }
+    [Theory]
+    [InlineData("scope")]
+    [InlineData("worker")]
+    [InlineData("result")]
+    [InlineData("original")]
+    public void Linux_scope_binding_refuses_rebind_before_entering_final_check(string change)
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        using var foreign = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var binding = new LinuxWorkerScopeBinding(original); var scope = BindingScope(); var entered = false;
+        binding.Bind(original, "worker", "result", scope, () => { });
+        Assert.Throws<ToolUsageException>(() => binding.Bind(change == "original" ? foreign : original,
+            change == "worker" ? "other" : "worker", change == "result" ? "other" : "result",
+            change == "scope" ? scope with { } : scope, () => entered = true));
+        Assert.False(entered); Assert.True(binding.Matches(original, scope));
+    }
+    [Fact]
+    public void Linux_scope_binding_does_not_publish_after_final_check_failure()
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var binding = new LinuxWorkerScopeBinding(original); var scope = BindingScope();
+        var failure = new IOException("actual-final-check-sentinel");
+        Assert.Same(failure, Assert.Throws<IOException>(() => binding.Bind(original, "worker", "result", scope, () => throw failure)));
+        Assert.False(binding.Matches(original, scope));
+    }
+
     [Theory]
     [InlineData("{not-json")]
     [InlineData("{\"Kind\":\"first\",\"Kind\":\"second\"}")]

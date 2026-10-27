@@ -14,6 +14,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     readonly LinuxScopeSelection? linuxScope;
     readonly InstalledHostAdmission.RuntimeTrust? runtimeTrust;
     readonly bool conformanceTrustRoute;
+    readonly bool conformanceDangerFullAccess;
     bool TrustProtocol => runtimeTrust is not null || conformanceTrustRoute;
     WindowsImageUse? trustedImage;
     bool trustedNativeCreationEntered, trustedNativeCreationReturned;
@@ -46,13 +47,21 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     }
     public CodexAppServerPort(CodexAppServerSelection selection, WorktreeManager actualGit, AgentAdapterProfile acceptedProfile, LinuxScopeSelection? linuxScope = null)
         : this(selection, actualGit, acceptedProfile, linuxScope, null) { }
-    internal CodexAppServerPort(CodexAppServerSelection selection, WorktreeManager actualGit, AgentAdapterProfile acceptedProfile, LinuxScopeSelection? linuxScope, InstalledHostAdmission.RuntimeTrust? runtimeTrust, bool conformanceTrustRoute = false)
+    internal CodexAppServerPort(CodexAppServerSelection selection, WorktreeManager actualGit, AgentAdapterProfile acceptedProfile, LinuxScopeSelection? linuxScope, InstalledHostAdmission.RuntimeTrust? runtimeTrust, bool conformanceTrustRoute = false, bool conformanceDangerFullAccess = false)
     {
         ArgumentNullException.ThrowIfNull(selection); ArgumentNullException.ThrowIfNull(acceptedProfile);
         if (conformanceTrustRoute && ((!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) ||
             OperatingSystem.IsLinux() && linuxScope is null || runtimeTrust is not null || acceptedProfile.Capabilities is null ||
             acceptedProfile.Capabilities.Any(row => row is null || row.Status != AgentCapabilityStatus.Unverified)))
             throw new ToolUsageException("Trust-route conformance requires the existing Windows/Linux UNVERIFIED native producer and concrete Linux scope; it cannot grant runtime trust.");
+        if (conformanceDangerFullAccess && (!OperatingSystem.IsLinux() || runtimeTrust is not null || conformanceTrustRoute ||
+            linuxScope?.RestrictiveChildPolicy != "nnp-user1000-ancestor-v3" ||
+            selection.Bytes != 296885960 || selection.Sha256 != "70ea33b7094a4c20c007d09b83bb50e33debb9bbf99bf066709f9eb85bad524a" ||
+            selection.Version != "0.163.0-alpha.10.2" || acceptedProfile.AdapterId != "codex.cli" ||
+            acceptedProfile.Capabilities is null || acceptedProfile.Capabilities.Count == 0 ||
+            acceptedProfile.Capabilities.Any(row => row is null || row.Status != AgentCapabilityStatus.Unverified)))
+            throw new ToolUsageException("One-job danger-full-access is only an explicit unverified Linux conformance selection for the exact admitted image and concrete restrictive scope; no runtime trust.");
+        this.conformanceDangerFullAccess = conformanceDangerFullAccess;
         this.conformanceTrustRoute = conformanceTrustRoute; this.runtimeTrust = runtimeTrust; this.linuxScope = linuxScope;
         if (acceptedProfile.Capabilities is null || acceptedProfile.Capabilities.Count is < 1 or > 6 || acceptedProfile.Capabilities.Any(row => row is null) || string.IsNullOrWhiteSpace(selection.Version) || selection.Version.Length > 256) throw new ToolUsageException("Finite complete actual native version/profile required BEFORE capability snapshot.");
         if (acceptedProfile.AdapterId != "codex.cli" || acceptedProfile.AdapterVersion != selection.Version || acceptedProfile.Capabilities.Any(x => (x.Capability is AgentCapability.Pause or AgentCapability.Resume) && x.Status == AgentCapabilityStatus.Supported)) throw new ToolUsageException("Stable app-server has interrupt, not same-turn pause/resume; exact accepted Codex version required.");
@@ -164,6 +173,18 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         }
         catch (Exception error) { pumpFailure = error; pending.Fail(error); lock (gate) terminalWait?.TrySetException(error); if (!shutdown) original.RetainUnknown(); throw; }
     }
+    // Internal fixture opt-in only. Production/public defaults remain cwd-only.
+    internal static object ConformanceDangerFullAccessParameters(AgentRequest actual) =>
+        new { cwd = actual.Worktree, sandbox = "danger-full-access" };
+    internal static void RequireConformanceDangerFullAccessThread(JsonElement result, AgentRequest actual)
+    {
+        if (result.ValueKind != JsonValueKind.Object ||
+            !result.TryGetProperty("cwd", out var cwd) || cwd.ValueKind != JsonValueKind.String || cwd.GetString() != actual.Worktree ||
+            !result.TryGetProperty("sandbox", out var sandbox) || sandbox.ValueKind != JsonValueKind.Object ||
+            sandbox.EnumerateObject().Count() != 1 || !sandbox.TryGetProperty("type", out var type) ||
+            type.ValueKind != JsonValueKind.String || type.GetString() != "dangerFullAccess")
+            throw new WorkerEnvelopeException("Actual one-job Linux conformance cwd/dangerFullAccess policy differs; no turn is dispatched.");
+    }
     public async Task<AgentAcceptedReceipt> StartAsync(AgentRequest actual, TimeSpan remaining, CancellationToken token)
     {
         original.Check(); (instructions ?? throw new WorkerEnvelopeException("Actual parent instructions required before any Codex dispatch.")).Require(actual); lock (gate) { if (startEntered) throw new WorkerEnvelopeException("App-server dispatch already entered; no retry."); startEntered = true; request = actual; }
@@ -205,7 +226,11 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             }
             // Omit model/provider/approval overrides: preserve actual configured
             // model, existing sign-in and host policy. No experimental fields.
-            startup.SetStage(CodexStartupStage.ThreadStart); var started = await Rpc("thread/start", new { cwd = actual.Worktree }, token).ConfigureAwait(false); threadId = Text(started.GetProperty("thread"), "id");
+            startup.SetStage(CodexStartupStage.ThreadStart);
+            var threadParameters = conformanceDangerFullAccess ? ConformanceDangerFullAccessParameters(actual) : new { cwd = actual.Worktree };
+            var started = await Rpc("thread/start", threadParameters, token).ConfigureAwait(false);
+            if (conformanceDangerFullAccess) RequireConformanceDangerFullAccessThread(started, actual);
+            threadId = Text(started.GetProperty("thread"), "id");
             if (started.TryGetProperty("model", out var model) && model.ValueKind == JsonValueKind.String) observedModel = model.GetString();
             if (started.TryGetProperty("modelProvider", out var provider) && provider.ValueKind == JsonValueKind.String) observedProvider = provider.GetString();
             // Optional read-only provenance. Unsupported/account-unavailable

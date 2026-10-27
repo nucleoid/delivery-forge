@@ -101,6 +101,33 @@ internal sealed class Issue17HostInputs
     }
 }
 
+// Same-original binding DATA only. This guard cannot construct RuntimeTrust,
+// issue admission, prove an image/scope, or bypass the containing checks.
+internal sealed class LinuxWorkerScopeBinding(ToolLifetime original)
+{
+    internal readonly object Gate = new();
+    string? worktree, resultDirectory;
+    LinuxScopeSelection? scope;
+    internal bool Matches(ToolLifetime actual, LinuxScopeSelection? selected)
+    {
+        lock (Gate) return worktree is not null && scope is not null &&
+            ReferenceEquals(original, actual) && ReferenceEquals(scope, selected);
+    }
+    internal void Bind(ToolLifetime actual, string selectedWorktree, string selectedResult,
+        LinuxScopeSelection? selectedScope, Action finalCheckAndCommitWorker)
+    {
+        lock (Gate)
+        {
+            if (!ReferenceEquals(original, actual) || selectedScope is null ||
+                scope is not null && (!ReferenceEquals(scope, selectedScope) ||
+                    worktree != selectedWorktree || resultDirectory != selectedResult))
+                throw new ToolUsageException("Linux owner trust requires the same concrete original, worker and scope; no adoption or rebind.");
+            finalCheckAndCommitWorker();
+            worktree = selectedWorktree; resultDirectory = selectedResult; scope = selectedScope;
+        }
+    }
+}
+
 public sealed partial class InstalledHostAdmission
 {
     internal RuntimeTrust? TrustedRuntime { get; private set; }
@@ -114,19 +141,19 @@ public sealed partial class InstalledHostAdmission
         readonly Issue17HostInputs inputs;
         readonly StandaloneHostSelection configurationHost;
         readonly BatchWindowsImages? images;
-        string? boundWorktree, boundResult; LinuxScopeSelection? boundLinuxScope; int checks;
+        string? boundWorktree, boundResult; readonly LinuxWorkerScopeBinding linuxBinding; int checks;
         static StringComparer PathComparer => OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
         // Existing RPC64 + bind/start/wait5 + reviewer entry/VerifyImage7.
         internal const int MaximumChecks = 76;
         RuntimeTrust(ToolLifetime original, TrustedConfiguration configuration, AdmissionFile root,
             AdmissionFile configurationPin, AdmissionFile ownerDecision, Issue17HostInputs inputs, StandaloneHostSelection host, BatchWindowsImages? images)
-        { this.original = original; this.configuration = configuration; this.root = root; this.configurationPin = configurationPin; this.ownerDecision = ownerDecision; this.inputs = inputs; configurationHost = host; this.images = images; }
+        { this.original = original; this.configuration = configuration; this.root = root; this.configurationPin = configurationPin; this.ownerDecision = ownerDecision; this.inputs = inputs; configurationHost = host; this.images = images; linuxBinding = new(original); }
         internal bool Matches(ToolLifetime actual, IndependentClaudeReviewSelection reviewer) =>
             ReferenceEquals(original, actual) && ReferenceEquals(configuration.InstalledReview?.IndependentReviewer, reviewer);
         internal bool MatchesLinuxScope(ToolLifetime actual, IndependentClaudeReviewSelection reviewer, LinuxScopeSelection? scope) =>
-            OperatingSystem.IsLinux() && boundWorktree is not null && boundLinuxScope is not null &&
-            ReferenceEquals(boundLinuxScope, scope) && Matches(actual, reviewer);
-        internal void Check(ToolLifetime actual)
+            OperatingSystem.IsLinux() && linuxBinding.Matches(actual, scope) && Matches(actual, reviewer);
+        internal void Check(ToolLifetime actual) => Check(actual, null);
+        void Check(ToolLifetime actual, string? pendingWorktree)
         {
             if (!ReferenceEquals(original, actual)) throw new ToolUsageException("Owner-trusted runtime cannot cross original owners.");
             original.Check();
@@ -139,7 +166,7 @@ public sealed partial class InstalledHostAdmission
                 _ = ReadExact(root, original, 1048576);
                 _ = ReadExact(configurationPin, original, 65536);
                 _ = ReadExact(ownerDecision, original, 65536);
-                if (boundWorktree is not null) RefuseRepositoryConfiguration(boundWorktree);
+                if ((pendingWorktree ?? boundWorktree) is { } checkedWorktree) RefuseRepositoryConfiguration(checkedWorktree);
                 RefuseRepositoryConfiguration(configuration.RepositoryRoot);
             }
             catch (Exception primary)
@@ -151,21 +178,25 @@ public sealed partial class InstalledHostAdmission
         }
         internal void BindWorker(ToolLifetime actual, Codex.CodexAppServerSelection image, string worktree, string resultDirectory, LinuxScopeSelection? scope = null)
         {
-            Check(actual);
-            if (configuration.Adapter != "codex.cli" || image.Executable != configurationHost.Executable || image.Bytes != configurationHost.Bytes || image.Sha256 != configurationHost.Sha256 || image.Version != configurationHost.Version)
-                throw new ToolUsageException("Owner trust is bound to the exact root-selected GPT worker image.");
-            if (boundWorktree is not null && (boundWorktree != worktree || boundResult != resultDirectory))
-                throw new ToolUsageException("Owner runtime trust cannot be rebound to another worker.");
-            if (OperatingSystem.IsLinux() && (scope is null || boundLinuxScope is not null && !ReferenceEquals(boundLinuxScope, scope)))
-                throw new ToolUsageException("Linux owner trust requires the same concrete worker scope; no scope adoption or rebind.");
-            inputs.Separate(configuration.RepositoryRoot, worktree, resultDirectory);
-            // Repository/ancestor Codex configuration is not part of this host-only
-            // trust decision. Refuse it rather than silently importing new policy.
-            RefuseRepositoryConfiguration(worktree);
-            RefuseRepositoryConfiguration(configuration.RepositoryRoot);
-            boundWorktree = worktree; boundResult = resultDirectory;
-            if (OperatingSystem.IsLinux()) boundLinuxScope = scope;
-            Check(actual);
+            lock (linuxBinding.Gate)
+            {
+                Check(actual);
+                if (configuration.Adapter != "codex.cli" || image.Executable != configurationHost.Executable || image.Bytes != configurationHost.Bytes || image.Sha256 != configurationHost.Sha256 || image.Version != configurationHost.Version)
+                    throw new ToolUsageException("Owner trust is bound to the exact root-selected GPT worker image.");
+                if (boundWorktree is not null && (boundWorktree != worktree || boundResult != resultDirectory))
+                    throw new ToolUsageException("Owner runtime trust cannot be rebound to another worker.");
+                void VerifyAndCommitWorker()
+                {
+                    inputs.Separate(configuration.RepositoryRoot, worktree, resultDirectory);
+                    // Repository/ancestor policy stays outside the selected host-only trust.
+                    RefuseRepositoryConfiguration(worktree);
+                    RefuseRepositoryConfiguration(configuration.RepositoryRoot);
+                    Check(actual, worktree);
+                    boundWorktree = worktree; boundResult = resultDirectory;
+                }
+                if (OperatingSystem.IsLinux()) linuxBinding.Bind(actual, worktree, resultDirectory, scope, VerifyAndCommitWorker);
+                else VerifyAndCommitWorker();
+            }
         }
         internal WindowsImageUse RetainWorkerImage(ToolLifetime actual, AdmissionFile pin, CancellationToken token)
         {

@@ -59,7 +59,7 @@ public sealed class InstalledNativeHostConformanceTests
         }
         // Retain entries/links on success and failure; no installed root mutation.
     }
-    public sealed record Fixture(string Kind, string Adapter, StandaloneHostSelection Host, string Git, string ParentCheckout, string Worktree, string ResultDirectory, string BaseCommit, string Repository, string CaseKind, AdmissionFile PlanBundle, PlanImportExpectations Expectations, string MutableReference, string RelativePath, string ExpectedText, AdmissionFile? LinuxScopeProfile, bool ObserveRuntimeTrustRoute = false, OwnerTrustedLinuxHelper? LinuxOwnerTrustedHelper = null);
+    public sealed record Fixture(string Kind, string Adapter, StandaloneHostSelection Host, string Git, string ParentCheckout, string Worktree, string ResultDirectory, string BaseCommit, string Repository, string CaseKind, AdmissionFile PlanBundle, PlanImportExpectations Expectations, string MutableReference, string RelativePath, string ExpectedText, AdmissionFile? LinuxScopeProfile, bool ObserveRuntimeTrustRoute = false, OwnerTrustedLinuxHelper? LinuxOwnerTrustedHelper = null, bool LinuxDangerFullAccessOnce = false);
     // Explicit conformance-only DATA selection; never a RuntimeTrust/native authority issuer.
     public sealed record OwnerTrustedLinuxHelper(AdmissionFile OwnerDecision, AdmissionFile CompletedReceipt, string PreparedBootId, AdmissionFile FinalDisposition);
     sealed record HelperDecision(string Kind, bool Approved, string VmId, string HelperPath, long HelperBytes, string HelperSha256, string TrustBoundary, string RestrictiveChildPolicy, string OfflineDecisionSha256);
@@ -228,6 +228,8 @@ public sealed class InstalledNativeHostConformanceTests
             var path = Environment.GetEnvironmentVariable(fixtureKey) ?? throw new IOException("Fresh Root-admitted real native conformance fixture required; no model/CLI fallback.");
             var rawFixture = BoundedFiles.Read(path, frame.Original, 65536); var expectedFixtureHash = Environment.GetEnvironmentVariable(fixtureKey + "_SHA256") ?? throw new IOException("Independent complete fixture hash required."); Assert.Equal(expectedFixtureHash, BoundedFiles.Sha(rawFixture)); _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(rawFixture); frame.Original.Check(); frame.Selected = JsonSerializer.Deserialize<Fixture>(rawFixture, BoundedFiles.Json) ?? throw new IOException("Actual probe fixture null."); var f = frame.Selected;
             if (f.Kind != "RootAdmittedNativeConformanceProvisioningFixture-v2" || f.CaseKind != (stop ? "stop" : "completion") || f.PlanBundle is null || f.Expectations is null || f.Adapter != adapter || f.Host is null || string.IsNullOrWhiteSpace(f.Host.Version) || f.Host.Version == "unverified" || f.Host.Version.Length > 256 || f.RelativePath is null || f.RelativePath.Length is < 1 or > 256 || f.RelativePath.Contains('\\') || Path.IsPathFullyQualified(f.RelativePath) || f.RelativePath.Split('/').Any(v => v is "" or "." or "..") || f.ExpectedText is null || f.ExpectedText.Length is < 1 or > 4096 || f.ExpectedText.Contains('\0')) throw new IOException("Exact finite independently prepared real-host task fixture required.");
+            if (f.LinuxDangerFullAccessOnce && (!OperatingSystem.IsLinux() || adapter != "codex.cli" || stop || f.CaseKind != "completion" || f.ObserveRuntimeTrustRoute || f.LinuxOwnerTrustedHelper is null))
+                throw new IOException("One explicitly selected helper-bound Linux Codex completion fixture required for danger-full-access; no production or stop-route selection.");
             if (f.ObserveRuntimeTrustRoute && (adapter != "codex.cli" || !OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() ||
                 OperatingSystem.IsLinux() && f.LinuxScopeProfile is null))
                 throw new IOException("Trust-route conformance selects only the existing Windows/Linux Codex UNVERIFIED producer with an actual Linux scope; no authority is granted.");
@@ -258,7 +260,7 @@ public sealed class InstalledNativeHostConformanceTests
             var profile = new AgentAdapterProfile(adapter, f.Host.Version, new[] { AgentCapability.Launch, AgentCapability.CompletionEvidence, AgentCapability.Stop, AgentCapability.EvidenceExport }.Select(c => new AgentCapabilityEvidence(c, AgentCapabilityStatus.Unverified, "actual installed transport UNDER TEST", "source-defined genuine probe, not conformance authority")).ToArray());
             frame.Port = adapter switch
             {
-                "codex.cli" => new DeliveryForge.Tool.Codex.CodexAppServerPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope, null, f.ObserveRuntimeTrustRoute),
+                "codex.cli" => new DeliveryForge.Tool.Codex.CodexAppServerPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope, null, f.ObserveRuntimeTrustRoute, f.LinuxDangerFullAccessOnce),
                 "claude-code.cli" => new DeliveryForge.Tool.Claude.ClaudeStreamPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope),
                 "pi.cli" => new DeliveryForge.Tool.Pi.PiRpcPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope),
                 _ => throw new IOException("No arbitrary protocol dispatch.")
@@ -325,7 +327,7 @@ public sealed class InstalledNativeHostConformanceTests
             // stderr, account responses and prompts cannot be made safe by a
             // regex redaction claim. Export exact hash/extent and fixed signals.
             var text = Encoding.UTF8.GetString(stderr); var signals = new List<string>();
-            foreach (var signal in new[] { "not initialized", "already initialized", "failed to initialize sqlite", "error loading", "permission denied", "connection refused", "timed out", "unauthorized", "authentication", "invalid request", "error" })
+            foreach (var signal in new[] { "not initialized", "already initialized", "failed to initialize sqlite", "error loading", "permission denied", "connection refused", "timed out", "unauthorized", "authentication", "invalid request", "error", "Resource temporarily unavailable", "failed to spawn", "out of memory", "failed to create", "Operation not permitted", "Read-only file system" })
                 if (text.Contains(signal, StringComparison.OrdinalIgnoreCase)) signals.Add(signal);
             var io = native.ActualIo; var first = io.Take(128).Select(x => new { x.Kind, x.Entered, x.InvocationReturned, TaskStatus = x.ActualTask?.Status, PrimaryType = x.Primary?.GetType().FullName, PostType = x.Post?.GetType().FullName, x.Unknown }).ToArray();
             var value = new
