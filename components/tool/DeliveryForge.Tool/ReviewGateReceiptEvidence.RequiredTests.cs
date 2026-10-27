@@ -136,8 +136,16 @@ internal static partial class ReviewGateReceiptEvidence
                 Need(matches.Length == 1, "graph-trx-unavailable");
                 budget.CasesSelected((int)passed);
                 var raw = Artifact(matches[0]); var cases = TrxCases(raw, (int)passed);
-                projected.Add(new { Project = project, GraphId = graph, ArtifactId = id, Bytes = raw.LongLength,
-                    Sha256 = "sha256:" + BoundedFiles.Sha(raw), CompleteCaseCount = cases.Length, Cases = cases });
+                projected.Add(new
+                {
+                    Project = project,
+                    GraphId = graph,
+                    ArtifactId = id,
+                    Bytes = raw.LongLength,
+                    Sha256 = "sha256:" + BoundedFiles.Sha(raw),
+                    CompleteCaseCount = cases.Length,
+                    Cases = cases
+                });
             }
             Need(seen.Count > 0, "required-test-members-unavailable");
             var presentation = JsonSerializer.SerializeToElement(new { Presented = true, Qualification = CaseQualification, Tests = projected }, BoundedFiles.Json);
