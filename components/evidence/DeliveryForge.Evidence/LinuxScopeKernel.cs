@@ -133,12 +133,24 @@ internal sealed class LinuxScopeKernel
     void Same(bool cleanup) { if (!bound || ObserveIdentity(cleanup) != identity) throw new IOException("Original cgroup kernel identity differs; no path adoption."); }
     byte[] Read(string name, bool cleanup, int maximum)
     {
-        Check(cleanup); if (name is not ("cgroup.events" or "memory.max" or "memory.swap.max" or "cpuset.cpus.effective" or "cpu.max" or "pids.max")) throw new IOException("Unlisted original cgroup observation.");
+        Check(cleanup); if (name is not ("cgroup.events" or "memory.max" or "memory.swap.max" or "cpuset.cpus.effective" or "cpu.max" or "pids.max" or "pids.current" or "pids.events" or "memory.current" or "memory.events")) throw new IOException("Unlisted original cgroup observation.");
         if (readBytes > (exactImageEntered ? (cleanup ? exactTotalReadByteLimit : exactWorkReadByteLimit) : (cleanup ? TotalReadByteLimit : WorkReadByteLimit)) - (maximum + 1)) throw new IOException("Complete cgroup observation byte quota exceeded before allocation."); readBytes += maximum + 1; var data = new byte[maximum + 1]; var fd = OpenFd(name, NoFollow | CloseOnExec, cleanup, group); var count = 0; Exception? primary = null, post = null;
         try { while (count < data.Length) { Check(cleanup); var chunk = new byte[data.Length - count]; var n = (int)Native("read:" + name, () => read(fd.Actual, chunk, (nuint)chunk.Length), cleanup, chunk); if (n == 0) break; Buffer.BlockCopy(chunk, 0, data, count, n); count += n; } if (count > maximum) throw new IOException("Complete cgroup file exceeded its finite profile."); }
         catch (Exception error) { primary = error; }
         try { Close(fd, cleanup); Check(cleanup); } catch (Exception error) { post = error; }
         if (primary is not null && post is not null) throw new AggregateException("Actual original cgroup read/first-close.", primary, post); if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw(); return data.AsSpan(0, count).ToArray();
+    }
+    // Diagnostic DATA from this already-owned leaf only. Each read reserves its
+    // complete maximum+EOF on the SAME original counter; no ancestor/path adoption.
+    internal IReadOnlyDictionary<string, ulong?> CaptureLeafCounters()
+    {
+        lock (gate)
+        {
+            Check(false); Same(false);
+            var raw = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+            foreach (var name in OwnedDuplexProcess.LeafCounterNames) raw.Add(name, Read(name, false, name.EndsWith(".events", StringComparison.Ordinal) ? 1024 : 256));
+            var result = OwnedDuplexProcess.ParseLeafCounters(raw); Same(false); Check(false); return result;
+        }
     }
     // Invoked only by the private owner for its already-bound creator, while the
     // verified gate is waiting for RELEASE. This method cannot bind/adopt a PID.

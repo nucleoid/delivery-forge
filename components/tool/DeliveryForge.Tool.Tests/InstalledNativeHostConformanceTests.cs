@@ -216,6 +216,17 @@ public sealed class InstalledNativeHostConformanceTests
         internal ParentEffectAdmission Parent = null!;
         internal readonly ToolLifetime Original = new(TimeSpan.FromSeconds(600), TestContext.Current.CancellationToken);
         internal readonly List<Task> ActualCalls = []; internal Fixture Selected = null!; internal IHostToolSessionPort Port = null!; internal WorktreeManager Git = null!; internal ProcessCommandExecutor Executor = null!; internal WriterLease? Lease; internal AgentRequest Request = null!;
+        readonly List<object> leafCounterSnapshots = [];
+        void CaptureLeafCounters(string phase)
+        {
+            if (leafCounterSnapshots.Count >= 2) throw new IOException("At most two original leaf snapshots.");
+            try
+            {
+                var values = (Native ?? throw new IOException("Actual original native owner missing.")).CaptureLeafCounters();
+                leafCounterSnapshots.Add(new { Phase = phase, Available = true, Values = values, ErrorType = (string?)null });
+            }
+            catch (Exception error) { leafCounterSnapshots.Add(new { Phase = phase, Available = false, Values = (object?)null, ErrorType = error.GetType().FullName }); Failure ??= error; throw; }
+        }
         internal DuplexRetirement? Retirement; internal bool LeaseCloseEntered, LeaseClosed, DispositionEntered, AcceptanceAssertionsReturned; internal Exception? Failure, Post; internal NativeFailureSnapshotWriter? FailureSnapshot;
         internal Task<AgentAcceptedReceipt>? StartupCall; internal CancellationTokenSource? StartupPhase;
         internal long StartupPhaseStarted; internal TimeSpan StartupPhaseLimit; internal bool StartupPhaseCloseEntered, StartupPhaseClosed;
@@ -261,7 +272,7 @@ public sealed class InstalledNativeHostConformanceTests
             var profile = new AgentAdapterProfile(adapter, f.Host.Version, new[] { AgentCapability.Launch, AgentCapability.CompletionEvidence, AgentCapability.Stop, AgentCapability.EvidenceExport }.Select(c => new AgentCapabilityEvidence(c, AgentCapabilityStatus.Unverified, "actual installed transport UNDER TEST", "source-defined genuine probe, not conformance authority")).ToArray());
             frame.Port = adapter switch
             {
-                "codex.cli" => new DeliveryForge.Tool.Codex.CodexAppServerPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope, null, f.ObserveRuntimeTrustRoute, f.LinuxDangerFullAccessOnce),
+                "codex.cli" => new DeliveryForge.Tool.Codex.CodexAppServerPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope, null, f.ObserveRuntimeTrustRoute, f.LinuxDangerFullAccessOnce, OperatingSystem.IsLinux() && (f.ObserveRuntimeTrustRoute || f.LinuxDangerFullAccessOnce) ? frame.CaptureLeafCounters : null),
                 "claude-code.cli" => new DeliveryForge.Tool.Claude.ClaudeStreamPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope),
                 "pi.cli" => new DeliveryForge.Tool.Pi.PiRpcPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope),
                 _ => throw new IOException("No arbitrary protocol dispatch.")
@@ -331,8 +342,11 @@ public sealed class InstalledNativeHostConformanceTests
             foreach (var signal in new[] { "not initialized", "already initialized", "failed to initialize sqlite", "error loading", "permission denied", "connection refused", "timed out", "unauthorized", "authentication", "invalid request", "error", "Resource temporarily unavailable", "failed to spawn", "out of memory", "failed to create", "Operation not permitted", "Read-only file system" })
                 if (text.Contains(signal, StringComparison.OrdinalIgnoreCase)) signals.Add(signal);
             var io = native.ActualIo; var first = io.Take(128).Select(x => new { x.Kind, x.Entered, x.InvocationReturned, TaskStatus = x.ActualTask?.Status, PrimaryType = x.Primary?.GetType().FullName, PostType = x.Post?.GetType().FullName, x.Unknown }).ToArray();
+            var leafCounters = leafCounterSnapshots.Count == 0 ? null : leafCounterSnapshots.ToArray();
+            if (JsonSerializer.SerializeToUtf8Bytes(leafCounters, BoundedFiles.Json).Length > 4096) throw new IOException("Finite optional leaf diagnostic exceeds4KiB.");
             var value = new
             {
+                LeafCounters = leafCounters,
                 Kind = "ActualNativeHostFailureSnapshot-v1",
                 Selected.Adapter,
                 Selected.CaseKind,

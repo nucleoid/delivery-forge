@@ -1,5 +1,6 @@
 using System.Text.Json;
 using DeliveryForge.Execution;
+using DeliveryForge.Evidence;
 using DeliveryForge.Execution.Host;
 using DeliveryForge.Tool.Codex;
 namespace DeliveryForge.Tool.Tests;
@@ -147,6 +148,66 @@ public sealed class CodexOneJobDangerFullAccessTests
         byte[] raw = [0xff, 0, 1, 2];
         InstalledHostAdmission.RequireNonDfaConformanceArtifact(raw);
         Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RequireLinuxCodexCompletionArtifact(raw));
+    }
+
+    static Dictionary<string, byte[]> CounterData() => new(StringComparer.Ordinal)
+    {
+        ["pids.current"] = "22\n"u8.ToArray(), ["pids.max"] = "48\n"u8.ToArray(), ["pids.events"] = "max 0\n"u8.ToArray(),
+        ["memory.current"] = "4096\n"u8.ToArray(), ["memory.max"] = "max\n"u8.ToArray(),
+        ["memory.events"] = "low 0\nhigh 0\nmax 1\noom 2\noom_kill 1\n"u8.ToArray()
+    };
+    [Fact]
+    public void Leaf_counter_data_keeps_actual_events_unlimited_and_optional_absence_distinct()
+    {
+        var values = OwnedDuplexProcess.ParseLeafCounters(CounterData());
+        Assert.Equal((ulong?)22, values["pids.current"]); Assert.Equal((ulong?)1, values["memory.events.oom_kill"]);
+        Assert.Null(values["memory.max"]); Assert.False(values.ContainsKey("memory.events.oom_group_kill"));
+    }
+    [Theory]
+    [InlineData("missing")]
+    [InlineData("overflow")]
+    [InlineData("negative")]
+    [InlineData("duplicate")]
+    [InlineData("missing-event")]
+    [InlineData("unknown-event")]
+    [InlineData("incomplete")]
+    [InlineData("oversize")]
+    public void Leaf_counter_malformed_or_unavailable_data_never_becomes_zero(string mutation)
+    {
+        var raw = CounterData();
+        switch (mutation)
+        {
+            case "missing": raw.Remove("pids.current"); break;
+            case "overflow": raw["pids.current"] = "18446744073709551616\n"u8.ToArray(); break;
+            case "negative": raw["memory.current"] = "-1\n"u8.ToArray(); break;
+            case "duplicate": raw["pids.events"] = "max 0\nmax 1\n"u8.ToArray(); break;
+            case "missing-event": raw["memory.events"] = "low 0\nhigh 0\nmax 0\noom 0\n"u8.ToArray(); break;
+            case "unknown-event": raw["pids.events"] = "other 0\n"u8.ToArray(); break;
+            case "incomplete": raw["pids.max"] = "48"u8.ToArray(); break;
+            case "oversize": raw["pids.events"] = new byte[1025]; break;
+        }
+        Assert.Throws<IOException>(() => OwnedDuplexProcess.ParseLeafCounters(raw));
+    }
+    [Theory]
+    [InlineData(0, "after-terminal")]
+    [InlineData(1, "before-turn")]
+    [InlineData(2, "after-terminal")]
+    [InlineData(0, "other")]
+    public void Leaf_diagnostic_rejects_missing_repeated_or_foreign_phase(int previous, string phase) =>
+        Assert.Throws<IOException>(() => CodexAppServerPort.RequireLeafCounterPhase(previous, phase));
+    [Fact]
+    public void Production_constructor_cannot_receive_conformance_leaf_observer() =>
+        Assert.Throws<ToolUsageException>(() => new CodexAppServerPort(Image(), new DeliveryForge.Execution.Git.WorktreeManager(), Profile(), Scope(), null, false, false, _ => throw new Exception("Must not invoke")));
+
+    [Fact]
+    public void Leaf_diagnostic_accepts_only_the_two_complete_ordered_samples()
+    {
+        var first = CodexAppServerPort.RequireLeafCounterPhase(0, "before-turn");
+        Assert.Equal(2, CodexAppServerPort.RequireLeafCounterPhase(first, "after-terminal"));
+        var raw = CounterData(); raw["memory.current"] = "18446744073709551615\n"u8.ToArray();
+        raw["memory.events"] = "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 4\n"u8.ToArray();
+        var values = OwnedDuplexProcess.ParseLeafCounters(raw);
+        Assert.Equal((ulong?)ulong.MaxValue, values["memory.current"]); Assert.Equal((ulong?)4, values["memory.events.oom_group_kill"]);
     }
 
 }

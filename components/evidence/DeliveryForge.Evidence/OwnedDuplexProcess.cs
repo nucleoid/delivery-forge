@@ -33,6 +33,45 @@ public sealed class OwnedDuplexProcess
     public bool HasCreationOwnedExactLinuxImage => creationOwnedExactImage?.Invoke() == true;
     internal bool HasCreationOwnedLinuxScope => creationOwnedScope?.Invoke() == true;
     internal void AttachScopeProof(Func<bool> actualProof, Func<bool>? actualExactImage = null) { if (creationOwnedScope is not null) throw new InvalidOperationException("Original scope proof already attached."); creationOwnedScope = actualProof; creationOwnedExactImage = actualExactImage; }
+    Func<IReadOnlyDictionary<string, ulong?>>? leafCounters;
+    internal void AttachLeafCounters(Func<IReadOnlyDictionary<string, ulong?>> capture) { if (leafCounters is not null) throw new IOException("Original leaf observer already attached."); leafCounters = capture; }
+    internal IReadOnlyDictionary<string, ulong?> CaptureLeafCounters()
+    {
+        lock (gate)
+        {
+            Check(false); if (retirement is not null || !HasCreationOwnedLinuxScope || leafCounters is null) throw new IOException("Live actual Linux owner required for leaf diagnostic.");
+            try { var result = leafCounters(); Check(false); return result; }
+            catch (Exception failure) { RecordOwnerFailure(failure); throw; }
+        }
+    }
+    internal static IReadOnlyList<string> LeafCounterNames { get; } = Array.AsReadOnly(new[] { "pids.current", "pids.max", "pids.events", "memory.current", "memory.max", "memory.events" });
+    internal static IReadOnlyDictionary<string, ulong?> ParseLeafCounters(IReadOnlyDictionary<string, byte[]> raw)
+    {
+        if (raw.Count != 6 || LeafCounterNames.Any(name => !raw.ContainsKey(name))) throw new IOException("Complete six-file leaf diagnostic required.");
+        var result = new Dictionary<string, ulong?>(StringComparer.Ordinal);
+        foreach (var name in LeafCounterNames)
+        {
+            var bytes = raw[name]; var events = name.EndsWith(".events", StringComparison.Ordinal);
+            if (bytes is null || bytes.Length is 0 || bytes.Length > (events ? 1024 : 256) || bytes.Any(x => x > 127)) throw new IOException("Malformed bounded leaf counter bytes.");
+            var text = System.Text.Encoding.ASCII.GetString(bytes); if (!text.EndsWith('\n')) throw new IOException("Complete newline-terminated leaf counter required.");
+            var lines = text[..^1].Split('\n');
+            if (!events)
+            {
+                if (lines.Length != 1) throw new IOException("One leaf scalar required.");
+                result.Add(name, name.EndsWith(".max", StringComparison.Ordinal) && lines[0] == "max" ? null : Number(lines[0])); continue;
+            }
+            var required = name == "pids.events" ? new[] { "max" } : new[] { "low", "high", "max", "oom", "oom_kill" };
+            var allowed = name == "pids.events" ? required : [.. required, "oom_group_kill"];
+            foreach (var line in lines)
+            {
+                var cells = line.Split(' ');
+                if (cells.Length != 2 || !allowed.Contains(cells[0], StringComparer.Ordinal) || !result.TryAdd(name + "." + cells[0], Number(cells[1]))) throw new IOException("Malformed, duplicate or unknown leaf event.");
+            }
+            if (required.Any(key => !result.ContainsKey(name + "." + key))) throw new IOException("Required leaf event unavailable; no zero substitution.");
+        }
+        return result;
+        static ulong Number(string text) => ulong.TryParse(text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value) ? value : throw new IOException("Unsigned finite leaf counter required.");
+    }
     object? actualOwner; bool inputCloseEntered, inputCloseReturned, outputEof, errorEof, disposeEntered, disposeReturned;
     bool opening = true, creationUnknown; long bytesRead, bytesWritten; int readerBusy, writerBusy; Task? errorDrain, outputConsumer; Task<DuplexRetirement>? retirement;
     readonly List<Exception> failures = []; readonly MemoryStream errorBytes = new();

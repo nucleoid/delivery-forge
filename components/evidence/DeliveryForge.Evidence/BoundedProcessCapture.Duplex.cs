@@ -40,7 +40,7 @@ internal static partial class BoundedProcessCapture
         try
         {
             if (selection is null) throw new PlatformNotSupportedException("A real selected creation-owned Linux scope profile is required; root-only fallback cannot establish duplex support.");
-            scope = new LinuxCommandScope(process, budget, selection, exactNativeImage); session.AttachScopeProof(() => scope.HasCreationOwnedScope, () => scope.HasCreationOwnedExactImage); retention.Add(scope); process.StartInfo = DuplexStartInfo(invocation); scope.Prepare(process.StartInfo);
+            scope = new LinuxCommandScope(process, budget, selection, exactNativeImage); session.AttachScopeProof(() => scope.HasCreationOwnedScope, () => scope.HasCreationOwnedExactImage); session.AttachLeafCounters(() => { try { return scope.CaptureLeafCounters(); } finally { Failures(); } }); retention.Add(scope); process.StartInfo = DuplexStartInfo(invocation); scope.Prepare(process.StartInfo);
             scope.BeforeCreation(); var created = process.Start(); scope.CreationReturned(created); if (!created) throw new IOException("Original scoped process did not start.");
             input = process.StandardInput; retention.Add(input); budget.CheckWork(); output = process.StandardOutput; retention.Add(output); budget.CheckWork(); error = process.StandardError; retention.Add(error); budget.CheckWork();
             // The SAME root is held at the genuine compiled birth barrier until

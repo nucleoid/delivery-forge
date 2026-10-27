@@ -272,6 +272,15 @@ internal sealed class LinuxCommandScope
     }
     internal bool HasCreationOwnedExactImage { get { lock (gate) return exactImage is not null && exactImageObserved && bound && releaseReturned; } }
     internal bool HasCreationOwnedScope { get { lock (gate) return bound && releaseReturned; } }
+    internal IReadOnlyDictionary<string, ulong?> CaptureLeafCounters()
+    {
+        lock (gate)
+        {
+            Check(false);
+            if (!bound || !releaseReturned || dispositionEntered || disposed || stopEntered || stopFailureCleanup || kernel is null) throw new IOException("Live bound original scope required for leaf diagnostic.");
+            return Observe("actual-original-leaf-counters", kernel.CaptureLeafCounters);
+        }
+    }
     internal DuplexNativeObservation ObserveNative(bool cleanup = false)
     {
         lock (gate)

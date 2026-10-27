@@ -15,6 +15,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     readonly InstalledHostAdmission.RuntimeTrust? runtimeTrust;
     readonly bool conformanceTrustRoute;
     readonly bool conformanceDangerFullAccess;
+    readonly Action<string>? conformanceLeafCounters; int conformanceCounterPhase;
     bool TrustProtocol => runtimeTrust is not null || conformanceTrustRoute;
     WindowsImageUse? trustedImage;
     bool trustedNativeCreationEntered, trustedNativeCreationReturned;
@@ -47,7 +48,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     }
     public CodexAppServerPort(CodexAppServerSelection selection, WorktreeManager actualGit, AgentAdapterProfile acceptedProfile, LinuxScopeSelection? linuxScope = null)
         : this(selection, actualGit, acceptedProfile, linuxScope, null) { }
-    internal CodexAppServerPort(CodexAppServerSelection selection, WorktreeManager actualGit, AgentAdapterProfile acceptedProfile, LinuxScopeSelection? linuxScope, InstalledHostAdmission.RuntimeTrust? runtimeTrust, bool conformanceTrustRoute = false, bool conformanceDangerFullAccess = false)
+    internal CodexAppServerPort(CodexAppServerSelection selection, WorktreeManager actualGit, AgentAdapterProfile acceptedProfile, LinuxScopeSelection? linuxScope, InstalledHostAdmission.RuntimeTrust? runtimeTrust, bool conformanceTrustRoute = false, bool conformanceDangerFullAccess = false, Action<string>? conformanceLeafCounters = null)
     {
         ArgumentNullException.ThrowIfNull(selection); ArgumentNullException.ThrowIfNull(acceptedProfile);
         if (conformanceTrustRoute && ((!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) ||
@@ -61,11 +62,26 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             acceptedProfile.Capabilities is null || acceptedProfile.Capabilities.Count == 0 ||
             acceptedProfile.Capabilities.Any(row => row is null || row.Status != AgentCapabilityStatus.Unverified)))
             throw new ToolUsageException("One-job danger-full-access is only an explicit unverified Linux conformance selection for the exact admitted image and concrete restrictive scope; no runtime trust.");
+        if (conformanceLeafCounters is not null && (!OperatingSystem.IsLinux() || linuxScope is null || runtimeTrust is not null || !conformanceTrustRoute && !conformanceDangerFullAccess || acceptedProfile.Capabilities is null || acceptedProfile.Capabilities.Count == 0 || acceptedProfile.Capabilities.Any(row => row is null || row.Status != AgentCapabilityStatus.Unverified)))
+            throw new ToolUsageException("Leaf diagnostics require an explicit unverified Linux conformance route; production has no observer.");
+        this.conformanceLeafCounters = conformanceLeafCounters;
         this.conformanceDangerFullAccess = conformanceDangerFullAccess;
         this.conformanceTrustRoute = conformanceTrustRoute; this.runtimeTrust = runtimeTrust; this.linuxScope = linuxScope;
         if (acceptedProfile.Capabilities is null || acceptedProfile.Capabilities.Count is < 1 or > 6 || acceptedProfile.Capabilities.Any(row => row is null) || string.IsNullOrWhiteSpace(selection.Version) || selection.Version.Length > 256) throw new ToolUsageException("Finite complete actual native version/profile required BEFORE capability snapshot.");
         if (acceptedProfile.AdapterId != "codex.cli" || acceptedProfile.AdapterVersion != selection.Version || acceptedProfile.Capabilities.Any(x => (x.Capability is AgentCapability.Pause or AgentCapability.Resume) && x.Status == AgentCapabilityStatus.Supported)) throw new ToolUsageException("Stable app-server has interrupt, not same-turn pause/resume; exact accepted Codex version required.");
         this.selection = selection; this.actualGit = actualGit; Profile = acceptedProfile with { Capabilities = Array.AsReadOnly(acceptedProfile.Capabilities.ToArray()) };
+    }
+    internal static int RequireLeafCounterPhase(int previous, string phase) => (previous, phase) switch
+    {
+        (0, "before-turn") => 1,
+        (1, "after-terminal") => 2,
+        _ => throw new IOException("Leaf diagnostics require at most two ordered phases.")
+    };
+    void ObserveConformanceLeafCounters(string phase)
+    {
+        if (conformanceLeafCounters is null) return;
+        conformanceCounterPhase = RequireLeafCounterPhase(conformanceCounterPhase, phase);
+        original.Check(); conformanceLeafCounters(phase); original.Check();
     }
     public void BindOriginal(ToolLifetime actualOriginal) { lock (gate) { if (boundOriginal is not null && !ReferenceEquals(boundOriginal, actualOriginal)) throw new WorkerEnvelopeException("Codex original cannot be rebound or renewed."); actualOriginal.Check(); boundOriginal = actualOriginal; startup ??= new(actualOriginal.OriginalStarted); } }
     internal CodexStartupDiagnostics SnapshotStartupDiagnostics()
@@ -250,6 +266,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                 CodexConfigReadData.RequireThread(routeProjection, observedModel, observedProvider);
                 CodexRuntimeRoute.RequireObserved(observedChatgptAccount, observedProvider, observedModel);
             }
+            ObserveConformanceLeafCounters("before-turn");
             startup.SetStage(CodexStartupStage.TurnStart); var turn = await Rpc("turn/start", HostAssignmentPrompt.CodexTurnStart(actual, instructions!, threadId), token).ConfigureAwait(false); turnId = Text(turn.GetProperty("turn"), "id");
             lock (gate) { terminalWait = new(TaskCreationOptions.RunContinuationsAsynchronously); if (terminals.TryGetValue(turnId, out var early)) { if (Text(early.GetProperty("params"), "threadId") != threadId) throw new IOException("Early terminal has foreign actual thread."); terminalWait.TrySetResult(early); } binding = new(actual.AdapterId, actual.AdapterVersion, actual.RunId, actual.RequestIdentity, threadId, turnId); }
             original.Check(); startup.SetStage(CodexStartupStage.Accepted); return new(actual.SchemaVersion, actual.RunId, actual.RequestIdentity, actual.PlanIdentity, actual.BaseCommit, actual.Worktree, actual.AdapterId, actual.AdapterVersion, threadId, turnId, DateTimeOffset.UtcNow, Profile.Capabilities);
@@ -273,6 +290,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         {
             Bound(actual); original.Check(); var completed = await Keep(terminalWait!.Task).WaitAsync(remaining < original.Remaining ? remaining : original.Remaining, token).ConfigureAwait(false); var status = Text(completed.GetProperty("params").GetProperty("turn"), "status"); if (status != "completed") throw new WorkerEnvelopeException("Actual Codex turn ended " + status + "; no successful completion inferred.");
             if (TrustProtocol) await ObserveRoute(token).ConfigureAwait(false);
+            ObserveConformanceLeafCounters("after-terminal");
             shutdown = true; var retired = await Keep(process!.RetireAsync(false)).ConfigureAwait(false); HostTransportRetirement.RequireSuccessful(retired);
             if (pump is not null) await pump.WaitAsync(original.Remaining, token).ConfigureAwait(false); if (pumpFailure is not null) throw new IOException("Actual app-server protocol failed; no successful completion.", pumpFailure);
             runtimeTrust?.Check(original); trustedImage?.Check(token); CloseTrustedImage(true, false);
