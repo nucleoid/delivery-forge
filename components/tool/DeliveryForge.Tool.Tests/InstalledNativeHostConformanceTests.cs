@@ -70,7 +70,7 @@ public sealed class InstalledNativeHostConformanceTests
     {
         const string PathName = "/codex-code-mode-host", Vm = "6baeba02-2e64-4b62-a051-4bb82f57a913";
         const string Hash = "6b4de7a1a69656779c88b6e249ab976cbbc9a43e1edf65e6ec9927feb26f996b";
-        const string RootUuid = "336b7308-380b-4f03-8a00-a46b12910576", ProvisionNonce = "7f1f3e2c0a954b56b9ec5e407f61fac7";
+        const string RootUuid = "336b7308-380b-4f03-8a00-a46b12910576", ProvisionNonce = "3ebae3b812d1490daae436b81a17f137";
         const string ProvisionDirectory = "/var/lib/delivery-forge-route-a-" + ProvisionNonce;
         const string PolicyPath = "/etc/systemd/system/user-1000.slice.d/90-delivery-forge-conformance.conf";
         const string PolicyHash = "e8d9d5317a40bd34453241e81f7e0c3f035d79bb8a1d5d0d1b27bbb20ee07c2a";
