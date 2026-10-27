@@ -152,8 +152,11 @@ public sealed class CodexOneJobDangerFullAccessTests
 
     static Dictionary<string, byte[]> CounterData() => new(StringComparer.Ordinal)
     {
-        ["pids.current"] = "22\n"u8.ToArray(), ["pids.max"] = "48\n"u8.ToArray(), ["pids.events"] = "max 0\n"u8.ToArray(),
-        ["memory.current"] = "4096\n"u8.ToArray(), ["memory.max"] = "max\n"u8.ToArray(),
+        ["pids.current"] = "22\n"u8.ToArray(),
+        ["pids.max"] = "48\n"u8.ToArray(),
+        ["pids.events"] = "max 0\n"u8.ToArray(),
+        ["memory.current"] = "4096\n"u8.ToArray(),
+        ["memory.max"] = "max\n"u8.ToArray(),
         ["memory.events"] = "low 0\nhigh 0\nmax 1\noom 2\noom_kill 1\n"u8.ToArray()
     };
     [Fact]
