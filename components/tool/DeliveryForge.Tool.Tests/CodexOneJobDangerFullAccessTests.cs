@@ -127,4 +127,26 @@ public sealed class CodexOneJobDangerFullAccessTests
         Assert.Null(error.InnerException); Assert.Equal("Malformed marked conformance artifact.", error.Message);
     }
 
+    [Fact]
+    public void Typed_Linux_Codex_completion_accepts_only_explicit_confined_trace_data() =>
+        InstalledHostAdmission.RequireLinuxCodexCompletionArtifact(JsonSerializer.SerializeToUtf8Bytes(new
+        { Kind = "ActualCodexAppServerTrace-v1", ConformanceDangerFullAccess = false, RuntimeCertified = false, Events = Array.Empty<object>() }));
+    [Theory]
+    [InlineData("{\"Kind\":\"ActualCodexAppServerTrace-v1\",\"Events\":[{\"Message\":{\"result\":{\"sandbox\":{\"type\":\"dangerFullAccess\"}}}}]}")]
+    [InlineData("{\"Kind\":\"ActualCodexAppServerTrace-v1\",\"ConformanceDangerFullAccess\":true}")]
+    [InlineData("{\"Kind\":\"other\",\"ConformanceDangerFullAccess\":false}")]
+    [InlineData("[]")]
+    public void Typed_Linux_Codex_completion_refuses_unmarked_relaxed_or_nontrace_data(string raw)
+    {
+        var error = Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RequireLinuxCodexCompletionArtifact(System.Text.Encoding.UTF8.GetBytes(raw)));
+        Assert.Null(error.InnerException); Assert.DoesNotContain(raw, error.Message, StringComparison.Ordinal);
+    }
+    [Fact]
+    public void Typed_Linux_Codex_completion_refuses_binary_while_global_legacy_reader_accepts_it()
+    {
+        byte[] raw = [0xff, 0, 1, 2];
+        InstalledHostAdmission.RequireNonDfaConformanceArtifact(raw);
+        Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RequireLinuxCodexCompletionArtifact(raw));
+    }
+
 }

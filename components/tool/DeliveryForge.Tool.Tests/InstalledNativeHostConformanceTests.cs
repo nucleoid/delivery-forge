@@ -510,7 +510,23 @@ public sealed class InstalledNativeHostConformanceTests
         }
         var native = frame.Native ?? throw new IOException("Actual original process reference missing."); var sameRetirement = native.RetireAsync(false); frame.Retirement = await sameRetirement.WaitAsync(frame.Original.Remaining, TestContext.Current.CancellationToken); HostTransportRetirement.RequireSuccessful(frame.Retirement);
         var after = await frame.ObserveAfterRun(); Assert.True(after.IsClean); Assert.Equal(after.HeadCommit, completion.HeadCommit); Assert.Equal(after.TreeId, completion.TreeId); Assert.Equal(Encoding.UTF8.GetBytes(f.ExpectedText), BoundedFiles.Read(Path.Combine(f.Worktree, f.RelativePath.Replace('/', Path.DirectorySeparatorChar)), frame.Original));
-        Assert.NotEmpty(completion.ArtifactPaths); foreach (var artifact in completion.ArtifactPaths) { var bytes = BoundedFiles.Read(artifact, frame.Original); Assert.DoesNotContain(frame.Request.WriterToken, Encoding.UTF8.GetString(bytes), StringComparison.Ordinal); if (f.LinuxDangerFullAccessOnce) { using var trace = JsonDocument.Parse(bytes); Assert.True(trace.RootElement.GetProperty("ConformanceDangerFullAccess").GetBoolean()); } }
+        Assert.NotEmpty(completion.ArtifactPaths);
+        foreach (var artifact in completion.ArtifactPaths)
+        {
+            var bytes = BoundedFiles.Read(artifact, frame.Original);
+            Assert.DoesNotContain(frame.Request.WriterToken, Encoding.UTF8.GetString(bytes), StringComparison.Ordinal);
+            if (adapter == "codex.cli")
+            {
+                using var trace = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 128 });
+                Assert.Equal(f.LinuxDangerFullAccessOnce, trace.RootElement.GetProperty("ConformanceDangerFullAccess").GetBoolean());
+                if (f.LinuxDangerFullAccessOnce) Assert.Throws<ToolUsageException>(() => InstalledHostAdmission.RequireNonDfaConformanceArtifact(bytes));
+                else
+                {
+                    InstalledHostAdmission.RequireNonDfaConformanceArtifact(bytes);
+                    InstalledHostAdmission.RequireLinuxCodexCompletionArtifact(bytes);
+                }
+            }
+        }
         // These are original-group facts. Final whole-VM conformance acceptance
         // additionally requires Root's outer actual Off/IO/frame audit; this Fact
         // cannot certify that no manager-brokered descendants left the group.

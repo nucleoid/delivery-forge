@@ -90,7 +90,7 @@ public sealed partial class InstalledHostAdmission
     internal static void RequireNonDfaConformanceArtifact(byte[] bytes)
     {
         JsonDocument document;
-        try { document = JsonDocument.Parse(bytes); }
+        try { document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 128 }); }
         catch (JsonException)
         {
             if (bytes.AsSpan().IndexOf("\"ConformanceDangerFullAccess\""u8) >= 0)
@@ -107,6 +107,25 @@ public sealed partial class InstalledHostAdmission
             if (marker.ValueKind != JsonValueKind.False)
                 throw new ToolUsageException("Sandbox-relaxed conformance cannot admit a production host.");
         }
+    }
+    // Linux Codex completion must be the actual confined trace, not an
+    // arbitrary unmarked artifact. Other platforms/adapters keep legacy typing.
+    internal static void RequireLinuxCodexCompletionArtifact(byte[] bytes)
+    {
+        try
+        {
+            _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(bytes);
+            using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 128 });
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object ||
+                !root.TryGetProperty("Kind", out var kind) || kind.ValueKind != JsonValueKind.String || kind.GetString() != "ActualCodexAppServerTrace-v1" ||
+                !root.TryGetProperty("ConformanceDangerFullAccess", out var marker) || marker.ValueKind != JsonValueKind.False)
+                throw new ToolUsageException("Linux Codex completion requires its confined typed trace.");
+        }
+        catch (DeliveryForge.Contracts.Serialization.ContractJsonException)
+        { throw new ToolUsageException("Malformed Linux Codex completion trace."); }
+        catch (JsonException)
+        { throw new ToolUsageException("Malformed Linux Codex completion trace."); }
     }
     public static InstalledHostAdmission ReadRootAccepted(AdmissionFile rootPin, TrustedConfiguration config, ToolLifetime original, AdmissionFile? actualConfigurationPin = null)
         => ReadRootAcceptedCore(rootPin, config, original, actualConfigurationPin, null);
@@ -126,9 +145,11 @@ public sealed partial class InstalledHostAdmission
         var self = System.Reflection.Assembly.GetExecutingAssembly().Location; if (Path.GetFullPath(receipt.ToolAssembly.Path) != Path.GetFullPath(self)) throw new ToolUsageException("Actual installed Tool assembly differs from independently accepted host conformance."); _ = ReadExact(receipt.ToolAssembly, original, 16777216);
         var image = new AdmissionFile(receipt.Host.Executable, receipt.Host.Bytes, receipt.Host.Sha256);
         if (images is null || receipt.RuntimeTrust is null) BoundedFiles.VerifyNativeImage(image, original); else images.Verify(image, original);
-        var artifacts = new HashSet<string>(StringComparer.Ordinal); long total = 0; byte[]? routeArtifact = null;
-        foreach (var pin in receipt.Artifacts) { if (pin is null) throw new ToolUsageException("Missing actual conformance artifact."); if (pin.Bytes <= 0 || pin.Bytes > 1048576 || total > 33554432 - pin.Bytes || !artifacts.Add(pin.Sha256)) throw new ToolUsageException("Actual conformance artifacts exceed finite complete profile or collide."); total += pin.Bytes; var raw = ReadExact(pin, original, 1048576); RequireNonDfaConformanceArtifact(raw); if (receipt.RuntimeTrust is not null && receipt.Cases.Any(row => row is not null && row.Name == "actual_runtime_trust_route" && row.ArtifactSha256 == pin.Sha256)) routeArtifact = raw; }
+        var artifacts = new HashSet<string>(StringComparer.Ordinal); long total = 0; byte[]? routeArtifact = null, completionArtifact = null;
+        foreach (var pin in receipt.Artifacts) { if (pin is null) throw new ToolUsageException("Missing actual conformance artifact."); if (pin.Bytes <= 0 || pin.Bytes > 1048576 || total > 33554432 - pin.Bytes || !artifacts.Add(pin.Sha256)) throw new ToolUsageException("Actual conformance artifacts exceed finite complete profile or collide."); total += pin.Bytes; var raw = ReadExact(pin, original, 1048576); RequireNonDfaConformanceArtifact(raw); if (receipt.Platform == "linux" && receipt.Adapter == "codex.cli" && receipt.Cases.Any(row => row is not null && row.Name == "actual_completion_commit" && row.ArtifactSha256 == pin.Sha256)) completionArtifact = raw; if (receipt.RuntimeTrust is not null && receipt.Cases.Any(row => row is not null && row.Name == "actual_runtime_trust_route" && row.ArtifactSha256 == pin.Sha256)) routeArtifact = raw; }
         RequireConformanceCases(receipt.Cases, artifacts, receipt.RuntimeTrust is not null);
+        if (receipt.Platform == "linux" && receipt.Adapter == "codex.cli")
+            RequireLinuxCodexCompletionArtifact(completionArtifact ?? throw new ToolUsageException("Actual Linux Codex completion artifact missing."));
         if (receipt.RuntimeTrust is not null)
         {
             original.Check(); RequireRuntimeTrustRouteArtifact(routeArtifact ?? throw new ToolUsageException("Actual runtime-trust artifact missing."), receipt.Host, receipt.Version); original.Check();
