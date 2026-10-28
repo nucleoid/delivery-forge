@@ -575,8 +575,8 @@ public sealed class OwnedLinuxExactImageTests
         foreach (var help in new[] { pathHelp, sealedHelp })
         {
             Assert.Equal(0, help.Command.ExitCode);
-            Assert.Contains("Usage:", help.Command.StandardOutput, StringComparison.Ordinal);
-            Assert.Contains("sandbox", help.Command.StandardOutput, StringComparison.Ordinal);
+            var usage = Assert.Single(help.Command.StandardOutput.Split('\n'), row => row.StartsWith("Usage:", StringComparison.Ordinal));
+            Assert.Contains(" sandbox ", usage, StringComparison.Ordinal);
             Assert.True(help.Command.StandardOutput.Contains("[COMMAND]", StringComparison.Ordinal) ||
                 help.Command.StandardOutput.Contains("<COMMAND>", StringComparison.Ordinal));
         }
