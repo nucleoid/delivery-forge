@@ -568,7 +568,7 @@ public sealed class OwnedLinuxExactImageTests
             Assert.Equal(mode == "user-owned" ? 1000U : 0U, facts.Uid);
             if (mode == "writable") Assert.NotEqual(0, facts.Mode & 0x80);
             else if (mode is "root-disk" or "sealed-default") Assert.Equal(0x16d, facts.Mode & 0xfff); // 0555, no special bits.
-            BoundedFiles.VerifyNativeImage(new(image.Path, image.Bytes, image.Sha256), original);
+            BoundedFiles.VerifyNativeImage(new(image.Path, image.Bytes, image.Sha256), original, TestContext.Current.CancellationToken);
         }
         var environment = ActualOrdinaryCapture.ResourceEnvironment();
         var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT"); Assert.True(!string.IsNullOrWhiteSpace(dotnetRoot) && Path.IsPathFullyQualified(dotnetRoot));
