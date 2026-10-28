@@ -278,7 +278,10 @@ internal sealed class LinuxCommandScope
         {
             Check(false);
             if (!bound || !releaseReturned || dispositionEntered || disposed || stopEntered || stopFailureCleanup || kernel is null) throw new IOException("Live bound original scope required for leaf diagnostic.");
-            return Observe("actual-original-leaf-counters", kernel.CaptureLeafCounters);
+            var raw = Observe("actual-original-leaf-counters", kernel.ReadLeafCounterBytes);
+            // Native reads and their identity/close checks have returned. A pure
+            // parse refusal is diagnostic failure, not an unreturned operation.
+            return OwnedDuplexProcess.ParseLeafCounters(raw);
         }
     }
     internal DuplexNativeObservation ObserveNative(bool cleanup = false)

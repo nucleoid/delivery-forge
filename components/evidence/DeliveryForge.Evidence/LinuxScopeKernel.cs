@@ -142,14 +142,14 @@ internal sealed class LinuxScopeKernel
     }
     // Diagnostic DATA from this already-owned leaf only. Each read reserves its
     // complete maximum+EOF on the SAME original counter; no ancestor/path adoption.
-    internal IReadOnlyDictionary<string, ulong?> CaptureLeafCounters()
+    internal IReadOnlyDictionary<string, byte[]> ReadLeafCounterBytes()
     {
         lock (gate)
         {
             Check(false); Same(false);
             var raw = new Dictionary<string, byte[]>(StringComparer.Ordinal);
             foreach (var name in OwnedDuplexProcess.LeafCounterNames) raw.Add(name, Read(name, false, name.EndsWith(".events", StringComparison.Ordinal) ? 1024 : 256));
-            var result = OwnedDuplexProcess.ParseLeafCounters(raw); Same(false); Check(false); return result;
+            Same(false); Check(false); return raw;
         }
     }
     // Invoked only by the private owner for its already-bound creator, while the
