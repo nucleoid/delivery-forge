@@ -225,7 +225,7 @@ public sealed class InstalledNativeHostConformanceTests
                 var values = (Native ?? throw new IOException("Actual original native owner missing.")).CaptureLeafCounters();
                 leafCounterSnapshots.Add(new { Phase = phase, Available = true, Values = values, ErrorType = (string?)null });
             }
-            catch (Exception error) { leafCounterSnapshots.Add(new { Phase = phase, Available = false, Values = (object?)null, ErrorType = error.GetType().FullName }); Failure ??= error; throw; }
+            catch (Exception error) { leafCounterSnapshots.Add(new { Phase = phase, Available = false, Values = (object?)null, ErrorType = error.GetType().FullName }); throw; }
         }
         internal DuplexRetirement? Retirement; internal bool LeaseCloseEntered, LeaseClosed, DispositionEntered, AcceptanceAssertionsReturned; internal Exception? Failure, Post; internal NativeFailureSnapshotWriter? FailureSnapshot;
         internal Task<AgentAcceptedReceipt>? StartupCall; internal CancellationTokenSource? StartupPhase;
