@@ -15,6 +15,8 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     readonly InstalledHostAdmission.RuntimeTrust? runtimeTrust;
     readonly bool conformanceTrustRoute;
     readonly bool conformanceDangerFullAccess;
+    string[]? linuxWorkspaceRoots; bool linuxWorkspaceThreadVerified; WorkerEnvelopeException? linuxWorkspaceThreadRefusal;
+    bool UsesLinuxWorkspaceWrite => SelectLinuxWorkspaceWrite(OperatingSystem.IsLinux(), conformanceTrustRoute, runtimeTrust is not null, conformanceDangerFullAccess, linuxScope);
     readonly Action<string>? conformanceLeafCounters; int conformanceCounterPhase;
     Exception? conformanceCounterFailure;
     bool TrustProtocol => runtimeTrust is not null || conformanceTrustRoute;
@@ -188,6 +190,12 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                         var actualId = message.GetProperty("id").GetInt64(); string actualMethod;
                         lock (gate)
                             if (!trustedReplyMethods.Remove(actualId, out actualMethod!)) throw new IOException("Uncorrelated trust-protocol response method.");
+                        if (actualMethod == "thread/start" && !message.TryGetProperty("error", out _) && UsesLinuxWorkspaceWrite)
+                        {
+                            linuxWorkspaceThreadRefusal = InspectLinuxWorkspaceWriteThread(message.GetProperty("result"), request!,
+                                linuxWorkspaceRoots ?? throw new IOException("Confined roots were not selected before thread dispatch."));
+                            linuxWorkspaceThreadVerified = linuxWorkspaceThreadRefusal is null;
+                        }
                         message = CodexTrustProtocolData.Response(message, actualMethod); trustedResponseMethod = actualMethod;
                     }
                 }
@@ -233,12 +241,58 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             type.ValueKind != JsonValueKind.String || type.GetString() != "dangerFullAccess")
             throw new WorkerEnvelopeException("Actual one-job Linux conformance cwd/dangerFullAccess policy differs; no turn is dispatched.");
     }
+    // Selection DATA only: actual RuntimeTrust still comes solely from the
+    // existing private factory and binds/checks the same original before birth.
+    internal static bool SelectLinuxWorkspaceWrite(bool linux, bool trustRoute, bool runtimeBound, bool dangerFullAccess, LinuxScopeSelection? scope)
+    {
+        if (!linux || dangerFullAccess || !trustRoute && !runtimeBound) return false;
+        if (scope?.RestrictiveChildPolicy != "nnp-user1000-ancestor-v3")
+            throw new ToolUsageException("Confined Linux workspace policy requires the selected restrictive scope.");
+        return true;
+    }
+    internal static WorkerEnvelopeException? InspectLinuxWorkspaceWriteThread(JsonElement result, AgentRequest actual, string[] roots)
+    {
+        try { RequireLinuxWorkspaceWriteThread(result, actual, roots); return null; }
+        catch (WorkerEnvelopeException refusal) { return refusal; }
+    }
+    internal static string[] LinuxWorkspaceWriteRoots(WorktreeManager git, ToolLifetime owner, AgentRequest actual)
+    {
+        owner.Check();
+        var retained = git.RequireOriginalBinding(actual.Worktree, owner, actual.RunId);
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        var roots = new[] { retained.Worktree, retained.GitDirectory, retained.ObjectsPath }
+            .Select(path => Path.TrimEndingDirectorySeparator(BoundedFiles.Plain(path, true))).Distinct(comparer).ToArray();
+        if (roots.Any(path => !Directory.Exists(path))) throw new WorktreeBoundaryException("Confined Git root disappeared.");
+        retained.Check(); owner.Check(); return roots;
+    }
+    internal static object LinuxWorkspaceWritePolicy(string[] roots) => new
+    {
+        type = "workspaceWrite", writableRoots = roots, networkAccess = false,
+        excludeTmpdirEnvVar = true, excludeSlashTmp = true
+    };
+    internal static void RequireLinuxWorkspaceWriteThread(JsonElement result, AgentRequest actual, string[] selectedRoots)
+    {
+        var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
+        if (result.ValueKind != JsonValueKind.Object || !result.TryGetProperty("cwd", out var cwd) ||
+            cwd.ValueKind != JsonValueKind.String || !comparer.Equals(cwd.GetString(), actual.Worktree) ||
+            !result.TryGetProperty("sandbox", out var policy) || policy.ValueKind != JsonValueKind.Object ||
+            policy.EnumerateObject().Any(p => p.Name is not ("type" or "writableRoots" or "networkAccess" or "excludeTmpdirEnvVar" or "excludeSlashTmp")) ||
+            !policy.TryGetProperty("type", out var type) || type.ValueKind != JsonValueKind.String || type.GetString() != "workspaceWrite" ||
+            !policy.TryGetProperty("networkAccess", out var network) || network.ValueKind != JsonValueKind.False ||
+            !policy.TryGetProperty("writableRoots", out var roots) || roots.ValueKind != JsonValueKind.Array ||
+            roots.EnumerateArray().Any(root => root.ValueKind != JsonValueKind.String || !selectedRoots.Contains(root.GetString(), comparer)) ||
+            policy.EnumerateObject().Any(p => p.Name is "excludeTmpdirEnvVar" or "excludeSlashTmp" && p.Value.ValueKind is not (JsonValueKind.True or JsonValueKind.False)))
+            throw new WorkerEnvelopeException("Actual confined Linux cwd/workspaceWrite policy differs; no turn dispatched.");
+        // Thread/start selects mode only. Exact roots/temp exclusions are the
+        // typed turn request below, not a pre-turn server echo of that override.
+    }
     public async Task<AgentAcceptedReceipt> StartAsync(AgentRequest actual, TimeSpan remaining, CancellationToken token)
     {
         original.Check(); (instructions ?? throw new WorkerEnvelopeException("Actual parent instructions required before any Codex dispatch.")).Require(actual); lock (gate) { if (startEntered) throw new WorkerEnvelopeException("App-server dispatch already entered; no retry."); startEntered = true; request = actual; }
         try
         {
             if (actual.AdapterId != "codex.cli" || actual.AdapterVersion != selection.Version || remaining <= TimeSpan.Zero || remaining > original.WorkLimit) throw new WorkerEnvelopeException("Actual request/version/deadline differs from containing original.");
+            var confined = UsesLinuxWorkspaceWrite;
             runtimeTrust?.BindWorker(original, selection, actual.Worktree, actual.ResultDirectory, linuxScope);
             startup!.SetStage(CodexStartupStage.NativeImageVerification);
             // Reserve the actual gate copy and independent sealed-fd verification
@@ -273,11 +327,17 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                 if (!observedChatgptAccount) throw new IOException("Actual existing ChatGPT subscription is required before worker thread creation.");
             }
             // Omit model/provider/approval overrides: preserve actual configured
-            // model, existing sign-in and host policy. No experimental fields.
+            // model and existing sign-in. Only the existing trusted Linux route
+            // below selects the fixed confined filesystem policy; no experimental fields.
             startup.SetStage(CodexStartupStage.ThreadStart);
-            var threadParameters = conformanceDangerFullAccess ? ConformanceDangerFullAccessParameters(actual) : new { cwd = actual.Worktree };
+            var confinedRoots = confined ? LinuxWorkspaceWriteRoots(actualGit, original, actual) : null;
+            linuxWorkspaceRoots = confinedRoots;
+            object threadParameters = conformanceDangerFullAccess ? ConformanceDangerFullAccessParameters(actual) :
+                confined ? new { cwd = actual.Worktree, sandbox = "workspace-write" } : new { cwd = actual.Worktree };
             var started = await Rpc("thread/start", threadParameters, token).ConfigureAwait(false);
             if (conformanceDangerFullAccess) RequireConformanceDangerFullAccessThread(started, actual);
+            if (confined && linuxWorkspaceThreadRefusal is { } refusal) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(refusal).Throw();
+            if (confined && !linuxWorkspaceThreadVerified) throw new WorkerEnvelopeException("Actual confined thread policy was not verified before redaction.");
             threadId = Text(started.GetProperty("thread"), "id");
             if (started.TryGetProperty("model", out var model) && model.ValueKind == JsonValueKind.String) observedModel = model.GetString();
             if (started.TryGetProperty("modelProvider", out var provider) && provider.ValueKind == JsonValueKind.String) observedProvider = provider.GetString();
@@ -299,7 +359,15 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                 CodexRuntimeRoute.RequireObserved(observedChatgptAccount, observedProvider, observedModel);
             }
             ObserveConformanceLeafCounters("before-turn");
-            startup.SetStage(CodexStartupStage.TurnStart); var turn = await Rpc("turn/start", HostAssignmentPrompt.CodexTurnStart(actual, instructions!, threadId), token).ConfigureAwait(false); turnId = Text(turn.GetProperty("turn"), "id");
+            object turnParameters = HostAssignmentPrompt.CodexTurnStart(actual, instructions!, threadId);
+            if (confined)
+            {
+                var roots = LinuxWorkspaceWriteRoots(actualGit, original, actual);
+                if (!roots.SequenceEqual(confinedRoots!, OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal))
+                    throw new WorktreeBoundaryException("Original confined Git roots changed before turn.");
+                turnParameters = new { threadId, input = new[] { new { type = "text", text = HostAssignmentPrompt.Create(actual, instructions!) } }, sandboxPolicy = LinuxWorkspaceWritePolicy(roots) };
+            }
+            startup.SetStage(CodexStartupStage.TurnStart); var turn = await Rpc("turn/start", turnParameters, token).ConfigureAwait(false); turnId = Text(turn.GetProperty("turn"), "id");
             lock (gate) { terminalWait = new(TaskCreationOptions.RunContinuationsAsynchronously); if (terminals.TryGetValue(turnId, out var early)) { if (Text(early.GetProperty("params"), "threadId") != threadId) throw new IOException("Early terminal has foreign actual thread."); terminalWait.TrySetResult(early); } binding = new(actual.AdapterId, actual.AdapterVersion, actual.RunId, actual.RequestIdentity, threadId, turnId); }
             original.Check(); startup.SetStage(CodexStartupStage.Accepted); return new(actual.SchemaVersion, actual.RunId, actual.RequestIdentity, actual.PlanIdentity, actual.BaseCommit, actual.Worktree, actual.AdapterId, actual.AdapterVersion, threadId, turnId, DateTimeOffset.UtcNow, Profile.Capabilities);
         }

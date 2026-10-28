@@ -291,4 +291,73 @@ public sealed class CodexOneJobDangerFullAccessTests
         Assert.Same(counter, Assert.Throws<IOException>(() => CodexAppServerPort.RequireSuccessfulTerminalWithLeafCounters(terminal.RootElement, () => throw counter)));
     }
 
+
+    [Fact]
+    public void Confined_workspace_policy_is_complete_and_has_no_network_or_temporary_root_expansion()
+    {
+        var roots = new[] { Path.GetFullPath("assigned"), Path.GetFullPath("parent/.git/worktrees/assigned"), Path.GetFullPath("parent/.git/objects") };
+        var wire = JsonSerializer.SerializeToElement(CodexAppServerPort.LinuxWorkspaceWritePolicy(roots));
+        Assert.Equal(5, wire.EnumerateObject().Count()); Assert.Equal("workspaceWrite", wire.GetProperty("type").GetString());
+        Assert.Equal(roots, wire.GetProperty("writableRoots").EnumerateArray().Select(x => x.GetString()).ToArray());
+        Assert.False(wire.GetProperty("networkAccess").GetBoolean());
+        Assert.True(wire.GetProperty("excludeTmpdirEnvVar").GetBoolean()); Assert.True(wire.GetProperty("excludeSlashTmp").GetBoolean());
+        Assert.DoesNotContain("danger", wire.GetRawText(), StringComparison.Ordinal);
+    }
+    [Theory]
+    [InlineData("network")]
+    [InlineData("outside-root")]
+    [InlineData("danger")]
+    [InlineData("missing-network")]
+    [InlineData("foreign-cwd")]
+    public void Confined_thread_refuses_effective_policy_expansion_before_turn(string change)
+    {
+        var actual = Request(); var roots = new[] { actual.Worktree };
+        var policy = new Dictionary<string, object?> { ["type"] = "workspaceWrite", ["writableRoots"] = Array.Empty<string>(), ["networkAccess"] = false };
+        var cwd = actual.Worktree;
+        if (change == "network") policy["networkAccess"] = true;
+        if (change == "outside-root") policy["writableRoots"] = new[] { actual.ResultDirectory };
+        if (change == "danger") policy["type"] = "dangerFullAccess";
+        if (change == "missing-network") policy.Remove("networkAccess");
+        if (change == "foreign-cwd") cwd = actual.ResultDirectory;
+        Assert.Throws<WorkerEnvelopeException>(() => CodexAppServerPort.RequireLinuxWorkspaceWriteThread(JsonSerializer.SerializeToElement(new { cwd, sandbox = policy }), actual, roots));
+    }
+    [Fact]
+    public void Confined_thread_mode_check_accepts_no_extra_roots_before_the_typed_turn_override()
+    {
+        var actual = Request();
+        CodexAppServerPort.RequireLinuxWorkspaceWriteThread(JsonSerializer.SerializeToElement(new
+        { cwd = actual.Worktree, sandbox = new { type = "workspaceWrite", writableRoots = Array.Empty<string>(), networkAccess = false, excludeSlashTmp = false, excludeTmpdirEnvVar = false } }), actual, [actual.Worktree]);
+    }
+
+    [Theory]
+    [InlineData(true, true, false, false, true)]
+    [InlineData(true, false, true, false, true)]
+    [InlineData(true, true, true, false, true)]
+    [InlineData(true, false, false, false, false)]
+    [InlineData(false, false, true, false, false)]
+    [InlineData(false, true, false, false, false)]
+    [InlineData(true, false, false, true, false)]
+    public void Existing_Linux_trust_routes_share_selection_without_issuing_RuntimeTrust(bool linux, bool route, bool runtime, bool dfa, bool expected) =>
+        Assert.Equal(expected, CodexAppServerPort.SelectLinuxWorkspaceWrite(linux, route, runtime, dfa, Scope()));
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Either_selected_Linux_trust_route_refuses_a_missing_or_foreign_scope(bool runtime)
+    {
+        Assert.Throws<ToolUsageException>(() => CodexAppServerPort.SelectLinuxWorkspaceWrite(true, !runtime, runtime, false, null));
+        Assert.Throws<ToolUsageException>(() => CodexAppServerPort.SelectLinuxWorkspaceWrite(true, !runtime, runtime, false, Scope() with { RestrictiveChildPolicy = "other" }));
+        // Boolean selection cannot construct the private capability.
+        Assert.Empty(typeof(InstalledHostAdmission.RuntimeTrust).GetConstructors());
+    }
+    [Fact]
+    public void Well_formed_policy_refusal_is_carried_to_Start_without_becoming_a_pump_exception()
+    {
+        var actual = Request(); var reply = JsonSerializer.SerializeToElement(new
+        { cwd = actual.Worktree, sandbox = new { type = "workspaceWrite", writableRoots = Array.Empty<string>(), networkAccess = true } });
+        WorkerEnvelopeException? refusal = null;
+        var pumpError = Record.Exception(() => refusal = CodexAppServerPort.InspectLinuxWorkspaceWriteThread(reply, actual, [actual.Worktree]));
+        Assert.Null(pumpError); Assert.IsType<WorkerEnvelopeException>(refusal);
+        var observed = Assert.Throws<WorkerEnvelopeException>(() => System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(refusal!).Throw());
+        Assert.Same(refusal, observed);
+    }
 }

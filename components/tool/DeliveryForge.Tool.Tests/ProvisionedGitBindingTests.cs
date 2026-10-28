@@ -413,6 +413,46 @@ public sealed class ProvisionedGitBindingTests
             Assert.True((await fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token)).IsClean);
         }
     }
+    static AgentRequest ConfinedRequest(Fixture fixture, string run = "owned") => WorkerEnvelope.PrepareWorker(new(
+        run, "sha256:" + new string('1', 64), new string('a', 40), "fixture/repo", fixture.Repository,
+        fixture.Worker, Path.Combine(fixture.Root, "result"), "PRIVATE-WRITER", ["subject.txt"], [],
+        "codex.cli", "0.163.0-alpha.10.2", [AgentCapability.Launch, AgentCapability.CompletionEvidence]));
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Confined_roots_come_from_the_actual_linked_worktree_and_exclude_parent_and_common_metadata()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        var roots = DeliveryForge.Tool.Codex.CodexAppServerPort.LinuxWorkspaceWriteRoots(fixture.InitialManager, fixture.Original, ConfinedRequest(fixture));
+        Assert.Equal(new[] { binding.Worktree, binding.GitDirectory, binding.ObjectsPath }, roots);
+        Assert.True(File.Exists(Path.Combine(fixture.Worker, ".git"))); Assert.False(Directory.Exists(Path.Combine(fixture.Worker, ".git")));
+        Assert.DoesNotContain(fixture.Repository, roots); Assert.DoesNotContain(binding.CommonDirectory, roots);
+        Assert.DoesNotContain(Path.Combine(binding.CommonDirectory, "refs"), roots);
+    }
+    [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    [InlineData("marker")]
+    [InlineData("backpointer")]
+    [InlineData("common")]
+    [InlineData("parent")]
+    [InlineData("owner")]
+    [InlineData("run")]
+    public async Task Confined_policy_roots_refuse_stale_or_foreign_original_binding_without_a_native_birth(string change)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        if (change is "marker" or "backpointer" or "common")
+        {
+            var path = change == "marker" ? Path.Combine(fixture.Worker, ".git") : Path.Combine(binding.GitDirectory, change == "backpointer" ? "gitdir" : "commondir");
+            using var file = new FileStream(path, FileMode.Open, FileAccess.Write, FileShare.Read);
+            file.SetLength(0); file.Write(Encoding.UTF8.GetBytes(change == "marker" ? "gitdir: " + fixture.Foreign + "\n" : fixture.Foreign + "\n"));
+        }
+        if (change == "parent") fixture.Parent.Current = false;
+        using var foreign = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var before = fixture.InitialManager.ActualOwnedGitInvocations;
+        Assert.ThrowsAny<Exception>(() => DeliveryForge.Tool.Codex.CodexAppServerPort.LinuxWorkspaceWriteRoots(
+            fixture.InitialManager, change == "owner" ? foreign : fixture.Original, ConfinedRequest(fixture, change == "run" ? "foreign" : "owned")));
+        Assert.Equal(before, fixture.InitialManager.ActualOwnedGitInvocations);
+    }
+
     sealed class PostBirthParent : ICoordinatedSynchronousEffectAdmission
     {
         internal readonly ParentEffectAdmission Inner;

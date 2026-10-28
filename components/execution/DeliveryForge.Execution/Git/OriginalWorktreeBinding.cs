@@ -234,6 +234,16 @@ public sealed partial class WorktreeManager
         if (matches.Length != 1) throw new WorktreeBoundaryException("No unique actual original provisioned worktree.");
         matches[0].RequireOriginal(original, parent, runId); return matches[0];
     }
+    // Same existing retained provisioning; this overload cannot adopt metadata.
+    internal OwnedGitBinding RequireOriginalBinding(string worktree, IOwnedDuplexBudget original, string runId)
+    {
+        if (!ReferenceEquals(_originalBudget, original))
+            throw new WorktreeBoundaryException("Confined Git roots belong to another original.");
+        var binding = RequireOriginalBinding(worktree);
+        if (binding.RunId != runId) throw new WorktreeBoundaryException("Confined Git roots belong to another run.");
+        return binding;
+    }
+
     OwnedGitBinding CaptureProvisionedBinding(string worktree, string common)
     {
         if (_originalBudget is null || _effectAdmission is not ICoordinatedSynchronousEffectAdmission parent || _effectRunId is null)
