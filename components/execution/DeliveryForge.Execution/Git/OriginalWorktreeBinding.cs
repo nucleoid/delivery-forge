@@ -20,6 +20,7 @@ public sealed partial class WorktreeManager
         readonly ICoordinatedSynchronousEffectAdmission parent;
         readonly byte[] markerBytes, gitdirBytes, commonBytes;
         WriterLease? writer;
+        bool confinedConformanceConfiguration;
         internal bool Uncertain { get; private set; }
         internal string RunId { get; }
         internal string Worktree { get; }
@@ -110,9 +111,22 @@ public sealed partial class WorktreeManager
             if (!manager.ownedGit.TryGetValue(Worktree, out var retained) || !ReferenceEquals(retained, this))
                 throw new WorktreeBoundaryException("No original parent provisioning owns this Git binding.");
         }
+        // Arming is limited to this actual same-original retained conformance binding.
+        // All later existing checks, including before parent Git, retain this refusal.
+        internal void RequireConfinedConformanceConfiguration()
+        {
+            RequireRetained();
+            parent.EnterSynchronous(RunId, () =>
+            {
+                Phase(false); confinedConformanceConfiguration = true;
+                VerifyMetadata(false); return true;
+            });
+        }
         void VerifyMetadata(bool cleanup)
         {
             Phase(cleanup);
+            if (confinedConformanceConfiguration && Path.Exists(Path.Combine(GitDirectory, "config.worktree")))
+                throw new WorktreeBoundaryException("Confined conformance worktree configuration is unsupported.");
             if (!Read(Path.Combine(Worktree, ".git"), cleanup).AsSpan().SequenceEqual(markerBytes) ||
                 !Read(Path.Combine(GitDirectory, "gitdir"), cleanup).AsSpan().SequenceEqual(gitdirBytes) ||
                 !Read(Path.Combine(GitDirectory, "commondir"), cleanup).AsSpan().SequenceEqual(commonBytes))

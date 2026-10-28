@@ -448,11 +448,48 @@ public sealed class ProvisionedGitBindingTests
         if (change == "parent") fixture.Parent.Current = false;
         using var foreign = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
         var before = fixture.InitialManager.ActualOwnedGitInvocations;
-        Assert.ThrowsAny<Exception>(() => DeliveryForge.Tool.Codex.CodexAppServerPort.LinuxWorkspaceWriteRoots(
-            fixture.InitialManager, change == "owner" ? foreign : fixture.Original, ConfinedRequest(fixture, change == "run" ? "foreign" : "owned")));
+        void Select() => DeliveryForge.Tool.Codex.CodexAppServerPort.LinuxWorkspaceWriteRoots(
+            fixture.InitialManager, change == "owner" ? foreign : fixture.Original, ConfinedRequest(fixture, change == "run" ? "foreign" : "owned"));
+        if (change == "parent")
+            Assert.Equal("No current original parent effect authority.", Assert.Throws<CoordinationUncertainException>(Select).Message);
+        else
+        {
+            var failure = Assert.Throws<WorktreeBoundaryException>(Select);
+            if (change == "owner") Assert.Equal("Confined Git roots belong to another original.", failure.Message);
+            if (change == "run") Assert.Equal("Confined Git roots belong to another run.", failure.Message);
+            if (change is "marker" or "backpointer" or "common") Assert.Equal("Original provisioned Git metadata association changed.", failure.Message);
+        }
         Assert.Equal(before, fixture.InitialManager.ActualOwnedGitInvocations);
     }
 
+    [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Confined_configuration_refusal_persists_before_parent_Git_without_another_birth(bool afterSelection)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        if (afterSelection) _ = DeliveryForge.Tool.Codex.CodexAppServerPort.LinuxWorkspaceWriteRoots(fixture.InitialManager, fixture.Original, ConfinedRequest(fixture));
+        File.WriteAllText(Path.Combine(binding.GitDirectory, "config.worktree"), "[include]\npath = worker-controlled\n");
+        var before = fixture.InitialManager.ActualOwnedGitInvocations;
+        if (afterSelection)
+            Assert.Equal("Confined conformance worktree configuration is unsupported.",
+                (await Assert.ThrowsAsync<WorktreeBoundaryException>(() => fixture.Manager.ObserveAsync(fixture.Worker, TestContext.Current.CancellationToken))).Message);
+        else
+            Assert.Equal("Confined conformance worktree configuration is unsupported.", Assert.Throws<WorktreeBoundaryException>(() =>
+                DeliveryForge.Tool.Codex.CodexAppServerPort.LinuxWorkspaceWriteRoots(fixture.InitialManager, fixture.Original, ConfinedRequest(fixture))).Message);
+        Assert.Equal(before, fixture.InitialManager.ActualOwnedGitInvocations);
+    }
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Unselected_binding_does_not_acquire_the_conformance_configuration_refusal()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        File.WriteAllText(Path.Combine(binding.GitDirectory, "config.worktree"), "[test]\nvalue = unchanged-default\n");
+        var before = fixture.InitialManager.ActualOwnedGitInvocations;
+        binding.Check();
+        Assert.Equal(before, fixture.InitialManager.ActualOwnedGitInvocations);
+    }
     sealed class PostBirthParent : ICoordinatedSynchronousEffectAdmission
     {
         internal readonly ParentEffectAdmission Inner;

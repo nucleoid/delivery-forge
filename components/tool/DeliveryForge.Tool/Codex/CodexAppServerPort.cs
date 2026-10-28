@@ -241,11 +241,11 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             type.ValueKind != JsonValueKind.String || type.GetString() != "dangerFullAccess")
             throw new WorkerEnvelopeException("Actual one-job Linux conformance cwd/dangerFullAccess policy differs; no turn is dispatched.");
     }
-    // Selection DATA only: actual RuntimeTrust still comes solely from the
-    // existing private factory and binds/checks the same original before birth.
+    // Dedicated disposable conformance fixture only. Bound production RuntimeTrust
+    // keeps its previous policy until shared object integrity is separately solved.
     internal static bool SelectLinuxWorkspaceWrite(bool linux, bool trustRoute, bool runtimeBound, bool dangerFullAccess, LinuxScopeSelection? scope)
     {
-        if (!linux || dangerFullAccess || !trustRoute && !runtimeBound) return false;
+        if (!linux || dangerFullAccess || !trustRoute || runtimeBound) return false;
         if (scope?.RestrictiveChildPolicy != "nnp-user1000-ancestor-v3")
             throw new ToolUsageException("Confined Linux workspace policy requires the selected restrictive scope.");
         return true;
@@ -259,6 +259,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     {
         owner.Check();
         var retained = git.RequireOriginalBinding(actual.Worktree, owner, actual.RunId);
+        retained.RequireConfinedConformanceConfiguration();
         var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
         var roots = new[] { retained.Worktree, retained.GitDirectory, retained.ObjectsPath }
             .Select(path => Path.TrimEndingDirectorySeparator(BoundedFiles.Plain(path, true))).Distinct(comparer).ToArray();
