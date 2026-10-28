@@ -365,7 +365,7 @@ internal sealed class LinuxScopeKernel
     {
         Same(cleanup);
         string Text(string name) => Utf8.GetString(Read(name, cleanup, 256)).TrimEnd('\n');
-        if (Text("memory.max") != (restrictedChild ? "2147483648" : "4294967296") || Text("memory.swap.max") != "0" || Text("cpuset.cpus.effective") != expectedCpus || Text("pids.max") != (restrictedChild ? "48" : "128")) throw new IOException("Actual scope limits differ from selected closed ordinary or stricter child profile.");
+        if (Text("memory.max") != (restrictedChild ? "2147483648" : "4294967296") || Text("memory.swap.max") != "0" || Text("cpuset.cpus.effective") != expectedCpus || Text("pids.max") != (restrictedChild ? "64" : "128")) throw new IOException("Actual scope limits differ from selected closed ordinary or stricter child profile.");
         var cpu = Text("cpu.max").Split(' '); if (cpu.Length != 2 || !ulong.TryParse(cpu[0], out var quota) || !ulong.TryParse(cpu[1], out var period) || period == 0 || quota / period > 2 || quota % period != 0 || quota / period != 2) throw new IOException("Actual cgroup CPU quota is not exactly two CPUs."); Same(cleanup);
     }
     internal void Kill(bool cleanup) { lock (gate) KillCore(cleanup); }

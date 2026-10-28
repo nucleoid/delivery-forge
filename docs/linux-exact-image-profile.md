@@ -191,12 +191,12 @@ hash. Rollback is not automatic, a retry, arbitrary cleanup, or authority adopti
 
 ### Proposed V8 closed child and final disposition
 
-The opt-in nnp-user1000-ancestor-v3 child is stricter: 48 tasks and 2 GiB under the unchanged root-controlled user-1000 ancestor's 128 tasks, 4 GiB and two CPUs. The required outside owner is outside that ancestor's accounting; 128 is not an aggregate owner-plus-child task guarantee. Ordinary null selection retains its prior limits. The arithmetic difference is not measured free capacity, a reservation or a guarantee against hostile same-UID manager brokerage; actual Codex/helper fit remains unproved. Only COMPLETE may select the root-owned helper; STOP cannot. No protected runtime authority is issued.
+The opt-in nnp-user1000-ancestor-v3 child is stricter: 64 tasks and 2 GiB under the unchanged root-controlled user-1000 ancestor's 128 tasks, 4 GiB and two CPUs. The required outside owner is outside that ancestor's accounting; 128 is not an aggregate owner-plus-child task guarantee. Ordinary null selection retains its prior limits. The arithmetic difference is not measured free capacity, a reservation or a guarantee against hostile same-UID manager brokerage; actual Codex/helper fit remains unproved. Only COMPLETE may select the root-owned helper; STOP cannot. No protected runtime authority is issued.
 
 Before any offline archive/ISO or persistent write, bind the actual current source/Csc/PDB and gate-five-file build acceptance. The existing already-running KVP daemon supplies fresh nonce READY, one host ACK before installed-root RW, and FINAL only after installed-root unmount/clean plus seed unmount. The host retains FINAL before first ID-only graceful shutdown. Missing/failed/unknown FINAL blocks profile even if completed.json exists. No new service, transport or credential route is implied. Fresh same-running-boot guest preparation stages approved decision/final DATA at actual guest paths and derives PreparedBootId there; inspection's previous boot ID and Windows paths are inadmissible. All byte exceptions and persistent policy remain owner-pending.
 
 V9 private correction: only the opted-in exact native image receives the lower
-48-task/2GiB child limits; ordinary prerequisite captures launch and read back
+child limits (now64 tasks/2GiB); ordinary prerequisite captures launch and read back
 their original128-task/4GiB scope. New operator permission must explicitly cover
 one host VM-configuration AddKvpItems and conditional RemoveKvpItems. The fresh
 ACK is removed once only after raw matching FINAL is retained while the VM is still Running; after Off, only read-only original-frame verification is permitted;
