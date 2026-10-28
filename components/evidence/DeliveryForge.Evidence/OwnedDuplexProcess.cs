@@ -136,6 +136,7 @@ public sealed class OwnedDuplexProcess
     internal void AttachOwner(object owner, Func<bool, DuplexNativeObservation> observation, Action<bool> stop, Func<bool, bool> disposition) { actualOwner = owner; observe = observation; terminate = stop; dispose = disposition; }
     internal void AttachStreams(Stream stdin, Stream stdout, Stream stderr, Action<bool>? closeOriginalInput = null) { input = stdin; output = stdout; error = stderr; closeInput = closeOriginalInput; }
     internal void RecordOwnerFailure(Exception failure) { lock (failures) if (!failures.Contains(failure)) failures.Add(failure); }
+    internal Exception[] SnapshotActualFailures() { lock (failures) return failures.ToArray(); }
     // Outgoing observation from THIS retained owner only. It does not adopt a
     // PID, accept a DTO or grant stop/disposition authority.
     public DuplexNativeObservation ObserveActualNative() => ObserveOriginal(false);

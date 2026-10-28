@@ -47,9 +47,16 @@ internal static class ScopedBoundedCapture
         var nativeFailed = frame.Failures.Count != 0 || retired?.Failures.Count > 0 || frame.Session?.StartupFailure is not null;
         // Export bounded actual causes before a known-closed frame is released.
         // Closure alone must not erase a failed observation or imply success.
-        var failureDetails = frame.Failures.Select(error => error.GetType().FullName + ": " + CommandStartupObservation.Clip(error.Message, 512))
-            .Concat(retired?.Failures ?? []).Concat(frame.Session?.StartupFailure is Exception startFailure ? [startFailure.GetType().FullName + ": " + CommandStartupObservation.Clip(startFailure.Message, 512)] : []);
-        var failure = nativeFailed ? CommandStartupObservation.Clip("Actual scoped capture failed; bounded original causes: " + string.Join(" | ", failureDetails.Take(8).Select(detail => CommandStartupObservation.Clip(detail, 512))), 4096) : null;
+        var causes = frame.Failures.Concat(frame.Session?.SnapshotActualFailures() ?? [])
+            .Concat(frame.Session?.StartupFailure is Exception startFailure ? [startFailure] : [])
+            .SelectMany(error => error is AggregateException aggregate ? aggregate.InnerExceptions.Take(8) : [error])
+            .Distinct<Exception>(ReferenceEqualityComparer.Instance).Take(9).ToArray();
+        // Exception messages can contain paths or invocation data. Export only
+        // bounded ASCII type names and numeric codes, never custom Message getters.
+        var details = causes.Take(8).Select(error => new string(error.GetType().Name.Where(char.IsAsciiLetterOrDigit).Take(64).ToArray())
+            + "(hr=" + error.HResult.ToString("x8", System.Globalization.CultureInfo.InvariantCulture)
+            + (error is System.ComponentModel.Win32Exception nativeError ? ",errno=" + nativeError.NativeErrorCode.ToString(System.Globalization.CultureInfo.InvariantCulture) : "") + ")");
+        var failure = nativeFailed ? CommandStartupObservation.Clip("Actual scoped capture failed; typed original causes: " + string.Join(" | ", details) + (causes.Length > 8 ? " | additional causes omitted" : ""), 1024) : null;
         var outputDone = retired?.OutputEof == true && frame.Output?.IsCompletedSuccessfully == true; var errorDone = retired?.ErrorEof == true;
         var command = new CommandResult(retired?.ExitCode, Encoding.UTF8.GetString(outBytes), Encoding.UTF8.GetString(errBytes), timedOut, cancelled, began, DateTimeOffset.UtcNow, known) { LifecycleDiagnostics = new(false, false, null, failure, false, retired?.RootExited == true, retired?.RootExited == true, outputDone && errorDone, 0, new(outputDone, frame.Output?.IsFaulted == true, frame.Output?.IsCanceled == true, outputDone ? Encoding.UTF8.GetString(outBytes) : null), new(errorDone, false, false, errorDone ? Encoding.UTF8.GetString(errBytes) : null)) { NativeFailure = failure, OwnedTree = new(frame.Session?.HasCreationOwnedLinuxScope == true, known, known ? 0 : -1) } };
         var result = new BoundedCommandCaptureResult(command, outBytes, errBytes, exceeded, retired?.RootExited == true, outputDone, errorDone, new(budget.OriginalStarted, budget.LocalCleanupEntered, Stopwatch.Frequency), frame.Session?.HasCreationOwnedLinuxScope == true ? BoundedCaptureOwnershipKind.LinuxCreationOwnedScope : BoundedCaptureOwnershipKind.LegacyObservation);
