@@ -570,19 +570,19 @@ public sealed class OwnedLinuxExactImageTests
             // Unknown native/IO disposition or exceeded capture stops all later calls.
             ActualOrdinaryCapture.Require(actual); original.CheckWork(); return actual;
         }
-        var pathHelp = await Capture("path-help", ["sandbox", "linux", "--help"], false);
-        var sealedHelp = await Capture("sealed-help", ["sandbox", "linux", "--help"], true);
+        var pathHelp = await Capture("path-help", ["sandbox", "--help"], false);
+        var sealedHelp = await Capture("sealed-help", ["sandbox", "--help"], true);
         foreach (var help in new[] { pathHelp, sealedHelp })
         {
             Assert.Equal(0, help.Command.ExitCode);
             Assert.Contains("Usage:", help.Command.StandardOutput, StringComparison.Ordinal);
-            Assert.Contains("sandbox linux", help.Command.StandardOutput, StringComparison.Ordinal);
+            Assert.Contains("sandbox", help.Command.StandardOutput, StringComparison.Ordinal);
             Assert.True(help.Command.StandardOutput.Contains("[COMMAND]", StringComparison.Ordinal) ||
                 help.Command.StandardOutput.Contains("<COMMAND>", StringComparison.Ordinal));
         }
         // Actual help must establish the grammar before either helper-spawning call.
-        var pathCommand = await Capture("path-sandbox-true", ["sandbox", "linux", "--", "/usr/bin/true"], false);
-        var sealedCommand = await Capture("sealed-sandbox-true", ["sandbox", "linux", "--", "/usr/bin/true"], true);
+        var pathCommand = await Capture("path-sandbox-true", ["sandbox", "--", "/usr/bin/true"], false);
+        var sealedCommand = await Capture("sealed-sandbox-true", ["sandbox", "--", "/usr/bin/true"], true);
         Assert.Equal(0, pathCommand.Command.ExitCode); Assert.Equal(0, sealedCommand.Command.ExitCode);
         // Retain this fresh private directory as diagnostic evidence; no recursive cleanup.
     }
