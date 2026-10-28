@@ -573,6 +573,7 @@ public sealed class OwnedLinuxExactImageTests
         var environment = ActualOrdinaryCapture.ResourceEnvironment();
         var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT"); Assert.True(!string.IsNullOrWhiteSpace(dotnetRoot) && Path.IsPathFullyQualified(dotnetRoot));
         environment["DOTNET_ROOT"] = dotnetRoot!; environment["PATH"] = "/usr/bin:/bin";
+        environment["XDG_RUNTIME_DIR"] = "/run/user/1000"; environment["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/1000/bus";
         var selected = mode == "sealed-default" ? scope with { ExactImageBacking = LinuxExactImageBacking.SealedMemfd } : scope;
         var invocation = new CommandInvocation(image.Path, [], Path.GetDirectoryName(fixture.RootImage.Path)!, environment, InheritEnvironment: false) { EnvironmentIsComplete = true };
         BoundedFiles.ReserveExactLinuxImageReads(new(image.Path, image.Bytes, image.Sha256), original);

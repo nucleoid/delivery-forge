@@ -10,7 +10,7 @@ namespace DeliveryForge.Evidence;
 [SupportedOSPlatform("linux")]
 internal sealed class LinuxCommandScope
 {
-    readonly LinuxScopeImage? exactImage; bool exactImageObserved;
+    readonly LinuxScopeImage? exactImage; bool exactImageObserved; LinuxExactImageBacking? observedExactImageBacking;
     readonly Process process; readonly IOwnedDuplexBudget original; readonly LinuxScopeSelection selected; readonly object gate = new();
     readonly string unit = "delivery-forge-" + Guid.NewGuid().ToString("N") + ".scope", ticket = Guid.NewGuid().ToString("N");
     readonly List<Operation> operations = []; readonly List<object> retained = []; readonly List<Exception> failures = [];
@@ -54,7 +54,7 @@ internal sealed class LinuxCommandScope
     {
         // Linux6.8 source-profile observation, not a caller-issued capability.
         // Keep returned descriptors on the SAME original journal before any post.
-        var opened = new List<(int Fd, Operation Row)>(5); Exception? primary = null; string membership = "";
+        var opened = new List<(int Fd, Operation Row)>(6); Exception? primary = null; string membership = "";
         int Native(string kind, Func<int> invoke, bool cleanup = false)
         {
             var error = 0;
@@ -110,14 +110,30 @@ internal sealed class LinuxCommandScope
             var identity = Identity(actual, "", 0x1000);
             var linkAfter = Identity(directory, "cgroup", 0x100);
             if (!SameLink(linkBefore, linkAfter) || identity.Inode != 0xeffffffbUL) throw new IOException("Selected Linux6.8 policy requires the actual initial cgroup namespace before birth.");
-            // Placement must come from this held verified procfs task, not a
-            // later pathname lookup through a potentially different mount view.
-            var member = Open(self, "cgroup", NoFollow | CloseOnExec);
-            Native("actual-owner-membership-procfs", () => NamespaceFileSystem(member, out fs));
-            var memberIdentity = Identity(member, "", 0x1000);
-            if (fs.Type != 0x9fa0 || (memberIdentity.Mode & 0xf000) != 0x8000 || !SameMount(root, memberIdentity))
-                throw new IOException("Actual owner membership must be a regular file on the verified procfs mount.");
-            membership = ReadText("verified-owner-cgroup-membership", 8192, false, member);
+            if (selected.ExactImageBacking == LinuxExactImageBacking.RootControlledDisk)
+            {
+                // UID0 on a protected path means initial-root ownership only
+                // after proving THIS calling thread's actual user namespace.
+                var userBefore = Identity(directory, "user", 0x100);
+                if ((userBefore.Mode & 0xf000) != 0xa000 || !SameMount(root, userBefore)) throw new IOException("Actual own user namespace magic link was redirected.");
+                var user = Open(directory, "user", CloseOnExec);
+                Native("actual-owner-user-namespace-filesystem", () => NamespaceFileSystem(user, out fs));
+                if (fs.Type != 0x6e736673 || Native("actual-owner-user-namespace-type", () => NamespaceType(user, 0xb703)) != 0x10000000) throw new IOException("Actual user namespace object/type required.");
+                var userIdentity = Identity(user, "", 0x1000);
+                var userAfter = Identity(directory, "user", 0x100);
+                if (!SameLink(userBefore, userAfter) || userIdentity.Inode != 0xeffffffdUL) throw new IOException("Selected Linux6.8 root-disk policy requires the actual initial user namespace before birth.");
+            }
+            if (selected.RestrictiveChildPolicy is not null)
+            {
+                // Placement remains v3-only. Ordinary root-disk mode needs no
+                // new text read or ancestor-membership restriction.
+                var member = Open(self, "cgroup", NoFollow | CloseOnExec);
+                Native("actual-owner-membership-procfs", () => NamespaceFileSystem(member, out fs));
+                var memberIdentity = Identity(member, "", 0x1000);
+                if (fs.Type != 0x9fa0 || (memberIdentity.Mode & 0xf000) != 0x8000 || !SameMount(root, memberIdentity))
+                    throw new IOException("Actual owner membership must be a regular file on the verified procfs mount.");
+                membership = ReadText("verified-owner-cgroup-membership", 8192, false, member);
+            }
         }
         catch (Exception caught) { primary = caught; failures.Add(caught); }
         // Every actual returned descriptor gets at most its first close. Mark
@@ -187,12 +203,13 @@ internal sealed class LinuxCommandScope
             var available = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
             if (Environment.ProcessorCount != 2 || available <= 0 || available > 4294967296L)
                 throw new IOException("Actual prebirth managed CPU/heap resource profile is not established.");
-            if (selected.RestrictiveChildPolicy is not null)
+            if (selected.RestrictiveChildPolicy is not null || selected.ExactImageBacking == LinuxExactImageBacking.RootControlledDisk)
             {
-                // The selected ancestor must contain descendants, not their
-                // owner. Observe only this caller before any library/bus/birth.
-                if (selected.RestrictiveChildPolicy != "nnp-user1000-ancestor-v3") throw new IOException("Only explicit exact-image unprivileged child policy is supported.");
-                LinuxScopeOwnerBoundary.RequireOutsideAncestorMembership(RequireInitialCgroupNamespace());
+                // Root-disk ownership also requires this parent's initial user
+                // namespace; only v3 imposes the outside-ancestor placement.
+                if (selected.RestrictiveChildPolicy is not (null or "nnp-user1000-ancestor-v3")) throw new IOException("Only explicit exact-image unprivileged child policy is supported.");
+                var membership = RequireInitialCgroupNamespace();
+                if (selected.RestrictiveChildPolicy is not null) LinuxScopeOwnerBoundary.RequireOutsideAncestorMembership(membership);
             }
             // The original caller already owns this process wrapper. It is not
             // an adopted child; observe its real inherited two-bit CPU mask.
@@ -217,7 +234,7 @@ internal sealed class LinuxCommandScope
             Check(false); prepared = true;
         }
     }
-    internal void BeforeCreation() { lock (gate) { Check(false); if (!prepared || creationEntered) throw new IOException("One privately prepared original creation required."); if (selected.RestrictiveChildPolicy is not null) LinuxScopeOwnerBoundary.RequireCallingThread(namespaceThread); creationEntered = true; } }
+    internal void BeforeCreation() { lock (gate) { Check(false); if (!prepared || creationEntered) throw new IOException("One privately prepared original creation required."); if (selected.RestrictiveChildPolicy is not null || selected.ExactImageBacking == LinuxExactImageBacking.RootControlledDisk) LinuxScopeOwnerBoundary.RequireCallingThread(namespaceThread); creationEntered = true; } }
     internal void CreationReturned(bool actualCreated) { lock (gate) { if (!creationEntered || creationReturned) throw new IOException("Actual original creation return cannot be synthesized/repeated."); created = actualCreated; creationReturned = true; Check(false); } }
     ulong ProcStart(bool cleanup) { var stat = ReadText("/proc/" + process.Id.ToString(CultureInfo.InvariantCulture) + "/stat", 8192, cleanup); var end = stat.LastIndexOf(')'); if (end < 0) throw new IOException("Complete original proc stat malformed."); var fields = stat[(end + 2)..].Split(' ', StringSplitOptions.RemoveEmptyEntries); if (fields.Length < 20 || !ulong.TryParse(fields[19], NumberStyles.None, CultureInfo.InvariantCulture, out var start) || start == 0) throw new IOException("Actual original kernel process generation unavailable."); return start; }
     internal void BindAndRelease(Stream input, Stream output)
@@ -264,7 +281,7 @@ internal sealed class LinuxCommandScope
                 kernel.RequireExactImage(process.Id, fd, exactImage, inode, major, minor, selected.ExactImageBacking);
                 if (selected.RestrictiveChildPolicy is not null || selected.ExactImageBacking == LinuxExactImageBacking.RootControlledDisk) kernel.RequireUnprivilegedCreator(process.Id);
                 if (ProcStart(false) != procStart || !invocation.AsSpan().SequenceEqual(bus.InvocationId(unitPath, false))) throw new IOException("Original generation/invocation changed after selected image observation.");
-                exactImageObserved = true;
+                observedExactImageBacking = ready[5] switch { "ELF" => LinuxExactImageBacking.SealedMemfd, "ROOT_DISK_ELF" => LinuxExactImageBacking.RootControlledDisk, _ => throw new IOException("Accepted exact-image READY backing is unknown.") }; exactImageObserved = true;
             }
             // A genuine negative fixture may exercise the SAME kernel observations,
             // but must NEVER earn release even if a kernel check regresses.
@@ -273,7 +290,7 @@ internal sealed class LinuxCommandScope
         }
     }
     internal bool HasCreationOwnedExactImage { get { lock (gate) return exactImage is not null && exactImageObserved && bound && releaseReturned; } }
-    internal LinuxExactImageBacking? CreationOwnedExactImageBacking { get { lock (gate) return HasCreationOwnedExactImage ? selected.ExactImageBacking : null; } }
+    internal LinuxExactImageBacking? CreationOwnedExactImageBacking { get { lock (gate) return HasCreationOwnedExactImage ? observedExactImageBacking : null; } }
     internal bool HasCreationOwnedScope { get { lock (gate) return bound && releaseReturned; } }
     internal IReadOnlyDictionary<string, ulong?> CaptureLeafCounters()
     {
