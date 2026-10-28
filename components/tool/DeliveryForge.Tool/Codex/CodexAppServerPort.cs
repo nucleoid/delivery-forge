@@ -267,8 +267,11 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     }
     internal static object LinuxWorkspaceWritePolicy(string[] roots) => new
     {
-        type = "workspaceWrite", writableRoots = roots, networkAccess = false,
-        excludeTmpdirEnvVar = true, excludeSlashTmp = true
+        type = "workspaceWrite",
+        writableRoots = roots,
+        networkAccess = false,
+        excludeTmpdirEnvVar = true,
+        excludeSlashTmp = true
     };
     internal static void RequireLinuxWorkspaceWriteThread(JsonElement result, AgentRequest actual, string[] selectedRoots)
     {
