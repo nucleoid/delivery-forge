@@ -16,22 +16,23 @@ public static class Program
         var allocations = new List<IntPtr>(); ExactNativeImage? exactImage = null;
         try
         {
-            if (args.Length is < 12 or > 79 || args[0] != "--original" || args[2] != "--frequency" || args[4] != "--work-ticks" || args[6] != "--parent" || args[8] != "--ticket" || args[10] is not ("--" or "--exact-native-elf" or "--exact-native-elf-nnp-user1000-ancestor-v3")) throw new IOException("Exact private birth-gate grammar required.");
+            if (args.Length is < 12 or > 79 || args[0] != "--original" || args[2] != "--frequency" || args[4] != "--work-ticks" || args[6] != "--parent" || args[8] != "--ticket" || args[10] is not ("--" or "--exact-native-elf" or "--exact-native-elf-nnp-user1000-ancestor-v3" or "--root-controlled-native-elf" or "--root-controlled-native-elf-nnp-user1000-ancestor-v3")) throw new IOException("Exact private birth-gate grammar required.");
             var original = long.Parse(args[1], NumberStyles.None, CultureInfo.InvariantCulture); var frequency = long.Parse(args[3], NumberStyles.None, CultureInfo.InvariantCulture); var workTicks = long.Parse(args[5], NumberStyles.None, CultureInfo.InvariantCulture); var parent = int.Parse(args[7], NumberStyles.None, CultureInfo.InvariantCulture); var ticket = args[9];
             if (original <= 0 || frequency != Stopwatch.Frequency || workTicks <= 0 || workTicks > TimeSpan.FromSeconds(1100).Ticks || parent <= 0 || ticket.Length != 32 || ticket.Any(c => c is not (>= 'a' and <= 'f') and not (>= '0' and <= '9'))) throw new IOException("Actual original birth identity/budget differs.");
             void Check() { var elapsed = Stopwatch.GetElapsedTime(original); if (elapsed < TimeSpan.Zero || elapsed >= TimeSpan.FromTicks(workTicks)) throw new TimeoutException("SAME original birth work endpoint expired."); }
             Check(); if (getpid() != Environment.ProcessId || gettid() != getpid() || getppid() != parent) throw new IOException("Actual original parent/leader differs.");
             // Actual parent death cannot promote a stranded gate to success.
             if (prctl(1, 9, 0, 0, 0) != 0 || getppid() != parent) throw new IOException("Actual original parent-death guard unavailable."); Check();
-            var unprivileged = args[10] == "--exact-native-elf-nnp-user1000-ancestor-v3";
-            var exact = args[10] == "--exact-native-elf" || unprivileged;
+            var rootDisk = args[10] is "--root-controlled-native-elf" or "--root-controlled-native-elf-nnp-user1000-ancestor-v3";
+            var unprivileged = args[10] is "--exact-native-elf-nnp-user1000-ancestor-v3" or "--root-controlled-native-elf-nnp-user1000-ancestor-v3";
+            var exact = args[10] == "--exact-native-elf" || rootDisk || unprivileged;
             if (exact && (args.Length < 15 || args[13] != "--")) throw new IOException("Exact native ELF birth grammar required.");
             var targetIndex = exact ? 14 : 11;
             var target = args[targetIndex]; var arguments = args.Skip(targetIndex).ToArray(); if (arguments.Length > MaximumArguments || !Path.IsPathFullyQualified(target) || arguments.Any(x => x.Length > 8192 || x.Contains('\0'))) throw new IOException("Finite exact target argv required.");
             for (var fd = 0; fd < 3; fd++) { var flags = fcntl(fd, 1, 0); if (flags < 0 || fcntl(fd, 2, flags & ~1) != 0) throw new IOException("Original stdio CLOEXEC observation/set failed."); Check(); }
             if (exact)
             {
-                try { exactImage = ExactNativeImage.Create(target, long.Parse(args[11], NumberStyles.None, CultureInfo.InvariantCulture), args[12], Check); }
+                try { exactImage = ExactNativeImage.Create(target, long.Parse(args[11], NumberStyles.None, CultureInfo.InvariantCulture), args[12], Check, rootDisk); }
                 catch (ExactNativeImage.Refusal refused)
                 {
                     // A known preparation refusal stays alive only long enough
@@ -57,7 +58,7 @@ public static class Program
             }
             // Restriction applies to THIS main-thread leader only, then survives its
             // exec and all descendants. Installer/parent/global guest policy is untouched.
-            Check(); if (unprivileged && (prctl(38, 1, 0, 0, 0) != 0 || prctl(39, 0, 0, 0, 0) != 1)) throw new IOException("Selected child no-new-privileges unavailable."); Check();
+            Check(); if ((unprivileged || rootDisk) && (prctl(38, 1, 0, 0, 0) != 0 || prctl(39, 0, 0, 0, 0) != 1)) throw new IOException("Selected child no-new-privileges unavailable."); Check();
             var ready = Encoding.ASCII.GetBytes("DF_SCOPE_READY|" + Environment.ProcessId.ToString(CultureInfo.InvariantCulture) + "|" + original.ToString(CultureInfo.InvariantCulture) + "|" + ticket + "|" + frequency.ToString(CultureInfo.InvariantCulture) + (exactImage is null ? "" : "|" + exactImage.Ready) + "\n");
             Check(); if (write(1, ready, (nuint)ready.Length) != ready.Length) throw new IOException("Complete actual birth READY delivery failed; no replay."); Check();
             var expected = Encoding.ASCII.GetBytes("DF_SCOPE_RELEASE|" + ticket + "|" + original.ToString(CultureInfo.InvariantCulture) + "\n"); var actual = new byte[expected.Length]; var offset = 0;
@@ -68,7 +69,7 @@ public static class Program
             for (var index = 0; index < arguments.Length; index++) { Check(); var pointer = Marshal.StringToCoTaskMemUTF8(arguments[index]); allocations.Add(pointer); Marshal.WriteIntPtr(vector, index * IntPtr.Size, pointer); }
             Marshal.WriteIntPtr(vector, arguments.Length * IntPtr.Size, IntPtr.Zero);
             Check(); if (getppid() != parent || gettid() != getpid()) throw new IOException("Original parent/leader left before synchronous exec.");
-            Check(); if (unprivileged && prctl(39, 0, 0, 0, 0) != 1) throw new IOException("Selected child no-new-privileges changed before exec."); Check();
+            Check(); if ((unprivileged || rootDisk) && prctl(39, 0, 0, 0, 0) != 1) throw new IOException("Selected child no-new-privileges changed before exec."); Check();
             // execv preserves the actual environment and stdio; success never
             // returns. No fork, shell interpolation or Process.Start exists here.
             if (exactImage is not null) { exactImage.Execute(vector); throw new IOException("Exact native ELF exec unexpectedly returned."); }

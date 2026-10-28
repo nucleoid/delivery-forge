@@ -6,10 +6,43 @@ namespace DeliveryForge.Evidence;
 
 // Selection is DATA, never a scope or native-owner constructor. Runtime checks
 // pin actual opened images; actual user-manager/kernel/resource proof follows.
+// An explicit deployment choice, never an automatic retry after sealed failure.
+public enum LinuxExactImageBacking { SealedMemfd = 0, RootControlledDisk = 1 }
+internal static class LinuxExactImageBackingRules
+{
+    internal static void Require(LinuxExactImageBacking backing, string path)
+    {
+        if (backing is not (LinuxExactImageBacking.SealedMemfd or LinuxExactImageBacking.RootControlledDisk)) throw new IOException("Unknown exact-image backing selection.");
+        if (backing == LinuxExactImageBacking.RootControlledDisk &&
+            (path.Length is 0 or > 4096 || !path.StartsWith('/') || path.Contains('\\') || path.Any(char.IsControl) || path[1..].Split('/').Length > 32 || path[1..].Split('/').Any(x => x is "" or "." or "..")))
+            throw new IOException("Bounded canonical absolute root-controlled image path required.");
+    }
+    internal static string GateArgument(LinuxExactImageBacking backing, bool restricted)
+    {
+        Require(backing, "/selected-image");
+        return backing == LinuxExactImageBacking.RootControlledDisk
+            ? (restricted ? "--root-controlled-native-elf-nnp-user1000-ancestor-v3" : "--root-controlled-native-elf")
+            : (restricted ? "--exact-native-elf-nnp-user1000-ancestor-v3" : "--exact-native-elf");
+    }
+    internal static string ReadyMarker(LinuxExactImageBacking backing)
+    {
+        Require(backing, "/selected-image");
+        return backing == LinuxExactImageBacking.RootControlledDisk ? "ROOT_DISK_ELF" : "ELF";
+    }
+    internal static void RequireRootDirectoryMetadata(uint uid, ushort mode)
+    {
+        if (uid != 0 || (mode & 0xf000) != 0x4000 || (mode & 0x12) != 0) throw new IOException("Plain root-owned non-group/other-writable directory required.");
+    }
+    internal static void RequireRootFileMetadata(uint uid, uint links, ushort mode)
+    {
+        if (uid != 0 || links != 1 || (mode & 0xf000) != 0x8000 || (mode & 0xe92) != 0 || (mode & 0x49) == 0) throw new IOException("Plain singly-linked root-owned read-only executable required.");
+    }
+}
 public sealed record LinuxScopeImage(string Path, long Bytes, string Sha256);
 public sealed record LinuxScopeSelection(LinuxScopeImage SystemdRun, LinuxScopeImage SystemdLibrary, string ManagerVersion, string KernelRelease, LinuxScopeImage BirthGate, IReadOnlyList<LinuxScopeImage> BirthGateClosure, LinuxScopeImage GateBuildReceipt)
 {
     public string? RestrictiveChildPolicy { get; init; }
+    public LinuxExactImageBacking ExactImageBacking { get; init; } = LinuxExactImageBacking.SealedMemfd;
 }
 [SupportedOSPlatform("linux")]
 internal sealed class LinuxSystemdLibrary
