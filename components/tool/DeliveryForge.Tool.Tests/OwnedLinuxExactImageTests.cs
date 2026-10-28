@@ -517,6 +517,76 @@ public sealed class OwnedLinuxExactImageTests
         finally { var retired = await session.RetireAsync(true); if (retired.KnownClosed) original.Dispose(); }
     }
 
+    public static bool CodexSelfReexecDiagnosticSelected => OperatingSystem.IsLinux() &&
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DELIVERY_FORGE_DIAGNOSTIC_CODEX_IMAGE"));
+
+    [Fact(Timeout = 180000, Skip = "Explicit Linux official-image diagnostic selection required.", SkipUnless = nameof(CodexSelfReexecDiagnosticSelected))]
+    public async Task Diagnostic_official_Codex_sandbox_reexec_matches_path_and_sealed_image()
+    {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Linux diagnostic only.");
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(180), TestContext.Current.CancellationToken);
+        var status = ActualKernelText("/proc/self/status", original, 16384);
+        Assert.Equal("NoNewPrivs:\t1", Assert.Single(status.Split('\n'), row => row.StartsWith("NoNewPrivs:", StringComparison.Ordinal)));
+        using var affinity = new OwnedDuplexProcessTests.Affinity();
+        var scope = Scope(original);
+        // Explicit DIAGNOSTIC ordinary profile, never silently clear a v3 policy.
+        // This comparison issues no runtime trust, production admission or model turn.
+        Assert.Null(scope.RestrictiveChildPolicy);
+        var path = Environment.GetEnvironmentVariable("DELIVERY_FORGE_DIAGNOSTIC_CODEX_IMAGE")!;
+        Assert.True(Path.IsPathFullyQualified(path));
+        var image = new LinuxScopeImage(path, 296885960, "70ea33b7094a4c20c007d09b83bb50e33debb9bbf99bf066709f9eb85bad524a");
+        var directory = Path.Combine(Path.GetTempPath(), "forge-codex-reexec-" + Guid.NewGuid().ToString("N"));
+        original.CheckWork(); Assert.False(Directory.Exists(directory)); Assert.False(File.Exists(directory));
+        Directory.CreateDirectory(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute); original.CheckWork();
+        var environment = ActualOrdinaryCapture.ResourceEnvironment();
+        var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT");
+        Assert.True(!string.IsNullOrWhiteSpace(dotnetRoot) && Path.IsPathFullyQualified(dotnetRoot));
+        environment["DOTNET_ROOT"] = dotnetRoot!; // Existing framework-dependent birth-gate runtime only.
+        foreach (var key in new[] { "HOME", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "TMPDIR" }) environment[key] = directory;
+        environment["PATH"] = "/usr/bin:/bin"; environment["LANG"] = "C.UTF-8"; environment["LC_ALL"] = "C.UTF-8";
+        environment["XDG_RUNTIME_DIR"] = "/run/user/1000"; environment["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/1000/bus";
+        var executor = new ProcessCommandExecutor(scope, original);
+        async Task<BoundedCommandCaptureResult> Capture(string label, string[] arguments, bool sealedImage)
+        {
+            // Four fresh source hashes plus two gate-copy/parent-verification pairs:
+            // 8*(296885960+1)=2375087688 image-read bytes, same original credit.
+            BoundedFiles.VerifyNativeImage(new(image.Path, image.Bytes, image.Sha256), original);
+            if (sealedImage) BoundedFiles.ReserveExactLinuxImageReads(new(image.Path, image.Bytes, image.Sha256), original);
+            var invocation = new CommandInvocation(path, arguments, directory, environment, InheritEnvironment: false) { EnvironmentIsComplete = true };
+            var actual = await executor.ExecuteBoundedCaptureAsync(invocation, TimeSpan.FromSeconds(30), 16384,
+                TestContext.Current.CancellationToken, new OwnedWorkPhaseBudget(original), scope, sealedImage ? image : null);
+            // Emit bounded raw captures and observed closure before any outcome assertion.
+            TestContext.Current.TestOutputHelper!.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+            {
+                Kind = "DiagnosticCodexSelfReexecCapture-v1", Label = label, SealedImageRequested = sealedImage,
+                actual.Command.ExitCode, actual.Command.TimedOut, actual.Command.Cancelled, actual.Command.OwnedProcessQuiescent,
+                actual.RootExitObserved, actual.StandardOutputDrainCompleted, actual.StandardErrorDrainCompleted,
+                actual.CaptureBoundExceeded, actual.OwnershipKind, actual.Timing,
+                NativeFailure = actual.Command.LifecycleDiagnostics?.NativeFailure,
+                OwnedTree = actual.Command.LifecycleDiagnostics?.OwnedTree,
+                StandardOutputBase64 = Convert.ToBase64String(actual.StandardOutputBytes),
+                StandardErrorBase64 = Convert.ToBase64String(actual.StandardErrorBytes)
+            }, BoundedFiles.Json));
+            // Unknown native/IO disposition or exceeded capture stops all later calls.
+            ActualOrdinaryCapture.Require(actual); original.CheckWork(); return actual;
+        }
+        var pathHelp = await Capture("path-help", ["sandbox", "linux", "--help"], false);
+        var sealedHelp = await Capture("sealed-help", ["sandbox", "linux", "--help"], true);
+        foreach (var help in new[] { pathHelp, sealedHelp })
+        {
+            Assert.Equal(0, help.Command.ExitCode);
+            Assert.Contains("Usage:", help.Command.StandardOutput, StringComparison.Ordinal);
+            Assert.Contains("sandbox linux", help.Command.StandardOutput, StringComparison.Ordinal);
+            Assert.True(help.Command.StandardOutput.Contains("[COMMAND]", StringComparison.Ordinal) ||
+                help.Command.StandardOutput.Contains("<COMMAND>", StringComparison.Ordinal));
+        }
+        // Actual help must establish the grammar before either helper-spawning call.
+        var pathCommand = await Capture("path-sandbox-true", ["sandbox", "linux", "--", "/usr/bin/true"], false);
+        var sealedCommand = await Capture("sealed-sandbox-true", ["sandbox", "linux", "--", "/usr/bin/true"], true);
+        Assert.Equal(0, pathCommand.Command.ExitCode); Assert.Equal(0, sealedCommand.Command.ExitCode);
+        // Retain this fresh private directory as diagnostic evidence; no recursive cleanup.
+    }
+
     static async Task<string> ActualLfRow(OwnedDuplexProcess session, ToolLifetime original, int maximum)
     {
         var bytes = new byte[maximum]; var one = new byte[1]; var used = 0;
