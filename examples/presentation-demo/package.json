@@ -1,0 +1,21 @@
+{
+  "name": "delivery-forge-ux1-native-prototypes",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "DEMO-ONLY synthetic UX-1 presentation prototypes; no live adapters",
+  "scripts": {
+    "test": "node --test",
+    "demo": "node scripts/demo.mjs",
+    "usage-ledger": "node scripts/usage-ledger.mjs",
+    "capture": "node scripts/capture-evidence.mjs",
+    "capture:usage": "node scripts/capture-usage-durability.mjs",
+    "screenshots": "node scripts/screenshots.mjs",
+    "screenshots:ux2": "node scripts/screenshots-ux2.mjs",
+    "cockpit": "node scripts/demo.mjs failed-gate 80 --color"
+  },
+  "engines": { "node": ">=20" },
+  "devDependencies": {
+    "playwright": "1.58.2"
+  }
+}

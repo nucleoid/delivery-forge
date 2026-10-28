@@ -1,0 +1,6 @@
+{
+  "statusLine": {
+    "type": "command",
+    "command": "node /ABSOLUTE/PATH/TO/prototypes/hosts/claude/statusline.mjs --state /ABSOLUTE/PATH/TO/prototypes/hosts/claude/statusline-state.json"
+  }
+}

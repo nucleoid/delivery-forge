@@ -1,0 +1,411 @@
+{
+  "schemaVersion": "delivery-forge.public-native-capture-ledger/1",
+  "summary": {
+    "status": "ADMITTED_FOR_NATIVE_DEMO",
+    "scope": "deterministic bundled synthetic presets only",
+    "capturesPublished": 14,
+    "productionEffects": false,
+    "modelPrompts": false,
+    "actualDurableLedgerClaim": false,
+    "parentPixelAcceptance": "All 14 current images personally inspected; replacement Codex execute and Pi usage accepted. Source images in earlier commits are superseded, not accepted."
+  },
+  "source": {
+    "prototypeCommit": "37aab4c6529dfcd361cf9f924f5dcca41423af7f",
+    "archiveUrlCommit": "693caa7ed1484520451bcf3f135b17d7bad1326e",
+    "archiveName": "native-prototype-37aab4c.zip",
+    "archiveSha256": "2469a22fdd291567823d86856edab5e6d8308a2e1cb43ad94ec3d7bacd9fc426",
+    "fixture": "demo-014",
+    "syntheticOnly": true
+  },
+  "environment": {
+    "os": "Windows laptop",
+    "captureViewportPixels": "1920x1032",
+    "sanitizationReview": "All current published images were visually reviewed. Only cropped native terminal/TUI content is public; account metadata, absolute host paths, and private application chrome are excluded."
+  },
+  "errata": [
+    {
+      "publishedAfterCommit": "1d4c5a83124acc0c1047fcbce89fb41eb268e752",
+      "file": "codex-native-0.153.4-execute.png",
+      "correction": "Replaced a wrongly selected LAUNCH frame and unsafe crop with a new native EXECUTE capture showing ceiling IMPLEMENT and approximately USD 0.021700. The superseded blob remains in repository history.",
+      "status": "Historical correction claim rejected by parent pixel review; superseded by parentCorrection below."
+    },
+    {
+      "publishedAfterCommit": "1d4c5a83124acc0c1047fcbce89fb41eb268e752",
+      "file": "pi-native-0.80.7-usage.png",
+      "correction": "Re-cropped the original native usage frame to exclude startup warnings and absolute host paths while retaining the complete usage panel and scroll hint. The superseded blob remains in repository history.",
+      "status": "Historical correction claim rejected by parent pixel review; superseded by parentCorrection below."
+    }
+  ],
+  "caveats": [
+    "The distributed ZIP contains no test files, so its local node --test run discovered 0 tests; the independent source-tree receipt reported 63/63 tests.",
+    "Claude Code was installed as 2.1.303 at capture time, not the planned 2.1.302.",
+    "Claude Code exposes compact usage in its native status line; no separate expanded usage capture was produced because that path would require a model-driven command.",
+    "One preliminary Codex boundary attempt showed that an empty MCP table override merged instead of replacing configured entries; startup was interrupted immediately. Final captures explicitly disabled every configured MCP server and verified all were disabled before rendering."
+  ],
+  "captures": [
+    {
+      "slot": "codex.launch",
+      "file": "codex-native-0.153.4-launch.png",
+      "hostVersion": "Codex CLI 0.153.4",
+      "surface": "native user-shell transcript",
+      "action": "launch",
+      "view": "compact",
+      "capturedUtc": "2026-10-19T10:47:45.8450810Z",
+      "dimensions": {
+        "width": 1920,
+        "height": 210
+      },
+      "bytes": 22459,
+      "sha256": "7b8173d5b4bd4be8b53e89571451a76b32766f37705994aae72170d393091a4f",
+      "observed": "LAUNCH / INCOMPLETE; estimate unavailable; synthetic tokens/rates",
+      "provenance": "literal local user-shell command; no model turn",
+      "crop": {
+        "kind": "truthful terminal/TUI viewport crop",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true
+      }
+    },
+    {
+      "slot": "codex.execute",
+      "file": "codex-native-0.153.4-execute.png",
+      "hostVersion": "Codex CLI 0.153.4",
+      "surface": "native user-shell transcript",
+      "action": "execute",
+      "view": "compact",
+      "capturedUtc": "2026-10-19T11:22:40.5838127Z",
+      "dimensions": {
+        "width": 1100,
+        "height": 160
+      },
+      "bytes": 17442,
+      "sha256": "93596eb1dd329b248e8a7893b8206871bb7d1315314eb5629db96bc68cb691c0",
+      "observed": "Parent personally observed native EXECUTE / INCOMPLETE, ceiling IMPLEMENT, API-equivalent ~0.0217, synthetic tokens/rates.",
+      "provenance": "Fresh literal local user-shell execution personally observed by parent; no model prompt. Native source 37aab4c.",
+      "crop": {
+        "kind": "physical-screen crop of personally observed fresh native execution",
+        "sourcePixels": {
+          "left": 0,
+          "top": 205,
+          "width": 1100,
+          "height": 160
+        },
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "parentPixelAccepted": true,
+        "fullWindow": "Privately observed through computer snapshot; only the cropped PNG was separately saved."
+      }
+    },
+    {
+      "slot": "codex.failed-gate",
+      "file": "codex-native-0.153.4-failed-gate.png",
+      "hostVersion": "Codex CLI 0.153.4",
+      "surface": "native user-shell transcript",
+      "action": "failed-gate",
+      "view": "compact",
+      "capturedUtc": "2026-10-19T10:48:23.3436931Z",
+      "dimensions": {
+        "width": 1920,
+        "height": 180
+      },
+      "bytes": 18967,
+      "sha256": "cb0247c8b0bb2199f73859d1b983c16653d6a7b1a05c9207797fac5c96c724d7",
+      "observed": "EVALUATE / INCOMPLETE; ~USD 0.044225 known subtotal; multiple models; PARTIAL",
+      "provenance": "literal local user-shell command; no model turn",
+      "crop": {
+        "kind": "truthful terminal/TUI viewport crop",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true
+      }
+    },
+    {
+      "slot": "codex.usage",
+      "file": "codex-native-0.153.4-usage.png",
+      "hostVersion": "Codex CLI 0.153.4",
+      "surface": "native user-shell transcript",
+      "action": "failed-gate",
+      "view": "usage",
+      "capturedUtc": "2026-10-19T10:48:37.1017542Z",
+      "dimensions": {
+        "width": 1920,
+        "height": 810
+      },
+      "bytes": 79360,
+      "sha256": "644921a35aff5454ab689555f79bfd5fac064dfd1749ea424636a3d619708cdc",
+      "observed": "USD 0.044225 known subtotal / PARTIAL; 19,300 tokens; one unpriced request; actual charge unknown",
+      "provenance": "literal local user-shell command; no model turn",
+      "crop": {
+        "kind": "truthful terminal/TUI viewport crop",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true
+      }
+    },
+    {
+      "slot": "claude.launch",
+      "file": "claude-native-2.1.303-launch.png",
+      "hostVersion": "Claude Code 2.1.303",
+      "surface": "native status line",
+      "action": "launch",
+      "view": "compact",
+      "capturedUtc": "2026-10-19T10:49:55.7248068Z",
+      "dimensions": {
+        "width": 1920,
+        "height": 190
+      },
+      "bytes": 18632,
+      "sha256": "25e2f02f81924ef39633cec13d80634089b3e71bb6eaa709566138d6d8ed4822",
+      "observed": "LAUNCH / INCOMPLETE; estimate unavailable",
+      "provenance": "startup status-line render; no prompt",
+      "crop": {
+        "kind": "truthful terminal/TUI viewport crop",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true
+      }
+    },
+    {
+      "slot": "claude.execute",
+      "file": "claude-native-2.1.303-execute.png",
+      "hostVersion": "Claude Code 2.1.303",
+      "surface": "native status line",
+      "action": "execute",
+      "view": "compact",
+      "capturedUtc": "2026-10-19T10:50:27.4117339Z",
+      "dimensions": {
+        "width": 1920,
+        "height": 190
+      },
+      "bytes": 19274,
+      "sha256": "70ad698dccc65aa88487a50fe1dfd2f32156ad0508cac3143f101aa90a81500c",
+      "observed": "EXECUTE / INCOMPLETE; ~USD 0.021700; writer COMPLETE",
+      "provenance": "startup status-line render; no prompt",
+      "crop": {
+        "kind": "truthful terminal/TUI viewport crop",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true
+      }
+    },
+    {
+      "slot": "claude.failed-gate",
+      "file": "claude-native-2.1.303-failed-gate.png",
+      "hostVersion": "Claude Code 2.1.303",
+      "surface": "native status line",
+      "action": "failed-gate",
+      "view": "compact",
+      "capturedUtc": "2026-10-19T10:50:54.3934756Z",
+      "dimensions": {
+        "width": 1920,
+        "height": 190
+      },
+      "bytes": 19192,
+      "sha256": "74f909181663bc2d72f6b184ff223d9ffa2d3c2175453c24988679d488b9ad8e",
+      "observed": "EVALUATE / INCOMPLETE; ~USD 0.044225 known subtotal; multiple models; PARTIAL",
+      "provenance": "startup status-line render; no prompt",
+      "crop": {
+        "kind": "truthful terminal/TUI viewport crop",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true
+      }
+    },
+    {
+      "slot": "claude.missing-state",
+      "file": "claude-native-2.1.303-missing-state.png",
+      "hostVersion": "Claude Code 2.1.303",
+      "surface": "native status line",
+      "action": "missing-state",
+      "view": "compact",
+      "capturedUtc": "2026-10-19T10:51:25.4540389Z",
+      "dimensions": {
+        "width": 1920,
+        "height": 185
+      },
+      "bytes": 15652,
+      "sha256": "f4256d7610ec748a40a78113d3f0a85f5cd8b50b26bbe31d36b9281f6d61743d",
+      "observed": "state unavailable / INCOMPLETE; reconciliation required",
+      "provenance": "startup status-line render; no prompt",
+      "crop": {
+        "kind": "truthful terminal/TUI viewport crop",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true
+      }
+    },
+    {
+      "slot": "pi.launch",
+      "file": "pi-native-0.80.7-launch.png",
+      "hostVersion": "Pi 0.80.7",
+      "surface": "native extension widget",
+      "action": "launch",
+      "view": "compact",
+      "capturedUtc": "2026-10-19T10:52:05.8113851Z",
+      "dimensions": {
+        "width": 1920,
+        "height": 125
+      },
+      "bytes": 12668,
+      "sha256": "4da090d46feaa2e0ff7740af6dbc7b0387d446ecb5518af771f35f65efd880ef",
+      "observed": "LAUNCH / INCOMPLETE; estimate unavailable",
+      "provenance": "offline extension render; no model available or invoked",
+      "crop": {
+        "kind": "truthful terminal/TUI viewport crop",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true
+      }
+    },
+    {
+      "slot": "pi.execute",
+      "file": "pi-native-0.80.7-execute.png",
+      "hostVersion": "Pi 0.80.7",
+      "surface": "native extension widget",
+      "action": "execute",
+      "view": "compact",
+      "capturedUtc": "2026-10-19T10:52:20.6144637Z",
+      "dimensions": {
+        "width": 1920,
+        "height": 125
+      },
+      "bytes": 13203,
+      "sha256": "c11cac8b15a89475cee68e05fc2a152dffbd9931a4159ab4cdce98b09021c21a",
+      "observed": "EXECUTE / INCOMPLETE; ~USD 0.021700; writer COMPLETE",
+      "provenance": "offline extension command; no model available or invoked",
+      "crop": {
+        "kind": "truthful terminal/TUI viewport crop",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true
+      }
+    },
+    {
+      "slot": "pi.failed-gate",
+      "file": "pi-native-0.80.7-failed-gate.png",
+      "hostVersion": "Pi 0.80.7",
+      "surface": "native extension widget",
+      "action": "failed-gate",
+      "view": "compact",
+      "capturedUtc": "2026-10-19T10:52:35.4189048Z",
+      "dimensions": {
+        "width": 1920,
+        "height": 125
+      },
+      "bytes": 13218,
+      "sha256": "4fbc6c66f76b0accefa12571c573707b14071defb7fe78bf42c2a59f44423d5f",
+      "observed": "EVALUATE / INCOMPLETE; ~USD 0.044225 known subtotal; multiple models; PARTIAL",
+      "provenance": "offline extension command; no model available or invoked",
+      "crop": {
+        "kind": "truthful terminal/TUI viewport crop",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true
+      }
+    },
+    {
+      "slot": "pi.usage",
+      "file": "pi-native-0.80.7-usage.png",
+      "hostVersion": "Pi 0.80.7",
+      "surface": "native custom usage panel",
+      "action": "failed-gate",
+      "view": "usage",
+      "capturedUtc": "2026-10-19T10:52:51.2298920Z",
+      "dimensions": {
+        "width": 1450,
+        "height": 440
+      },
+      "bytes": 66285,
+      "sha256": "68593ac1002ec8134b0f0e34d24d2628f60e25d2a320634e085405a1c2e32dbb",
+      "observed": "USD 0.044225 known subtotal / PARTIAL; 19,300 tokens; one unpriced request; usage viewport and scroll hint visible. Additional model rows require scrolling, independently exercised in the original native test.",
+      "provenance": "re-crop of the original offline extension frame; no model available or invoked; private full-window source SHA-256 9fc73f3e17c480277c529871af793bc07e077194f31dbaf7abe5055378ab8535",
+      "crop": {
+        "kind": "truthful terminal/TUI viewport crop",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true,
+        "parentPixelAccepted": true,
+        "sourcePublishedCommit": "889b8eca09e421bf70a416e458943eb36063673e",
+        "sourcePublishedSha256": "1213a477bcae882eec198f9539fb466c5d7ea7e09fb5891da2c327990d99602d",
+        "boundsWithinSource": {
+          "left": 0,
+          "top": 268,
+          "right": 1450,
+          "bottom": 708
+        },
+        "note": "Truthful crop retaining native widget, usage summary and scroll hint; startup warnings and private footer excluded."
+      }
+    },
+    {
+      "slot": "pi.selection-detail",
+      "file": "pi-native-0.80.7-selection-detail.png",
+      "hostVersion": "Pi 0.80.7",
+      "surface": "native custom evidence panel",
+      "action": "failed-gate",
+      "view": "detail",
+      "capturedUtc": "2026-10-19T10:53:38.7187434Z",
+      "dimensions": {
+        "width": 1920,
+        "height": 300
+      },
+      "bytes": 30254,
+      "sha256": "7bfe6322e07e0d0a2e316429008ef464c9391ab3840652430f7c721dfd6b3eb9",
+      "observed": "keyboard selection opened incomplete mutation-gate detail; Escape return verified",
+      "provenance": "offline native key handling; no model available or invoked",
+      "crop": {
+        "kind": "truthful terminal/TUI viewport crop",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true
+      }
+    },
+    {
+      "slot": "pi.unknown-scenario",
+      "file": "pi-native-0.80.7-unknown-scenario.png",
+      "hostVersion": "Pi 0.80.7",
+      "surface": "native extension notification and unchanged widget",
+      "action": "does-not-exist",
+      "view": "negative",
+      "capturedUtc": "2026-10-19T10:54:27.5868500Z",
+      "dimensions": {
+        "width": 1920,
+        "height": 165
+      },
+      "bytes": 15512,
+      "sha256": "928da3b46db4b1e68fe74eaf6cba353a75f3fa8b6b726569bb1b54a5f4eb37ad",
+      "observed": "explicit unknown-scenario error; prior failed-gate state remained visible",
+      "provenance": "offline extension command; no model available or invoked",
+      "crop": {
+        "kind": "truthful terminal/TUI viewport crop",
+        "accountMetadataExcluded": true,
+        "absoluteHostPathsExcluded": true,
+        "privateApplicationChromeExcluded": true,
+        "privateFullWindowOriginalRetainedByOperator": true
+      }
+    }
+  ],
+  "parentCorrection": {
+    "supersedes": [
+      "1d4c5a83124acc0c1047fcbce89fb41eb268e752",
+      "889b8eca09e421bf70a416e458943eb36063673e"
+    ],
+    "reason": "Parent pixel review rejected two previous correction claims: Codex execute showed a launcher error, while Pi usage still exposed local paths. Fresh Codex execution and a verified Pi crop replace those assets. Earlier Git history was not rewritten. No credential values were observed in the rejected images.",
+    "nativeSource": "37aab4c6529dfcd361cf9f924f5dcca41423af7f",
+    "modelPrompts": false,
+    "productionForgeEffects": false,
+    "normalTrustAcknowledgement": "The parent accepted the normal host trust prompt only for an inspected empty task-owned directory; no authentication file was copied or inspected."
+  }
+}

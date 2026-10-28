@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Forge cockpit panel — shared component, DESKTOP MOCKUP</title>
+  <link rel="stylesheet" href="forge-cockpit.css">
+  <style>html,body{margin:0;background:#0b1218}body{display:flex;justify-content:center;padding:24px}#forge{width:640px;border:1px solid #30414d;border-radius:12px;overflow:hidden}.forge{height:auto}.forge-body{overflow:visible}</style>
+</head>
+<body>
+  <div id="forge"></div>
+  <script src="../companion/companion-data.js"></script>
+  <script src="forge-cockpit.js"></script>
+  <script>
+    const params = new URLSearchParams(location.search);
+    globalThis.ForgeDesktop = { ui: ForgeCockpit.mount(document.getElementById('forge'), { scenario: params.get('scenario') || 'failed-gate', tab: params.get('tab') || 'overview', detail: params.has('detail'), preview: params.has('preview') }) };
+  </script>
+</body>
+</html>

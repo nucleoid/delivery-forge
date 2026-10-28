@@ -1,0 +1,7 @@
+HARNESS EVIDENCE — owned synthetic JSONL durability; no installed host or provider
+healthy: USD 0.044225 | tokens 19300 | PARTIAL | records 6
+duplicate append unchanged: true
+malformed/truncated: PARTIAL | truncated JSONL tail excluded; evidence continuity uncertain; malformed JSONL record 7; excluded
+reader mutated damaged bytes: false
+pre-damage bytes retained as prefix: true
+actual charge: unknown; production collector: absent
