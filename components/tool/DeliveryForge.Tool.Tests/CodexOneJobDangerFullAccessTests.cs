@@ -229,6 +229,38 @@ public sealed class CodexOneJobDangerFullAccessTests
         Assert.Throws<IOException>(() => CodexAppServerPort.RequireLeafCounterPhase(final, "startup-failed"));
     }
 
+    [Theory]
+    [InlineData("absent")]
+    [InlineData("success")]
+    [InlineData("failure")]
+    public async Task Startup_diagnostic_always_precedes_retirement_and_keeps_original_failure(string observer)
+    {
+        var primary = new OperationCanceledException("Original startup cancellation");
+        var order = new List<string>();
+        Action? capture = observer == "absent" ? null : () =>
+        {
+            order.Add("capture");
+            if (observer == "failure") throw new IOException("Counter unavailable");
+        };
+        var actual = await Assert.ThrowsAsync<OperationCanceledException>(() => CodexAppServerPort.RetireFailedStartupAsync(primary, capture, async () => { order.Add("retire"); await Task.Yield(); }));
+        Assert.Same(primary, actual);
+        Assert.Equal(observer == "absent" ? ["retire"] : new[] { "capture", "retire" }, order);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Startup_cleanup_failure_keeps_primary_and_any_diagnostic_failure(bool counterFails)
+    {
+        var primary = new IOException("Original startup failure");
+        var counter = new IOException("Counter unavailable");
+        var cleanup = new IOException("Actual retirement failed");
+        var retired = 0;
+        var actual = await Assert.ThrowsAsync<AggregateException>(() => CodexAppServerPort.RetireFailedStartupAsync(primary, () => { if (counterFails) throw counter; }, () => { retired++; return Task.FromException(cleanup); }));
+        Assert.Equal(1, retired);
+        Assert.Equal(counterFails ? new Exception[] { primary, counter, cleanup } : [primary, cleanup], actual.InnerExceptions);
+    }
+
     [Fact]
     public void Leaf_counter_future_numeric_events_are_validated_but_not_projected()
     {

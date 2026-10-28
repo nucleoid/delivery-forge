@@ -16,6 +16,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     readonly bool conformanceTrustRoute;
     readonly bool conformanceDangerFullAccess;
     readonly Action<string>? conformanceLeafCounters; int conformanceCounterPhase;
+    Exception? conformanceCounterFailure;
     bool TrustProtocol => runtimeTrust is not null || conformanceTrustRoute;
     WindowsImageUse? trustedImage;
     bool trustedNativeCreationEntered, trustedNativeCreationReturned;
@@ -100,10 +101,24 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         }
         if (counterFailure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(counterFailure).Throw();
     }
+    internal static async Task RetireFailedStartupAsync(Exception primary, Action? capture, Func<Task> retire)
+    {
+        Exception? counterFailure = null;
+        try { capture?.Invoke(); } catch (Exception diagnostic) { counterFailure = diagnostic; }
+        try { await retire().ConfigureAwait(false); }
+        catch (Exception cleanup)
+        {
+            if (counterFailure is not null) throw new AggregateException("Codex start, leaf diagnostic and same-original retirement/image disposition failure.", primary, counterFailure, cleanup);
+            throw new AggregateException("Codex start and same-original retirement/image disposition failure.", primary, cleanup);
+        }
+        // A diagnostic cannot replace the original failure's type. The actual
+        // caller retains its separate diagnostic type in startup metadata.
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+    }
     public void BindOriginal(ToolLifetime actualOriginal) { lock (gate) { if (boundOriginal is not null && !ReferenceEquals(boundOriginal, actualOriginal)) throw new WorkerEnvelopeException("Codex original cannot be rebound or renewed."); actualOriginal.Check(); boundOriginal = actualOriginal; startup ??= new(actualOriginal.OriginalStarted); } }
     internal CodexStartupDiagnostics SnapshotStartupDiagnostics()
     {
-        lock (gate) return (startup ?? throw new IOException("Actual Codex original not bound.")).Snapshot(pending.PendingIds, pending.Failure, pumpFailure, pump, OriginalTasks, threadId is not null, turnId is not null);
+        lock (gate) return (startup ?? throw new IOException("Actual Codex original not bound.")).Snapshot(pending.PendingIds, pending.Failure, pumpFailure, pump, OriginalTasks, threadId is not null, turnId is not null) with { LeafCounterFailureType = conformanceCounterFailure?.GetType().FullName };
     }
     Task<T> Keep<T>(Task<T> actual) { lock (tasks) { if (tasks.Count >= 1024) throw new IOException("Finite actual Codex task ledger exhausted."); tasks.Add(actual); } return actual; }
     Task Keep(Task actual) { lock (tasks) { if (tasks.Count >= 1024) throw new IOException("Finite actual Codex task ledger exhausted."); tasks.Add(actual); } return actual; }
@@ -290,27 +305,27 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         }
         catch (Exception primary)
         {
-            Exception? counterFailure = null;
             // Startup can fail before the before-turn hook. Sample only this
             // already-released exact Linux owner, before retirement removes its
             // cgroup. This replaces an unused sample; it cannot add a third one.
+            Action? capture = null;
             if (conformanceLeafCounters is not null && conformanceCounterPhase == 0 && process is { HasCreationOwnedExactLinuxImage: true })
             {
-                try { ObserveConformanceLeafCounters("startup-failed"); }
-                catch (Exception diagnostic) { counterFailure = diagnostic; }
+                capture = () =>
+                {
+                    try { ObserveConformanceLeafCounters("startup-failed"); }
+                    catch (Exception diagnostic) { conformanceCounterFailure = diagnostic; throw; }
+                };
             }
-            try
+            await RetireFailedStartupAsync(primary, capture, async () =>
             {
-                if (process is not null) { var stop = process.RetireAsync(true); lock (tasks) tasks.Add(stop); var closed = await stop.ConfigureAwait(false); CloseTrustedImage(closed.KnownClosed && !process.HasUnknownIo, true); }
-                else CloseTrustedImage(!trustedNativeCreationEntered || trustedNativeCreationReturned, true);
-            }
-            catch (Exception cleanup)
-            {
-                trustedImage?.RetainUnknown();
-                if (counterFailure is not null) throw new AggregateException("Codex start, leaf diagnostic and same-original retirement/image disposition failure.", primary, counterFailure, cleanup);
-                throw new AggregateException("Codex start and same-original retirement/image disposition failure.", primary, cleanup);
-            }
-            if (counterFailure is not null) throw new AggregateException("Codex start and leaf diagnostic failure.", primary, counterFailure);
+                try
+                {
+                    if (process is not null) { var stop = process.RetireAsync(true); lock (tasks) tasks.Add(stop); var closed = await stop.ConfigureAwait(false); CloseTrustedImage(closed.KnownClosed && !process.HasUnknownIo, true); }
+                    else CloseTrustedImage(!trustedNativeCreationEntered || trustedNativeCreationReturned, true);
+                }
+                catch { trustedImage?.RetainUnknown(); throw; }
+            }).ConfigureAwait(false);
             throw;
         }
     }
