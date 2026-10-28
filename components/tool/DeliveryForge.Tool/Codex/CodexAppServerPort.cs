@@ -75,6 +75,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     {
         (0, "before-turn") => 1,
         (1, "after-terminal") => 2,
+        (0, "startup-failed") => 2,
         _ => throw new IOException("Leaf diagnostics require at most two ordered phases.")
     };
     void ObserveConformanceLeafCounters(string phase)
@@ -289,12 +290,27 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         }
         catch (Exception primary)
         {
+            Exception? counterFailure = null;
+            // Startup can fail before the before-turn hook. Sample only this
+            // already-released exact Linux owner, before retirement removes its
+            // cgroup. This replaces an unused sample; it cannot add a third one.
+            if (conformanceLeafCounters is not null && conformanceCounterPhase == 0 && process is { HasCreationOwnedExactLinuxImage: true })
+            {
+                try { ObserveConformanceLeafCounters("startup-failed"); }
+                catch (Exception diagnostic) { counterFailure = diagnostic; }
+            }
             try
             {
                 if (process is not null) { var stop = process.RetireAsync(true); lock (tasks) tasks.Add(stop); var closed = await stop.ConfigureAwait(false); CloseTrustedImage(closed.KnownClosed && !process.HasUnknownIo, true); }
                 else CloseTrustedImage(!trustedNativeCreationEntered || trustedNativeCreationReturned, true);
             }
-            catch (Exception cleanup) { trustedImage?.RetainUnknown(); throw new AggregateException("Codex start and same-original retirement/image disposition failure.", primary, cleanup); }
+            catch (Exception cleanup)
+            {
+                trustedImage?.RetainUnknown();
+                if (counterFailure is not null) throw new AggregateException("Codex start, leaf diagnostic and same-original retirement/image disposition failure.", primary, counterFailure, cleanup);
+                throw new AggregateException("Codex start and same-original retirement/image disposition failure.", primary, cleanup);
+            }
+            if (counterFailure is not null) throw new AggregateException("Codex start and leaf diagnostic failure.", primary, counterFailure);
             throw;
         }
     }

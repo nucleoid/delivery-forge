@@ -200,6 +200,8 @@ public sealed class CodexOneJobDangerFullAccessTests
     [InlineData(1, "before-turn")]
     [InlineData(2, "after-terminal")]
     [InlineData(0, "other")]
+    [InlineData(1, "startup-failed")]
+    [InlineData(2, "startup-failed")]
     public void Leaf_diagnostic_rejects_missing_repeated_or_foreign_phase(int previous, string phase) =>
         Assert.Throws<IOException>(() => CodexAppServerPort.RequireLeafCounterPhase(previous, phase));
     [Fact]
@@ -215,6 +217,16 @@ public sealed class CodexOneJobDangerFullAccessTests
         raw["memory.events"] = "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 4\n"u8.ToArray();
         var values = OwnedDuplexProcess.ParseLeafCounters(raw);
         Assert.Equal((ulong?)ulong.MaxValue, values["memory.current"]); Assert.Equal((ulong?)4, values["memory.events.oom_group_kill"]);
+    }
+
+    [Fact]
+    public void Startup_failure_uses_the_unused_sample_and_closes_the_diagnostic_sequence()
+    {
+        var final = CodexAppServerPort.RequireLeafCounterPhase(0, "startup-failed");
+        Assert.Equal(2, final);
+        Assert.Throws<IOException>(() => CodexAppServerPort.RequireLeafCounterPhase(final, "before-turn"));
+        Assert.Throws<IOException>(() => CodexAppServerPort.RequireLeafCounterPhase(final, "after-terminal"));
+        Assert.Throws<IOException>(() => CodexAppServerPort.RequireLeafCounterPhase(final, "startup-failed"));
     }
 
     [Fact]
