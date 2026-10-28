@@ -315,12 +315,16 @@ internal sealed class LinuxScopeKernel
             exactWorkReadByteLimit = Math.Min(ExactWorkReadByteLimit, checked(readBytes + byteLimit + 3L * 1024 * 1024));
             exactTotalReadByteLimit = Math.Min(ExactTotalReadByteLimit, checked(exactWorkReadByteLimit + 2L * 1024 * 1024));
             readBytes += byteLimit; exactImageEntered = true; Check(false);
-            var fd = OpenFd("/proc/" + actualPid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/fd/" + actualFd.ToString(System.Globalization.CultureInfo.InvariantCulture), CloseOnExec, false);
+            var firstOwned = descriptors.Count;
             Exception? primary = null, post = null;
             var rootChain = new List<(OwnedFd Fd, Statx Identity, OwnedFd? Parent, string Name)>();
-            OwnedFd? rootLeaf = null;
+            OwnedFd? rootLeaf = null; Statx? rootVolume = null;
             try
             {
+                // OpenFd records returned ownership before its endpoint post.
+                // Keep that post, the path walk and every metadata check inside
+                // this observation's descriptor disposition scope.
+                var fd = OpenFd("/proc/" + actualPid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/fd/" + actualFd.ToString(System.Globalization.CultureInfo.InvariantCulture), CloseOnExec, false);
                 const int sealsRequired = 0x2f;
                 void Identity()
                 {
@@ -328,7 +332,7 @@ internal sealed class LinuxScopeKernel
                     if (actual.Size != (ulong)selected.Bytes || actual.Inode != inode || actual.Major != major || actual.Minor != minor) throw new IOException("Actual selected image identity/extent differs.");
                     if (backing == LinuxExactImageBacking.RootControlledDisk)
                     {
-                        RequireRootFile(actual); RecheckRootChain(actual);
+                        RequireRootFile(actual); RootFileSystem(fd); RecheckRootChain(actual);
                     }
                     else
                     {
@@ -341,7 +345,14 @@ internal sealed class LinuxScopeKernel
                 Statx RootStat(OwnedFd actual, string name = "", int flags = 0x1000)
                 {
                     Statx value = default; Native("statx-root-controlled-chain", () => statx(actual.Actual, name, flags, 0x17ff, out value), false);
-                    if ((value.Mask & 0x131f) != 0x131f) throw new IOException("Complete root-controlled chain identity metadata required."); return value;
+                    if ((value.Mask & 0x131f) != 0x131f) throw new IOException("Complete root-controlled chain identity metadata required.");
+                    if (rootVolume is { } root) LinuxExactImageBackingRules.RequireRootMount(value.Mount, value.Major, value.Minor, root.Mount, root.Major, root.Minor);
+                    return value;
+                }
+                void RootFileSystem(OwnedFd actual)
+                {
+                    StatFs value = default; Native("fstatfs-root-controlled-chain", () => fstatfs(actual.Actual, out value), false);
+                    LinuxExactImageBackingRules.RequireRootLocalFileSystem(value.Type, value.Flags);
                 }
                 static void RequireRootDirectory(Statx value)
                 {
@@ -356,14 +367,16 @@ internal sealed class LinuxScopeKernel
                 {
                     foreach (var row in rootChain)
                     {
-                        var held = RootStat(row.Fd); RequireRootDirectory(held);
+                        var held = RootStat(row.Fd); RequireRootDirectory(held); RootFileSystem(row.Fd);
                         Statx named;
                         if (row.Parent is null) { named = default; Native("statx-root-path", () => statx(-100, "/", 0x100, 0x17ff, out named), false); }
                         else named = RootStat(row.Parent, row.Name, 0x100);
                         if (!SameRoot(held, row.Identity) || !SameRoot(named, row.Identity)) throw new IOException("Root-controlled directory link changed before release.");
                     }
                     var namedFile = RootStat(rootChain[^1].Fd, selected.Path.Split('/')[^1], 0x100); RequireRootFile(namedFile);
-                    if (rootLeaf is null || !SameRoot(namedFile, imageIdentity) || !SameRoot(RootStat(rootLeaf), imageIdentity)) throw new IOException("Original child descriptor differs from independently opened protected path.");
+                    if (rootLeaf is null) throw new IOException("Independent protected root leaf is absent.");
+                    RootFileSystem(rootLeaf);
+                    if (!SameRoot(namedFile, imageIdentity) || !SameRoot(RootStat(rootLeaf), imageIdentity)) throw new IOException("Original child descriptor differs from independently opened protected path.");
                 }
                 if (backing == LinuxExactImageBacking.RootControlledDisk)
                 {
@@ -371,11 +384,12 @@ internal sealed class LinuxScopeKernel
                     // is on the SAME original finite syscall ledger. No extra image read.
                     OwnedFd? parent = null; var directory = OpenFd("/", DirectoryFlag | NoFollow | CloseOnExec, false);
                     var rootIdentity = RootStat(directory); RequireRootDirectory(rootIdentity); rootChain.Add((directory, rootIdentity, null, "/"));
+                    rootVolume = rootIdentity; LinuxExactImageBackingRules.RequireRootMount(rootIdentity.Mount, rootIdentity.Major, rootIdentity.Minor, rootIdentity.Mount, rootIdentity.Major, rootIdentity.Minor); RootFileSystem(directory);
                     var parts = selected.Path[1..].Split('/');
                     foreach (var name in parts.Take(parts.Length - 1))
                     {
                         parent = directory; directory = OpenFd(name, DirectoryFlag | NoFollow | CloseOnExec, false, parent);
-                        var value = RootStat(directory); RequireRootDirectory(value); rootChain.Add((directory, value, parent, name));
+                        var value = RootStat(directory); RequireRootDirectory(value); rootChain.Add((directory, value, parent, name)); RootFileSystem(directory);
                     }
                     rootLeaf = OpenFd(parts[^1], 0x800 | NoFollow | CloseOnExec, false, directory);
                     // The leaf is independently opened without following links; its full
@@ -424,11 +438,11 @@ internal sealed class LinuxScopeKernel
                 try { Check(false); }
                 catch (Exception admission) { post = admission; cleanupClose = true; }
             }
-            // Retain every opened chain descriptor through complete content and
-            // repeated same-link proof. Independently perform their first closes.
-            for (var index = rootChain.Count - 1; index >= 0; index--) post = CloseExactImage(rootChain[index].Fd, cleanupClose || post is not null, post);
-            if (rootLeaf is not null) post = CloseExactImage(rootLeaf, cleanupClose || post is not null, post);
-            post = CloseExactImage(fd, cleanupClose || post is not null, post);
+            // Include an OpenFd endpoint-post refusal and metadata failures
+            // before a local chain row/leaf assignment. Never close an older fd
+            // or retry an entered first close; unresolved effects stay UNKNOWN.
+            for (var index = descriptors.Count - 1; index >= firstOwned; index--)
+                if (!descriptors[index].CloseEntered) post = CloseExactImage(descriptors[index], cleanupClose || post is not null, post);
             if (primary is not null && post is not null) throw new AggregateException("Actual exact image and original first-close.", primary, post);
             if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
             if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
@@ -462,7 +476,7 @@ internal sealed class LinuxScopeKernel
         if (group is { Closed: true } && procDescriptors is not null) { try { Close(procDescriptors, cleanup || primary is not null); } catch (Exception error) { post = error; } }
         if (primary is not null && post is not null) throw new AggregateException(primary, post); if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
     }
-    [StructLayout(LayoutKind.Explicit, Size = 256)] struct StatFs { [FieldOffset(0)] public long Type; }
+    [StructLayout(LayoutKind.Explicit, Size = 256)] struct StatFs { [FieldOffset(0)] public long Type; [FieldOffset(80)] public ulong Flags; }
     [StructLayout(LayoutKind.Explicit, Size = 256)] struct Statx { [FieldOffset(0)] public uint Mask; [FieldOffset(16)] public uint Links; [FieldOffset(20)] public uint Uid; [FieldOffset(24)] public uint Gid; [FieldOffset(28)] public ushort Mode; [FieldOffset(32)] public ulong Inode; [FieldOffset(40)] public ulong Size; [FieldOffset(136)] public uint Major; [FieldOffset(140)] public uint Minor; [FieldOffset(144)] public ulong Mount; }
     [DllImport("libc", SetLastError = true)] static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
     [DllImport("libc", SetLastError = true)] static extern int openat(int fd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);

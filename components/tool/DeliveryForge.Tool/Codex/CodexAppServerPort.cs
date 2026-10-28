@@ -120,7 +120,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     public void BindOriginal(ToolLifetime actualOriginal) { lock (gate) { if (boundOriginal is not null && !ReferenceEquals(boundOriginal, actualOriginal)) throw new WorkerEnvelopeException("Codex original cannot be rebound or renewed."); actualOriginal.Check(); boundOriginal = actualOriginal; startup ??= new(actualOriginal.OriginalStarted); } }
     internal CodexStartupDiagnostics SnapshotStartupDiagnostics()
     {
-        lock (gate) return (startup ?? throw new IOException("Actual Codex original not bound.")).Snapshot(pending.PendingIds, pending.Failure, pumpFailure, pump, OriginalTasks, threadId is not null, turnId is not null) with { LeafCounterFailureType = conformanceCounterFailure?.GetType().FullName };
+        lock (gate) return (startup ?? throw new IOException("Actual Codex original not bound.")).Snapshot(pending.PendingIds, pending.Failure, pumpFailure, pump, OriginalTasks, threadId is not null, turnId is not null) with { LeafCounterFailureType = conformanceCounterFailure?.GetType().FullName, ExactImageBacking = process?.CreationOwnedExactLinuxImageBacking?.ToString() };
     }
     Task<T> Keep<T>(Task<T> actual) { lock (tasks) { if (tasks.Count >= 1024) throw new IOException("Finite actual Codex task ledger exhausted."); tasks.Add(actual); } return actual; }
     Task Keep(Task actual) { lock (tasks) { if (tasks.Count >= 1024) throw new IOException("Finite actual Codex task ledger exhausted."); tasks.Add(actual); } return actual; }
@@ -299,7 +299,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             var confined = UsesLinuxWorkspaceWrite;
             runtimeTrust?.BindWorker(original, selection, actual.Worktree, actual.ResultDirectory, linuxScope);
             startup!.SetStage(CodexStartupStage.NativeImageVerification);
-            // Reserve the actual gate copy and independent sealed-fd verification
+            // Reserve the actual gate and independent backing-specific verification
             // before pathname hashing or native birth; no ordinary Linux fallback.
             LinuxScopeImage? exactImage = null;
             if (OperatingSystem.IsLinux())
@@ -308,15 +308,15 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                 BoundedFiles.ReserveExactLinuxImageReads(new(selection.Executable, selection.Bytes, selection.Sha256), original);
                 exactImage = new(selection.Executable, selection.Bytes, selection.Sha256);
             }
-            // Linux retains its complete pathname verification plus the existing
-            // creation-owned gate copy/sealed-fd proof; never borrow Windows handles.
+            // Linux retains its complete pathname verification plus the selected
+            // creation-owned backing proof; never borrow Windows handles.
             if (!TrustProtocol || !OperatingSystem.IsWindows()) BoundedFiles.VerifyNativeImage(new(selection.Executable, selection.Bytes, selection.Sha256), original);
             else trustedImage = runtimeTrust?.RetainWorkerImage(original, new(selection.Executable, selection.Bytes, selection.Sha256), token)
                 ?? WindowsImageUse.Open(new(selection.Executable, selection.Bytes, selection.Sha256), original, token);
             var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1" };
             runtimeTrust?.Check(original); trustedImage?.Check(token);
             startup.SetStage(CodexStartupStage.NativeCreation); trustedNativeCreationEntered = true; process = OwnedDuplexProcess.Open(new(selection.Executable, ["app-server"], actual.Worktree, environment), original, linuxScope, exactImage); trustedNativeCreationReturned = true; if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
-            if (exactImage is not null && !process.HasCreationOwnedExactLinuxImage) throw new IOException("Actual creation-owned exact Linux image proof required before Codex protocol startup.");
+            if (exactImage is not null && (!process.HasCreationOwnedExactLinuxImage || process.CreationOwnedExactLinuxImageBacking != linuxScope!.ExactImageBacking)) throw new IOException("Actual creation-owned exact Linux image/backing proof required before Codex protocol startup.");
             protocol = new(process.Input, process.Output, original); pump = Pump(original.Token); process.AttachOriginalOutputConsumer(pump); lock (tasks) tasks.Add(pump);
             startup.SetStage(CodexStartupStage.Initialize); _ = await Rpc("initialize", new { clientInfo = new { name = "delivery_forge", title = "Delivery Forge", version = "0.1.0" }, capabilities = new { experimentalApi = false } }, token).ConfigureAwait(false);
             startup.SetStage(CodexStartupStage.InitializedNotification); startup.Client("initialized", null, CodexWireState.WriteEntered);

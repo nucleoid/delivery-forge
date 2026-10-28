@@ -29,13 +29,21 @@ internal static class LinuxExactImageBackingRules
         Require(backing, "/selected-image");
         return backing == LinuxExactImageBacking.RootControlledDisk ? "ROOT_DISK_ELF" : "ELF";
     }
+    internal static void RequireRootLocalFileSystem(long type, ulong flags)
+    {
+        if (type is not (0xef53 or 0x58465342 or 0x9123683e) || (flags & 0x20) == 0 || (flags & 0x8) != 0) throw new IOException("Executable known local root filesystem required.");
+    }
+    internal static void RequireRootMount(ulong mount, uint major, uint minor, ulong rootMount, uint rootMajor, uint rootMinor)
+    {
+        if (rootMount == 0 || mount != rootMount || major != rootMajor || minor != rootMinor) throw new IOException("Selected path must remain on the original root mount and device.");
+    }
     internal static void RequireRootDirectoryMetadata(uint uid, ushort mode)
     {
         if (uid != 0 || (mode & 0xf000) != 0x4000 || (mode & 0x12) != 0) throw new IOException("Plain root-owned non-group/other-writable directory required.");
     }
     internal static void RequireRootFileMetadata(uint uid, uint links, ushort mode)
     {
-        if (uid != 0 || links != 1 || (mode & 0xf000) != 0x8000 || (mode & 0xe92) != 0 || (mode & 0x49) == 0) throw new IOException("Plain singly-linked root-owned read-only executable required.");
+        if (uid != 0 || links != 1 || mode != 0x816d) throw new IOException("Plain singly-linked root-owned read-only executable required.");
     }
 }
 public sealed record LinuxScopeImage(string Path, long Bytes, string Sha256);

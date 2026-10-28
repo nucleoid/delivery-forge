@@ -37,7 +37,8 @@ public sealed class LinuxScopeOwnerBoundaryTests
     }
     [Theory]
     [InlineData(0, 1, 0x816d, true)] // Regular root-owned 0555.
-    [InlineData(0, 1, 0x8140, true)] // Regular root-owned 0500.
+    [InlineData(0, 1, 0x8140, false)] // Root-only 0500 cannot serve UID1000.
+    [InlineData(0, 1, 0x8164, false)] // 0544 lacks other execute.
     [InlineData(1000, 1, 0x816d, false)]
     [InlineData(0, 2, 0x816d, false)]
     [InlineData(0, 0, 0x816d, false)]
@@ -64,6 +65,33 @@ public sealed class LinuxScopeOwnerBoundaryTests
     {
         var failure = Record.Exception(() => LinuxExactImageBackingRules.RequireRootDirectoryMetadata((uint)uid, (ushort)mode));
         if (accepted) Assert.Null(failure); else Assert.IsType<IOException>(failure);
+    }
+
+    [Theory]
+    [InlineData(0xef53L, 0x20UL, true)] // ext4 family, kernel-valid and executable.
+    [InlineData(0x58465342L, 0x20UL, true)] // XFS.
+    [InlineData(0x9123683eL, 0x20UL, true)] // Btrfs.
+    [InlineData(0x65735546L, 0x20UL, false)] // FUSE can report arbitrary ownership.
+    [InlineData(0x6969L, 0x20UL, false)] // NFS.
+    [InlineData(0x01021994L, 0x20UL, false)] // tmpfs.
+    [InlineData(0x794c7630L, 0x20UL, false)] // overlay.
+    [InlineData(0xef53L, 0UL, false)] // No kernel-valid flags.
+    [InlineData(0xef53L, 0x28UL, false)] // ST_NOEXEC.
+    public void Root_disk_filesystem_refuses_untrusted_or_nonexecutable_backing(long type, ulong flags, bool accepted)
+    {
+        var error = Record.Exception(() => LinuxExactImageBackingRules.RequireRootLocalFileSystem(type, flags));
+        if (accepted) Assert.Null(error); else Assert.IsType<IOException>(error);
+    }
+    [Theory]
+    [InlineData(100UL, 8U, 1U, true)]
+    [InlineData(101UL, 8U, 1U, false)] // Same device, different mount.
+    [InlineData(100UL, 9U, 1U, false)] // Different major.
+    [InlineData(100UL, 8U, 2U, false)] // Different minor.
+    public void Root_disk_chain_cannot_cross_the_observed_root_mount_or_device(ulong mount, uint major, uint minor, bool accepted)
+    {
+        var error = Record.Exception(() => LinuxExactImageBackingRules.RequireRootMount(mount, major, minor, 100, 8, 1));
+        if (accepted) Assert.Null(error); else Assert.IsType<IOException>(error);
+        Assert.Throws<IOException>(() => LinuxExactImageBackingRules.RequireRootMount(0, 8, 1, 0, 8, 1));
     }
 
     [Fact]

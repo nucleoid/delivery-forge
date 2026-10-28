@@ -517,6 +517,89 @@ public sealed class OwnedLinuxExactImageTests
         finally { var retired = await session.RetireAsync(true); if (retired.KnownClosed) original.Dispose(); }
     }
 
+    public static bool RootDiskTinyDiagnosticSelected => OperatingSystem.IsLinux() &&
+        !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DELIVERY_FORGE_DIAGNOSTIC_ROOT_ELF_FIXTURE"));
+    sealed record RootDiskTinyFixture(LinuxScopeImage RootImage, LinuxScopeImage UserImage, LinuxScopeImage SymlinkImage, LinuxScopeImage WritableImage);
+    [StructLayout(LayoutKind.Explicit, Size = 256)]
+    struct RootDiskTinyStat
+    {
+        [FieldOffset(0)] public uint Mask;
+        [FieldOffset(16)] public uint Links;
+        [FieldOffset(20)] public uint Uid;
+        [FieldOffset(28)] public ushort Mode;
+        [FieldOffset(40)] public ulong Size;
+    }
+    [DllImport("libc", EntryPoint = "statx", SetLastError = true)]
+    static extern int RootDiskTinyLstat(int directory, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out RootDiskTinyStat value);
+
+    [Theory(Timeout = 30000, Skip = "Explicit independently provisioned tiny Linux root-image fixture required.", SkipUnless = nameof(RootDiskTinyDiagnosticSelected))]
+    [InlineData("root-disk")]
+    [InlineData("sealed-default")]
+    [InlineData("user-owned")]
+    [InlineData("symlink")]
+    [InlineData("writable")]
+    public async Task Diagnostic_tiny_root_disk_and_sealed_default_enforce_selected_image_boundary(string mode)
+    {
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Linux diagnostic only.");
+        // Each expected refusal permanently closes THIS row's original WORK.
+        // Other theory rows have their own bounded originals; no failed original is reopened.
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        using var affinity = new OwnedDuplexProcessTests.Affinity();
+        var started = original.OriginalStarted;
+        var status = ActualKernelText("/proc/self/status", original, 16384);
+        Assert.Equal("NoNewPrivs:\t1", Assert.Single(status.Split('\n'), row => row.StartsWith("NoNewPrivs:", StringComparison.Ordinal)));
+        var scope = Scope(original); Assert.Null(scope.RestrictiveChildPolicy);
+        Assert.Equal(LinuxExactImageBacking.RootControlledDisk, scope.ExactImageBacking);
+        var fixture = BoundedFiles.ReadJson<RootDiskTinyFixture>(Environment.GetEnvironmentVariable("DELIVERY_FORGE_DIAGNOSTIC_ROOT_ELF_FIXTURE")!, original, 4096);
+        var images = new[] { fixture.RootImage, fixture.UserImage, fixture.SymlinkImage, fixture.WritableImage };
+        Assert.Equal(4, images.Select(x => x.Path).Distinct(StringComparer.Ordinal).Count());
+        Assert.All(images, x => { Assert.True(Path.IsPathFullyQualified(x.Path)); Assert.InRange(x.Bytes, 64, 65536); Assert.Equal(fixture.RootImage.Bytes, x.Bytes); Assert.Equal(fixture.RootImage.Sha256, x.Sha256); });
+        var image = mode switch { "root-disk" or "sealed-default" => fixture.RootImage, "user-owned" => fixture.UserImage, "symlink" => fixture.SymlinkImage, "writable" => fixture.WritableImage, _ => throw new ArgumentException("Closed tiny-image case.", nameof(mode)) };
+        original.CheckWork(); var observed = RootDiskTinyLstat(-100, image.Path, 0x100, 0x7ff, out var facts); original.CheckWork();
+        Assert.Equal(0, observed); Assert.Equal(0x20fU, facts.Mask & 0x20fU);
+        if (mode == "symlink")
+        {
+            Assert.Equal(0xa000, facts.Mode & 0xf000);
+            original.CheckWork(); Assert.Equal(fixture.RootImage.Path, File.ResolveLinkTarget(image.Path, false)!.FullName); original.CheckWork();
+        }
+        else
+        {
+            Assert.Equal(0x8000, facts.Mode & 0xf000); Assert.Equal(1U, facts.Links); Assert.Equal((ulong)image.Bytes, facts.Size);
+            Assert.Equal(mode == "user-owned" ? 1000U : 0U, facts.Uid);
+            if (mode == "writable") Assert.NotEqual(0, facts.Mode & 0x80);
+            else if (mode is "root-disk" or "sealed-default") Assert.Equal(0x16d, facts.Mode & 0xfff); // 0555, no special bits.
+            BoundedFiles.VerifyNativeImage(new(image.Path, image.Bytes, image.Sha256), original);
+        }
+        var environment = ActualOrdinaryCapture.ResourceEnvironment();
+        var dotnetRoot = Environment.GetEnvironmentVariable("DOTNET_ROOT"); Assert.True(!string.IsNullOrWhiteSpace(dotnetRoot) && Path.IsPathFullyQualified(dotnetRoot));
+        environment["DOTNET_ROOT"] = dotnetRoot!; environment["PATH"] = "/usr/bin:/bin";
+        var selected = mode == "sealed-default" ? scope with { ExactImageBacking = LinuxExactImageBacking.SealedMemfd } : scope;
+        var invocation = new CommandInvocation(image.Path, [], Path.GetDirectoryName(fixture.RootImage.Path)!, environment, InheritEnvironment: false) { EnvironmentIsComplete = true };
+        BoundedFiles.ReserveExactLinuxImageReads(new(image.Path, image.Bytes, image.Sha256), original);
+        if (mode is "root-disk" or "sealed-default")
+        {
+            var actual = await new ProcessCommandExecutor(selected, original).ExecuteBoundedCaptureAsync(invocation, TimeSpan.FromSeconds(15), 4096, original.Token, new OwnedWorkPhaseBudget(original), selected, image);
+            TestContext.Current.TestOutputHelper!.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { Kind = "TinyRootDiskDiagnostic-v1", Mode = mode, actual.Command.ExitCode, actual.RootExitObserved, actual.StandardOutputDrainCompleted, actual.StandardErrorDrainCompleted, actual.CaptureBoundExceeded, actual.OwnershipKind, actual.Timing, Native = actual.Command.LifecycleDiagnostics }, BoundedFiles.Json));
+            ActualOrdinaryCapture.Require(actual); Assert.Equal(0, actual.Command.ExitCode); Assert.Empty(actual.StandardOutputBytes); Assert.Empty(actual.StandardErrorBytes);
+            var timing = actual.Timing ?? throw new IOException("Actual original timing observation required.");
+            Assert.Equal(started, timing.OriginalStartedTimestamp); Assert.False(original.HasRetainedUnknown); return;
+        }
+        var session = OwnedDuplexProcess.Open(invocation, original, selected, image);
+        try
+        {
+            Assert.NotNull(session.StartupFailure); Assert.False(session.HasCreationOwnedExactLinuxImage);
+            var retired = await session.RetireAsync(true);
+            var drain = session.OriginalErrorDrainTask; Assert.NotNull(drain); await drain.WaitAsync(original.CleanupRemaining, TestContext.Current.CancellationToken);
+            var refusals = new UTF8Encoding(false, true).GetString(session.StandardError).Split('\n').Select(x => x.TrimEnd('\r')).Where(x => x.StartsWith("DF_SCOPE_EXACT_IMAGE_REFUSAL|", StringComparison.Ordinal)).ToArray();
+            TestContext.Current.TestOutputHelper!.WriteLine(System.Text.Json.JsonSerializer.Serialize(new { Kind = "TinyRootDiskDiagnostic-v1", Mode = mode, Refusals = refusals, Retired = retired, OriginalStarted = started }, BoundedFiles.Json));
+            Assert.Equal(["DF_SCOPE_EXACT_IMAGE_REFUSAL|source"], refusals); Assert.False(session.ErrorQuotaExceeded);
+            Assert.True(retired.KnownClosed && retired.RootExited && retired.OutputEof && retired.ErrorEof && retired.InputCloseReturned && retired.DispositionReturned);
+            Assert.Equal(0U, retired.ActiveProcesses); Assert.NotEqual(0, retired.ExitCode); Assert.False(original.HasRetainedUnknown);
+            Assert.Equal(started, original.OriginalStarted); Assert.Throws<TimeoutException>(() => original.CheckWork());
+        }
+        finally { var retired = await session.RetireAsync(true); if (retired.KnownClosed) original.Dispose(); }
+    }
+
     public static bool CodexSelfReexecDiagnosticSelected => OperatingSystem.IsLinux() &&
         !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("DELIVERY_FORGE_DIAGNOSTIC_CODEX_IMAGE"));
 

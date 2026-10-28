@@ -11,7 +11,7 @@ internal sealed class ExactNativeImage : IDisposable
     internal const long MaximumBytes = 512L * 1024 * 1024;
     const int RequiredSeals = 0x2f; // SEAL | SHRINK | GROW | WRITE | EXEC.
     readonly Action check; readonly List<(int Fd, Statx Identity, int Parent, string Name)> rootDirectories = [];
-    bool rootDisk; string? rootName; Statx rootIdentity;
+    bool rootDisk, rootVolumeSelected; string? rootName; Statx rootIdentity, rootVolume;
     int source = -1, image = -1; bool closeEntered;
     internal int Descriptor => image;
     internal string Ready { get; private set; } = "";
@@ -94,10 +94,18 @@ internal sealed class ExactNativeImage : IDisposable
     Statx RootStat(int fd, string path = "", int flags = 0x1000)
     {
         check(); Required(statx(fd, path, flags, 0x17ff, out var value) == 0, RefusalKind.Source); check();
-        Required((value.Mask & 0x131f) == 0x131f, RefusalKind.Source); return value;
+        Required((value.Mask & 0x131f) == 0x131f, RefusalKind.Source);
+        if (rootVolumeSelected) Required(value.Mount == rootVolume.Mount && value.Major == rootVolume.Major && value.Minor == rootVolume.Minor, RefusalKind.Source);
+        return value;
+    }
+    void RootFileSystem(int fd)
+    {
+        check(); Required(fstatfs(fd, out var fs) == 0, RefusalKind.Source); check();
+        Required(fs.Type is 0xef53 or 0x58465342 or 0x9123683e, RefusalKind.Source);
+        Required((fs.Flags & 0x20) != 0 && (fs.Flags & 0x8) == 0, RefusalKind.Source);
     }
     static void RootDirectory(Statx value) => Required((value.Mode & 0xf000) == 0x4000 && value.Uid == 0 && (value.Mode & 0x12) == 0, RefusalKind.Source);
-    static void RootFile(Statx value, long length) => Required((value.Mode & 0xf000) == 0x8000 && value.Uid == 0 && value.Links == 1 && (value.Mode & 0xe92) == 0 && (value.Mode & 0x49) != 0 && value.Size == (ulong)length, RefusalKind.Source);
+    static void RootFile(Statx value, long length) => Required((value.Mode & 0xf000) == 0x8000 && value.Uid == 0 && value.Links == 1 && value.Mode == 0x816d && value.Size == (ulong)length, RefusalKind.Source);
     int OpenRootPart(int parent, string name, bool directory)
     {
         check(); var fd = openat(parent, name, 0x20000 | 0x80000 | (directory ? 0x10000 : 0x800));
@@ -115,10 +123,12 @@ internal sealed class ExactNativeImage : IDisposable
         {
             var position = rootDirectories.Count - 1; var row = rootDirectories[position]; var identity = RootStat(parent); RootDirectory(identity);
             rootDirectories[position] = (row.Fd, identity, row.Parent, row.Name);
+            if (index == 0) { Required(identity.Mount != 0, RefusalKind.Source); rootVolume = identity; rootVolumeSelected = true; }
+            RootFileSystem(parent);
             if (index == parts.Length - 1) { rootName = parts[index]; OpenRootPart(parent, rootName, false); break; }
             parent = OpenRootPart(parent, parts[index], true);
         }
-        rootIdentity = RootStat(image); RootFile(rootIdentity, length); RecheckRoot();
+        rootIdentity = RootStat(image); RootFile(rootIdentity, length); RootFileSystem(image); RecheckRoot();
         var buffer = new byte[65536]; var header = new byte[64]; var headerUsed = 0; long consumed = 0;
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         while (consumed < length)
@@ -138,10 +148,10 @@ internal sealed class ExactNativeImage : IDisposable
     {
         foreach (var row in rootDirectories)
         {
-            var held = RootStat(row.Fd); RootDirectory(held); Required(SameRootIdentity(held, row.Identity), RefusalKind.Source);
+            var held = RootStat(row.Fd); RootDirectory(held); RootFileSystem(row.Fd); Required(SameRootIdentity(held, row.Identity), RefusalKind.Source);
             var named = RootStat(row.Parent, row.Name, 0x100); RootDirectory(named); Required(SameRootIdentity(named, row.Identity), RefusalKind.Source);
         }
-        var file = RootStat(image); RootFile(file, (long)rootIdentity.Size);
+        var file = RootStat(image); RootFile(file, (long)rootIdentity.Size); RootFileSystem(image);
         Required(SameRootIdentity(file, rootIdentity) && SameRootIdentity(RootStat(rootDirectories[^1].Fd, rootName!, 0x100), rootIdentity), RefusalKind.Source);
     }
     void CloseSource()
@@ -187,7 +197,9 @@ internal sealed class ExactNativeImage : IDisposable
         }
         if (primary is not null) throw primary;
     }
+    [StructLayout(LayoutKind.Explicit, Size = 256)] struct StatFs { [FieldOffset(0)] public long Type; [FieldOffset(80)] public ulong Flags; }
     [StructLayout(LayoutKind.Explicit, Size = 256)] struct Statx { [FieldOffset(0)] public uint Mask; [FieldOffset(16)] public uint Links; [FieldOffset(20)] public uint Uid; [FieldOffset(24)] public uint Gid; [FieldOffset(28)] public ushort Mode; [FieldOffset(32)] public ulong Inode; [FieldOffset(40)] public ulong Size; [FieldOffset(136)] public uint Major; [FieldOffset(140)] public uint Minor; [FieldOffset(144)] public ulong Mount; }
+    [DllImport("libc", SetLastError = true)] static extern int fstatfs(int fd, out StatFs value);
     [DllImport("libc", SetLastError = true)] static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
     [DllImport("libc", SetLastError = true)] static extern int openat(int fd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
     [DllImport("libc", SetLastError = true)] static extern int close(int fd);

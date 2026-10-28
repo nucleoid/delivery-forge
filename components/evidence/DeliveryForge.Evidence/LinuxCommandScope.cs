@@ -273,6 +273,7 @@ internal sealed class LinuxCommandScope
         }
     }
     internal bool HasCreationOwnedExactImage { get { lock (gate) return exactImage is not null && exactImageObserved && bound && releaseReturned; } }
+    internal LinuxExactImageBacking? CreationOwnedExactImageBacking { get { lock (gate) return HasCreationOwnedExactImage ? selected.ExactImageBacking : null; } }
     internal bool HasCreationOwnedScope { get { lock (gate) return bound && releaseReturned; } }
     internal IReadOnlyDictionary<string, ulong?> CaptureLeafCounters()
     {

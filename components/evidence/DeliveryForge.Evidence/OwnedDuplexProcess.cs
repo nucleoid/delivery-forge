@@ -28,11 +28,12 @@ public sealed class OwnedDuplexProcess
     readonly IOwnedDuplexBudget budget; readonly bool commandCapture; readonly List<DuplexIoObservation> io = []; readonly object gate = new();
     Stream? input, output, error; Action<bool>? closeInput; readonly int errorLimit; bool errorQuotaExceeded; Func<bool, DuplexNativeObservation>? observe; Action<bool>? terminate; Func<bool, bool>? dispose;
     DuplexNativeObservation lastObservation = new(false, false, uint.MaxValue, null, "No actual native observation returned.");
-    Func<bool>? creationOwnedScope, creationOwnedExactImage;
+    Func<bool>? creationOwnedScope, creationOwnedExactImage; Func<LinuxExactImageBacking?>? creationOwnedExactImageBacking;
     // Read-only observation of this retained owner; no DTO, adoption or issuer.
     public bool HasCreationOwnedExactLinuxImage => creationOwnedExactImage?.Invoke() == true;
+    public LinuxExactImageBacking? CreationOwnedExactLinuxImageBacking => creationOwnedExactImageBacking?.Invoke();
     internal bool HasCreationOwnedLinuxScope => creationOwnedScope?.Invoke() == true;
-    internal void AttachScopeProof(Func<bool> actualProof, Func<bool>? actualExactImage = null) { if (creationOwnedScope is not null) throw new InvalidOperationException("Original scope proof already attached."); creationOwnedScope = actualProof; creationOwnedExactImage = actualExactImage; }
+    internal void AttachScopeProof(Func<bool> actualProof, Func<bool>? actualExactImage = null, Func<LinuxExactImageBacking?>? actualBacking = null) { if (creationOwnedScope is not null) throw new InvalidOperationException("Original scope proof already attached."); creationOwnedScope = actualProof; creationOwnedExactImage = actualExactImage; creationOwnedExactImageBacking = actualBacking; }
     Func<IReadOnlyDictionary<string, ulong?>>? leafCounters;
     internal void AttachLeafCounters(Func<IReadOnlyDictionary<string, ulong?>> capture) { if (leafCounters is not null) throw new IOException("Original leaf observer already attached."); leafCounters = capture; }
     internal IReadOnlyDictionary<string, ulong?> CaptureLeafCounters()
