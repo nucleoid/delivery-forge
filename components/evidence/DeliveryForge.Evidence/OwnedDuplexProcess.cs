@@ -58,14 +58,19 @@ public sealed class OwnedDuplexProcess
             if (!events)
             {
                 if (lines.Length != 1) throw new IOException("One leaf scalar required.");
+                // null here means the explicit kernel limit "max"; unavailable capture is separate.
                 result.Add(name, name.EndsWith(".max", StringComparison.Ordinal) && lines[0] == "max" ? null : Number(lines[0])); continue;
             }
             var required = name == "pids.events" ? new[] { "max" } : new[] { "low", "high", "max", "oom", "oom_kill" };
             var allowed = name == "pids.events" ? required : [.. required, "oom_group_kill"];
+            var seen = new HashSet<string>(StringComparer.Ordinal);
             foreach (var line in lines)
             {
                 var cells = line.Split(' ');
-                if (cells.Length != 2 || !allowed.Contains(cells[0], StringComparer.Ordinal) || !result.TryAdd(name + "." + cells[0], Number(cells[1]))) throw new IOException("Malformed, duplicate or unknown leaf event.");
+                if (cells.Length != 2 || cells[0].Length == 0 || cells[0].Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('_' or '.' or '-')) || !seen.Add(cells[0])) throw new IOException("Malformed or duplicate leaf event.");
+                var value = Number(cells[1]);
+                if (allowed.Contains(cells[0], StringComparer.Ordinal)) result.Add(name + "." + cells[0], value);
+                // Future well-formed keys are validated, not projected or treated as zero.
             }
             if (required.Any(key => !result.ContainsKey(name + "." + key))) throw new IOException("Required leaf event unavailable; no zero substitution.");
         }

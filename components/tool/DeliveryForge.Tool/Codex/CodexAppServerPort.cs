@@ -83,6 +83,22 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         conformanceCounterPhase = RequireLeafCounterPhase(conformanceCounterPhase, phase);
         original.Check(); conformanceLeafCounters(phase); original.Check();
     }
+    internal static void RequireSuccessfulTerminalWithLeafCounters(JsonElement completed, Action capture)
+    {
+        Exception? counterFailure = null;
+        try { capture(); } catch (Exception failure) { counterFailure = failure; }
+        try
+        {
+            var status = Text(completed.GetProperty("params").GetProperty("turn"), "status");
+            if (status != "completed") throw new WorkerEnvelopeException("Actual Codex turn ended " + status + "; no successful completion inferred.");
+        }
+        catch (Exception primary)
+        {
+            if (counterFailure is not null) throw new AggregateException("Actual terminal and leaf diagnostic failure.", primary, counterFailure);
+            throw;
+        }
+        if (counterFailure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(counterFailure).Throw();
+    }
     public void BindOriginal(ToolLifetime actualOriginal) { lock (gate) { if (boundOriginal is not null && !ReferenceEquals(boundOriginal, actualOriginal)) throw new WorkerEnvelopeException("Codex original cannot be rebound or renewed."); actualOriginal.Check(); boundOriginal = actualOriginal; startup ??= new(actualOriginal.OriginalStarted); } }
     internal CodexStartupDiagnostics SnapshotStartupDiagnostics()
     {
@@ -288,9 +304,9 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         Exception? primary = null;
         try
         {
-            Bound(actual); original.Check(); var completed = await Keep(terminalWait!.Task).WaitAsync(remaining < original.Remaining ? remaining : original.Remaining, token).ConfigureAwait(false); var status = Text(completed.GetProperty("params").GetProperty("turn"), "status"); if (status != "completed") throw new WorkerEnvelopeException("Actual Codex turn ended " + status + "; no successful completion inferred.");
+            Bound(actual); original.Check(); var completed = await Keep(terminalWait!.Task).WaitAsync(remaining < original.Remaining ? remaining : original.Remaining, token).ConfigureAwait(false);
+            RequireSuccessfulTerminalWithLeafCounters(completed, () => ObserveConformanceLeafCounters("after-terminal"));
             if (TrustProtocol) await ObserveRoute(token).ConfigureAwait(false);
-            ObserveConformanceLeafCounters("after-terminal");
             shutdown = true; var retired = await Keep(process!.RetireAsync(false)).ConfigureAwait(false); HostTransportRetirement.RequireSuccessful(retired);
             if (pump is not null) await pump.WaitAsync(original.Remaining, token).ConfigureAwait(false); if (pumpFailure is not null) throw new IOException("Actual app-server protocol failed; no successful completion.", pumpFailure);
             runtimeTrust?.Check(original); trustedImage?.Check(token); CloseTrustedImage(true, false);

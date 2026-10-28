@@ -172,7 +172,9 @@ public sealed class CodexOneJobDangerFullAccessTests
     [InlineData("negative")]
     [InlineData("duplicate")]
     [InlineData("missing-event")]
-    [InlineData("unknown-event")]
+    [InlineData("unknown-invalid")]
+    [InlineData("unknown-duplicate")]
+    [InlineData("unknown-overflow")]
     [InlineData("incomplete")]
     [InlineData("oversize")]
     public void Leaf_counter_malformed_or_unavailable_data_never_becomes_zero(string mutation)
@@ -185,7 +187,9 @@ public sealed class CodexOneJobDangerFullAccessTests
             case "negative": raw["memory.current"] = "-1\n"u8.ToArray(); break;
             case "duplicate": raw["pids.events"] = "max 0\nmax 1\n"u8.ToArray(); break;
             case "missing-event": raw["memory.events"] = "low 0\nhigh 0\nmax 0\noom 0\n"u8.ToArray(); break;
-            case "unknown-event": raw["pids.events"] = "other 0\n"u8.ToArray(); break;
+            case "unknown-invalid": raw["pids.events"] = "other? 0\n"u8.ToArray(); break;
+            case "unknown-duplicate": raw["pids.events"] = "max 0\nfuture 1\nfuture 2\n"u8.ToArray(); break;
+            case "unknown-overflow": raw["pids.events"] = "max 0\nfuture 18446744073709551616\n"u8.ToArray(); break;
             case "incomplete": raw["pids.max"] = "48"u8.ToArray(); break;
             case "oversize": raw["pids.events"] = new byte[1025]; break;
         }
@@ -211,6 +215,36 @@ public sealed class CodexOneJobDangerFullAccessTests
         raw["memory.events"] = "low 0\nhigh 0\nmax 0\noom 0\noom_kill 0\noom_group_kill 4\n"u8.ToArray();
         var values = OwnedDuplexProcess.ParseLeafCounters(raw);
         Assert.Equal((ulong?)ulong.MaxValue, values["memory.current"]); Assert.Equal((ulong?)4, values["memory.events.oom_group_kill"]);
+    }
+
+    [Fact]
+    public void Leaf_counter_future_numeric_events_are_validated_but_not_projected()
+    {
+        var raw = CounterData(); raw["pids.events"] = "max 3\nmax.imposed 7\n"u8.ToArray();
+        raw["memory.events"] = "low 0\nhigh 0\nmax 1\noom 2\noom_kill 1\nfuture_key-1 9\n"u8.ToArray();
+        var values = OwnedDuplexProcess.ParseLeafCounters(raw);
+        Assert.Equal((ulong?)3, values["pids.events.max"]);
+        Assert.False(values.ContainsKey("pids.events.max.imposed")); Assert.False(values.ContainsKey("memory.events.future_key-1"));
+        raw["pids.events"] = "max.imposed 7\n"u8.ToArray();
+        Assert.Throws<IOException>(() => OwnedDuplexProcess.ParseLeafCounters(raw));
+    }
+    [Theory]
+    [InlineData("failed")]
+    [InlineData("interrupted")]
+    public void Terminal_failure_is_sampled_and_preserved_with_counter_failure(string status)
+    {
+        using var terminal = JsonDocument.Parse("{\"params\":{\"turn\":{\"status\":\"" + status + "\"}}}");
+        var captured = 0; var counter = new IOException("Counter refused");
+        var error = Assert.Throws<AggregateException>(() => CodexAppServerPort.RequireSuccessfulTerminalWithLeafCounters(terminal.RootElement, () => { captured++; throw counter; }));
+        Assert.Equal(1, captured); Assert.IsType<WorkerEnvelopeException>(error.InnerExceptions[0]); Assert.Same(counter, error.InnerExceptions[1]);
+    }
+    [Fact]
+    public void Completed_terminal_is_sampled_and_counter_failure_is_not_swallowed()
+    {
+        using var terminal = JsonDocument.Parse("{\"params\":{\"turn\":{\"status\":\"completed\"}}}");
+        var captured = 0; CodexAppServerPort.RequireSuccessfulTerminalWithLeafCounters(terminal.RootElement, () => captured++);
+        Assert.Equal(1, captured); var counter = new IOException("Counter refused");
+        Assert.Same(counter, Assert.Throws<IOException>(() => CodexAppServerPort.RequireSuccessfulTerminalWithLeafCounters(terminal.RootElement, () => throw counter)));
     }
 
 }

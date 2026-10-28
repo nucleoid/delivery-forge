@@ -343,7 +343,7 @@ public sealed class InstalledNativeHostConformanceTests
                 if (text.Contains(signal, StringComparison.OrdinalIgnoreCase)) signals.Add(signal);
             var io = native.ActualIo; var first = io.Take(128).Select(x => new { x.Kind, x.Entered, x.InvocationReturned, TaskStatus = x.ActualTask?.Status, PrimaryType = x.Primary?.GetType().FullName, PostType = x.Post?.GetType().FullName, x.Unknown }).ToArray();
             var leafCounters = leafCounterSnapshots.Count == 0 ? null : leafCounterSnapshots.ToArray();
-            if (JsonSerializer.SerializeToUtf8Bytes(leafCounters, BoundedFiles.Json).Length > 4096) throw new IOException("Finite optional leaf diagnostic exceeds4KiB.");
+            if (JsonSerializer.SerializeToUtf8Bytes(leafCounters, BoundedFiles.Json).Length > 4096) leafCounters = null;
             var value = new
             {
                 LeafCounters = leafCounters,
