@@ -64,7 +64,7 @@ public sealed class ClaudeStreamPort : IHostToolSessionPort, IOriginalBoundHostP
                 lock (gate) { state!.Observe(row); if (state.Acknowledged) accepted.TrySetResult(true); if (state.Settled) settled.TrySetResult(true); }
             }
         }
-        catch (Exception failure) { pumpFailure = failure; accepted.TrySetException(failure); settled.TrySetException(failure); foreach (var reply in pending.Values) reply.TrySetException(failure); if (!shutdown) Original.RetainUnknown(); throw; }
+        catch (Exception failure) { pumpFailure = failure; accepted.TrySetException(failure); settled.TrySetException(failure); foreach (var reply in pending.Values) reply.TrySetException(failure); if (!shutdown) Original.RetainUnknown(); usage?.FailIncompleteDispatch(); throw; }
     }
     public async Task<AgentAcceptedReceipt> StartAsync(AgentRequest actual, TimeSpan remaining, CancellationToken token)
     {
@@ -90,13 +90,14 @@ public sealed class ClaudeStreamPort : IHostToolSessionPort, IOriginalBoundHostP
             if (usage is not null) usageWatch = Keep(usage.WatchAsync(StopForReportedUsage));
             framing = new(process.Input, process.Output, Original); pump = Pump(Original.Token); _ = Keep(pump); process.AttachOriginalOutputConsumer(pump);
             _ = await Control("initialize", token).ConfigureAwait(false); usage?.Check(); lock (gate) state.AdmitPrompt();
+            usage?.EnterModelWrite();
             await Keep(framing.WriteAsync(new { type = "user", session_id = "", message = new { role = "user", content = prompt }, parent_tool_use_id = (string?)null, uuid = promptId, origin = new { kind = "human" }, client_composed = true }, token)).ConfigureAwait(false);
             _ = Keep(accepted.Task); await accepted.Task.WaitAsync(remaining < Original.Remaining ? remaining : Original.Remaining, token).ConfigureAwait(false);
             lock (gate) binding = new(actual.AdapterId, actual.AdapterVersion, actual.RunId, actual.RequestIdentity, state.Session, promptId); Original.Check();
             usage?.Check();
             return new(actual.SchemaVersion, actual.RunId, actual.RequestIdentity, actual.PlanIdentity, actual.BaseCommit, actual.Worktree, actual.AdapterId, actual.AdapterVersion, binding.RuntimeRunIdentity, binding.RuntimeTaskIdentity, DateTimeOffset.UtcNow, Profile.Capabilities);
         }
-        catch (Exception primary) { if (process is not null) { shutdown = true; try { var stop = process.RetireAsync(true); _ = Keep(stop); var retired = await stop.ConfigureAwait(false); if (!retired.KnownClosed) Original.RetainUnknown(); } catch (Exception post) { throw new AggregateException("Actual Claude start and independent original retirement failure.", primary, post); } } if (usage is not null) await usage.JoinAsync(usageWatch, primary).ConfigureAwait(false); throw; }
+        catch (Exception primary) { usage?.FailIncompleteDispatch(); if (process is not null) { shutdown = true; try { var stop = process.RetireAsync(true); _ = Keep(stop); var retired = await stop.ConfigureAwait(false); if (!retired.KnownClosed) Original.RetainUnknown(); } catch (Exception post) { throw new AggregateException("Actual Claude start and independent original retirement failure.", primary, post); } } if (usage is not null) await usage.JoinAsync(usageWatch, primary).ConfigureAwait(false); throw; }
     }
     void Bound(AgentRunBinding actual) { lock (gate) if (binding is null || binding != actual) throw new WorkerEnvelopeException("No exact private Claude session/prompt binding."); }
     public async Task<AgentCompletionReceipt> WaitAsync(AgentRunBinding actual, TimeSpan remaining, CancellationToken token)
@@ -114,6 +115,7 @@ public sealed class ClaudeStreamPort : IHostToolSessionPort, IOriginalBoundHostP
         }
         catch (Exception primary)
         {
+            usage?.FailIncompleteDispatch();
             if (usage?.Failure is not null && usageWatch is not null)
                 try { await usageWatch.ConfigureAwait(false); }
                 catch (Exception cleanup) { throw new AggregateException("Claude completion and reported usage stop failure.", primary, cleanup); }
@@ -133,6 +135,7 @@ public sealed class ClaudeStreamPort : IHostToolSessionPort, IOriginalBoundHostP
     public async Task<AgentControlResult> ControlAsync(AgentRunBinding actual, AgentControlAction action, TimeSpan remaining, CancellationToken token)
     {
         Bound(actual); if (action != AgentControlAction.Stop) return new(actual, action, AgentActivityState.Unknown, false, "", "Claude interrupt cannot pause/resume the same actual turn."); lock (gate) { if (stopEntered) throw new WorkerEnvelopeException("Actual stop already entered; no retry."); stopEntered = true; }
+        usage?.FailIncompleteDispatch();
         Exception? interrupt = null; try { _ = await Control("interrupt", token).ConfigureAwait(false); } catch (Exception error) { interrupt = error; }
         shutdown = true; var stop = process!.RetireAsync(true); _ = Keep(stop); var retirement = await stop.ConfigureAwait(false); settled.TrySetException(new OperationCanceledException("Actual original Claude stop.")); foreach (var reply in pending.Values) reply.TrySetException(new OperationCanceledException("Actual original stopped; no replay."));
         if (usage is not null) await usage.JoinAsync(usageWatch).ConfigureAwait(false);

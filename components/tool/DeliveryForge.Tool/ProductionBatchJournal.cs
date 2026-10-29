@@ -9,7 +9,7 @@ internal sealed record BatchMarker(string Kind, string RunId, string Configurati
 internal sealed record BatchObservation(int Version, string ConfigurationSha256, string SelectionIdentity,
     string PolicyIdentity, string FairnessIdentity, long OriginalStarted, TimeSpan OriginalWhole, TimeSpan OriginalWork,
     TimeSpan ObservedWorkRemaining, IReadOnlyDictionary<string, string> Plans, IReadOnlyDictionary<string, string> Phases,
-    IReadOnlyDictionary<string, string> CompletedHeads, bool Paused, bool Stopped);
+    IReadOnlyDictionary<string, string> CompletedHeads, bool Paused, bool Stopped, ReportedModelUsage.RunSnapshot? ReportedUsage = null);
 internal sealed record ReconstructedBatchData(string RunId, IReadOnlyDictionary<string, string> Phases,
     IReadOnlyDictionary<string, string> Plans, string PolicyIdentity, bool Paused, bool Stopped,
     IReadOnlyList<string> Limitations)
@@ -73,6 +73,17 @@ internal sealed partial class ProductionBatchOwner
                 row.CompletedHeads.Any(pair => !expectedPlans.ContainsKey(pair.Key) || row.Phases[pair.Key] is "Pending" or "Selected" or "ReplanRequired" || pair.Value.Length is not (40 or 64) || !pair.Value.All(char.IsAsciiHexDigitLower)) ||
                 row.Phases.Any(pair => pair.Value is "Pass" or "Fail" or "Incomplete" or "LocalComplete" && !row.CompletedHeads.ContainsKey(pair.Key)))
                 throw new IOException("Batch history changed its immutable selection, policy, node identity or original finite lifetime.");
+            if (row.ReportedUsage is { } usage)
+            {
+                if (usage.AggregateTokens < 0 || usage.AggregateStopAt is <= 0 or > 100000 ||
+                    usage.Stopped && (!row.Stopped || !row.Paused || usage.StopScope is not ("session" or "node" or "aggregate" or "usage-unavailable")) ||
+                    !usage.Stopped && (usage.StopScope is not null || usage.ObservedAtStop is not null || usage.SelectedStopAt is not null) ||
+                    usage.Stopped && usage.StopScope != "usage-unavailable" && (usage.ObservedAtStop is null || usage.SelectedStopAt is null || usage.SelectedStopAt <= 0 || usage.SelectedStopAt > 100000 || usage.ObservedAtStop < usage.SelectedStopAt) ||
+                    usage.StopScope == "usage-unavailable" && (usage.ObservedAtStop is not null || usage.SelectedStopAt is not null) ||
+                    previous?.ReportedUsage is { } prior && (usage.AggregateStopAt != prior.AggregateStopAt || usage.AggregateTokens < prior.AggregateTokens || prior.Stopped && (!usage.Stopped || usage.StopScope != prior.StopScope || usage.ObservedAtStop != prior.ObservedAtStop || usage.SelectedStopAt != prior.SelectedStopAt)))
+                    throw new IOException("Batch history changed its bounded reported token observation.");
+            }
+            else if (previous?.ReportedUsage is not null) throw new IOException("Batch history erased its reported token observation.");
             if (previous is not null)
             {
                 if (previous.Stopped && !row.Stopped || previous.Paused && !row.Paused ||

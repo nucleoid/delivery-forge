@@ -21,7 +21,7 @@ internal sealed class InstalledReviewHost : IDisposable
 {
     readonly TrustedConfiguration configuration; readonly AdmissionFile configurationPin;
     readonly InstalledReviewSelection selection; readonly ToolLifetime original;
-    readonly ProcessCommandExecutor executor;
+    readonly ProcessCommandExecutor executor, reviewerExecutor;
     readonly LinuxScopeSelection? linuxScope;
     readonly ReportedModelUsage.UsageNode? reportedUsage;
     readonly InstalledHostAdmission.RuntimeTrust? runtimeTrust;
@@ -46,10 +46,11 @@ internal sealed class InstalledReviewHost : IDisposable
     }
 
     internal InstalledReviewHost(TrustedConfiguration config, AdmissionFile actualConfigurationPin,
-        ToolLifetime actualOriginal, ProcessCommandExecutor actualExecutor, LinuxScopeSelection? selectedLinuxScope = null, InstalledHostAdmission.RuntimeTrust? runtimeTrust = null, ReportedModelUsage.UsageNode? reportedUsage = null)
+        ToolLifetime actualOriginal, ProcessCommandExecutor actualExecutor, LinuxScopeSelection? selectedLinuxScope = null, InstalledHostAdmission.RuntimeTrust? runtimeTrust = null, ReportedModelUsage.UsageNode? reportedUsage = null, ProcessCommandExecutor? actualReviewerExecutor = null)
     {
         configuration = config; configurationPin = actualConfigurationPin;
-        original = actualOriginal; executor = actualExecutor;
+        original = actualOriginal; executor = actualExecutor; reviewerExecutor = actualReviewerExecutor ?? actualExecutor;
+        if (OperatingSystem.IsLinux() && selectedLinuxScope?.ExactImageBacking == LinuxExactImageBacking.RootControlledDisk && actualReviewerExecutor is null) throw new ToolUsageException("Explicit exact reviewer executor required separately from ordinary source Git.");
         linuxScope = selectedLinuxScope; this.runtimeTrust = runtimeTrust; this.reportedUsage = reportedUsage;
         selection = config.InstalledReview ?? throw new ToolUsageException("No trusted installed review selection.");
         ValidateSelection(selection);
@@ -210,7 +211,7 @@ internal sealed class InstalledReviewHost : IDisposable
             return ClaudeReviewerWorkingDirectory.Create(original, assignment.RunId, selection.ArtifactRoot,
                 assignment.ParentCheckout, assignment.Worktree, assignment.ResultDirectory);
         });
-        independentReviewer = new(selection.IndependentReviewer, original, executor, parent, assignment.RunId, reviewerDirectory, userSettings, bootstrap,
+        independentReviewer = new(selection.IndependentReviewer, original, reviewerExecutor, parent, assignment.RunId, reviewerDirectory, userSettings, bootstrap,
             () => ReferenceEquals(frame.Completion, completion) && frame.OwnerCompleted && !frame.OwnerStopped && frame.Primary is null && frame.Post is null && actualNativeCompletedAndQuiet(),
             () => parent.EnterSynchronous(assignment.RunId, () => { sourceOwner.Check(); _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536); return true; }), linuxScope, runtimeTrust, reportedUsage);
         return await parent.EnterAsync(assignment.RunId, () => independentReviewer.RunAsync(actualAuthorFamily,

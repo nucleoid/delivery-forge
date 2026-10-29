@@ -315,4 +315,119 @@ public sealed class CodexTrustProtocolDataTests
         await watcher.WaitAsync(TestContext.Current.CancellationToken);
         Assert.Equal(1, stops); Assert.Throws<ReportedUsageException>(session.RequireFinal);
     }
+
+    [Fact]
+    public async Task Pre_prompt_refusal_can_settle_without_fabricating_usage_or_poisoning_the_run()
+    {
+        var node = ReportedModelUsage.Bind(UsageBudget(), 100000, 100000); var session = node.Register();
+        session.FailIncompleteDispatch(); await session.JoinAsync(null);
+        Assert.False(session.Evidence().ModelWriteEntered); Assert.False(session.Evidence().FinalUsageKnown);
+        Assert.False(session.Evidence().Stopped); node.Check(); _ = node.Register();
+    }
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Ambiguous_prompt_write_or_partial_usage_cannot_settle_with_unknown_spend(bool partial)
+    {
+        var budget = UsageBudget(); var node = ReportedModelUsage.Bind(budget, 100000, 100000); var session = node.Register();
+        session.EnterModelWrite(); if (partial) session.Observe(10, 2);
+        await session.JoinAsync(null); // Settlement is the central backstop even if a caller misses its catch hook.
+        Assert.True(session.Evidence().Stopped); Assert.True(session.Evidence().ModelWriteEntered); Assert.False(session.Evidence().FinalUsageKnown);
+        Assert.Equal(partial ? 12 : 0, session.Snapshot().Aggregate);
+        Assert.Throws<ReportedUsageException>(() => node.Register()); Assert.Throws<ReportedUsageException>(() => ReportedModelUsage.Bind(budget, 100000, 100000));
+    }
+    [Fact]
+    public async Task Actual_failed_terminal_gate_and_startup_retirement_preserve_primary_while_poisoning_unknown_spend()
+    {
+        var node = ReportedModelUsage.Bind(UsageBudget(), 100000, 100000); var session = node.Register(); session.EnterModelWrite();
+        var terminal = JsonSerializer.SerializeToElement(new { @params = new { turn = new { status = "failed" } } });
+        var primary = Assert.Throws<DeliveryForge.Execution.WorkerEnvelopeException>(() => CodexAppServerPort.RequireSuccessfulTerminalWithLeafCounters(terminal, () => { }));
+        session.FailIncompleteDispatch(); var callbackEntered = false;
+        var actual = await Assert.ThrowsAsync<DeliveryForge.Execution.WorkerEnvelopeException>(() => CodexAppServerPort.RetireFailedStartupAsync(primary, null, async () => { callbackEntered = true; await session.JoinAsync(null, primary); }));
+        Assert.Same(primary, actual); Assert.True(callbackEntered); Assert.Throws<ReportedUsageException>(node.Check);
+        // This executes the existing terminal/retirement helper, not a real native closure or a new port fixture.
+    }
+    [Fact]
+    public async Task Actual_pending_reply_EOF_after_prompt_fails_the_shared_usage_latch()
+    {
+        var node = ReportedModelUsage.Bind(UsageBudget(), 100000, 100000); var session = node.Register(); session.EnterModelWrite();
+        var pending = new CodexPendingReplies(); var reply = pending.Register(1); var eof = new IOException("Actual protocol EOF"); pending.Fail(eof);
+        Assert.Same(eof, await Assert.ThrowsAsync<IOException>(() => reply.Task.WaitAsync(TestContext.Current.CancellationToken)));
+        session.FailIncompleteDispatch(); await session.JoinAsync(null);
+        Assert.Throws<ReportedUsageException>(() => node.Register()); Assert.False(session.Evidence().FinalUsageKnown);
+    }
+    [Fact]
+    public async Task Failed_product_turn_with_valid_final_usage_keeps_known_spend_without_a_new_token_failure()
+    {
+        var node = ReportedModelUsage.Bind(UsageBudget(), 100000, 100000); var session = node.Register(); session.EnterModelWrite();
+        var usage = BoundUsage(session); usage.Observe(UsageWire(10, 2));
+        usage.Terminal(JsonSerializer.SerializeToElement(new { threadId = "actual-thread", turn = new { id = "actual-turn", status = "failed" } }));
+        session.FailIncompleteDispatch(); await session.JoinAsync(null); session.RequireFinal();
+        Assert.Equal(12, session.Snapshot().Aggregate); Assert.False(session.Evidence().Stopped); _ = node.Register();
+    }
+    [Fact]
+    public void Existing_lower_node_and_reviewer_caps_remain_conservative_whole_run_restrictions()
+    {
+        var budget = UsageBudget(); var node = ReportedModelUsage.Bind(budget, 100000, 10000);
+        node.Register().Observe(6000, 0, true); node.Register(5000).Observe(4000, 0, true);
+        var stopped = ReportedModelUsage.Snapshot(budget)!;
+        Assert.Equal("node", stopped.StopScope); Assert.Equal(10000L, stopped.ObservedAtStop); Assert.Equal(10000L, stopped.SelectedStopAt);
+        Assert.True(stopped.AggregateTokens < stopped.AggregateStopAt); Assert.Throws<ReportedUsageException>(() => node.Register());
+        var separate = UsageBudget(); var limited = ReportedModelUsage.Bind(separate, 100000, 100000).Register(1000); limited.Observe(1000, 0, true);
+        Assert.Equal("session", ReportedModelUsage.Snapshot(separate)!.StopScope); Assert.Equal(1000L, ReportedModelUsage.Snapshot(separate)!.SelectedStopAt);
+    }
+    [Theory]
+    [InlineData("codex.cli", true, false)]
+    [InlineData("claude-code.cli", true, false)]
+    [InlineData("pi.cli", true, true)]
+    [InlineData("pi.cli", false, false)]
+    public void Bound_production_usage_refuses_an_unmeasured_adapter(string adapter, bool bound, bool refused)
+    {
+        if (refused) Assert.Throws<ToolUsageException>(() => ReportedModelUsage.RequireMeasuredAdapter(adapter, bound));
+        else ReportedModelUsage.RequireMeasuredAdapter(adapter, bound);
+    }
+    [Fact]
+    public void Ordinary_projection_changes_only_known_backing_and_preserves_the_exact_selected_profile()
+    {
+        var image = new DeliveryForge.Evidence.LinuxScopeImage("/pure-profile-DATA", 64, new string('a', 64));
+        var selected = new DeliveryForge.Evidence.LinuxScopeSelection(image, image, "manager-DATA", "kernel-DATA", image, [image, image, image, image, image], image) { RestrictiveChildPolicy = "nnp-user1000-ancestor-v3", ExactImageBacking = DeliveryForge.Evidence.LinuxExactImageBacking.RootControlledDisk };
+        var ordinary = StandaloneOwnerComposition.OrdinaryLinuxScope(selected);
+        Assert.Equal(selected with { ExactImageBacking = DeliveryForge.Evidence.LinuxExactImageBacking.SealedMemfd }, ordinary);
+        Assert.Equal(DeliveryForge.Evidence.LinuxExactImageBacking.RootControlledDisk, selected.ExactImageBacking);
+        Assert.Same(selected.BirthGateClosure, ordinary.BirthGateClosure); Assert.Same(ordinary, StandaloneOwnerComposition.OrdinaryLinuxScope(ordinary));
+        Assert.Throws<ToolUsageException>(() => StandaloneOwnerComposition.OrdinaryLinuxScope(selected with { ExactImageBacking = (DeliveryForge.Evidence.LinuxExactImageBacking)int.MaxValue }));
+    }
+    [Fact]
+    public void Reported_stop_leaves_the_independent_second_queue_node_pending_before_any_new_intent()
+    {
+        var budget = UsageBudget(); var slots = new DeliveryForge.Scheduling.ResourceSlots(1, 1, 64, 1, 1, 0);
+        var demand = new DeliveryForge.Scheduling.RunDemand(slots, [], TimeSpan.FromSeconds(60), 10, 0);
+        var queue = new ProductionBatchQueue([new("a", new(["a.cs"], []), demand, 0, []), new("b", new(["b.cs"], []), demand, 0, [])], new("fairness-DATA", true, 2));
+        var control = new ProductionBatchControl(); Assert.Equal("a", ProductionBatchOwner.SelectUsageBoundCandidate(queue, budget, control)!.Id);
+        var session = ReportedModelUsage.Bind(budget, 100000, 100000).Register(); session.Observe(100000, 0, true); queue.RecordData("a", "Fail");
+        Assert.Null(ProductionBatchOwner.SelectUsageBoundCandidate(queue, budget, control)); Assert.True(control.Stopped); Assert.True(control.Paused);
+        Assert.Equal("Pending", queue.Snapshot()["b"]); Assert.Equal(100000, ReportedModelUsage.Snapshot(budget)!.AggregateTokens);
+    }
+
+    [Fact]
+    public void Durable_reported_stop_round_trips_without_restoring_dispatch_or_erasing_spend()
+    {
+        var budget = UsageBudget(); var slots = new DeliveryForge.Scheduling.ResourceSlots(1, 1, 64, 1, 1, 0);
+        var demand = new DeliveryForge.Scheduling.RunDemand(slots, [], TimeSpan.FromSeconds(60), 10, 0);
+        var pin = new AdmissionFile(Path.Combine(Path.GetTempPath(), "pure-batch-pin-DATA"), 1, new string('a', 64));
+        var selected = new ProductionBatchSelection(Path.GetTempPath(), new("policy-DATA", true, slots, TimeSpan.FromSeconds(1100), 100000, 0), new("fairness-DATA", true, 2), [new("a", pin, pin, demand), new("b", pin, pin, demand)]);
+        var plans = new Dictionary<string, string> { ["a"] = "sha256:" + new string('a', 64), ["b"] = "sha256:" + new string('b', 64) };
+        var phases = new Dictionary<string, string> { ["a"] = "Pending", ["b"] = "Pending" }; var identity = ProductionBatchOwner.SelectionIdentity(selected);
+        var initial = new BatchObservation(1, new string('a', 64), identity, selected.Policy.Identity, selected.Fairness.Identity, 123, TimeSpan.FromSeconds(1200), TimeSpan.FromSeconds(1100), TimeSpan.FromSeconds(1090), plans, phases, new Dictionary<string, string>(), false, false);
+        var session = ReportedModelUsage.Bind(budget, 100000, 100000).Register(); session.EnterModelWrite(); session.Observe(10, 2); session.FailIncompleteDispatch();
+        var stopped = initial with { Paused = true, Stopped = true, ReportedUsage = ReportedModelUsage.Snapshot(budget), ObservedWorkRemaining = TimeSpan.FromSeconds(1080) };
+        var restored = JsonSerializer.Deserialize<BatchObservation>(JsonSerializer.Serialize(stopped, BoundedFiles.Json), BoundedFiles.Json)!;
+        ProductionBatchOwner.ValidateHistory([initial, restored], initial.ConfigurationSha256, identity, selected, plans);
+        var observed = restored.ReportedUsage!; Assert.Equal(12, observed.AggregateTokens); Assert.Equal("usage-unavailable", observed.StopScope);
+        Assert.Throws<IOException>(() => ProductionBatchOwner.ValidateHistory([initial, restored, restored with { ReportedUsage = null }], initial.ConfigurationSha256, identity, selected, plans));
+        Assert.Throws<IOException>(() => ProductionBatchOwner.ValidateHistory([initial, restored, restored with { ReportedUsage = observed with { AggregateTokens = 11 } }], initial.ConfigurationSha256, identity, selected, plans));
+        Assert.Throws<IOException>(() => ProductionBatchOwner.ValidateHistory([initial, restored with { ReportedUsage = observed with { StopScope = "unknown" } }], initial.ConfigurationSha256, identity, selected, plans));
+        Assert.False(new ReconstructedBatchData("batch-DATA", restored.Phases, plans, selected.Policy.Identity, true, true, ["DATA only"]).MayDispatch);
+    }
+
 }

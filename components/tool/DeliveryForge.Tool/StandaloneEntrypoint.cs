@@ -103,7 +103,7 @@ internal sealed class StandaloneEntrypoint
                     }
                     LinuxScopeSelection? scope = null;
                     if (OperatingSystem.IsLinux()) scope = ReadPinned<LinuxScopeSelection>(root.LinuxScopeProfile ?? throw new ToolUsageException("Exact Linux owner profile required before Git or host birth."), 65536);
-                    ProcessCommandExecutor executor = OperatingSystem.IsLinux() ? new(scope!, original) : new();
+                    ProcessCommandExecutor executor = OperatingSystem.IsLinux() ? new(StandaloneOwnerComposition.OrdinaryLinuxScope(scope!), original) : new();
                     ToolApplication application;
                     if (inspection) application = new(actualExecutor: executor, actualOriginal: original, actualConfigurationPin: configPin);
                     else

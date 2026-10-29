@@ -25,7 +25,9 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         if ((aggregateBudget is null) != (batchNodeId is null)) throw new ToolUsageException("Batch node binding and shared budget must be supplied together.");
         ArgumentNullException.ThrowIfNull(actualConformedProfile); ArgumentNullException.ThrowIfNull(selectedHost); ArgumentNullException.ThrowIfNull(config);
         if (actualConformedProfile.AdapterId != config.Adapter || actualConformedProfile.AdapterVersion != config.AdapterVersion || selectedHost.Version != config.AdapterVersion) throw new ToolUsageException("Actual independently conformed version/profile differs from trusted selection.");
-        var executor = OperatingSystem.IsLinux() ? new ProcessCommandExecutor(selectedLinuxScope ?? throw new ToolUsageException("Actual selected Linux scope profile required before native use."), actualOriginal) : new ProcessCommandExecutor();
+        var ordinaryScope = OperatingSystem.IsLinux() ? OrdinaryLinuxScope(selectedLinuxScope ?? throw new ToolUsageException("Actual selected Linux scope profile required before native use.")) : null;
+        var executor = OperatingSystem.IsLinux() ? new ProcessCommandExecutor(ordinaryScope!, actualOriginal) : new ProcessCommandExecutor();
+        var exactExecutor = OperatingSystem.IsLinux() ? new ProcessCommandExecutor(selectedLinuxScope!, actualOriginal) : executor;
         if (!OperatingSystem.IsLinux() && !OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Installed root supports chosen Windows/Linux profiles only.");
         var worktrees = new WorktreeManager(config.GitExecutable, executor, actualOriginal);
         // Construct each exact supported port HERE with this SAME worktree
@@ -38,6 +40,7 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
             actualTokenBudget ??= DeliveryForge.Scheduling.ResourceBudget.Measure(actualResources.MeasureScheduling(actualOriginal), tokenPolicy.Policy);
             if (actualTokenBudget.PolicyIdentity != tokenPolicy.Policy.Identity) throw new ToolUsageException("Same containing scheduling policy required for measured model usage.");
         }
+        ReportedModelUsage.RequireMeasuredAdapter(config.Adapter, actualTokenBudget is not null);
         var reportedUsage = ReportedModelUsage.Bind(actualTokenBudget, config.LocalSingle?.Policy.MaximumTokens ?? 0, config.LocalSingle?.Demand.TokenLimit ?? 0);
         IHostToolSessionPort actualNativePort = config.Adapter switch
         {
@@ -67,9 +70,9 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
             });
         }
         if (config.LocalRealGolden is not null && config.LocalSingle is null) throw new ToolUsageException("Local-real requires an independently approved finite LocalSingle policy; no direct execution fallback.");
-        if (config.InstalledQuality is not null) bridge.BindInstalledQuality(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing quality requires the actual pinned root configuration."), actualOriginal, worktrees, selectedLinuxScope));
-        if (config.HistoricalQuality is not null) bridge.BindHistoricalQuality(new(config, actualConfigurationPin ?? throw new ToolUsageException("Historical gates require the actual pinned root configuration."), actualOriginal, selectedLinuxScope));
-        if (config.InstalledReview is not null) bridge.BindInstalledReview(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing review requires the actual pinned root configuration."), actualOriginal, executor, selectedLinuxScope, runtimeTrust, reportedUsage));
+        if (config.InstalledQuality is not null) bridge.BindInstalledQuality(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing quality requires the actual pinned root configuration."), actualOriginal, worktrees, ordinaryScope));
+        if (config.HistoricalQuality is not null) bridge.BindHistoricalQuality(new(config, actualConfigurationPin ?? throw new ToolUsageException("Historical gates require the actual pinned root configuration."), actualOriginal, ordinaryScope));
+        if (config.InstalledReview is not null) bridge.BindInstalledReview(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing review requires the actual pinned root configuration."), actualOriginal, executor, selectedLinuxScope, runtimeTrust, reportedUsage, exactExecutor));
         if (config.LocalRealGolden is { } golden)
         {
             BoundedFiles.Separate(actualStoreRoot, golden.ArtifactRoot);
@@ -78,6 +81,12 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         Application = new(bridge, assignments: new LocalWorkerAssignmentPort(actualOriginal, workerPaths), actualExecutor: executor, actualOriginal: actualOriginal, actualConfigurationPin: actualConfigurationPin);
         actualOriginal.Check();
     }
+    internal static LinuxScopeSelection OrdinaryLinuxScope(LinuxScopeSelection selected) => selected.ExactImageBacking switch
+    {
+        LinuxExactImageBacking.SealedMemfd => selected,
+        LinuxExactImageBacking.RootControlledDisk => selected with { ExactImageBacking = LinuxExactImageBacking.SealedMemfd },
+        _ => throw new ToolUsageException("Unknown exact-image backing cannot be projected for ordinary commands.")
+    };
     internal static void RequireFreshExecutionStore(string actualStoreRoot, ToolLifetime original)
     {
         original.Check(); var root = BoundedFiles.Plain(actualStoreRoot, true);

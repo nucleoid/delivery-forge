@@ -261,8 +261,9 @@ public sealed class InstalledNativeHostConformanceTests
                 var pin = f.LinuxScopeProfile ?? throw new IOException("Actual independently prepared Linux profile required."); var raw = BoundedFiles.Read(pin.Path, frame.Original, 65536); Assert.Equal(pin.Bytes, raw.LongLength); Assert.Equal(pin.Sha256, BoundedFiles.Sha(raw)); scope = JsonSerializer.Deserialize<LinuxScopeSelection>(raw, BoundedFiles.Json) ?? throw new IOException("Null actual Linux selection.");
             }
             if (frame.helper is not null && scope?.RestrictiveChildPolicy != "nnp-user1000-ancestor-v3") throw new IOException("Explicit helper selection requires the creator-observed unprivileged child policy.");
-            frame.helper?.Prepare(f); frame.helperScope = frame.helper is null ? null : scope;
-            var executor = OperatingSystem.IsLinux() ? new ProcessCommandExecutor(scope!, frame.Original) : new ProcessCommandExecutor(); frame.Executor = executor; frame.Git = new(f.Git, executor, frame.Original);
+            var ordinaryScope = scope is null ? null : StandaloneOwnerComposition.OrdinaryLinuxScope(scope);
+            frame.helper?.Prepare(f); frame.helperScope = frame.helper is null ? null : ordinaryScope;
+            var executor = OperatingSystem.IsLinux() ? new ProcessCommandExecutor(ordinaryScope!, frame.Original) : new ProcessCommandExecutor(); frame.Executor = executor; frame.Git = new(f.Git, executor, frame.Original);
             // A private finite test parent owns actual provisioning/captures;
             // it issues no production host/profile or coordination authority.
             frame.Parent = new(new object(), run => frame.BindingCurrent && run == frame.RunId, _ => frame.BindingCurrent = false);

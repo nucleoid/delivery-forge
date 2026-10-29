@@ -63,7 +63,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
     JsonElement[] Snapshot() { lock (events) return events.ToArray(); }
     internal async Task<bool> StopAsync()
     {
-        stopping = true; shutdown = true;
+        usage?.FailIncompleteDispatch(); stopping = true; shutdown = true;
         lock (tasks) phaseCancellation?.Cancel();
         complete.TrySetException(new OperationCanceledException("Same original reviewer was stopped."));
         initialized.TrySetException(new OperationCanceledException("Same original reviewer was stopped."));
@@ -274,7 +274,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         }
         catch (Exception failure)
         {
-            pumpFailure = failure; initialized.TrySetException(failure); complete.TrySetException(failure); throw;
+            pumpFailure = failure; initialized.TrySetException(failure); complete.TrySetException(failure); usage?.FailIncompleteDispatch(); throw;
         }
     }
     internal async Task<ToolResult> RunAsync(string authorFamily, string artifactDirectory,
@@ -378,6 +378,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             await protocol.WriteAsync(new { type = "control_request", request_id = "forge-review-initialize", request = new { subtype = "initialize", hooks = (object?)null } }, phaseStop.Token).ConfigureAwait(false);
             await initialized.Task.WaitAsync(Remaining(started), phaseStop.Token).ConfigureAwait(false);
             usage?.Check(); state.AdmitPrompt();
+            usage?.EnterModelWrite();
             await protocol.WriteAsync(new { type = "user", session_id = "", message = new { role = "user", content = prompt }, parent_tool_use_id = (string?)null, uuid = promptId, origin = new { kind = "human" }, client_composed = true }, phaseStop.Token).ConfigureAwait(false);
             await complete.Task.WaitAsync(Remaining(started), phaseStop.Token).ConfigureAwait(false);
             state.RequireSuccess(); usage?.RequireFinal(); shutdown = true;
@@ -438,6 +439,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         }
         catch (Exception primary)
         {
+            usage?.FailIncompleteDispatch();
             // Fixed code-owned phase only; record the primary before cancellation
             // or image disposition can obscure it. No output/account/path DATA.
             original.RecordFirstCaught("independent-review-" + phase, primary);

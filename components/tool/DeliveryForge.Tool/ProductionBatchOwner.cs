@@ -134,7 +134,7 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             if (!command.Has("dry-run")) StandaloneOwnerComposition.RequireFreshExecutionStore(root.StoreRoot, original);
             LinuxScopeSelection? scope = OperatingSystem.IsLinux()
                 ? Read<LinuxScopeSelection>(root.LinuxScopeProfile ?? throw new ToolUsageException("Actual pinned Linux scope required for every batch node."), 65536) : null;
-            ProcessCommandExecutor executor = scope is null ? new() : new(scope, original);
+            ProcessCommandExecutor executor = scope is null ? new() : new(StandaloneOwnerComposition.OrdinaryLinuxScope(scope), original);
             var bytes = InstalledHostAdmission.ReadExact(selection.Plan, original, 524288);
             var imported = await Observe(PlanImporter.ImportAndReconcileOwnedAsync(bytes,
                 new(config.RepositoryRoot, config.MutableReference, config.GitExecutable),
@@ -170,11 +170,11 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
         BoundedFiles.WriteNew(marker, JsonSerializer.SerializeToUtf8Bytes(new BatchMarker("ProductionBatchSelectionData-v1", runId, containingPin.Sha256, selectionIdentity), BoundedFiles.Json), original);
         await Persist().ConfigureAwait(false);
         if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
-        var candidate = control.Paused || control.Stopped ? null : queue.SelectCandidate(budget);
+        var candidate = control.Paused || control.Stopped ? null : SelectUsageBoundCandidate(queue, budget, control);
         while (!control.Paused && !control.Stopped && candidate is not null)
         {
             if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
-            if (control.Paused || control.Stopped) break;
+            if (ObserveReportedUsageStop(budget, control) || control.Paused || control.Stopped) break;
             original.Check(); _ = InstalledHostAdmission.ReadExact(containingPin, original, 65536);
             var node = nodes.Single(item => item.Selection.NodeId == candidate.Id);
             if (!await IsIntegratedAsync(node).ConfigureAwait(false))
@@ -182,20 +182,20 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
                 queue.RecordData(candidate.Id, "ReplanRequired");
                 await Persist().ConfigureAwait(false);
                 if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
-                candidate = control.Paused || control.Stopped ? null : queue.SelectCandidate(budget);
+                candidate = control.Paused || control.Stopped ? null : SelectUsageBoundCandidate(queue, budget, control);
                 continue;
             }
-            if (control.Paused || control.Stopped) break;
+            if (ObserveReportedUsageStop(budget, control) || control.Paused || control.Stopped) break;
             await Persist().ConfigureAwait(false); // Durable selected intent before any owner/lease/worker creation.
             if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
-            if (control.Paused || control.Stopped) break;
+            if (ObserveReportedUsageStop(budget, control) || control.Paused || control.Stopped) break;
             var admission = images is not null
                 ? InstalledHostAdmission.ReadRootAcceptedForBatch(node.Root.InstalledHostAdmission, node.Configuration, original, node.Selection.Configuration, images)
                 : InstalledHostAdmission.ReadRootAccepted(node.Root.InstalledHostAdmission, node.Configuration, original, node.Selection.Configuration);
             // Acknowledged input fences owner/coordination construction itself,
             // not merely the later native adapter start.
             if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
-            if (control.Paused || control.Stopped) break;
+            if (ObserveReportedUsageStop(budget, control) || control.Paused || control.Stopped) break;
             var actualOwner = new StandaloneOwnerComposition(node.Configuration, node.Root.StoreRoot, node.Root.WorkerPaths, original, admission.Host, admission.Profile,
                 node.Scope, node.Selection.Configuration, resources, budget, node.Selection.NodeId, admission.TrustedRuntime);
             lock (stateGate) { active = actualOwner; actualOwners.Add(actualOwner); }
@@ -217,7 +217,7 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             // Read and persist controls before the queue is advanced. Selection
             // mutates DATA exactly once; the cached choice is used next turn.
             if (operatorInput?.ReadBoundary() == true) await Persist().ConfigureAwait(false);
-            var following = control.Paused || control.Stopped ? null : queue.SelectCandidate(budget);
+            var following = control.Paused || control.Stopped ? null : SelectUsageBoundCandidate(queue, budget, control);
             // The final/pause/stopped owner goes to normal root cleanup. Never
             // enter cleanup and then request further WORK from this batch.
             if (following is null) break;
@@ -228,18 +228,34 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             candidate = following;
         }
         var snapshot = queue.Snapshot();
+        if (ObserveReportedUsageStop(budget, control))
+        {
+            await Persist().ConfigureAwait(false);
+            return ToolResult.Incomplete("REPORTED_USAGE_STOPPED", "Containing reported usage or an existing lower token constraint stopped further node intent/dispatch; physical owners retain their original cleanup obligations.", new { RunId = runId, Nodes = snapshot, ReportedUsage = ReportedModelUsage.Snapshot(budget), control.Paused, control.Stopped });
+        }
         return snapshot.Values.All(phase => phase == "Pass")
             ? new("COMPLETE", "COORDINATED_BATCH_LOCAL_COMPLETE", "Actual coordinated node pipelines completed; installed profile certification remains separate.", new { RunId = runId, Nodes = snapshot, SchedulingCertified = false })
             : ToolResult.Incomplete("COORDINATED_BATCH_BLOCKED", "Pending integration, nonpassing prerequisite, capacity, pause or stop prevents further node dispatch.", new { RunId = runId, Nodes = snapshot, control.Paused, control.Stopped });
 
         async Task Persist()
         {
+            ObserveReportedUsageStop(budget, control);
             original.Check();
             await Observe(store.AppendAsync(runId, "production-batch-observation", new BatchObservation(1, containingPin.Sha256, selectionIdentity,
                 selected.Policy.Identity, selected.Fairness.Identity, original.OriginalStarted, original.WholeLimit, original.WorkLimit,
                 original.Remaining, planIdentities, queue.Snapshot(), new Dictionary<string, string>(completedHeads, StringComparer.Ordinal),
-                control.Paused, control.Stopped), original.Token)).ConfigureAwait(false);
+                control.Paused, control.Stopped, ReportedModelUsage.Snapshot(budget)), original.Token)).ConfigureAwait(false);
         }
+    }
+    internal static bool ObserveReportedUsageStop(ResourceBudget budget, ProductionBatchControl control)
+    {
+        if (ReportedModelUsage.Snapshot(budget)?.Stopped != true) return false;
+        control.Stop(); return true;
+    }
+    internal static ProductionQueueNode? SelectUsageBoundCandidate(ProductionBatchQueue queue, ResourceBudget budget, ProductionBatchControl control)
+    {
+        if (ObserveReportedUsageStop(budget, control) || control.Paused || control.Stopped) return null;
+        return queue.SelectCandidate(budget);
     }
     static async Task<bool> InitializeNode(StandaloneOwnerComposition owner) { await owner.InitializeCoordinationAsync().ConfigureAwait(false); return true; }
     static TimeSpan Min(TimeSpan left, TimeSpan right) => left < right ? left : right;
@@ -272,7 +288,7 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
     }
     async Task<bool> IsIntegratedAsync(Node node)
     {
-        ProcessCommandExecutor executor = node.Scope is null ? new() : new(node.Scope, original);
+        ProcessCommandExecutor executor = node.Scope is null ? new() : new(StandaloneOwnerComposition.OrdinaryLinuxScope(node.Scope), original);
         var reader = new GitRepositoryContextReader(node.Configuration.GitExecutable, executor, original);
         var context = await Observe(reader.ReadAsync(node.Configuration.RepositoryRoot, node.Configuration.MutableReference, original.Token)).ConfigureAwait(false);
         if (!node.Plan.ReconcileBase(context).DownstreamReady || context.Dirty || context.Shallow) return false;

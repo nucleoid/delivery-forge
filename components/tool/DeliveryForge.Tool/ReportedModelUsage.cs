@@ -9,7 +9,8 @@ namespace DeliveryForge.Tool;
 internal sealed class ReportedModelUsage
 {
     internal sealed record UsageSnapshot(long InputTokens, long OutputTokens, long NodeTokens, long AggregateTokens,
-        long SessionStopAt, long NodeStopAt, long AggregateStopAt, bool UsageObserved, bool FinalUsageKnown, bool StopThresholdReached, bool Stopped);
+        long SessionStopAt, long NodeStopAt, long AggregateStopAt, bool UsageObserved, bool FinalUsageKnown, bool StopThresholdReached, bool Stopped, bool ModelWriteEntered, RunSnapshot Run);
+    internal sealed record RunSnapshot(long AggregateTokens, long AggregateStopAt, bool Stopped, string? StopScope, long? ObservedAtStop, long? SelectedStopAt);
     static readonly ConditionalWeakTable<ResourceBudget, ReportedModelUsage> Runs = new();
     readonly object gate = new();
     readonly long maximum;
@@ -17,6 +18,7 @@ internal sealed class ReportedModelUsage
     long consumed;
     int registrations;
     Exception? failure;
+    string? stopScope; long? observedAtStop, selectedStopAt;
     ReportedModelUsage(long maximum) => this.maximum = maximum;
     internal static UsageNode Bind(ResourceBudget? budget, long policyMaximum, long nodeMaximum)
     {
@@ -35,7 +37,22 @@ internal sealed class ReportedModelUsage
         if (maximum <= 0) throw new ReportedUsageException("Production model dispatch requires the existing finite scheduling policy.");
         if (failure is not null) throw new ReportedUsageException("Containing run reported usage stopped; no further forward work.", failure);
     }
-    void Fail(Exception error) { failure ??= error; stopped.TrySetResult(failure); }
+    void Fail(Exception error, string scope = "usage-unavailable", long? observed = null, long? limit = null)
+    {
+        if (failure is null) { failure = error; stopScope = scope; observedAtStop = observed; selectedStopAt = limit; }
+        stopped.TrySetResult(failure);
+    }
+    RunSnapshot SnapshotCore() => new(consumed, maximum, failure is not null, stopScope, observedAtStop, selectedStopAt);
+    internal static RunSnapshot? Snapshot(ResourceBudget budget)
+    {
+        if (!Runs.TryGetValue(budget, out var run)) return null;
+        lock (run.gate) return run.SnapshotCore();
+    }
+    internal static void RequireMeasuredAdapter(string adapter, bool bound)
+    {
+        if (bound && adapter is not ("codex.cli" or "claude-code.cli"))
+            throw new ToolUsageException("Production reported usage requires a supported measured model adapter; Pi is not admitted.");
+    }
     internal sealed class UsageNode
     {
         readonly ReportedModelUsage run;
@@ -55,10 +72,23 @@ internal sealed class ReportedModelUsage
         internal sealed class UsageSession(UsageNode node, long maximum)
         {
             long input, output;
-            bool seen, final;
+            bool seen, final, modelWriteEntered;
             readonly TaskCompletionSource finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
             internal Exception? Failure { get { lock (node.run.gate) return node.run.failure; } }
             internal void Check() => node.Check();
+            internal void EnterModelWrite()
+            {
+                lock (node.run.gate)
+                {
+                    node.run.Check();
+                    if (modelWriteEntered) throw new ReportedUsageException("Original model prompt write cannot replay.");
+                    modelWriteEntered = true; // Includes ambiguous/partial write invocation.
+                }
+            }
+            internal void FailIncompleteDispatch()
+            {
+                lock (node.run.gate) if (modelWriteEntered && (!seen || !final)) Refuse();
+            }
             internal void Refuse()
             {
                 lock (node.run.gate) node.run.Fail(new ReportedUsageException("Missing, malformed, foreign or regressing reported model usage; completion refused."));
@@ -77,8 +107,11 @@ internal sealed class ReportedModelUsage
                         var nextNode = checked(node.consumed + delta); var nextRun = checked(node.run.consumed + delta);
                         node.consumed = nextNode; node.run.consumed = nextRun;
                         input = actualInput; output = actualOutput; seen = true; final |= isFinal;
-                        if (total >= maximum || node.consumed >= node.maximum || node.run.consumed >= node.run.maximum)
-                            node.run.Fail(new ReportedUsageException("Reported model usage stop threshold reached; in-flight overshoot may already exist."));
+                        // Existing smaller session/node caps are restrictions,
+                        // never permission to spend up to the aggregate stop.
+                        if (total >= maximum) node.run.Fail(new ReportedUsageException("Reported model usage stop threshold reached; in-flight overshoot may already exist."), "session", total, maximum);
+                        else if (node.consumed >= node.maximum) node.run.Fail(new ReportedUsageException("Reported model usage stop threshold reached; in-flight overshoot may already exist."), "node", node.consumed, node.maximum);
+                        else if (node.run.consumed >= node.run.maximum) node.run.Fail(new ReportedUsageException("Reported model usage stop threshold reached; in-flight overshoot may already exist."), "aggregate", node.run.consumed, node.run.maximum);
                     }
                     catch (Exception error) when (error is OverflowException or ReportedUsageException) { node.run.Fail(new ReportedUsageException("Invalid or exhausted reported model usage.", error)); }
                 }
@@ -103,7 +136,10 @@ internal sealed class ReportedModelUsage
                 bool stopRequired; lock (node.run.gate) stopRequired = node.run.failure is not null;
                 if (stopRequired) await stop().ConfigureAwait(false);
             }
-            internal void Finish() => finished.TrySetResult();
+            internal void Finish()
+            {
+                lock (node.run.gate) { FailIncompleteDispatch(); finished.TrySetResult(); }
+            }
             internal async Task JoinAsync(Task? watcher, Exception? primary = null)
             {
                 Finish();
@@ -119,7 +155,7 @@ internal sealed class ReportedModelUsage
             {
                 lock (node.run.gate) return new(input, output, node.consumed, node.run.consumed,
                     maximum, node.maximum, node.run.maximum, seen, seen && final,
-                    seen && (checked(input + output) >= maximum || node.consumed >= node.maximum || node.run.consumed >= node.run.maximum), node.run.failure is not null);
+                    seen && (checked(input + output) >= maximum || node.consumed >= node.maximum || node.run.consumed >= node.run.maximum), node.run.failure is not null, modelWriteEntered, node.run.SnapshotCore());
             }
             internal (long Input, long Output, long Aggregate) Snapshot() { lock (node.run.gate) return (input, output, node.run.consumed); }
         }

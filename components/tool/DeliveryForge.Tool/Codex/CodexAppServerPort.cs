@@ -143,6 +143,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         try
         {
             startup!.Client(method, id, CodexWireState.WriteEntered);
+            if (method == "turn/start") usage?.EnterModelWrite();
             await Keep(protocol!.WriteAsync(new { id, method, @params = parameters }, token)).ConfigureAwait(false);
             startup.Client(method, id, CodexWireState.WriteReturned);
             return await Keep(reply.Task).WaitAsync(original.Remaining, token).ConfigureAwait(false);
@@ -235,7 +236,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                 waiter.TrySetResult(message.GetProperty("result").Clone());
             }
         }
-        catch (Exception error) { pumpFailure = error; pending.Fail(error); lock (gate) terminalWait?.TrySetException(error); if (!shutdown) original.RetainUnknown(); throw; }
+        catch (Exception error) { pumpFailure = error; pending.Fail(error); lock (gate) terminalWait?.TrySetException(error); if (!shutdown) original.RetainUnknown(); usage?.FailIncompleteDispatch(); throw; }
     }
     void ObserveReportedUsage(JsonElement message)
     {
@@ -418,6 +419,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         }
         catch (Exception primary)
         {
+            usage?.FailIncompleteDispatch();
             // Startup can fail before the before-turn hook. Sample only this
             // already-released exact Linux owner, before retirement removes its
             // cgroup. This replaces an unused sample; it cannot add a third one.
@@ -465,7 +467,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         }
         catch (Exception failure)
         {
-            primary = failure;
+            usage?.FailIncompleteDispatch(); primary = failure;
             if (usage?.Failure is not null && usageWatch is not null)
                 try { await usageWatch.ConfigureAwait(false); }
                 catch (Exception cleanup) { throw new AggregateException("Codex completion and reported usage stop failure.", failure, cleanup); }
@@ -491,6 +493,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     public async Task<AgentControlResult> ControlAsync(AgentRunBinding actual, AgentControlAction action, TimeSpan remaining, CancellationToken token)
     {
         Bound(actual); if (action != AgentControlAction.Stop) return new(actual, action, AgentActivityState.Unknown, false, "", "Stable app-server interrupt is not pause or same-turn resume.");
+        usage?.FailIncompleteDispatch();
         Exception? interruptFailure = null;
         try { if (turnId is not null && terminalWait?.Task.IsCompleted != true) _ = await Rpc("turn/interrupt", new { threadId, turnId }, token).ConfigureAwait(false); } catch (Exception error) { interruptFailure = error; }
         // WORK may already be closed by the containing stop latch. Regardless of
