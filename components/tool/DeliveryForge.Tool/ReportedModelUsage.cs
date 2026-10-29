@@ -99,8 +99,9 @@ internal sealed class ReportedModelUsage
             {
                 // TCS continuations are asynchronous: no cancellation callbacks or
                 // owner retirement run on the output-pump observation stack.
-                if (await Task.WhenAny(node.run.stopped.Task, finished.Task).ConfigureAwait(false) == node.run.stopped.Task)
-                    await stop().ConfigureAwait(false);
+                await Task.WhenAny(node.run.stopped.Task, finished.Task).ConfigureAwait(false);
+                bool stopRequired; lock (node.run.gate) stopRequired = node.run.failure is not null;
+                if (stopRequired) await stop().ConfigureAwait(false);
             }
             internal void Finish() => finished.TrySetResult();
             internal async Task JoinAsync(Task? watcher, Exception? primary = null)
