@@ -629,20 +629,21 @@ public sealed class OwnedLinuxExactImageTests
         foreach (var key in new[] { "HOME", "CODEX_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "TMPDIR" }) environment[key] = directory;
         environment["PATH"] = "/usr/bin:/bin"; environment["LANG"] = "C.UTF-8"; environment["LC_ALL"] = "C.UTF-8";
         environment["XDG_RUNTIME_DIR"] = "/run/user/1000"; environment["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/user/1000/bus";
-        var executor = new ProcessCommandExecutor(scope, original);
         async Task<BoundedCommandCaptureResult> Capture(string label, string[] arguments, bool sealedImage)
         {
             // Four fresh source hashes plus two gate-copy/parent-verification pairs:
             // 8*(296885960+1)=2375087688 image-read bytes, same original credit.
             BoundedFiles.VerifyNativeImage(new(image.Path, image.Bytes, image.Sha256), original);
             if (sealedImage) BoundedFiles.ReserveExactLinuxImageReads(new(image.Path, image.Bytes, image.Sha256), original);
+            var actualScope = sealedImage ? scope : scope with { ExactImageBacking = LinuxExactImageBacking.SealedMemfd };
+            var executor = new ProcessCommandExecutor(actualScope, original);
             var invocation = new CommandInvocation(path, arguments, directory, environment, InheritEnvironment: false) { EnvironmentIsComplete = true };
             var actual = await executor.ExecuteBoundedCaptureAsync(invocation, TimeSpan.FromSeconds(30), 16384,
-                TestContext.Current.CancellationToken, new OwnedWorkPhaseBudget(original), scope, sealedImage ? image : null);
+                TestContext.Current.CancellationToken, new OwnedWorkPhaseBudget(original), actualScope, sealedImage ? image : null);
             // Emit bounded raw captures and observed closure before any outcome assertion.
             TestContext.Current.TestOutputHelper!.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
             {
-                Kind = "DiagnosticCodexSelfReexecCapture-v1", Label = label, SealedImageRequested = sealedImage,
+                Kind = "DiagnosticCodexSelfReexecCapture-v1", Label = label, SealedImageRequested = sealedImage, ExactImageRequested = sealedImage, RequestedBacking = actualScope.ExactImageBacking.ToString(),
                 actual.Command.ExitCode, actual.Command.TimedOut, actual.Command.Cancelled, actual.Command.OwnedProcessQuiescent,
                 actual.RootExitObserved, actual.StandardOutputDrainCompleted, actual.StandardErrorDrainCompleted,
                 actual.CaptureBoundExceeded, actual.OwnershipKind, actual.Timing,
