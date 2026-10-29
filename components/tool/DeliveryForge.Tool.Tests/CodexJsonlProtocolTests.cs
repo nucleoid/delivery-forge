@@ -243,6 +243,17 @@ public sealed class CodexJsonlProtocolTests
         Assert.Throws<ReportedUsageException>(() => node.Register());
     }
     [Fact]
+    public async Task Prewrite_observation_cutoff_refuses_actual_prompt_before_bytes_without_stopping_undispatched_run()
+    {
+        var node = PromptNode(); var session = node.Register();
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        using var input = new MemoryStream(); using var output = new MemoryStream(); var codec = new CodexJsonlProtocol(input, output, life);
+        session.MarkObservationUnavailable();
+        await Assert.ThrowsAsync<ReportedUsageException>(() => ReportedModelUsage.WritePromptAsync(session, codec, new { type = "user", message = new { content = "fixed fixture" } }, TestContext.Current.CancellationToken));
+        Assert.Equal(0, input.Length); Assert.False(session.Evidence().ModelWriteEntered); Assert.False(session.Evidence().Stopped);
+        node.Register().Check(); // An undispatched failed session did not spend or stop the containing run.
+    }
+    [Fact]
     public async Task Actual_prompt_then_wire_EOF_cannot_be_zero_usage_or_admit_another_write()
     {
         var node = PromptNode(); var session = node.Register();
