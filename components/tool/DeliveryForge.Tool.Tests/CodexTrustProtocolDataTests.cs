@@ -228,7 +228,7 @@ public sealed class CodexTrustProtocolDataTests
         Task Stop() { Assert.False(observingUsage); Interlocked.Increment(ref stops); return Task.CompletedTask; }
         var one = a.WatchAsync(Stop); var two = b.WatchAsync(Stop);
         observingUsage = true; try { a.Observe(100000, 0, true); } finally { observingUsage = false; }
-        await Task.WhenAll(one, two).WaitAsync(TimeSpan.FromSeconds(5)); Assert.Equal(2, stops);
+        await Task.WhenAll(one, two).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken); Assert.Equal(2, stops);
         a.Finish(); Assert.Throws<ReportedUsageException>(a.RequireFinal); // Finish cannot erase a concurrently latched stop.
     }
     [Fact]
