@@ -301,4 +301,18 @@ public sealed class CodexTrustProtocolDataTests
         Assert.Throws<ReportedUsageException>(() => a.Accept(() => { a.Refuse(); return "accepted"; }));
         b.RequireFinal(); Assert.Equal("accepted", b.Accept(() => "accepted"));
     }
+    [Fact]
+    public async Task Finish_winner_cannot_hide_a_stop_latched_before_acceptance_lock_releases()
+    {
+        var session = UsageSession(); session.Observe(1, 1, true); var stops = 0;
+        var watcher = session.WatchAsync(() => { Interlocked.Increment(ref stops); return Task.CompletedTask; });
+        Assert.Throws<ReportedUsageException>(() => session.Accept(() =>
+        {
+            // Finish wakes the watcher first; its existing latch check must
+            // wait for this acceptance critical section and observe Refuse.
+            session.Finish(); session.Refuse(); return "must-not-accept";
+        }));
+        await watcher.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.Equal(1, stops); Assert.Throws<ReportedUsageException>(session.RequireFinal);
+    }
 }
