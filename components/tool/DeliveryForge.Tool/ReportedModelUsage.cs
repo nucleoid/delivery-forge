@@ -87,6 +87,7 @@ internal sealed class ReportedModelUsage
                 lock (node.run.gate)
                 {
                     node.run.Check();
+                    if (observationUnavailable) throw new ReportedUsageException("Original usage observation ended before model prompt write.");
                     if (modelWriteEntered) throw new ReportedUsageException("Original model prompt write cannot replay.");
                     modelWriteEntered = true; // Includes ambiguous/partial write invocation.
                 }
@@ -101,8 +102,8 @@ internal sealed class ReportedModelUsage
             {
                 lock (node.run.gate)
                 {
-                    if (!modelWriteEntered) return;
-                    observationUnavailable = true; Refuse();
+                    observationUnavailable = true;
+                    if (modelWriteEntered) Refuse();
                 }
             }
             internal void Refuse()
