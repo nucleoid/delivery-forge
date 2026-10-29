@@ -163,8 +163,8 @@ jobs:
           # Owned descendant retirement plus actual Git requires separate native admission,
           # its explicit Git image, and a Root-bound Linux scope on Linux.
           $publicFilter += "&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedDuplexProcessTests.Exit_zero_root_with_live_owned_descendant_retires_under_unchanged_work_then_verifies_actual_Git"
-          # This native case requires the separately bound Linux scope profile, like the private cases above.
-          $publicFilter += "&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedDuplexProcessTests.Actual_prompt_framing_and_original_graceful_retirement_observe_buffered_final_usage_with_phase_cancelled"
+          # Linux requires a separately bound scope; keep this case in public Windows CI.
+          if (-not $IsWindows) { $publicFilter += "&FullyQualifiedName!=DeliveryForge.Tool.Tests.OwnedDuplexProcessTests.Actual_prompt_framing_and_original_graceful_retirement_observe_buffered_final_usage_with_phase_cancelled" }
           # Every live Continuum row needs its separately admitted private UAT profile.
           # Public contract CI is not live/profile certification.
           $publicFilter += "&Category!=LiveContinuumAcceptance&Category!=InstalledLocalRealAcceptance"
