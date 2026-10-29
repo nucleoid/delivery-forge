@@ -31,10 +31,18 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         // Construct each exact supported port HERE with this SAME worktree
         // manager/executor/original. An externally built legacy Git consumer
         // cannot be smuggled in through a port factory or session DTO.
+        DeliveryForge.Scheduling.ResourceBudget? actualTokenBudget = aggregateBudget;
+        if (config.LocalSingle is { } tokenPolicy)
+        {
+            if (actualConfigurationPin is null || actualResources is null) throw new ToolUsageException("LocalSingle requires its exact configuration and measured original.");
+            actualTokenBudget ??= DeliveryForge.Scheduling.ResourceBudget.Measure(actualResources.MeasureScheduling(actualOriginal), tokenPolicy.Policy);
+            if (actualTokenBudget.PolicyIdentity != tokenPolicy.Policy.Identity) throw new ToolUsageException("Same containing scheduling policy required for measured model usage.");
+        }
+        var reportedUsage = ReportedModelUsage.Bind(actualTokenBudget, config.LocalSingle?.Policy.MaximumTokens ?? 0, config.LocalSingle?.Demand.TokenLimit ?? 0);
         IHostToolSessionPort actualNativePort = config.Adapter switch
         {
-            "codex.cli" => new DeliveryForge.Tool.Codex.CodexAppServerPort(new(selectedHost.Executable, selectedHost.Bytes, selectedHost.Sha256, selectedHost.Version), worktrees, actualConformedProfile, selectedLinuxScope, runtimeTrust),
-            "claude-code.cli" => new DeliveryForge.Tool.Claude.ClaudeStreamPort(new(selectedHost.Executable, selectedHost.Bytes, selectedHost.Sha256, selectedHost.Version), worktrees, actualConformedProfile, selectedLinuxScope),
+            "codex.cli" => new DeliveryForge.Tool.Codex.CodexAppServerPort(new(selectedHost.Executable, selectedHost.Bytes, selectedHost.Sha256, selectedHost.Version), worktrees, actualConformedProfile, selectedLinuxScope, runtimeTrust, usageNode: reportedUsage),
+            "claude-code.cli" => new DeliveryForge.Tool.Claude.ClaudeStreamPort(new(selectedHost.Executable, selectedHost.Bytes, selectedHost.Sha256, selectedHost.Version), worktrees, actualConformedProfile, selectedLinuxScope, reportedUsage),
             "pi.cli" => new DeliveryForge.Tool.Pi.PiRpcPort(new(selectedHost.Executable, selectedHost.Bytes, selectedHost.Sha256, selectedHost.Version), worktrees, actualConformedProfile, selectedLinuxScope),
             _ => throw new ToolUsageException("Optional host has no actual standalone native transport.")
         };
@@ -43,13 +51,12 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         if (config.LocalSingle is { } scheduling)
         {
             if (actualConfigurationPin is null || actualResources is null) throw new ToolUsageException("LocalSingle requires the independent exact configuration and actual measured caller owner.");
-            var measured = actualResources.MeasureScheduling(actualOriginal);
-            var budget = aggregateBudget ?? DeliveryForge.Scheduling.ResourceBudget.Measure(measured, scheduling.Policy);
+            var budget = actualTokenBudget!;
             if (budget.PolicyIdentity != scheduling.Policy.Identity) throw new ToolUsageException("Batch node differs from its same-original aggregate policy.");
             if (scheduling.Demand.TimeLimit > actualOriginal.WorkLimit || scheduling.Policy.MaximumTime > actualOriginal.WorkLimit || !budget.CanAllocate(scheduling.Demand)) throw new ToolUsageException("Scheduling selection exceeds the same original measured resource/time policy.");
             bridge.BindLocalSingleFactory((plan, assignment, parent) =>
             {
-                actualOriginal.Check();
+                actualOriginal.Check(); reportedUsage.Check();
                 _ = InstalledHostAdmission.ReadExact(actualConfigurationPin, actualOriginal, 65536);
                 var admitted = worktrees.WithParentAdmission(parent, assignment.RunId);
                 var admittedStore = coordinator.BindOriginalScheduling(actualOriginal, parent, assignment.RunId, admitted);
@@ -62,7 +69,7 @@ public sealed class StandaloneOwnerComposition : IAsyncDisposable
         if (config.LocalRealGolden is not null && config.LocalSingle is null) throw new ToolUsageException("Local-real requires an independently approved finite LocalSingle policy; no direct execution fallback.");
         if (config.InstalledQuality is not null) bridge.BindInstalledQuality(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing quality requires the actual pinned root configuration."), actualOriginal, worktrees, selectedLinuxScope));
         if (config.HistoricalQuality is not null) bridge.BindHistoricalQuality(new(config, actualConfigurationPin ?? throw new ToolUsageException("Historical gates require the actual pinned root configuration."), actualOriginal, selectedLinuxScope));
-        if (config.InstalledReview is not null) bridge.BindInstalledReview(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing review requires the actual pinned root configuration."), actualOriginal, executor, selectedLinuxScope, runtimeTrust));
+        if (config.InstalledReview is not null) bridge.BindInstalledReview(new(config, actualConfigurationPin ?? throw new ToolUsageException("Containing review requires the actual pinned root configuration."), actualOriginal, executor, selectedLinuxScope, runtimeTrust, reportedUsage));
         if (config.LocalRealGolden is { } golden)
         {
             BoundedFiles.Separate(actualStoreRoot, golden.ArtifactRoot);

@@ -52,6 +52,7 @@ internal static class CodexTrustProtocolData
     }
     internal static JsonElement Notification(JsonElement message)
     {
+        if (message.GetProperty("method").GetString() == "thread/tokenUsage/updated") return CodexReportedUsage.Projection(message);
         if (message.GetProperty("method").GetString() != "turn/completed")
             return JsonSerializer.SerializeToElement(new { method = "trust/other-notification", @params = new { payloadOmitted = true } });
         var parameters = Object(message, "params"); var threadId = Identity(parameters, "threadId");

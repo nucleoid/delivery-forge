@@ -270,10 +270,16 @@ public sealed class InstalledNativeHostConformanceTests
             // UNVERIFIED remains UNVERIFIED throughout this probe. Canonical
             // owner acceptance MUST refuse it until independent actual audit.
             var profile = new AgentAdapterProfile(adapter, f.Host.Version, new[] { AgentCapability.Launch, AgentCapability.CompletionEvidence, AgentCapability.Stop, AgentCapability.EvidenceExport }.Select(c => new AgentCapabilityEvidence(c, AgentCapabilityStatus.Unverified, "actual installed transport UNDER TEST", "source-defined genuine probe, not conformance authority")).ToArray());
+            // Same reported-usage stop as production; this finite test parent is
+            // not a production admission or a provider-side absolute ceiling.
+            var tokenSlots = new DeliveryForge.Scheduling.ResourceSlots(1, 2, 4096, 1, 1, 0);
+            var tokenPolicy = new DeliveryForge.Scheduling.BudgetPolicy("installed-native-reported-100k-v1", true, tokenSlots, TimeSpan.FromSeconds(600), 100000, 100);
+            var tokenBudget = DeliveryForge.Scheduling.ResourceBudget.Measure(tokenSlots, tokenPolicy);
+            var reportedUsage = ReportedModelUsage.Bind(tokenBudget, tokenPolicy.MaximumTokens, tokenPolicy.MaximumTokens);
             frame.Port = adapter switch
             {
-                "codex.cli" => new DeliveryForge.Tool.Codex.CodexAppServerPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope, null, f.ObserveRuntimeTrustRoute, f.LinuxDangerFullAccessOnce, OperatingSystem.IsLinux() && (f.ObserveRuntimeTrustRoute || f.LinuxDangerFullAccessOnce) ? frame.CaptureLeafCounters : null),
-                "claude-code.cli" => new DeliveryForge.Tool.Claude.ClaudeStreamPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope),
+                "codex.cli" => new DeliveryForge.Tool.Codex.CodexAppServerPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope, null, f.ObserveRuntimeTrustRoute, f.LinuxDangerFullAccessOnce, OperatingSystem.IsLinux() && (f.ObserveRuntimeTrustRoute || f.LinuxDangerFullAccessOnce) ? frame.CaptureLeafCounters : null, reportedUsage),
+                "claude-code.cli" => new DeliveryForge.Tool.Claude.ClaudeStreamPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope, reportedUsage),
                 "pi.cli" => new DeliveryForge.Tool.Pi.PiRpcPort(new(f.Host.Executable, f.Host.Bytes, f.Host.Sha256, f.Host.Version), frame.Git, profile, scope),
                 _ => throw new IOException("No arbitrary protocol dispatch.")
             };
@@ -360,6 +366,7 @@ public sealed class InstalledNativeHostConformanceTests
                 PrimaryType = Failure?.GetType().FullName,
                 PostType = Post?.GetType().FullName,
                 Startup = Port is DeliveryForge.Tool.Codex.CodexAppServerPort codex ? codex.SnapshotStartupDiagnostics() : null,
+                ReportedUsage = Port switch { DeliveryForge.Tool.Codex.CodexAppServerPort c => c.SnapshotReportedUsage(), DeliveryForge.Tool.Claude.ClaudeStreamPort c => c.SnapshotReportedUsage(), _ => null },
                 StandardError = new { Bytes = stderr.Length, Sha256 = BoundedFiles.Sha(stderr), Signals = signals, TextExported = false },
                 Native = new { Retirement.KnownClosed, Retirement.RootExited, Retirement.ActiveProcesses, Retirement.OutputEof, Retirement.ErrorEof, Retirement.InputCloseReturned, Retirement.DispositionReturned, Retirement.ExitCode, FailureCount = Retirement.Failures.Count },
                 ActualIoCount = io.Count,

@@ -20,7 +20,7 @@ public sealed record IndependentClaudeReviewSelection(AdmissionFile Image, strin
 internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection selection, ToolLifetime original,
     ProcessCommandExecutor executor, ParentCoordinationHost parent, string runId, ClaudeReviewerWorkingDirectory actualWorkingDirectory,
     ClaudeReviewerUserSettings actualUserSettings,
-    ProductionReviewBootstrap bootstrap, Func<bool> sameCompletedWorker, Action verifyProtectedConfiguration, LinuxScopeSelection? linuxScope, InstalledHostAdmission.RuntimeTrust? runtimeTrust = null)
+    ProductionReviewBootstrap bootstrap, Func<bool> sameCompletedWorker, Action verifyProtectedConfiguration, LinuxScopeSelection? linuxScope, InstalledHostAdmission.RuntimeTrust? runtimeTrust = null, ReportedModelUsage.UsageNode? usageNode = null)
 {
     enum ReviewPhase { ProtectedConfiguration, EvidencePreparation, VersionObservation, AuthObservation, SubscriptionValidation, VerifiedPatchExport, PromptPublication, NativeReview }
     // Created only after the existing private issuer accepted the exact genuine
@@ -49,6 +49,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
     readonly TaskCompletionSource<bool> initialized = new(TaskCreationOptions.RunContinuationsAsynchronously);
     readonly TaskCompletionSource<bool> complete = new(TaskCreationOptions.RunContinuationsAsynchronously);
     OwnedDuplexProcess? process; CodexJsonlProtocol? protocol; ClaudeStreamState? state;
+    ReportedModelUsage.UsageNode.UsageSession? usage; ClaudeReportedUsage? reportedUsage; Task? usageWatch;
     Task? pump; Exception? pumpFailure; JsonElement? result; string? model;
     sealed class Observation { internal bool Entered, Returned; internal Task<BoundedCommandCaptureResult>? Actual; }
     readonly List<Observation> observations = [];
@@ -84,6 +85,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             try { var retired = await Keep(native.RetireAsync(true)).ConfigureAwait(false); known &= retired.KnownClosed && !native.HasUnknownIo; }
             catch { known = false; }
         }
+        if (usage is not null) { try { await usage.JoinAsync(usageWatch).ConfigureAwait(false); } catch { known = false; } }
         if (!known) RetainUncertain("Actual reviewer stop retains original native observation/process uncertainty.");
         return known;
     }
@@ -151,7 +153,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         ToolResult.Incomplete("INDEPENDENT_REVIEW_BUDGET", decision.Reason, new { runId, decision.Findings });
     async Task<BoundedCommandCaptureResult> Observe(string[] arguments)
     {
-        Current(); VerifyImage();
+        Current(); usage?.Check(); VerifyImage();
         var nativeArguments = actualUserSettings.ObservationArguments(arguments);
         var nativeInvocation = actualUserSettings.Invocation(selection.Image.Path, nativeArguments, actualWorkingDirectory.Path);
         actualUserSettings.RequireIsolationArguments(nativeInvocation, observation: true);
@@ -217,6 +219,23 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         capture.StandardOutputDrainCompleted && capture.StandardErrorDrainCompleted &&
         capture.Command.LifecycleDiagnostics is { NativeFailure: null, OwnedTree: { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 } } &&
         (!OperatingSystem.IsLinux() || capture.OwnershipKind == BoundedCaptureOwnershipKind.LinuxCreationOwnedScope);
+    async Task StopForReportedUsage()
+    {
+        shutdown = true;
+        var failure = usage!.Failure ?? new ReportedUsageException("Containing run usage stopped.");
+        complete.TrySetException(failure); initialized.TrySetException(failure);
+        if (process is null)
+        {
+            // Version/auth preparation uses this same original phase token.
+            // Cancellation runs here, never on the raw output observation stack.
+            lock (tasks) phaseCancellation?.Cancel();
+        }
+        if (process is not null)
+        {
+            var retired = await process.RetireAsync(true).ConfigureAwait(false);
+            if (!retired.KnownClosed || process.HasUnknownIo) { RetainUncertain("Reported usage stop retains actual reviewer uncertainty."); throw new IOException("Reported usage reviewer retirement is unknown."); }
+        }
+    }
     async Task Pump(CancellationToken token)
     {
         try
@@ -225,7 +244,14 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             {
                 Current(); using var doc = await protocol!.ReadAsync(token).ConfigureAwait(false);
                 if (doc is null) { if (!shutdown) throw new IOException("Unexpected independent reviewer EOF."); return; }
-                var row = doc.RootElement; var bytes = Encoding.UTF8.GetByteCount(row.GetRawText());
+                var row = doc.RootElement;
+                var usageType = ClaudeStreamState.Text(row, "type");
+                if (reportedUsage is not null && usageType is ("assistant" or "stream_event" or "result"))
+                {
+                    try { reportedUsage.Observe(row, state!.Session); }
+                    catch (IOException) { usage!.Refuse(); }
+                }
+                var bytes = Encoding.UTF8.GetByteCount(row.GetRawText());
                 lock (events)
                 {
                     if (events.Count >= 4096 || eventBytes > 4 * 1024 * 1024 - bytes) throw new IOException("Complete independent reviewer transcript exceeds its finite profile.");
@@ -264,6 +290,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         // containing admission and SAME worker-bound Linux scope can pass.
         if (UnsupportedProductionProfile(runtimeTrust, original, selection, linuxScope) is { } profileRefusal) return profileRefusal;
         ClaudeIndependentReviewData.RequireSubscriptionEnvironment(Environment.GetEnvironmentVariable);
+        usage = usageNode?.Register(bootstrap.Policy.Budget.MaximumTokens); reportedUsage = usage is null ? null : new(usage); usage?.Check();
         var ledger = ReviewBudgetLedger.FromTrustedPolicy(bootstrap.Policy);
         if (!ledger.TryReserve(new(bootstrap.Policy.Budget.MaximumDuration, bootstrap.Policy.Budget.MaximumTokens, bootstrap.Policy.Budget.MaximumCost), out var reservation, out var decision))
             return ToolResult.Incomplete("INDEPENDENT_REVIEW_BUDGET", decision.Reason);
@@ -278,6 +305,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         var phase = ReviewPhase.ProtectedConfiguration;
         try
         {
+            if (usage is not null) usageWatch = Keep(usage.WatchAsync(StopForReportedUsage));
             // Six complete path verifications plus both exact-image reads for
             // each of three native entries: twelve image extents, fifteen file
             // operations on the SAME existing credit. Admission never reserves
@@ -327,6 +355,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             var inherited = Environment.GetEnvironmentVariable("CLAUDE_CODE_SDK_READS_SESSION_STATE");
             if (inherited is not null && inherited != "1") throw new ToolUsageException("Existing session-state selection differs; no settings override.");
             var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["CLAUDE_CODE_SDK_READS_SESSION_STATE"] = "1", ["DISABLE_COMPACT"] = "1" };
+            usage?.Check();
             var nativeArguments = actualUserSettings.ReviewArguments(bootstrap.Policy.Budget.MaximumCost);
             var nativeInvocation = actualUserSettings.Invocation(selection.Image.Path, nativeArguments, actualWorkingDirectory.Path, environment);
             actualUserSettings.RequireIsolationArguments(nativeInvocation, observation: false);
@@ -344,25 +373,26 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
                 return actual;
             });
             if (process.StartupFailure is Exception startup) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(startup).Throw();
+            usage?.Check();
             protocol = new(process.Input, process.Output, original); pump = Keep(Pump(phaseStop.Token)); process.AttachOriginalOutputConsumer(pump);
             await protocol.WriteAsync(new { type = "control_request", request_id = "forge-review-initialize", request = new { subtype = "initialize", hooks = (object?)null } }, phaseStop.Token).ConfigureAwait(false);
             await initialized.Task.WaitAsync(Remaining(started), phaseStop.Token).ConfigureAwait(false);
-            state.AdmitPrompt();
+            usage?.Check(); state.AdmitPrompt();
             await protocol.WriteAsync(new { type = "user", session_id = "", message = new { role = "user", content = prompt }, parent_tool_use_id = (string?)null, uuid = promptId, origin = new { kind = "human" }, client_composed = true }, phaseStop.Token).ConfigureAwait(false);
             await complete.Task.WaitAsync(Remaining(started), phaseStop.Token).ConfigureAwait(false);
-            state.RequireSuccess(); shutdown = true;
+            state.RequireSuccess(); usage?.RequireFinal(); shutdown = true;
             var retirement = Keep(process.RetireAsync(false)); var retired = await retirement.ConfigureAwait(false);
             HostTransportRetirement.RequireSuccessful(retired);
             await pump.WaitAsync(Remaining(started), phaseStop.Token).ConfigureAwait(false);
             // Retirement joins the complete pump, including activity after the first
             // result/idle. An earlier completion signal cannot certify later state.
-            state.RequireSuccess();
+            state.RequireSuccess(); usage?.RequireFinal(); if (usage is not null) await usage.JoinAsync(usageWatch).ConfigureAwait(false);
             if (pumpFailure is not null || model is null || result is null || protocol.Unknown || Unknown)
                 throw new IOException("Actual complete independent review provenance is unavailable.");
             var completedAt = DateTimeOffset.UtcNow;
-            var native = JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualIndependentClaudeReview-v1", requestId, promptId, SessionId = state.Session, Model = model, RouteHash = authHash, Events = Snapshot(), Retirement = retired }, BoundedFiles.Json);
+            var native = JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualIndependentClaudeReview-v1", requestId, promptId, SessionId = state.Session, Model = model, RouteHash = authHash, Events = Snapshot(), ReportedUsage = usage?.Evidence(), Retirement = retired }, BoundedFiles.Json);
             Save(Path.Combine(artifactDirectory, "independent-review-native.json"), native);
-            var usage = ClaudeIndependentReviewData.Usage(result.Value);
+            var actualUsage = ClaudeIndependentReviewData.Usage(result.Value);
             if (!result.Value.TryGetProperty("result", out var resultText) || resultText.ValueKind != JsonValueKind.String) throw new IOException("Complete actual reviewer report text is missing.");
             var report = ClaudeIndependentReviewData.ParseReport(resultText.GetString()!);
             // Keep complete parsed DATA before any post-retirement proof can
@@ -377,7 +407,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             // This is the original complete review-phase clock: preparation,
             // observations, native review, retirement and same-source postproof.
             // Native retirement does not grant a shorter accounting interval.
-            var budget = ledger.Settle(reservation!, new(Stopwatch.GetElapsedTime(started), usage.Tokens, usage.Cost));
+            var budget = ledger.Settle(reservation!, new(Stopwatch.GetElapsedTime(started), actualUsage.Tokens, actualUsage.Cost));
             if (budget.IsExhausted) return BudgetIncomplete(runId, budget);
             if (report.RawVerdict == "ship" && report.Findings.Count != 0)
                 return new("BLOCKED", "ACTUAL_INDEPENDENT_REVIEW_CONTRADICTORY",
@@ -387,16 +417,17 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             var proof = Hash(JsonSerializer.SerializeToUtf8Bytes(new { requestId, Model = model, RouteHash = authHash, selection.Image, selection.Version, Native = rawHash }));
             if (DateTimeOffset.UtcNow > validUntil) return ToolResult.Incomplete("INDEPENDENT_REVIEW_PROOF_EXPIRED", "Actual reviewer proof expired inside its original frozen allowance.");
             Current();
+            usage?.RequireFinal();
             var issued = bootstrap.Host.IssueCapability(capability, proof, observedAt, validUntil);
             var execution = bootstrap.Host.RecordExecution(registration, issued, state.Session + ":" + promptId, true, true, rawHash, report.RawVerdict, completedAt);
             var normalized = ReviewNormalizer.Normalize(request, new(patch, "claude", report.Verdict, report.Findings, rawHash, completedAt, false, false, false, false), bootstrap.Policy, issued, execution);
             var receiptBytes = ReviewReceiptSerializer.Serialize(ReviewReceiptSerializer.Create(normalized));
             var receipt = ContractValidator.ParseAndValidate(receiptBytes);
             Save(Path.Combine(artifactDirectory, "independent-review-receipt.json"), receiptBytes);
-            Current();
+            Current(); usage?.RequireFinal();
             if (normalized.Outcome == ReviewOutcome.Pass && normalized.ProductionAccepted)
             {
-                AcceptedRevision = AcceptedLocalRevision.Issue(original, bootstrap, receipt, normalized, acceptance);
+                AcceptedRevision = usage is null ? AcceptedLocalRevision.Issue(original, bootstrap, receipt, normalized, acceptance) : usage.Accept(() => AcceptedLocalRevision.Issue(original, bootstrap, receipt, normalized, acceptance));
             }
             return normalized.Outcome switch
             {
@@ -412,7 +443,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             original.RecordFirstCaught("independent-review-" + phase, primary);
             phaseFailure = primary;
             if (parsedFindings is not null) primary.Data["IndependentReviewerParsedFindings"] = parsedFindings;
-            phaseStop.Cancel();
+            if (usage?.Failure is null) phaseStop.Cancel(); // Keep raw late usage draining during a measured stop.
             if (nativeBirthEntered && !nativeBirthReturned) RetainUncertain("Actual reviewer creation entered without returning its original owner.");
             if (process is not null)
             {
@@ -424,6 +455,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
                 }
                 catch (Exception secondary) { uncertain = true; original.RetainUnknown(); throw new AggregateException("Independent review and original retirement failure.", primary, secondary); }
             }
+            if (usage is not null) await usage.JoinAsync(usageWatch, primary).ConfigureAwait(false);
             primary.Data["IndependentReviewerEvents"] = Snapshot();
             if (process is not null)
             {
@@ -436,6 +468,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         {
             try
             {
+                if (usage is not null) await usage.JoinAsync(usageWatch, phaseFailure).ConfigureAwait(false);
                 if (heldImage is not null)
                 {
                     if (Unknown) heldImage.RetainUnknown();

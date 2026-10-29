@@ -12,6 +12,9 @@ public sealed record CodexAppServerSelection(string Executable, long Bytes, stri
 public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHostPort, IHostInstructionPort
 {
     readonly LinuxScopeSelection? linuxScope;
+    readonly ReportedModelUsage.UsageNode? usageNode;
+    ReportedModelUsage.UsageNode.UsageSession? usage; CodexReportedUsage? reportedUsage; Task? usageWatch;
+    long usageThreadRpc, usageTurnRpc;
     readonly InstalledHostAdmission.RuntimeTrust? runtimeTrust;
     readonly bool conformanceTrustRoute;
     readonly bool conformanceDangerFullAccess;
@@ -30,11 +33,12 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     readonly CodexPendingReplies pending = new(); readonly List<JsonElement> trace = []; readonly object gate = new(); CodexStartupJournal? startup;
     readonly Dictionary<string, JsonElement> terminals = new(StringComparer.Ordinal); readonly List<Task> tasks = [];
     OwnedDuplexProcess? process; CodexJsonlProtocol? protocol; Task? pump; AgentRequest? request; AgentRunBinding? binding;
-    TaskCompletionSource<JsonElement>? terminalWait; long nextId; bool startEntered, shutdown; string? threadId, turnId; Exception? pumpFailure;
+    TaskCompletionSource<JsonElement>? terminalWait; long nextId; bool startEntered; volatile bool shutdown; string? threadId, turnId; Exception? pumpFailure;
     public AgentAdapterProfile Profile { get; }
     public HostObservationRealm Realm => HostObservationRealm.ActualHost;
     public IReadOnlyList<Task> OriginalTasks { get { lock (tasks) return tasks.ToArray(); } }
-    public OwnedDuplexProcess? OriginalProcess => process; // reference only, never a PID adoption API.
+    public OwnedDuplexProcess? OriginalProcess => process;
+    internal ReportedModelUsage.UsageSnapshot? SnapshotReportedUsage() => usage?.Evidence();
     string? observedModel, observedProvider; bool observedChatgptAccount; volatile bool accountReadRefused; long accountReadId; long configReadId; string? observedRoute; JsonElement routeProjection;
     internal string? CompletedImplementationFamily(AgentCompletionReceipt completion)
     {
@@ -51,7 +55,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     }
     public CodexAppServerPort(CodexAppServerSelection selection, WorktreeManager actualGit, AgentAdapterProfile acceptedProfile, LinuxScopeSelection? linuxScope = null)
         : this(selection, actualGit, acceptedProfile, linuxScope, null) { }
-    internal CodexAppServerPort(CodexAppServerSelection selection, WorktreeManager actualGit, AgentAdapterProfile acceptedProfile, LinuxScopeSelection? linuxScope, InstalledHostAdmission.RuntimeTrust? runtimeTrust, bool conformanceTrustRoute = false, bool conformanceDangerFullAccess = false, Action<string>? conformanceLeafCounters = null)
+    internal CodexAppServerPort(CodexAppServerSelection selection, WorktreeManager actualGit, AgentAdapterProfile acceptedProfile, LinuxScopeSelection? linuxScope, InstalledHostAdmission.RuntimeTrust? runtimeTrust, bool conformanceTrustRoute = false, bool conformanceDangerFullAccess = false, Action<string>? conformanceLeafCounters = null, ReportedModelUsage.UsageNode? usageNode = null)
     {
         ArgumentNullException.ThrowIfNull(selection); ArgumentNullException.ThrowIfNull(acceptedProfile);
         if (conformanceTrustRoute && ((!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) ||
@@ -67,6 +71,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             throw new ToolUsageException("One-job danger-full-access is only an explicit unverified Linux conformance selection for the exact admitted image and concrete restrictive scope; no runtime trust.");
         if (conformanceLeafCounters is not null && (!OperatingSystem.IsLinux() || linuxScope is null || runtimeTrust is not null || !conformanceTrustRoute && !conformanceDangerFullAccess || acceptedProfile.Capabilities is null || acceptedProfile.Capabilities.Count == 0 || acceptedProfile.Capabilities.Any(row => row is null || row.Status != AgentCapabilityStatus.Unverified)))
             throw new ToolUsageException("Leaf diagnostics require an explicit unverified Linux conformance route; production has no observer.");
+        this.usageNode = usageNode;
         this.conformanceLeafCounters = conformanceLeafCounters;
         this.conformanceDangerFullAccess = conformanceDangerFullAccess;
         this.conformanceTrustRoute = conformanceTrustRoute; this.runtimeTrust = runtimeTrust; this.linuxScope = linuxScope;
@@ -126,11 +131,13 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     Task Keep(Task actual) { lock (tasks) { if (tasks.Count >= 1024) throw new IOException("Finite actual Codex task ledger exhausted."); tasks.Add(actual); } return actual; }
     async Task<JsonElement> Rpc(string method, object parameters, CancellationToken token)
     {
-        original.Check(); var id = Interlocked.Increment(ref nextId); if (id > 64) throw new IOException("Fixed Codex RPC allowance exceeded.");
+        original.Check(); if (method != "turn/interrupt") usage?.Check(); var id = Interlocked.Increment(ref nextId); if (id > 64) throw new IOException("Fixed Codex RPC allowance exceeded.");
         runtimeTrust?.Check(original); trustedImage?.Check(token);
         if (shutdown || pump is { IsCompleted: true }) pending.Fail(pumpFailure ?? new IOException("Original Codex pump has stopped; no new RPC."));
         var reply = pending.Register(id);
         if (TrustProtocol) lock (gate) trustedReplyMethods.Add(id, method);
+        if (method == "thread/start") Volatile.Write(ref usageThreadRpc, id);
+        if (method == "turn/start") Volatile.Write(ref usageTurnRpc, id);
         if (method == "account/read") Volatile.Write(ref accountReadId, id);
         if (method == "config/read") Volatile.Write(ref configReadId, id);
         try
@@ -170,6 +177,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                     (rawResult.TryGetProperty("config", out _) || rawResult.TryGetProperty("layers", out _) || rawResult.TryGetProperty("origins", out _)) &&
                     (!message.GetProperty("id").TryGetInt64(out var configurationId) || configurationId != Volatile.Read(ref configReadId)))
                     throw new IOException("Configuration-shaped response has a foreign correlation; no response payload is retained.");
+                ObserveReportedUsage(message); // Raw numeric spend BEFORE redaction/trace.
                 if (TrustProtocol)
                 {
                     if (message.TryGetProperty("method", out _))
@@ -228,6 +236,36 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             }
         }
         catch (Exception error) { pumpFailure = error; pending.Fail(error); lock (gate) terminalWait?.TrySetException(error); if (!shutdown) original.RetainUnknown(); throw; }
+    }
+    void ObserveReportedUsage(JsonElement message)
+    {
+        if (reportedUsage is null) return;
+        try
+        {
+            if (message.TryGetProperty("method", out var method))
+            {
+                if (message.TryGetProperty("id", out _)) return;
+                if (method.GetString() == "thread/tokenUsage/updated") reportedUsage.Observe(UsageNumbers.Object(message, "params"));
+                if (method.GetString() == "turn/completed") reportedUsage.Terminal(UsageNumbers.Object(message, "params"));
+            }
+            else if (!message.TryGetProperty("error", out _))
+            {
+                var id = message.GetProperty("id").GetInt64(); var result = UsageNumbers.Object(message, "result");
+                if (id == Volatile.Read(ref usageThreadRpc)) reportedUsage.BindThread(UsageNumbers.Id(UsageNumbers.Object(result, "thread"), "id"));
+                if (id == Volatile.Read(ref usageTurnRpc)) reportedUsage.BindTurn(UsageNumbers.Id(UsageNumbers.Object(result, "turn"), "id"));
+            }
+        }
+        catch (Exception error) when (error is ReportedUsageException or InvalidOperationException or KeyNotFoundException) { usage!.Refuse(); }
+    }
+    async Task StopForReportedUsage()
+    {
+        shutdown = true; var failure = usage!.Failure ?? new ReportedUsageException("Containing run usage stopped.");
+        pending.Fail(failure); lock (gate) terminalWait?.TrySetException(failure);
+        if (process is not null)
+        {
+            var stopped = await Keep(process.RetireAsync(true)).ConfigureAwait(false);
+            if (!stopped.KnownClosed || process.HasUnknownIo) { original.RetainUnknown(); throw new IOException("Reported usage stop has unknown actual retirement."); }
+        }
     }
     // Internal fixture opt-in only. Production/public defaults remain cwd-only.
     internal static object ConformanceDangerFullAccessParameters(AgentRequest actual) =>
@@ -296,6 +334,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         try
         {
             if (actual.AdapterId != "codex.cli" || actual.AdapterVersion != selection.Version || remaining <= TimeSpan.Zero || remaining > original.WorkLimit) throw new WorkerEnvelopeException("Actual request/version/deadline differs from containing original.");
+            usage = usageNode?.Register(); reportedUsage = usage is null ? null : new(usage); usage?.Check();
             var confined = UsesLinuxWorkspaceWrite;
             runtimeTrust?.BindWorker(original, selection, actual.Worktree, actual.ResultDirectory, linuxScope);
             startup!.SetStage(CodexStartupStage.NativeImageVerification);
@@ -317,6 +356,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             runtimeTrust?.Check(original); trustedImage?.Check(token);
             startup.SetStage(CodexStartupStage.NativeCreation); trustedNativeCreationEntered = true; process = OwnedDuplexProcess.Open(new(selection.Executable, ["app-server"], actual.Worktree, environment), original, linuxScope, exactImage); trustedNativeCreationReturned = true; if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             if (exactImage is not null && (!process.HasCreationOwnedExactLinuxImage || process.CreationOwnedExactLinuxImageBacking != linuxScope!.ExactImageBacking)) throw new IOException("Actual creation-owned exact Linux image/backing proof required before Codex protocol startup.");
+            if (usage is not null) usageWatch = Keep(usage.WatchAsync(StopForReportedUsage));
             protocol = new(process.Input, process.Output, original); pump = Pump(original.Token); process.AttachOriginalOutputConsumer(pump); lock (tasks) tasks.Add(pump);
             startup.SetStage(CodexStartupStage.Initialize); _ = await Rpc("initialize", new { clientInfo = new { name = "delivery_forge", title = "Delivery Forge", version = "0.1.0" }, capabilities = new { experimentalApi = false } }, token).ConfigureAwait(false);
             startup.SetStage(CodexStartupStage.InitializedNotification); startup.Client("initialized", null, CodexWireState.WriteEntered);
@@ -371,9 +411,10 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                     throw new WorktreeBoundaryException("Original confined Git roots changed before turn.");
                 turnParameters = new { threadId, input = new[] { new { type = "text", text = HostAssignmentPrompt.Create(actual, instructions!) } }, sandboxPolicy = LinuxWorkspaceWritePolicy(roots) };
             }
+            reportedUsage?.BeginTurn();
             startup.SetStage(CodexStartupStage.TurnStart); var turn = await Rpc("turn/start", turnParameters, token).ConfigureAwait(false); turnId = Text(turn.GetProperty("turn"), "id");
             lock (gate) { terminalWait = new(TaskCreationOptions.RunContinuationsAsynchronously); if (terminals.TryGetValue(turnId, out var early)) { if (Text(early.GetProperty("params"), "threadId") != threadId) throw new IOException("Early terminal has foreign actual thread."); terminalWait.TrySetResult(early); } binding = new(actual.AdapterId, actual.AdapterVersion, actual.RunId, actual.RequestIdentity, threadId, turnId); }
-            original.Check(); startup.SetStage(CodexStartupStage.Accepted); return new(actual.SchemaVersion, actual.RunId, actual.RequestIdentity, actual.PlanIdentity, actual.BaseCommit, actual.Worktree, actual.AdapterId, actual.AdapterVersion, threadId, turnId, DateTimeOffset.UtcNow, Profile.Capabilities);
+            usage?.Check(); original.Check(); startup.SetStage(CodexStartupStage.Accepted); return new(actual.SchemaVersion, actual.RunId, actual.RequestIdentity, actual.PlanIdentity, actual.BaseCommit, actual.Worktree, actual.AdapterId, actual.AdapterVersion, threadId, turnId, DateTimeOffset.UtcNow, Profile.Capabilities);
         }
         catch (Exception primary)
         {
@@ -389,12 +430,14 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                     catch (Exception diagnostic) { conformanceCounterFailure = diagnostic; throw; }
                 };
             }
+            shutdown = true;
             await RetireFailedStartupAsync(primary, capture, async () =>
             {
                 try
                 {
                     if (process is not null) { var stop = process.RetireAsync(true); lock (tasks) tasks.Add(stop); var closed = await stop.ConfigureAwait(false); CloseTrustedImage(closed.KnownClosed && !process.HasUnknownIo, true); }
                     else CloseTrustedImage(!trustedNativeCreationEntered || trustedNativeCreationReturned, true);
+                    if (usage is not null) await usage.JoinAsync(usageWatch, primary).ConfigureAwait(false);
                 }
                 catch { trustedImage?.RetainUnknown(); throw; }
             }).ConfigureAwait(false);
@@ -412,12 +455,22 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             if (TrustProtocol) await ObserveRoute(token).ConfigureAwait(false);
             shutdown = true; var retired = await Keep(process!.RetireAsync(false)).ConfigureAwait(false); HostTransportRetirement.RequireSuccessful(retired);
             if (pump is not null) await pump.WaitAsync(original.Remaining, token).ConfigureAwait(false); if (pumpFailure is not null) throw new IOException("Actual app-server protocol failed; no successful completion.", pumpFailure);
+            usage?.RequireFinal(); if (usage is not null) await usage.JoinAsync(usageWatch).ConfigureAwait(false);
             runtimeTrust?.Check(original); trustedImage?.Check(token); CloseTrustedImage(true, false);
             var snapshotTask = actualGit.ObserveAsync(request!.Worktree, token); var snapshot = await Keep(snapshotTask).WaitAsync(original.Remaining, token).ConfigureAwait(false); original.Check();
-            original.Check(); var artifact = Path.Combine(request.ResultDirectory, "codex-app-server-events.json"); JsonElement[] rows; lock (trace) rows = trace.ToArray(); var raw = conformanceTrustRoute ? JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualCodexAppServerTrace-v1", Host = new StandaloneHostSelection(selection.Executable, selection.Bytes, selection.Sha256, selection.Version), Version = selection.Version, TrustRouteConformanceOnly = conformanceTrustRoute, ConformanceDangerFullAccess = conformanceDangerFullAccess, actual.RunId, actual.RequestIdentity, ThreadId = threadId, TurnId = turnId, Events = rows, Retirement = retired, PumpFailure = pumpFailure?.GetType().FullName, RuntimeCertified = false }, BoundedFiles.Json) : JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualCodexAppServerTrace-v1", TrustRouteConformanceOnly = conformanceTrustRoute, ConformanceDangerFullAccess = conformanceDangerFullAccess, actual.RunId, actual.RequestIdentity, ThreadId = threadId, TurnId = turnId, Events = rows, Retirement = retired, PumpFailure = pumpFailure?.GetType().FullName, RuntimeCertified = false }, BoundedFiles.Json); BoundedFiles.WriteNew(artifact, raw, original);
-            return new(request.SchemaVersion, request.RunId, request.RequestIdentity, request.AdapterId, request.AdapterVersion, actual.RuntimeRunIdentity, actual.RuntimeTaskIdentity, "success", request.Worktree, snapshot.HeadCommit, snapshot.TreeId, DateTimeOffset.UtcNow, [artifact], ["Actual transport only; independent review, real quality/current-source and installed conformance remain separate."]);
+            original.Check(); var artifact = Path.Combine(request.ResultDirectory, "codex-app-server-events.json"); JsonElement[] rows; lock (trace) rows = trace.ToArray(); var raw = conformanceTrustRoute ? JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualCodexAppServerTrace-v1", Host = new StandaloneHostSelection(selection.Executable, selection.Bytes, selection.Sha256, selection.Version), Version = selection.Version, TrustRouteConformanceOnly = conformanceTrustRoute, ConformanceDangerFullAccess = conformanceDangerFullAccess, actual.RunId, actual.RequestIdentity, ThreadId = threadId, TurnId = turnId, Events = rows, ReportedUsage = usage?.Evidence(), Retirement = retired, PumpFailure = pumpFailure?.GetType().FullName, RuntimeCertified = false }, BoundedFiles.Json) : JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualCodexAppServerTrace-v1", TrustRouteConformanceOnly = conformanceTrustRoute, ConformanceDangerFullAccess = conformanceDangerFullAccess, actual.RunId, actual.RequestIdentity, ThreadId = threadId, TurnId = turnId, Events = rows, ReportedUsage = usage?.Evidence(), Retirement = retired, PumpFailure = pumpFailure?.GetType().FullName, RuntimeCertified = false }, BoundedFiles.Json); BoundedFiles.WriteNew(artifact, raw, original);
+            usage?.RequireFinal();
+            AgentCompletionReceipt Receipt() => new(request.SchemaVersion, request.RunId, request.RequestIdentity, request.AdapterId, request.AdapterVersion, actual.RuntimeRunIdentity, actual.RuntimeTaskIdentity, "success", request.Worktree, snapshot.HeadCommit, snapshot.TreeId, DateTimeOffset.UtcNow, [artifact], ["Actual transport only; independent review, real quality/current-source and installed conformance remain separate."]);
+            return usage is null ? Receipt() : usage.Accept(Receipt);
         }
-        catch (Exception failure) { primary = failure; throw; }
+        catch (Exception failure)
+        {
+            primary = failure;
+            if (usage?.Failure is not null && usageWatch is not null)
+                try { await usageWatch.ConfigureAwait(false); }
+                catch (Exception cleanup) { throw new AggregateException("Codex completion and reported usage stop failure.", failure, cleanup); }
+            throw;
+        }
         finally
         {
             // A failed route/pump/postcheck cannot strand a cleanly retired image.
@@ -443,6 +496,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         // WORK may already be closed by the containing stop latch. Regardless of
         // interrupt availability, only this original owner can stop its own Job.
         shutdown = true; var retired = await Keep(process!.RetireAsync(true)).ConfigureAwait(false); CloseTrustedImage(retired.KnownClosed && !process.HasUnknownIo, true); lock (gate) terminalWait?.TrySetException(new OperationCanceledException("Original owner stop settled or remains explicitly unknown.")); pending.Fail(new OperationCanceledException("Original app-server stopped; no RPC replay."));
+        if (usage is not null) await usage.JoinAsync(usageWatch).ConfigureAwait(false);
         return new(actual, action, retired.KnownClosed ? AgentActivityState.Quiescent : AgentActivityState.Unknown, retired.KnownClosed, "actual-private-original-app-server-retirement", "Interrupt response alone never proves quiescence; original root/Job/IO/disposition joined. InterruptFailure=" + interruptFailure?.GetType().FullName);
     }
     public Task<AgentControlResult> ObserveUnstartedAsync(AgentRunBinding actual, TimeSpan remaining, CancellationToken token)

@@ -23,6 +23,7 @@ internal sealed class InstalledReviewHost : IDisposable
     readonly InstalledReviewSelection selection; readonly ToolLifetime original;
     readonly ProcessCommandExecutor executor;
     readonly LinuxScopeSelection? linuxScope;
+    readonly ReportedModelUsage.UsageNode? reportedUsage;
     readonly InstalledHostAdmission.RuntimeTrust? runtimeTrust;
     readonly List<BoundedCommandCaptureResult> captures = [];
     FrozenPlan? frozen; FrozenWorkerPlan? assignment; TrustedConfiguration? boundConfiguration;
@@ -45,11 +46,11 @@ internal sealed class InstalledReviewHost : IDisposable
     }
 
     internal InstalledReviewHost(TrustedConfiguration config, AdmissionFile actualConfigurationPin,
-        ToolLifetime actualOriginal, ProcessCommandExecutor actualExecutor, LinuxScopeSelection? selectedLinuxScope = null, InstalledHostAdmission.RuntimeTrust? runtimeTrust = null)
+        ToolLifetime actualOriginal, ProcessCommandExecutor actualExecutor, LinuxScopeSelection? selectedLinuxScope = null, InstalledHostAdmission.RuntimeTrust? runtimeTrust = null, ReportedModelUsage.UsageNode? reportedUsage = null)
     {
         configuration = config; configurationPin = actualConfigurationPin;
         original = actualOriginal; executor = actualExecutor;
-        linuxScope = selectedLinuxScope; this.runtimeTrust = runtimeTrust;
+        linuxScope = selectedLinuxScope; this.runtimeTrust = runtimeTrust; this.reportedUsage = reportedUsage;
         selection = config.InstalledReview ?? throw new ToolUsageException("No trusted installed review selection.");
         ValidateSelection(selection);
         if (!Same(config.GitExecutable, selection.GitImage.Path))
@@ -211,7 +212,7 @@ internal sealed class InstalledReviewHost : IDisposable
         });
         independentReviewer = new(selection.IndependentReviewer, original, executor, parent, assignment.RunId, reviewerDirectory, userSettings, bootstrap,
             () => ReferenceEquals(frame.Completion, completion) && frame.OwnerCompleted && !frame.OwnerStopped && frame.Primary is null && frame.Post is null && actualNativeCompletedAndQuiet(),
-            () => parent.EnterSynchronous(assignment.RunId, () => { sourceOwner.Check(); _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536); return true; }), linuxScope, runtimeTrust);
+            () => parent.EnterSynchronous(assignment.RunId, () => { sourceOwner.Check(); _ = InstalledHostAdmission.ReadExact(configurationPin, original, 65536); return true; }), linuxScope, runtimeTrust, reportedUsage);
         return await parent.EnterAsync(assignment.RunId, () => independentReviewer.RunAsync(actualAuthorFamily,
             Path.Combine(selection.ArtifactRoot, assignment.RunId), PrepareEvidence)).ConfigureAwait(false);
     }
