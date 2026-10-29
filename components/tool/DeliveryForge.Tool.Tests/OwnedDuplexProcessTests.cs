@@ -58,6 +58,30 @@ public sealed class OwnedDuplexProcessTests
     public sealed record FixtureBinding(string Image, IReadOnlyList<FixturePin> Files, LinuxScopeImage? NegativeGateBuildReceipt = null);
     static void AssertPhysicalScope(DuplexRetirement actual) { Assert.True(actual.KnownClosed, string.Join(";", actual.Failures)); Assert.True(actual.RootExited); Assert.Equal(0u, actual.ActiveProcesses); Assert.True(actual.DispositionReturned); }
     [Fact(Timeout = 90000)]
+    public async Task Actual_prompt_framing_and_original_graceful_retirement_observe_buffered_final_usage_with_phase_cancelled()
+    {
+        using var affinity = new Affinity(); await using var run = new Run("usage-on-eof"); await run.Ready();
+        var slots = new DeliveryForge.Scheduling.ResourceSlots(1, 1, 64, 1, 1, 0);
+        var budget = DeliveryForge.Scheduling.ResourceBudget.Measure(slots, new("actual-framing-control", true, slots, TimeSpan.FromSeconds(60), 100000, 0));
+        var session = ReportedModelUsage.Bind(budget, 100000, 100000).Register(); var usage = new ClaudeReportedUsage(session);
+        var codec = new DeliveryForge.Tool.Codex.CodexJsonlProtocol(run.Session.Input, run.Session.Output, run.Original);
+        using var phase = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        async Task ReadFinal()
+        {
+            using var row = await codec.ReadAsync(run.Original.Token); Assert.NotNull(row); usage.Observe(row.RootElement, "fixture-session");
+            Assert.Null(await codec.ReadAsync(run.Original.Token));
+        }
+        var pump = ReadFinal(); run.Session.AttachOriginalOutputConsumer(pump);
+        await ReportedModelUsage.WritePromptAsync(session, codec, new { type = "user", message = new { role = "user", content = "fixed fixture" } }, phase.Token);
+        phase.Cancel(); // Forward phase is stopped; original WORK observation still owns EOF.
+        var closed = await run.Session.RetireAsync(false);
+        await pump.WaitAsync(run.Original.Remaining, TestContext.Current.CancellationToken);
+        session.RequireFinal(); session.Finish(); AssertPhysicalScope(closed);
+        Assert.Equal(0, closed.ExitCode); Assert.True(closed.OutputEof && closed.ErrorEof); Assert.False(run.Session.HasUnknownIo);
+        var actual = session.Evidence(); Assert.Equal(19, actual.AggregateTokens); Assert.True(actual.FinalUsageKnown); Assert.False(actual.Stopped);
+        run.Preserve(closed);
+    }
+    [Fact(Timeout = 90000)]
     public async Task Actual_duplex_roundtrip_complete_EOF_and_same_first_retirement()
     {
         using var affinity = new Affinity(); await using var run = new Run("echo"); await run.Ready(); var sent = Encoding.ASCII.GetBytes("actual-duplex-16"); Assert.Equal(16, sent.Length); await run.Session.Input.WriteAsync(sent, 0, sent.Length, run.Original.Token); await run.Session.Input.FlushAsync(run.Original.Token); var actual = new byte[16]; await run.Session.Output.ReadExactlyAsync(actual, run.Original.Token); Assert.Equal(sent, actual); var eof = new byte[1]; Assert.Equal(0, await run.Session.Output.ReadAsync(eof, 0, 1, run.Original.Token)); var first = run.Session.RetireAsync(false); Assert.Same(first, run.Session.RetireAsync(false)); var closed = await first; AssertPhysicalScope(closed); Assert.Equal(0, closed.ExitCode); Assert.True(closed.OutputEof); Assert.All(run.Session.ActualIo, x => Assert.False(x.Unknown)); run.Preserve(closed);

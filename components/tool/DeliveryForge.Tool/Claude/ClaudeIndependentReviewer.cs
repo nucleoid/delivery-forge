@@ -242,7 +242,10 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         {
             while (true)
             {
-                Current(); using var doc = await protocol!.ReadAsync(token).ConfigureAwait(false);
+                // Numeric observation is not a new author/review effect. Keep it
+                // reading while original WORK remains, despite phase stop. The
+                // existing framing/owner still refuses WORK-to-cleanup reads.
+                using var doc = await protocol!.ReadAsync(token).ConfigureAwait(false);
                 if (doc is null) { if (!shutdown) throw new IOException("Unexpected independent reviewer EOF."); return; }
                 var row = doc.RootElement;
                 var usageType = ClaudeStreamState.Text(row, "type");
@@ -274,7 +277,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         }
         catch (Exception failure)
         {
-            pumpFailure = failure; initialized.TrySetException(failure); complete.TrySetException(failure); usage?.FailIncompleteDispatch(); throw;
+            pumpFailure = failure; initialized.TrySetException(failure); complete.TrySetException(failure); usage?.MarkObservationUnavailable(); throw;
         }
     }
     internal async Task<ToolResult> RunAsync(string authorFamily, string artifactDirectory,
@@ -374,12 +377,11 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             });
             if (process.StartupFailure is Exception startup) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(startup).Throw();
             usage?.Check();
-            protocol = new(process.Input, process.Output, original); pump = Keep(Pump(phaseStop.Token)); process.AttachOriginalOutputConsumer(pump);
+            protocol = new(process.Input, process.Output, original); pump = Keep(Pump(original.Token)); process.AttachOriginalOutputConsumer(pump);
             await protocol.WriteAsync(new { type = "control_request", request_id = "forge-review-initialize", request = new { subtype = "initialize", hooks = (object?)null } }, phaseStop.Token).ConfigureAwait(false);
             await initialized.Task.WaitAsync(Remaining(started), phaseStop.Token).ConfigureAwait(false);
             usage?.Check(); state.AdmitPrompt();
-            usage?.EnterModelWrite();
-            await protocol.WriteAsync(new { type = "user", session_id = "", message = new { role = "user", content = prompt }, parent_tool_use_id = (string?)null, uuid = promptId, origin = new { kind = "human" }, client_composed = true }, phaseStop.Token).ConfigureAwait(false);
+            await ReportedModelUsage.WritePromptAsync(usage, protocol, new { type = "user", session_id = "", message = new { role = "user", content = prompt }, parent_tool_use_id = (string?)null, uuid = promptId, origin = new { kind = "human" }, client_composed = true }, phaseStop.Token).ConfigureAwait(false);
             await complete.Task.WaitAsync(Remaining(started), phaseStop.Token).ConfigureAwait(false);
             state.RequireSuccess(); usage?.RequireFinal(); shutdown = true;
             var retirement = Keep(process.RetireAsync(false)); var retired = await retirement.ConfigureAwait(false);
@@ -444,8 +446,11 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             // or image disposition can obscure it. No output/account/path DATA.
             original.RecordFirstCaught("independent-review-" + phase, primary);
             phaseFailure = primary;
+            primary.Data["IndependentReviewerReportedUsage"] = usage?.Evidence();
             if (parsedFindings is not null) primary.Data["IndependentReviewerParsedFindings"] = parsedFindings;
-            if (usage?.Failure is null) phaseStop.Cancel(); // Keep raw late usage draining during a measured stop.
+            phaseStop.Cancel(); // Stops forward phase effects, not the original-token pump.
+            // Forced cleanup/WORK expiry can cut parsing; do not promise exact
+            // final provider spend after that boundary. The run remains stopped.
             if (nativeBirthEntered && !nativeBirthReturned) RetainUncertain("Actual reviewer creation entered without returning its original owner.");
             if (process is not null)
             {
@@ -458,6 +463,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
                 catch (Exception secondary) { uncertain = true; original.RetainUnknown(); throw new AggregateException("Independent review and original retirement failure.", primary, secondary); }
             }
             if (usage is not null) await usage.JoinAsync(usageWatch, primary).ConfigureAwait(false);
+            primary.Data["IndependentReviewerReportedUsage"] = usage?.Evidence();
             primary.Data["IndependentReviewerEvents"] = Snapshot();
             if (process is not null)
             {
@@ -471,6 +477,7 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             try
             {
                 if (usage is not null) await usage.JoinAsync(usageWatch, phaseFailure).ConfigureAwait(false);
+                if (phaseFailure is not null) phaseFailure.Data["IndependentReviewerReportedUsage"] = usage?.Evidence();
                 if (heldImage is not null)
                 {
                     if (Unknown) heldImage.RetainUnknown();
@@ -505,7 +512,11 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
                     }
                 }
             }
-            finally { lock (tasks) phaseCancellation = null; }
+            finally
+            {
+                if (phaseFailure is not null) phaseFailure.Data["IndependentReviewerReportedUsage"] = usage?.Evidence();
+                lock (tasks) phaseCancellation = null;
+            }
         }
     }
     static string Hash(byte[] bytes) => "sha256:" + Convert.ToHexStringLower(SHA256.HashData(bytes));

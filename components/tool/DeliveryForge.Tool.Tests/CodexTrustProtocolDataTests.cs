@@ -427,7 +427,37 @@ public sealed class CodexTrustProtocolDataTests
         Assert.Throws<IOException>(() => ProductionBatchOwner.ValidateHistory([initial, restored, restored with { ReportedUsage = null }], initial.ConfigurationSha256, identity, selected, plans));
         Assert.Throws<IOException>(() => ProductionBatchOwner.ValidateHistory([initial, restored, restored with { ReportedUsage = observed with { AggregateTokens = 11 } }], initial.ConfigurationSha256, identity, selected, plans));
         Assert.Throws<IOException>(() => ProductionBatchOwner.ValidateHistory([initial, restored with { ReportedUsage = observed with { StopScope = "unknown" } }], initial.ConfigurationSha256, identity, selected, plans));
+        Assert.Throws<IOException>(() => ProductionBatchOwner.ValidateHistory([initial with { ReportedUsage = new(100000, 100000, false, null, null, null) }], initial.ConfigurationSha256, identity, selected, plans));
+        Assert.Throws<IOException>(() => ProductionBatchOwner.ValidateHistory([initial, restored with { ReportedUsage = new(100000, 100000, true, "aggregate", 100001, 100000) }], initial.ConfigurationSha256, identity, selected, plans));
         Assert.False(new ReconstructedBatchData("batch-DATA", restored.Phases, plans, selected.Policy.Identity, true, true, ["DATA only"]).MayDispatch);
+    }
+
+    [Fact]
+    public void Cutoff_keeps_late_numeric_spend_but_cannot_restore_final_usage_acceptance()
+    {
+        var session = UsageSession(); session.EnterModelWrite(); session.Observe(10, 2, true);
+        session.MarkObservationUnavailable(); session.Observe(20, 3, true);
+        var actual = session.Evidence(); Assert.Equal(23, actual.AggregateTokens); Assert.True(actual.Stopped);
+        Assert.False(actual.FinalUsageKnown); Assert.Throws<ReportedUsageException>(session.RequireFinal);
+    }
+    [Fact]
+    public async Task Persist_usage_snapshot_and_atomic_controls_remain_consistent_across_late_stops()
+    {
+        var budget = UsageBudget(); var session = ReportedModelUsage.Bind(budget, 100000, 100000).Register();
+        var earlier = ReportedModelUsage.Snapshot(budget); session.Observe(100000, 0, true);
+        var control = new ProductionBatchControl();
+        var before = ProductionBatchOwner.SnapshotReportedControls(earlier, control);
+        Assert.False(earlier!.Stopped); Assert.False(before.Paused); Assert.False(before.Stopped);
+        var after = ProductionBatchOwner.SnapshotReportedControls(ReportedModelUsage.Snapshot(budget), control);
+        Assert.True(after.Paused); Assert.True(after.Stopped);
+        var operatorControl = new ProductionBatchControl(); Task<(bool Paused, bool Stopped)>? reader = null;
+        operatorControl.EnterNodeStart(() =>
+        {
+            reader = Task.Run(operatorControl.Snapshot, TestContext.Current.CancellationToken);
+            operatorControl.Stop(); return true;
+        });
+        var actual = await reader!.WaitAsync(TestContext.Current.CancellationToken);
+        Assert.True(actual.Paused); Assert.True(actual.Stopped);
     }
 
 }

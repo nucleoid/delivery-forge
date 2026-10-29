@@ -75,6 +75,13 @@ using (var actual = Process.GetCurrentProcess())
 {
     Console.WriteLine("READY|" + actual.ProcessorAffinity.ToInt64() + "|" + Environment.GetEnvironmentVariable("DOTNET_PROCESSOR_COUNT") + "|" + Environment.GetEnvironmentVariable("DOTNET_GCHeapHardLimit")); Console.Out.Flush();
 }
+if (mode == "usage-on-eof")
+{
+    var input = Console.OpenStandardInput(); var buffer = new byte[4096]; var total = 0;
+    while (true) { var count = await input.ReadAsync(buffer); if (count == 0) break; total += count; if (total > 65536) return 77; }
+    Console.WriteLine("{\"type\":\"result\",\"session_id\":\"fixture-session\",\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":2,\"cache_read_input_tokens\":3,\"output_tokens\":4}}");
+    Console.Out.Flush(); return 0;
+}
 if (mode == "fast-exit") return 0;
 if (mode is "parent-contract" or "parent-contract-hold")
 {

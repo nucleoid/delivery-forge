@@ -227,6 +227,8 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
             lock (stateGate) { retired.Add(actualOwner); active = null; }
             candidate = following;
         }
+        // Selected is candidate DATA, not proof of a persisted owner intent or
+        // started lease. A stop can retain an unstarted selected candidate.
         var snapshot = queue.Snapshot();
         if (ObserveReportedUsageStop(budget, control))
         {
@@ -239,13 +241,19 @@ internal sealed partial class ProductionBatchOwner(TrustedConfiguration containi
 
         async Task Persist()
         {
-            ObserveReportedUsageStop(budget, control);
+            var reported = ReportedModelUsage.Snapshot(budget);
+            var controls = SnapshotReportedControls(reported, control);
             original.Check();
             await Observe(store.AppendAsync(runId, "production-batch-observation", new BatchObservation(1, containingPin.Sha256, selectionIdentity,
                 selected.Policy.Identity, selected.Fairness.Identity, original.OriginalStarted, original.WholeLimit, original.WorkLimit,
                 original.Remaining, planIdentities, queue.Snapshot(), new Dictionary<string, string>(completedHeads, StringComparer.Ordinal),
-                control.Paused, control.Stopped, ReportedModelUsage.Snapshot(budget)), original.Token)).ConfigureAwait(false);
+                controls.Paused, controls.Stopped, reported), original.Token)).ConfigureAwait(false);
         }
+    }
+    internal static (bool Paused, bool Stopped) SnapshotReportedControls(ReportedModelUsage.RunSnapshot? reported, ProductionBatchControl control)
+    {
+        if (reported?.Stopped == true) control.Stop();
+        return control.Snapshot(); // One gate: never paused=false/stopped=true.
     }
     internal static bool ObserveReportedUsageStop(ResourceBudget budget, ProductionBatchControl control)
     {

@@ -76,6 +76,8 @@ internal sealed partial class ProductionBatchOwner
             if (row.ReportedUsage is { } usage)
             {
                 if (usage.AggregateTokens < 0 || usage.AggregateStopAt is <= 0 or > 100000 ||
+                    !usage.Stopped && usage.AggregateTokens >= usage.AggregateStopAt ||
+                    usage.StopScope == "aggregate" && usage.ObservedAtStop > usage.AggregateTokens ||
                     usage.Stopped && (!row.Stopped || !row.Paused || usage.StopScope is not ("session" or "node" or "aggregate" or "usage-unavailable")) ||
                     !usage.Stopped && (usage.StopScope is not null || usage.ObservedAtStop is not null || usage.SelectedStopAt is not null) ||
                     usage.Stopped && usage.StopScope != "usage-unavailable" && (usage.ObservedAtStop is null || usage.SelectedStopAt is null || usage.SelectedStopAt <= 0 || usage.SelectedStopAt > 100000 || usage.ObservedAtStop < usage.SelectedStopAt) ||

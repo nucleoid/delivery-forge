@@ -635,7 +635,7 @@ public sealed class OwnedLinuxExactImageTests
             // 8*(296885960+1)=2375087688 image-read bytes, same original credit.
             BoundedFiles.VerifyNativeImage(new(image.Path, image.Bytes, image.Sha256), original);
             if (sealedImage) BoundedFiles.ReserveExactLinuxImageReads(new(image.Path, image.Bytes, image.Sha256), original);
-            var actualScope = sealedImage ? scope : scope with { ExactImageBacking = LinuxExactImageBacking.SealedMemfd };
+            var actualScope = sealedImage ? scope : StandaloneOwnerComposition.OrdinaryLinuxScope(scope);
             var executor = new ProcessCommandExecutor(actualScope, original);
             var invocation = new CommandInvocation(path, arguments, directory, environment, InheritEnvironment: false) { EnvironmentIsComplete = true };
             var actual = await executor.ExecuteBoundedCaptureAsync(invocation, TimeSpan.FromSeconds(30), 16384,

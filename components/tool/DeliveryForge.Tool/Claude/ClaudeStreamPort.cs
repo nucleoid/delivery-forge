@@ -64,7 +64,7 @@ public sealed class ClaudeStreamPort : IHostToolSessionPort, IOriginalBoundHostP
                 lock (gate) { state!.Observe(row); if (state.Acknowledged) accepted.TrySetResult(true); if (state.Settled) settled.TrySetResult(true); }
             }
         }
-        catch (Exception failure) { pumpFailure = failure; accepted.TrySetException(failure); settled.TrySetException(failure); foreach (var reply in pending.Values) reply.TrySetException(failure); if (!shutdown) Original.RetainUnknown(); usage?.FailIncompleteDispatch(); throw; }
+        catch (Exception failure) { pumpFailure = failure; accepted.TrySetException(failure); settled.TrySetException(failure); foreach (var reply in pending.Values) reply.TrySetException(failure); if (!shutdown) Original.RetainUnknown(); usage?.MarkObservationUnavailable(); throw; }
     }
     public async Task<AgentAcceptedReceipt> StartAsync(AgentRequest actual, TimeSpan remaining, CancellationToken token)
     {
@@ -90,8 +90,7 @@ public sealed class ClaudeStreamPort : IHostToolSessionPort, IOriginalBoundHostP
             if (usage is not null) usageWatch = Keep(usage.WatchAsync(StopForReportedUsage));
             framing = new(process.Input, process.Output, Original); pump = Pump(Original.Token); _ = Keep(pump); process.AttachOriginalOutputConsumer(pump);
             _ = await Control("initialize", token).ConfigureAwait(false); usage?.Check(); lock (gate) state.AdmitPrompt();
-            usage?.EnterModelWrite();
-            await Keep(framing.WriteAsync(new { type = "user", session_id = "", message = new { role = "user", content = prompt }, parent_tool_use_id = (string?)null, uuid = promptId, origin = new { kind = "human" }, client_composed = true }, token)).ConfigureAwait(false);
+            await Keep(ReportedModelUsage.WritePromptAsync(usage, framing, new { type = "user", session_id = "", message = new { role = "user", content = prompt }, parent_tool_use_id = (string?)null, uuid = promptId, origin = new { kind = "human" }, client_composed = true }, token)).ConfigureAwait(false);
             _ = Keep(accepted.Task); await accepted.Task.WaitAsync(remaining < Original.Remaining ? remaining : Original.Remaining, token).ConfigureAwait(false);
             lock (gate) binding = new(actual.AdapterId, actual.AdapterVersion, actual.RunId, actual.RequestIdentity, state.Session, promptId); Original.Check();
             usage?.Check();

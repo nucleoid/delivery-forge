@@ -7,6 +7,7 @@ internal sealed class ProductionBatchControl
     bool paused, stopped;
     internal bool Paused { get { lock (gate) return paused; } }
     internal bool Stopped { get { lock (gate) return stopped; } }
+    internal (bool Paused, bool Stopped) Snapshot() { lock (gate) return (paused, stopped); }
     internal void Pause() { lock (gate) paused = true; }
     internal void Stop() { lock (gate) { stopped = true; paused = true; } }
     internal T EnterNodeStart<T>(Func<T> actualInvocation)

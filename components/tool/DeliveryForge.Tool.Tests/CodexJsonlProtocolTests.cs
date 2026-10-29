@@ -210,4 +210,49 @@ public sealed class CodexJsonlProtocolTests
             }
         }
     }
+    sealed class PartialPromptStream(Func<bool> marker) : MemoryStream
+    {
+        internal readonly IOException Failure = new("Entered partial prompt write.");
+        internal bool MarkerObserved;
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken token)
+        {
+            MarkerObserved = marker(); base.Write(buffer, offset, Math.Min(7, count));
+            return Task.FromException(Failure);
+        }
+    }
+    static ReportedModelUsage.UsageNode PromptNode()
+    {
+        var slots = new DeliveryForge.Scheduling.ResourceSlots(1, 1, 64, 1, 1, 0);
+        var budget = DeliveryForge.Scheduling.ResourceBudget.Measure(slots, new("framing-control", true, slots, TimeSpan.FromSeconds(60), 100000, 0));
+        return ReportedModelUsage.Bind(budget, 100000, 100000);
+    }
+    [Theory]
+    [InlineData("codex")]
+    [InlineData("claude-worker")]
+    [InlineData("claude-reviewer")]
+    public async Task Shared_actual_prompt_boundary_marks_before_partial_framing_write(string producer)
+    {
+        var node = PromptNode(); var session = node.Register();
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        using var input = new PartialPromptStream(() => session.Evidence().ModelWriteEntered); using var output = new MemoryStream();
+        var codec = new CodexJsonlProtocol(input, output, life);
+        object frame = producer == "codex" ? new { id = 1, method = "turn/start", @params = new { threadId = "fixture" } } : (object)new { type = "user", message = new { role = "user", content = "fixed fixture" } };
+        var failure = await Assert.ThrowsAsync<IOException>(() => ReportedModelUsage.WritePromptAsync(session, codec, frame, TestContext.Current.CancellationToken));
+        Assert.Same(input.Failure, failure); Assert.True(input.MarkerObserved); Assert.Equal(7, input.Length);
+        session.Finish(); Assert.True(session.Evidence().Stopped); Assert.False(session.Evidence().FinalUsageKnown);
+        Assert.Throws<ReportedUsageException>(() => node.Register());
+    }
+    [Fact]
+    public async Task Actual_prompt_then_wire_EOF_cannot_be_zero_usage_or_admit_another_write()
+    {
+        var node = PromptNode(); var session = node.Register();
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        using var input = new MemoryStream(); using var output = new MemoryStream(); var codec = new CodexJsonlProtocol(input, output, life);
+        await ReportedModelUsage.WritePromptAsync(session, codec, new { type = "user", message = new { content = "fixed fixture" } }, TestContext.Current.CancellationToken);
+        Assert.Null(await codec.ReadAsync(TestContext.Current.CancellationToken)); session.Finish(); var written = input.Length;
+        Assert.True(session.Evidence().Stopped); Assert.False(session.Evidence().FinalUsageKnown);
+        await Assert.ThrowsAsync<ReportedUsageException>(() => ReportedModelUsage.WritePromptAsync(session, codec, new { type = "user" }, TestContext.Current.CancellationToken));
+        Assert.Equal(written, input.Length);
+    }
+
 }

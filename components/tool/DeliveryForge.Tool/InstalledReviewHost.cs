@@ -51,6 +51,7 @@ internal sealed class InstalledReviewHost : IDisposable
         configuration = config; configurationPin = actualConfigurationPin;
         original = actualOriginal; executor = actualExecutor; reviewerExecutor = actualReviewerExecutor ?? actualExecutor;
         if (OperatingSystem.IsLinux() && selectedLinuxScope?.ExactImageBacking == LinuxExactImageBacking.RootControlledDisk && actualReviewerExecutor is null) throw new ToolUsageException("Explicit exact reviewer executor required separately from ordinary source Git.");
+        if (OperatingSystem.IsLinux() && selectedLinuxScope is not null) reviewerExecutor.RequireSelectedLinuxCaptureOwner(actualOriginal, selectedLinuxScope);
         linuxScope = selectedLinuxScope; this.runtimeTrust = runtimeTrust; this.reportedUsage = reportedUsage;
         selection = config.InstalledReview ?? throw new ToolUsageException("No trusted installed review selection.");
         ValidateSelection(selection);

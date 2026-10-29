@@ -53,6 +53,12 @@ internal sealed class ReportedModelUsage
         if (bound && adapter is not ("codex.cli" or "claude-code.cli"))
             throw new ToolUsageException("Production reported usage requires a supported measured model adapter; Pi is not admitted.");
     }
+    // The same actual framing boundary is used by all three model producers.
+    internal static Task WritePromptAsync(UsageNode.UsageSession? usage, Codex.CodexJsonlProtocol framing, object frame, CancellationToken token)
+    {
+        usage?.EnterModelWrite();
+        return framing.WriteAsync(frame, token);
+    }
     internal sealed class UsageNode
     {
         readonly ReportedModelUsage run;
@@ -72,7 +78,7 @@ internal sealed class ReportedModelUsage
         internal sealed class UsageSession(UsageNode node, long maximum)
         {
             long input, output;
-            bool seen, final, modelWriteEntered;
+            bool seen, final, modelWriteEntered, observationUnavailable;
             readonly TaskCompletionSource finished = new(TaskCreationOptions.RunContinuationsAsynchronously);
             internal Exception? Failure { get { lock (node.run.gate) return node.run.failure; } }
             internal void Check() => node.Check();
@@ -85,9 +91,19 @@ internal sealed class ReportedModelUsage
                     modelWriteEntered = true; // Includes ambiguous/partial write invocation.
                 }
             }
+            // Deliberately conservative: a failure/Stop may hold the whole run
+            // even if valid final usage later arrives. No pending/resume state.
             internal void FailIncompleteDispatch()
             {
-                lock (node.run.gate) if (modelWriteEntered && (!seen || !final)) Refuse();
+                lock (node.run.gate) if (modelWriteEntered && (!seen || !final || observationUnavailable)) Refuse();
+            }
+            internal void MarkObservationUnavailable()
+            {
+                lock (node.run.gate)
+                {
+                    if (!modelWriteEntered) return;
+                    observationUnavailable = true; Refuse();
+                }
             }
             internal void Refuse()
             {
@@ -120,7 +136,7 @@ internal sealed class ReportedModelUsage
             {
                 lock (node.run.gate)
                 {
-                    if (!seen || !final) node.run.Fail(new ReportedUsageException("Final correlated model usage is required; missing usage is not zero."));
+                    if (!seen || !final || observationUnavailable) node.run.Fail(new ReportedUsageException("Final correlated model usage is required; missing usage is not zero."));
                     node.run.Check();
                 }
             }
@@ -154,7 +170,7 @@ internal sealed class ReportedModelUsage
             internal UsageSnapshot Evidence()
             {
                 lock (node.run.gate) return new(input, output, node.consumed, node.run.consumed,
-                    maximum, node.maximum, node.run.maximum, seen, seen && final,
+                    maximum, node.maximum, node.run.maximum, seen, seen && final && !observationUnavailable,
                     seen && (checked(input + output) >= maximum || node.consumed >= node.maximum || node.run.consumed >= node.run.maximum), node.run.failure is not null, modelWriteEntered, node.run.SnapshotCore());
             }
             internal (long Input, long Output, long Aggregate) Snapshot() { lock (node.run.gate) return (input, output, node.run.consumed); }

@@ -143,8 +143,8 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         try
         {
             startup!.Client(method, id, CodexWireState.WriteEntered);
-            if (method == "turn/start") usage?.EnterModelWrite();
-            await Keep(protocol!.WriteAsync(new { id, method, @params = parameters }, token)).ConfigureAwait(false);
+            var frame = new { id, method, @params = parameters };
+            await Keep(method == "turn/start" ? ReportedModelUsage.WritePromptAsync(usage, protocol!, frame, token) : protocol!.WriteAsync(frame, token)).ConfigureAwait(false);
             startup.Client(method, id, CodexWireState.WriteReturned);
             return await Keep(reply.Task).WaitAsync(original.Remaining, token).ConfigureAwait(false);
         }
@@ -236,7 +236,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                 waiter.TrySetResult(message.GetProperty("result").Clone());
             }
         }
-        catch (Exception error) { pumpFailure = error; pending.Fail(error); lock (gate) terminalWait?.TrySetException(error); if (!shutdown) original.RetainUnknown(); usage?.FailIncompleteDispatch(); throw; }
+        catch (Exception error) { pumpFailure = error; pending.Fail(error); lock (gate) terminalWait?.TrySetException(error); if (!shutdown) original.RetainUnknown(); usage?.MarkObservationUnavailable(); throw; }
     }
     void ObserveReportedUsage(JsonElement message)
     {
