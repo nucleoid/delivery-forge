@@ -108,7 +108,8 @@ public sealed class CodexTrustProtocolDataTests
     static ReportedModelUsage.UsageNode.UsageSession UsageSession(long maximum = 100000) => ReportedModelUsage.Bind(UsageBudget(maximum), maximum, maximum).Register();
     static JsonElement UsageWire(long input, long output, string thread = "actual-thread", string turn = "actual-turn") => JsonSerializer.SerializeToElement(new
     {
-        threadId = thread, turnId = turn,
+        threadId = thread,
+        turnId = turn,
         tokenUsage = new { total = new { inputTokens = input, outputTokens = output, cachedInputTokens = input, reasoningOutputTokens = output, totalTokens = checked(input + output) } }
     });
     static CodexReportedUsage BoundUsage(ReportedModelUsage.UsageNode.UsageSession session)
@@ -117,7 +118,9 @@ public sealed class CodexTrustProtocolDataTests
     }
     static JsonElement ClaudeUsage(string type, long input, long cacheCreate, long cacheRead, long output, string id = "m1") => JsonSerializer.SerializeToElement(new
     {
-        type, session_id = "s1", message = new { id, usage = new { input_tokens = input, cache_creation_input_tokens = cacheCreate, cache_read_input_tokens = cacheRead, output_tokens = output } },
+        type,
+        session_id = "s1",
+        message = new { id, usage = new { input_tokens = input, cache_creation_input_tokens = cacheCreate, cache_read_input_tokens = cacheRead, output_tokens = output } },
         usage = new { input_tokens = input, cache_creation_input_tokens = cacheCreate, cache_read_input_tokens = cacheRead, output_tokens = output }
     });
     [Theory]
