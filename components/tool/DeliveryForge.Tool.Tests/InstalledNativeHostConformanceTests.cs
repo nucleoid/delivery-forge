@@ -632,6 +632,11 @@ public sealed class InstalledNativeHostConformanceTests
             Assert.False(string.IsNullOrWhiteSpace(control.EvidenceReference));
             if (requireInterruptSuccess) Assert.True(control.Limitation.EndsWith("InterruptFailure=", StringComparison.Ordinal), "Actual turn/interrupt must return successfully before same-original retirement.");
             var stopped = Assert.IsType<DeliveryForge.Tool.Codex.CodexAppServerPort>(frame.Port).SnapshotStartupDiagnostics();
+            var reportedUsage = Assert.IsType<DeliveryForge.Tool.Codex.CodexAppServerPort>(frame.Port).SnapshotReportedUsage();
+            // Test-only parser depends on the current ControlAsync fixed suffix.
+            const string interruptFailurePrefix = "InterruptFailure=";
+            Assert.Contains(interruptFailurePrefix, control.Limitation, StringComparison.Ordinal);
+            var interruptFailureType = control.Limitation[(control.Limitation.LastIndexOf(interruptFailurePrefix, StringComparison.Ordinal) + interruptFailurePrefix.Length)..];
             Assert.False(stopped.WireBoundExceeded);
             Assert.Empty(stopped.PendingIds);
             // ControlAsync deliberately closes the reply registry with this
@@ -642,22 +647,42 @@ public sealed class InstalledNativeHostConformanceTests
                 Assert.DoesNotContain(stopped.Wire, row => row.HasError || row.ErrorCode is not null);
             }
             var numbered = stopped.Wire.Where(row => row.ClientId is not null).ToArray();
-            Assert.Equal(21, numbered.Length);
+            var replies = numbered.Where(row => row.ClientId == 7 && row.Direction == DeliveryForge.Tool.Codex.CodexWireDirection.Server && row.State == DeliveryForge.Tool.Codex.CodexWireState.Received).ToArray();
+            if (requireInterruptSuccess) Assert.Single(replies); else Assert.InRange(replies.Length, 0, 1);
+            Assert.Equal(20 + replies.Length, numbered.Length);
             var entered = Assert.Single(numbered, row => row.ClientId == 7 && row.Direction == DeliveryForge.Tool.Codex.CodexWireDirection.Client && row.State == DeliveryForge.Tool.Codex.CodexWireState.WriteEntered);
             var returned = Assert.Single(numbered, row => row.ClientId == 7 && row.Direction == DeliveryForge.Tool.Codex.CodexWireDirection.Client && row.State == DeliveryForge.Tool.Codex.CodexWireState.WriteReturned);
-            var received = Assert.Single(numbered, row => row.ClientId == 7 && row.Direction == DeliveryForge.Tool.Codex.CodexWireDirection.Server && row.State == DeliveryForge.Tool.Codex.CodexWireState.Received);
+            var received = replies.SingleOrDefault();
             Assert.Equal(DeliveryForge.Tool.Codex.CodexWireMethod.TurnInterrupt, entered.Method);
             Assert.Equal(DeliveryForge.Tool.Codex.CodexWireMethod.TurnInterrupt, returned.Method);
-            Assert.Equal(DeliveryForge.Tool.Codex.CodexWireMethod.None, received.Method);
-            Assert.All(new[] { entered, returned, received }, row => Assert.Equal(DeliveryForge.Tool.Codex.CodexWireIdKind.ClientNumber, row.IdKind));
+            Assert.All(new[] { entered, returned }, row => Assert.Equal(DeliveryForge.Tool.Codex.CodexWireIdKind.ClientNumber, row.IdKind));
+            if (received is not null)
+            {
+                Assert.Equal(DeliveryForge.Tool.Codex.CodexWireMethod.None, received.Method);
+                Assert.Equal(DeliveryForge.Tool.Codex.CodexWireIdKind.ClientNumber, received.IdKind);
+            }
             Assert.Same(native, frame.Native);
             Assert.Same(retired, native.OriginalRetirementTask);
             Assert.True(frame.Retirement.OutputEof); Assert.True(frame.Retirement.ErrorEof);
             Assert.True(frame.Retirement.InputCloseReturned);
             if (requireInterruptSuccess) Assert.Empty(frame.Retirement.Failures);
             Assert.False(native.HasUnknownIo);
+            if (received is null)
+            {
+                // This Stop path initiated its own usage-unavailable stop, which
+                // raced with the optional reply; no reply cause is classified.
+                // Same-original retirement/EOF assertions above remain required.
+                Assert.False(requireInterruptSuccess);
+                Assert.Equal(typeof(ReportedUsageException).FullName, stopped.ReplyFailureType);
+                Assert.False(string.IsNullOrWhiteSpace(interruptFailureType));
+                Assert.NotNull(reportedUsage);
+                Assert.True(reportedUsage.ModelWriteEntered); Assert.True(reportedUsage.Stopped);
+                Assert.False(reportedUsage.FinalUsageKnown);
+                Assert.Equal("usage-unavailable", reportedUsage.Run.StopScope);
+            }
             Assert.All(frame.ActualCalls, call => Assert.True(call.IsCompleted));
             Assert.All(Assert.IsType<DeliveryForge.Tool.Codex.CodexAppServerPort>(frame.Port).OriginalTasks, call => Assert.True(call.IsCompleted));
+            Assert.All(stopped.OriginalTasks, status => Assert.True(status is TaskStatus.RanToCompletion or TaskStatus.Faulted or TaskStatus.Canceled));
             // RouteConformanceOnly=true; RuntimeCertified=false. This existing
             // UNVERIFIED probe cannot construct Root trust or an accepted profile.
             Assert.All(frame.Port.Profile.Capabilities, capability => Assert.Equal(AgentCapabilityStatus.Unverified, capability.Status));
@@ -671,7 +696,7 @@ public sealed class InstalledNativeHostConformanceTests
                 var faultRows = io.Where(row => row.Primary is not null || row.Post is not null).ToArray();
                 var summary = new
                 {
-                    Kind = "ActualInstalledCodexContractStopDisposition-v1",
+                    Kind = "ActualInstalledCodexContractStopDisposition-v2",
                     frame.Selected.Host,
                     Version = frame.Selected.Host.Version,
                     control.Action,
@@ -681,7 +706,10 @@ public sealed class InstalledNativeHostConformanceTests
                     StartupTrustReplyCount = 6,
                     StartupTrustNumberedRows = 18,
                     FinalNumberedRows = numbered.Length,
-                    OptionalInterrupt = new { RequestId = 7, WriteEntered = true, WriteReturned = true, ReplyReceived = true, Refused = received.HasError, received.ErrorCode },
+                    OptionalInterrupt = new { RequestId = 7, WriteEntered = true, WriteReturned = true, ReplyReceived = received is not null, ReplyObservation = received is null ? "Unobserved" : "Received", Refused = received?.HasError, ErrorCode = received?.ErrorCode, InterruptFailureType = interruptFailureType },
+                    ReportedUsage = reportedUsage,
+                    SpendKnown = reportedUsage?.FinalUsageKnown ?? false,
+                    ExclusiveInterruptFailureCauseClaimed = false,
                     Native = new { frame.Retirement.KnownClosed, frame.Retirement.RootExited, frame.Retirement.ActiveProcesses, frame.Retirement.OutputEof, frame.Retirement.ErrorEof, frame.Retirement.InputCloseReturned, frame.Retirement.DispositionReturned, frame.Retirement.ExitCode, FailureCount = frame.Retirement.Failures.Count },
                     IoCount = io.Count,
                     IoFaultCount = faultRows.Length,
