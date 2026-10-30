@@ -522,7 +522,18 @@ public sealed class InstalledNativeHostConformanceTests
     public async Task Actual_installed_native_task_accepts_exact_assignment_commits_then_refuses_foreign_completion(string adapter)
     {
         using var affinity = new OwnedDuplexProcessTests.Affinity(); await using var frame = Frame.Prepare(adapter, false); var f = frame.Selected; var accepted = await frame.Start(false); var binding = Frame.Binding(accepted);
+        var sameNative = frame.Native ?? throw new IOException("Actual original process reference missing after start.");
+        var retirementBeforeForeignWait = sameNative.OriginalRetirementTask;
         await Assert.ThrowsAsync<WorkerEnvelopeException>(() => frame.Port.WaitAsync(binding with { RuntimeTaskIdentity = binding.RuntimeTaskIdentity + "-foreign" }, frame.Original.Remaining, TestContext.Current.CancellationToken));
+        Assert.Same(sameNative, frame.Native); Assert.Same(retirementBeforeForeignWait, sameNative.OriginalRetirementTask);
+        var reportedAfterForeignWait = frame.Port switch
+        {
+            DeliveryForge.Tool.Codex.CodexAppServerPort codex => codex.SnapshotReportedUsage(),
+            DeliveryForge.Tool.Claude.ClaudeStreamPort claude => claude.SnapshotReportedUsage(),
+            _ => null
+        };
+        if (reportedAfterForeignWait is not null) Assert.False(reportedAfterForeignWait.Stopped);
+        frame.Original.Check();
         var completion = await frame.Call(() => frame.Port.WaitAsync(binding, frame.Original.Remaining, TestContext.Current.CancellationToken)); Assert.Equal(binding.RuntimeRunIdentity, completion.RuntimeRunIdentity); Assert.Equal(binding.RuntimeTaskIdentity, completion.RuntimeTaskIdentity); Assert.Equal(binding.RequestIdentity, completion.RequestIdentity); Assert.Equal("success", completion.Outcome); Assert.NotEqual(f.BaseCommit, completion.HeadCommit);
         if (f.ObserveRuntimeTrustRoute)
         {

@@ -449,10 +449,11 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     void Bound(AgentRunBinding actual) { lock (gate) if (binding is null || binding != actual) throw new WorkerEnvelopeException("No exact privately accepted Codex thread/turn binding."); }
     public async Task<AgentCompletionReceipt> WaitAsync(AgentRunBinding actual, TimeSpan remaining, CancellationToken token)
     {
+        Bound(actual);
         Exception? primary = null;
         try
         {
-            Bound(actual); original.Check(); var completed = await Keep(terminalWait!.Task).WaitAsync(remaining < original.Remaining ? remaining : original.Remaining, token).ConfigureAwait(false);
+            original.Check(); var completed = await Keep(terminalWait!.Task).WaitAsync(remaining < original.Remaining ? remaining : original.Remaining, token).ConfigureAwait(false);
             RequireSuccessfulTerminalWithLeafCounters(completed, () => ObserveConformanceLeafCounters("after-terminal"));
             if (TrustProtocol) await ObserveRoute(token).ConfigureAwait(false);
             shutdown = true; var retired = await Keep(process!.RetireAsync(false)).ConfigureAwait(false); HostTransportRetirement.RequireSuccessful(retired);

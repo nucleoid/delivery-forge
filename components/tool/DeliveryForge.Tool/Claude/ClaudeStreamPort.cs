@@ -101,9 +101,10 @@ public sealed class ClaudeStreamPort : IHostToolSessionPort, IOriginalBoundHostP
     void Bound(AgentRunBinding actual) { lock (gate) if (binding is null || binding != actual) throw new WorkerEnvelopeException("No exact private Claude session/prompt binding."); }
     public async Task<AgentCompletionReceipt> WaitAsync(AgentRunBinding actual, TimeSpan remaining, CancellationToken token)
     {
+        Bound(actual);
         try
         {
-            Bound(actual); Original.Check(); if (remaining <= TimeSpan.Zero || remaining > Original.WorkLimit) throw new ArgumentOutOfRangeException(nameof(remaining)); _ = Keep(settled.Task); await settled.Task.WaitAsync(remaining < Original.Remaining ? remaining : Original.Remaining, token).ConfigureAwait(false); lock (gate) state!.RequireSuccess(); usage?.RequireFinal();
+            Original.Check(); if (remaining <= TimeSpan.Zero || remaining > Original.WorkLimit) throw new ArgumentOutOfRangeException(nameof(remaining)); _ = Keep(settled.Task); await settled.Task.WaitAsync(remaining < Original.Remaining ? remaining : Original.Remaining, token).ConfigureAwait(false); lock (gate) state!.RequireSuccess(); usage?.RequireFinal();
             shutdown = true; var close = process!.RetireAsync(false); _ = Keep(close); var retirement = await close.ConfigureAwait(false); HostTransportRetirement.RequireSuccessful(retirement); if (pump is not null) await pump.WaitAsync(Original.Remaining, token).ConfigureAwait(false); if (pumpFailure is not null) throw new IOException("Actual Claude stream failed.", pumpFailure); lock (gate) state!.RequireSuccess();
             usage?.RequireFinal(); if (usage is not null) await usage.JoinAsync(usageWatch).ConfigureAwait(false);
             var snapshotTask = git.ObserveAsync(request!.Worktree, token); _ = Keep(snapshotTask); var snapshot = await snapshotTask.WaitAsync(Original.Remaining, token).ConfigureAwait(false); Original.Check(); JsonElement[] rows; lock (trace) rows = trace.ToArray();
