@@ -245,7 +245,7 @@ public sealed class InstalledNativeHostConformanceTests
             if (f.ObserveRuntimeTrustRoute && (adapter != "codex.cli" || !OperatingSystem.IsWindows() && !OperatingSystem.IsLinux() ||
                 OperatingSystem.IsLinux() && f.LinuxScopeProfile is null))
                 throw new IOException("Trust-route conformance selects only the existing Windows/Linux Codex UNVERIFIED producer with an actual Linux scope; no authority is granted.");
-            if (f.LinuxOwnerTrustedHelper is not null && !stop && f.CaseKind == "completion" && OperatingSystem.IsLinux() && adapter == "codex.cli" && f.Host.Version == "0.163.0-alpha.10.2")
+            if (f.LinuxOwnerTrustedHelper is not null && (!stop && f.CaseKind == "completion" || stop && f.CaseKind == "stop" && f.ObserveRuntimeTrustRoute) && OperatingSystem.IsLinux() && adapter == "codex.cli" && f.Host.Version == "0.163.0-alpha.10.2")
             {
                 if (f.Host.Bytes != 296885960 || f.Host.Sha256 != "70ea33b7094a4c20c007d09b83bb50e33debb9bbf99bf066709f9eb85bad524a") throw new IOException("Exact measured RouteA primary image required.");
                 frame.helper = new(frame.Original);
