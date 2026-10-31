@@ -62,6 +62,47 @@ internal static class CodexTrustProtocolData
     }
     internal static JsonElement ServerRequestReceipt() => JsonSerializer.SerializeToElement(new
     { method = "trust/unsupported-server-request", @params = new { payloadOmitted = true } });
+    // Called only for the pump's already-correlated response, BEFORE projection.
+    // These text matches are hints, never an OS/account/model/resource verdict.
+    internal static CodexRefusalFacts? Refusal(JsonElement message, long expectedId)
+    {
+        if (expectedId is < 1 or > 64 || message.ValueKind != JsonValueKind.Object ||
+            !message.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.Number || !id.TryGetInt64(out var actualId) || actualId != expectedId ||
+            !message.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.Object) return null;
+        string? hash = null; int? bytes = null, osCode = null; var exceeded = false; var signals = CodexRefusalSignal.None;
+        if (error.TryGetProperty("message", out var raw) && raw.ValueKind == JsonValueKind.String && raw.GetString() is { } text)
+        {
+            // Diagnostic-only bound; an oversized message does not change the
+            // existing protocol admission, exception, cleanup or UNKNOWN state.
+            exceeded = text.Length > 4096;
+            if (!exceeded)
+            {
+                var utf8 = System.Text.Encoding.UTF8.GetBytes(text); bytes = utf8.Length;
+                hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(utf8)).ToLowerInvariant();
+                bool Has(string value) => text.Contains(value, StringComparison.OrdinalIgnoreCase);
+                if (Has("os error") || Has("permission denied")) signals |= CodexRefusalSignal.OsError;
+                if (Has("unauthorized") || Has("authentication") || Has("not logged in")) signals |= CodexRefusalSignal.Authentication;
+                if (Has("model not found") || Has("model is not supported") || Has("model does not exist")) signals |= CodexRefusalSignal.Model;
+                if (Has("resource temporarily unavailable") || Has("too many open files") || Has("out of memory") || Has("rate limit")) signals |= CodexRefusalSignal.Resource;
+                if (Has("read-only") || Has("read only")) signals |= CodexRefusalSignal.ReadOnly;
+                if (Has("sqlite") || Has("database")) signals |= CodexRefusalSignal.Database;
+                if (Has("no such file or directory") || Has("path does not exist") || Has("file not found")) signals |= CodexRefusalSignal.PathMissing;
+                const string prefix = "os error ";
+                var start = text.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+                if (start >= 0 && text.IndexOf(prefix, start + prefix.Length, StringComparison.OrdinalIgnoreCase) < 0 &&
+                    (start == 0 || char.IsWhiteSpace(text[start - 1]) || text[start - 1] is '(' or '[' or '{'))
+                {
+                    start += prefix.Length; var end = start;
+                    while (end < text.Length && char.IsAsciiDigit(text[end])) end++;
+                    if (end > start && end - start <= 5 &&
+                        (end == text.Length || char.IsWhiteSpace(text[end]) || text[end] is ')' or ']' or '}' or ',' or ';' or ':') &&
+                        int.TryParse(text.AsSpan(start, end - start), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var number) && number <= 65535)
+                        osCode = number;
+                }
+            }
+        }
+        return new(hash, bytes, true, exceeded, error.TryGetProperty("data", out _), signals.ToString(), true, osCode);
+    }
     internal static string ErrorMessage(JsonElement error)
     {
         int? code = error.ValueKind == JsonValueKind.Object && error.TryGetProperty("code", out var raw) &&

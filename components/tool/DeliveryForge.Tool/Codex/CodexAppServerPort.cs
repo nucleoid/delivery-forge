@@ -200,7 +200,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                     throw CodexProtocolFailure.Create(CodexProtocolFailureKind.MalformedRuntimeFrame, "Malformed runtime configuration/protocol frame; no parser payload is retained.");
                 }
                 using var doc = read; if (doc is null) { if (!shutdown) throw CodexProtocolFailure.Create(CodexProtocolFailureKind.UnexpectedEof, "Unexpected app-server EOF."); return; }
-                var message = doc.RootElement; CodexJsonlProtocol.RequireEnvelope(message); string? trustedResponseMethod = null;
+                var message = doc.RootElement; CodexJsonlProtocol.RequireEnvelope(message); string? trustedResponseMethod = null; CodexRefusalFacts? refusal = null;
                 // Reject unclaimed response IDs before ANY payload retention.
                 // The actual configuration reply is then projected before the
                 // journal, trace and pending Task result can observe it.
@@ -237,6 +237,8 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                                 linuxWorkspaceRoots ?? throw CodexProtocolFailure.Create(CodexProtocolFailureKind.MissingConfinedRoots, "Confined roots were not selected before thread dispatch."));
                             linuxWorkspaceThreadVerified = linuxWorkspaceThreadRefusal is null;
                         }
+                        try { refusal = CodexTrustProtocolData.Refusal(message, actualId); }
+                        catch (Exception) { /* Optional facts cannot change response admission or failure. */ }
                         message = CodexTrustProtocolData.Response(message, actualMethod); trustedResponseMethod = actualMethod;
                     }
                 }
@@ -264,7 +266,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                     continue;
                 }
                 var responseId = message.GetProperty("id"); if (!responseId.TryGetInt64(out var number) || !pending.TryRemove(number, out var waiter)) throw CodexProtocolFailure.Create(CodexProtocolFailureKind.ResponseCorrelation, "Foreign/duplicate Codex response ID.");
-                if (message.TryGetProperty("error", out var error)) { if (number == Volatile.Read(ref accountReadId)) accountReadRefused = true; waiter.TrySetException(new CodexRemoteRpcException(!TrustProtocol ? "Actual app-server response error: " + error.GetRawText() : CodexTrustProtocolData.ErrorMessage(error), number)); continue; }
+                if (message.TryGetProperty("error", out var error)) { if (number == Volatile.Read(ref accountReadId)) accountReadRefused = true; waiter.TrySetException(new CodexRemoteRpcException(!TrustProtocol ? "Actual app-server response error: " + error.GetRawText() : CodexTrustProtocolData.ErrorMessage(error), number, refusal)); continue; }
                 waiter.TrySetResult(message.GetProperty("result").Clone());
             }
         }
@@ -489,13 +491,19 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             shutdown = true;
             await RetireFailedStartupAsync(primary, capture, async () =>
             {
+                Task<DuplexRetirement>? actualRetirement = null; Exception? cleanupFailure = null;
                 try
                 {
-                    if (process is not null) { var stop = process.RetireAsync(true); lock (tasks) tasks.Add(stop); var closed = await stop.ConfigureAwait(false); CloseTrustedImage(closed.KnownClosed && !process.HasUnknownIo, true); }
+                    if (process is not null) { var stop = process.RetireAsync(true); actualRetirement = stop; lock (tasks) tasks.Add(stop); var closed = await stop.ConfigureAwait(false); CloseTrustedImage(closed.KnownClosed && !process.HasUnknownIo, true); }
                     else CloseTrustedImage(!trustedNativeCreationEntered || trustedNativeCreationReturned, true);
                     if (usage is not null) await usage.JoinAsync(usageWatch, primary).ConfigureAwait(false);
                 }
-                catch { trustedImage?.RetainUnknown(); throw; }
+                catch (Exception cleanup) { cleanupFailure = cleanup; trustedImage?.RetainUnknown(); throw; }
+                finally
+                {
+                    try { CodexRemoteRpcException.FindSingle(primary)?.CaptureCleanup(actualRetirement, process?.HasUnknownIo, cleanupFailure); }
+                    catch (Exception) { /* Optional snapshot cannot replace primary/cleanup failure or add UNKNOWN. */ }
+                }
             }).ConfigureAwait(false);
             throw;
         }

@@ -85,7 +85,8 @@ internal sealed class ToolFailureAttention
                 failure.CleanupAlreadyBegun,
                 failure.MarkerAlreadyEntered
             };
-            var codex = Codex.CodexRemoteRpcException.FindSingle(failure.Error)?.StartupFailure ?? failure.StartupContext;
+            var rpc = Codex.CodexRemoteRpcException.FindSingle(failure.Error);
+            var codex = rpc?.StartupFailure ?? failure.StartupContext;
             var line = "DFCLI_FIRST_CAUGHT|" + (codex is null ? System.Text.Json.JsonSerializer.Serialize(fields) :
                 System.Text.Json.JsonSerializer.Serialize(new
                 {
@@ -100,6 +101,25 @@ internal sealed class ToolFailureAttention
             // Preserve the existing startup/default diagnostic exactly. New
             // optional facts are omitted on serialization/extent refusal, with
             // no additional output, cleanup entry or UNKNOWN transition.
+            if (rpc is not null && (rpc.Refusal is not null || rpc.StartupCleanup is not null))
+            {
+                try
+                {
+                    var candidate = "DFCLI_FIRST_CAUGHT|" + System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        fields.Stage,
+                        fields.Type,
+                        fields.HResult,
+                        fields.InnerType,
+                        fields.CleanupAlreadyBegun,
+                        fields.MarkerAlreadyEntered,
+                        CodexStartup = codex,
+                        CodexFailure = new { rpc.Refusal, Cleanup = rpc.StartupCleanup }
+                    });
+                    if (System.Text.Encoding.UTF8.GetByteCount(candidate) <= 1024) line = candidate;
+                }
+                catch (Exception) { /* Keep the original diagnostic unchanged. */ }
+            }
             if (codex is null && failure.ProtocolFacts is { } protocol)
             {
                 try
