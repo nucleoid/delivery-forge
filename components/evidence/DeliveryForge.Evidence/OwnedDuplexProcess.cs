@@ -81,7 +81,7 @@ public sealed class OwnedDuplexProcess
         static ulong Number(string text) => ulong.TryParse(text, System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var value) ? value : throw new IOException("Unsigned finite leaf counter required.");
     }
     object? actualOwner; bool inputCloseEntered, inputCloseReturned, outputEof, errorEof, disposeEntered, disposeReturned;
-    bool opening = true, creationUnknown; long bytesRead, bytesWritten; int readerBusy, writerBusy; Task? errorDrain, outputConsumer; Task<DuplexRetirement>? retirement;
+    volatile bool opening = true; bool creationUnknown; LinuxDuplexCreator? linuxCreator; long bytesRead, bytesWritten; int readerBusy, writerBusy; Task? errorDrain, outputConsumer; Task<DuplexRetirement>? retirement;
     readonly List<Exception> failures = []; readonly MemoryStream errorBytes = new();
     public bool HasRetainedOriginalOwner => actualOwner is not null;
     internal bool IsOwnedBy(IOwnedDuplexBudget actual) => ReferenceEquals(budget, actual);
@@ -120,7 +120,9 @@ public sealed class OwnedDuplexProcess
         }
         catch (Exception failure)
         {
-            session.StartupFailure = failure; session.failures.Add(failure); session.opening = false;
+            session.StartupFailure = failure; session.RecordOwnerFailure(failure);
+            // A caller timeout cannot settle an actual creator still in birth.
+            if (session.linuxCreator is null) session.opening = false;
             // Linux may have real attached stderr even when its birth barrier
             // refused. Retain the existing bounded reader under SAME failure
             // cleanup; do not replace the creator failure or invent closure.
@@ -131,11 +133,13 @@ public sealed class OwnedDuplexProcess
                     if (original is IOwnedFailureCleanup cleanup) cleanup.BeginFailureCleanup();
                     session.errorDrain = session.DrainErrorAsync(cleanup: true);
                 }
-                catch (Exception observationFailure) { session.failures.Add(observationFailure); }
+                catch (Exception observationFailure) { session.RecordOwnerFailure(observationFailure); }
             }
         }
         return session; // Includes failed creator frame; callers must retire it, never retry.
     }
+    internal void AttachLinuxCreator(LinuxDuplexCreator actual) { if (linuxCreator is not null) throw new IOException("Actual Linux creator already retained."); linuxCreator = actual; }
+    internal void LinuxBirthReturned() => opening = false;
     internal void AttachOwner(object owner, Func<bool, DuplexNativeObservation> observation, Action<bool> stop, Func<bool, bool> disposition) { actualOwner = owner; observe = observation; terminate = stop; dispose = disposition; }
     internal void AttachStreams(Stream stdin, Stream stdout, Stream stderr, Action<bool>? closeOriginalInput = null) { input = stdin; output = stdout; error = stderr; closeInput = closeOriginalInput; }
     internal void RecordOwnerFailure(Exception failure) { lock (failures) if (!failures.Contains(failure)) failures.Add(failure); }
@@ -224,7 +228,13 @@ public sealed class OwnedDuplexProcess
             if (errorDrain is not null) { try { await errorDrain.WaitAsync(cleanup ? budget.CleanupRemaining : budget.WorkLimit - Stopwatch.GetElapsedTime(budget.OriginalStarted)).ConfigureAwait(false); } catch (Exception failure) { lock (failures) if (!failures.Contains(failure)) failures.Add(failure); cleanup = true; Admission(); if (!errorDrain.IsCompleted) { PreserveOriginalUnknown(); return new(false, native.RootExited, native.ActiveProcesses, outputEof, errorEof, inputCloseReturned, false, native.ExitCode, FailureText()); } } }
             if (!errorEof && error is not null) { var buffer = new byte[4096]; while (await Read(error, buffer, 0, buffer.Length, true, cleanup, CancellationToken.None).ConfigureAwait(false) != 0) { } }
             var ready = (input is null || inputCloseReturned) && native.Known && native.RootExited && native.ActiveProcesses == 0 && !HasUnknownIo && Volatile.Read(ref readerBusy) == 0 && Volatile.Read(ref writerBusy) == 0 && (output is null || outputEof) && (error is null || errorEof);
-            if (ready && !disposeEntered) { Admission(); disposeEntered = true; disposeReturned = dispose?.Invoke(cleanup) == true; Admission(); }
+            if (ready && !disposeEntered)
+            {
+                // RetireAsync may have entered this method under its publication
+                // lock. Never join a Linux creator under that or a scope lock.
+                if (linuxCreator is not null) await Task.Yield();
+                Admission(); disposeEntered = true; disposeReturned = dispose?.Invoke(cleanup) == true; Admission();
+            }
             var known = ready && disposeReturned; if (known) Retained.TryRemove(this, out _); else { cleanup = true; Admission(); PreserveOriginalUnknown(); }
             return new(known, native.RootExited, native.ActiveProcesses, outputEof, errorEof, inputCloseReturned, disposeReturned, native.ExitCode, FailureText());
         }

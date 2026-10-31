@@ -15,10 +15,16 @@ internal static partial class BoundedProcessCapture
     internal static void OpenDuplex(CommandInvocation invocation, IOwnedDuplexBudget budget, OwnedDuplexProcess session, LinuxScopeSelection? selection, LinuxScopeImage? exactNativeImage = null)
     {
         budget.CheckWork(); var process = new Process(); var retention = new BoundedCaptureRetention(); retention.Add(process); retention.Add(session);
-        LinuxCommandScope? scope = null; StreamWriter? input = null; StreamReader? output = null, error = null; var inputCloseEntered = false; var inputClosed = false; var lastFailure = 0;
+        LinuxDuplexCreator? creator = null; LinuxCommandScope? scope = null; StreamWriter? input = null; StreamReader? output = null, error = null; var inputCloseEntered = false; var inputClosed = false; var lastFailure = 0;
         void Failures() { if (scope is not null) foreach (var failure in scope.Failures.Skip(lastFailure)) { session.RecordOwnerFailure(failure); lastFailure++; } }
-        session.AttachOwner(process, cleanup => { try { return scope?.ObserveNative(cleanup) ?? new(true, true, 0, null, "Actual original Process.Start never entered."); } finally { Failures(); } }, cleanup => { try { scope?.Stop(cleanup); } finally { Failures(); } }, cleanup =>
+        session.AttachOwner(process, cleanup =>
         {
+            if (creator is { BirthReturned: false }) return new(false, false, uint.MaxValue, null, "Actual Linux creator birth remains unreturned.");
+            try { var observed = scope?.ObserveNative(cleanup) ?? new(true, true, 0, null, "Actual original Process.Start never entered."); if (observed.RootExited && creator is { BirthReturned: true }) creator.ObserveRootExited(); return observed; }
+            finally { Failures(); }
+        }, cleanup => { try { scope?.Stop(cleanup); } finally { Failures(); } }, cleanup =>
+        {
+            if (creator is null || !creator.Join(cleanup)) return false;
             var known = true; try { if (scope is not null && !scope.DisposeKnown(cleanup)) return false; } finally { Failures(); }
             if (inputCloseEntered && !inputClosed) return false;
             bool FirstClose(IDisposable resource, string kind)
@@ -34,20 +40,26 @@ internal static partial class BoundedProcessCapture
             if (output is not null && !FirstClose(output, "stdout-reader")) return false;
             if (error is not null && !FirstClose(error, "stderr-reader")) return false;
             if (!known) return false;
+            if (!FirstClose(creator, "linux-creator")) return false;
             if (!FirstClose(process, "original-process")) return false;
             if (known) retention.ReleaseKnown(); return known;
         });
-        try
+        void Birth()
         {
-            if (selection is null) throw new PlatformNotSupportedException("A real selected creation-owned Linux scope profile is required; root-only fallback cannot establish duplex support.");
-            scope = new LinuxCommandScope(process, budget, selection, exactNativeImage); session.AttachScopeProof(() => scope.HasCreationOwnedScope, () => scope.HasCreationOwnedExactImage, () => scope.CreationOwnedExactImageBacking); session.AttachLeafCounters(() => { try { return scope.CaptureLeafCounters(); } finally { Failures(); } }); retention.Add(scope); process.StartInfo = DuplexStartInfo(invocation); scope.Prepare(process.StartInfo);
-            scope.BeforeCreation(); var created = process.Start(); scope.CreationReturned(created); if (!created) throw new IOException("Original scoped process did not start.");
-            input = process.StandardInput; retention.Add(input); budget.CheckWork(); output = process.StandardOutput; retention.Add(output); budget.CheckWork(); error = process.StandardError; retention.Add(error); budget.CheckWork();
-            // The SAME root is held at the genuine compiled birth barrier until
-            // actual group/identity/resource proof has returned before release.
-            scope.BindAndRelease(input.BaseStream, output.BaseStream); budget.CheckWork();
-            session.AttachStreams(input.BaseStream, output.BaseStream, error.BaseStream, cleanup => { CheckDuplexBudget(budget, cleanup); if (inputCloseEntered) throw new IOException("Original writer first-close already entered."); inputCloseEntered = true; input.Dispose(); inputClosed = true; });
+            try
+            {
+                if (selection is null) throw new PlatformNotSupportedException("A real selected creation-owned Linux scope profile is required; root-only fallback cannot establish duplex support.");
+                scope = new LinuxCommandScope(process, budget, selection, exactNativeImage); session.AttachScopeProof(() => scope.HasCreationOwnedScope, () => scope.HasCreationOwnedExactImage, () => scope.CreationOwnedExactImageBacking); session.AttachLeafCounters(() => { if (creator is { BirthReturned: false }) throw new IOException("Actual Linux creator birth remains unreturned."); try { return scope.CaptureLeafCounters(); } finally { Failures(); } }); retention.Add(scope); process.StartInfo = DuplexStartInfo(invocation); scope.Prepare(process.StartInfo);
+                scope.BeforeCreation(); creator!.CreationEntered(); var created = process.Start(); creator.CreationReturned(created); scope.CreationReturned(created); if (!created) throw new IOException("Original scoped process did not start.");
+                input = process.StandardInput; retention.Add(input); budget.CheckWork(); output = process.StandardOutput; retention.Add(output); budget.CheckWork(); error = process.StandardError; retention.Add(error); budget.CheckWork();
+                // The SAME root is held at the genuine compiled birth barrier until
+                // actual group/identity/resource proof has returned before release.
+                scope.BindAndRelease(input.BaseStream, output.BaseStream); budget.CheckWork();
+                session.AttachStreams(input.BaseStream, output.BaseStream, error.BaseStream, cleanup => { CheckDuplexBudget(budget, cleanup); if (inputCloseEntered) throw new IOException("Original writer first-close already entered."); inputCloseEntered = true; input.Dispose(); inputClosed = true; });
+            }
+            catch { if (input is not null && output is not null && error is not null) session.AttachStreams(input.BaseStream, output.BaseStream, error.BaseStream, cleanup => { CheckDuplexBudget(budget, cleanup); if (inputCloseEntered) throw new IOException("Original writer first-close already entered."); inputCloseEntered = true; input.Dispose(); inputClosed = true; }); Failures(); throw; }
         }
-        catch { if (input is not null && output is not null && error is not null) session.AttachStreams(input.BaseStream, output.BaseStream, error.BaseStream, cleanup => { CheckDuplexBudget(budget, cleanup); if (inputCloseEntered) throw new IOException("Original writer first-close already entered."); inputCloseEntered = true; input.Dispose(); inputClosed = true; }); Failures(); throw; }
+        creator = new LinuxDuplexCreator(budget, session, Birth); retention.Add(creator); session.AttachLinuxCreator(creator);
+        creator.StartAndWait();
     }
 }

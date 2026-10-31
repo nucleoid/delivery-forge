@@ -341,7 +341,11 @@ public sealed class OwnedLinuxExactImageTests
         {
             try { session = OwnedDuplexProcess.Open(new(selected.Image.Path, ["/proc/self/cgroup", "-"], selected.Directory, ActualOrdinaryCapture.ResourceEnvironment()), original, scope, selected.Image); }
             catch (Exception failure) { creationFailure = failure; }
-        }) { IsBackground = true, Name = "exact-image-creator" };
+        })
+        {
+            IsBackground = true,
+            Name = "exact-image-creator"
+        };
         var creatorStarted = false; var creatorJoined = false;
         try
         {
@@ -381,9 +385,18 @@ public sealed class OwnedLinuxExactImageTests
                 var closed = await session.RetireAsync(true);
                 TestContext.Current.TestOutputHelper!.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
                 {
-                    Kind = "ActualCreatorThreadNativeRetirement-v1", creatorStarted, creatorJoined, ParentProcessId = Environment.ProcessId,
-                    closed.KnownClosed, closed.RootExited, closed.ActiveProcesses, closed.ExitCode, closed.OutputEof, closed.ErrorEof,
-                    closed.DispositionReturned, CreationFailureType = creationFailure?.GetType().FullName
+                    Kind = "ActualCreatorThreadNativeRetirement-v1",
+                    creatorStarted,
+                    creatorJoined,
+                    ParentProcessId = Environment.ProcessId,
+                    closed.KnownClosed,
+                    closed.RootExited,
+                    closed.ActiveProcesses,
+                    closed.ExitCode,
+                    closed.OutputEof,
+                    closed.ErrorEof,
+                    closed.DispositionReturned,
+                    CreationFailureType = creationFailure?.GetType().FullName
                 }));
                 if (closed.KnownClosed) original.Dispose();
             }
