@@ -49,7 +49,7 @@ public sealed class ProgramFailureTests
         adapter.BindInstructions(HostInstructionContext.FromParentSelection(request, "sha256:" + new string('c', 64),
             "Refuse this inert startup before native work.", ["No image verification or process birth."], ["Reject the request deadline."]));
         adapter.BindOriginal(life);
-        var failure = await Assert.ThrowsAsync<WorkerEnvelopeException>(() => adapter.StartAsync(request, life.WorkLimit + TimeSpan.FromSeconds(1), life.Token));
+        var failure = await Assert.ThrowsAsync<DeliveryForge.Execution.WorkerEnvelopeException>(() => adapter.StartAsync(request, life.WorkLimit + TimeSpan.FromSeconds(1), life.Token));
         Assert.Equal("Actual request/version/deadline differs from containing original.", failure.Message);
         var call = Assert.Single(adapter.ActualCalls); Assert.True(call.Entered); Assert.True(call.InvocationReturned);
         Assert.True(call.ActualTask!.IsFaulted); Assert.Same(failure, call.InvocationFailure);
