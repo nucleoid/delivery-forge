@@ -720,7 +720,8 @@ public sealed class ProvisionedGitBindingTests
             environment["GIT_WORK_TREE"] = binding.Worktree; environment["GIT_INDEX_FILE"] = binding.IndexPath;
             environment["GIT_OBJECT_DIRECTORY"] = binding.ObjectsPath; environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = binding.CommonObjectsPath;
             return OwnedDuplexProcess.Open(new(GitImage, ["-c", "core.hooksPath=NUL", "-c", "core.fsmonitor=false", .. arguments],
-                Worker, environment) { EnvironmentIsComplete = true }, Original);
+                Worker, environment)
+            { EnvironmentIsComplete = true }, Original);
         }
         async Task<string> Git(params string[] arguments) => await GitAt(Repository, arguments);
         internal async Task<string> GitAt(string directory, params string[] arguments)
