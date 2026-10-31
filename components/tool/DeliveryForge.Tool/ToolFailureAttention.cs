@@ -6,7 +6,7 @@ internal sealed class ToolFailureAttention
 {
     readonly ToolLifetime original; readonly TextWriter actualErrors; readonly object gate = new();
     bool entered, returned; Task? actualWrite; Exception? primary, post;
-    (string Stage, Exception Error, bool CleanupAlreadyBegun, bool MarkerAlreadyEntered, Codex.CodexStartupFailureFacts? StartupContext)? firstCaught;
+    (string Stage, Exception Error, bool CleanupAlreadyBegun, bool MarkerAlreadyEntered, Codex.CodexStartupFailureFacts? StartupContext, Codex.CodexProtocolFailureFacts? ProtocolFacts)? firstCaught;
     bool diagnosticEntered, diagnosticReturned; Task? actualDiagnosticWrite; Exception? diagnosticPrimary, diagnosticPost;
     internal ToolFailureAttention(ToolLifetime original, TextWriter actualErrors) { this.original = original; this.actualErrors = actualErrors; }
     internal void CaptureFirstCaught(string stage, Exception actual, bool cleanupAlreadyBegun)
@@ -20,7 +20,10 @@ internal sealed class ToolFailureAttention
             Codex.CodexStartupFailureFacts? context = null;
             try { if (IsOuterStartupTimeout(stage, actual)) context = original.ObserveActiveCodexStartup(); }
             catch (Exception) { /* Optional context cannot replace the actual first-caught failure. */ }
-            firstCaught = (stage, actual, cleanupAlreadyBegun, entered, context);
+            Codex.CodexProtocolFailureFacts? protocol = null;
+            try { protocol = Codex.CodexProtocolFailure.FindSingle(actual); }
+            catch (Exception) { /* Optional code-owned facts cannot replace the actual failure. */ }
+            firstCaught = (stage, actual, cleanupAlreadyBegun, entered, context, protocol);
         }
     }
     static bool IsOuterStartupTimeout(string stage, Exception actual)
@@ -48,7 +51,7 @@ internal sealed class ToolFailureAttention
     internal bool Unknown { get { lock (gate) return MarkerUnknownLocked || DiagnosticUnknownLocked; } }
     internal void EmitFirstCaughtOnce()
     {
-        (string Stage, Exception Error, bool CleanupAlreadyBegun, bool MarkerAlreadyEntered, Codex.CodexStartupFailureFacts? StartupContext) failure;
+        (string Stage, Exception Error, bool CleanupAlreadyBegun, bool MarkerAlreadyEntered, Codex.CodexStartupFailureFacts? StartupContext, Codex.CodexProtocolFailureFacts? ProtocolFacts) failure;
         lock (gate)
         {
             if (!returned || diagnosticEntered || firstCaught is not { } actual) return;
@@ -94,6 +97,27 @@ internal sealed class ToolFailureAttention
                     fields.MarkerAlreadyEntered,
                     CodexStartup = codex
                 }));
+            // Preserve the existing startup/default diagnostic exactly. New
+            // optional facts are omitted on serialization/extent refusal, with
+            // no additional output, cleanup entry or UNKNOWN transition.
+            if (codex is null && failure.ProtocolFacts is { } protocol)
+            {
+                try
+                {
+                    var candidate = "DFCLI_FIRST_CAUGHT|" + System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        fields.Stage,
+                        fields.Type,
+                        fields.HResult,
+                        fields.InnerType,
+                        fields.CleanupAlreadyBegun,
+                        fields.MarkerAlreadyEntered,
+                        CodexProtocol = protocol
+                    });
+                    if (System.Text.Encoding.UTF8.GetByteCount(candidate) <= 1024) line = candidate;
+                }
+                catch (Exception) { /* Keep the original diagnostic unchanged. */ }
+            }
             if (System.Text.Encoding.UTF8.GetByteCount(line) > 1024) throw new IOException("Finite first-caught attention exceeded.");
             var write = actualErrors.WriteLineAsync(line.AsMemory(), CancellationToken.None);
             lock (gate) actualDiagnosticWrite = write;

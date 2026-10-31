@@ -197,19 +197,19 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                     // The concrete JSON parser can include property/number text
                     // in its message. Do not retain that config-bearing text or
                     // an inner exception. Owner/IO/cancellation errors are intact.
-                    throw new IOException("Malformed runtime configuration/protocol frame; no parser payload is retained.");
+                    throw CodexProtocolFailure.Create(CodexProtocolFailureKind.MalformedRuntimeFrame, "Malformed runtime configuration/protocol frame; no parser payload is retained.");
                 }
-                using var doc = read; if (doc is null) { if (!shutdown) throw new IOException("Unexpected app-server EOF."); return; }
+                using var doc = read; if (doc is null) { if (!shutdown) throw CodexProtocolFailure.Create(CodexProtocolFailureKind.UnexpectedEof, "Unexpected app-server EOF."); return; }
                 var message = doc.RootElement; CodexJsonlProtocol.RequireEnvelope(message); string? trustedResponseMethod = null;
                 // Reject unclaimed response IDs before ANY payload retention.
                 // The actual configuration reply is then projected before the
                 // journal, trace and pending Task result can observe it.
                 if (!message.TryGetProperty("method", out _) && (message.GetProperty("id").ValueKind != JsonValueKind.Number || !message.GetProperty("id").TryGetInt64(out var pendingId) || !pending.Contains(pendingId)))
-                    throw new IOException("Foreign/duplicate Codex response ID; no response payload is retained.");
+                    throw CodexProtocolFailure.Create(CodexProtocolFailureKind.ResponseCorrelation, "Foreign/duplicate Codex response ID; no response payload is retained.");
                 if (TrustProtocol && !message.TryGetProperty("method", out _) && message.TryGetProperty("result", out var rawResult) && rawResult.ValueKind == JsonValueKind.Object &&
                     (rawResult.TryGetProperty("config", out _) || rawResult.TryGetProperty("layers", out _) || rawResult.TryGetProperty("origins", out _)) &&
                     (!message.GetProperty("id").TryGetInt64(out var configurationId) || configurationId != Volatile.Read(ref configReadId)))
-                    throw new IOException("Configuration-shaped response has a foreign correlation; no response payload is retained.");
+                    throw CodexProtocolFailure.Create(CodexProtocolFailureKind.ConfigurationCorrelation, "Configuration-shaped response has a foreign correlation; no response payload is retained.");
                 ObserveReportedUsage(message); // Raw numeric spend BEFORE redaction/trace.
                 if (TrustProtocol)
                 {
@@ -220,7 +220,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                             // Preserve the actual opaque ID only for its wire reply;
                             // no request params, method or ID value enters retention.
                             startup!.Server(message);
-                            lock (trace) { if (trace.Count >= 4096) throw new IOException("Codex event trace exceeded."); trace.Add(CodexTrustProtocolData.ServerRequestReceipt()); }
+                            lock (trace) { if (trace.Count >= 4096) throw CodexProtocolFailure.Create(CodexProtocolFailureKind.TraceBound, "Codex event trace exceeded."); trace.Add(CodexTrustProtocolData.ServerRequestReceipt()); }
                             await protocol.WriteAsync(new { id = actualServerId.Clone(), error = new { code = -32601, message = "Unsupported client request; no approval or capability granted." } }, token).ConfigureAwait(false);
                             continue;
                         }
@@ -230,11 +230,11 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                     {
                         var actualId = message.GetProperty("id").GetInt64(); string actualMethod;
                         lock (gate)
-                            if (!trustedReplyMethods.Remove(actualId, out actualMethod!)) throw new IOException("Uncorrelated trust-protocol response method.");
+                            if (!trustedReplyMethods.Remove(actualId, out actualMethod!)) throw CodexProtocolFailure.Create(CodexProtocolFailureKind.TrustMethodCorrelation, "Uncorrelated trust-protocol response method.");
                         if (actualMethod == "thread/start" && !message.TryGetProperty("error", out _) && UsesLinuxWorkspaceWrite)
                         {
                             linuxWorkspaceThreadRefusal = InspectLinuxWorkspaceWriteThread(message.GetProperty("result"), request!,
-                                linuxWorkspaceRoots ?? throw new IOException("Confined roots were not selected before thread dispatch."));
+                                linuxWorkspaceRoots ?? throw CodexProtocolFailure.Create(CodexProtocolFailureKind.MissingConfinedRoots, "Confined roots were not selected before thread dispatch."));
                             linuxWorkspaceThreadVerified = linuxWorkspaceThreadRefusal is null;
                         }
                         message = CodexTrustProtocolData.Response(message, actualMethod); trustedResponseMethod = actualMethod;
@@ -247,7 +247,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                 // no capability or runtime trust to the conformance producer.
                 var retainedMessage = trustedResponseMethod is null ? message.Clone() :
                     JsonSerializer.SerializeToElement(new { TrustRpcMethod = trustedResponseMethod, Message = message });
-                lock (trace) { if (trace.Count >= 4096) throw new IOException("Codex event trace exceeded."); trace.Add(retainedMessage); }
+                lock (trace) { if (trace.Count >= 4096) throw CodexProtocolFailure.Create(CodexProtocolFailureKind.TraceBound, "Codex event trace exceeded."); trace.Add(retainedMessage); }
                 if (message.TryGetProperty("method", out var method))
                 {
                     if (message.TryGetProperty("id", out var serverId))
@@ -258,12 +258,12 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                     }
                     if (method.GetString() == "turn/completed")
                     {
-                        var parameters = message.GetProperty("params"); var actualThread = Text(parameters, "threadId"); var turn = parameters.GetProperty("turn"); var actualTurn = Text(turn, "id"); var status = Text(turn, "status"); if (status is not ("completed" or "interrupted" or "failed")) throw new IOException("Invalid terminal Codex status.");
-                        lock (gate) { if (threadId is not null && actualThread != threadId) throw new IOException("Foreign Codex terminal thread."); if (terminals.Count >= 8 || terminals.ContainsKey(actualTurn)) throw new IOException("Duplicate/excess terminal event."); terminals.Add(actualTurn, message.Clone()); if (turnId == actualTurn) terminalWait?.TrySetResult(message.Clone()); }
+                        var parameters = message.GetProperty("params"); var actualThread = Text(parameters, "threadId"); var turn = parameters.GetProperty("turn"); var actualTurn = Text(turn, "id"); var status = Text(turn, "status"); if (status is not ("completed" or "interrupted" or "failed")) throw CodexProtocolFailure.Create(CodexProtocolFailureKind.TerminalStatus, "Invalid terminal Codex status.");
+                        lock (gate) { if (threadId is not null && actualThread != threadId) throw CodexProtocolFailure.Create(CodexProtocolFailureKind.TerminalThread, "Foreign Codex terminal thread."); if (terminals.Count >= 8 || terminals.ContainsKey(actualTurn)) throw CodexProtocolFailure.Create(CodexProtocolFailureKind.DuplicateOrExcessTerminal, "Duplicate/excess terminal event."); terminals.Add(actualTurn, message.Clone()); if (turnId == actualTurn) terminalWait?.TrySetResult(message.Clone()); }
                     }
                     continue;
                 }
-                var responseId = message.GetProperty("id"); if (!responseId.TryGetInt64(out var number) || !pending.TryRemove(number, out var waiter)) throw new IOException("Foreign/duplicate Codex response ID.");
+                var responseId = message.GetProperty("id"); if (!responseId.TryGetInt64(out var number) || !pending.TryRemove(number, out var waiter)) throw CodexProtocolFailure.Create(CodexProtocolFailureKind.ResponseCorrelation, "Foreign/duplicate Codex response ID.");
                 if (message.TryGetProperty("error", out var error)) { if (number == Volatile.Read(ref accountReadId)) accountReadRefused = true; waiter.TrySetException(new CodexRemoteRpcException(!TrustProtocol ? "Actual app-server response error: " + error.GetRawText() : CodexTrustProtocolData.ErrorMessage(error), number)); continue; }
                 waiter.TrySetResult(message.GetProperty("result").Clone());
             }
