@@ -232,7 +232,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                     continue;
                 }
                 var responseId = message.GetProperty("id"); if (!responseId.TryGetInt64(out var number) || !pending.TryRemove(number, out var waiter)) throw new IOException("Foreign/duplicate Codex response ID.");
-                if (message.TryGetProperty("error", out var error)) { if (number == Volatile.Read(ref accountReadId)) accountReadRefused = true; waiter.TrySetException(new CodexRemoteRpcException(!TrustProtocol ? "Actual app-server response error: " + error.GetRawText() : CodexTrustProtocolData.ErrorMessage(error))); continue; }
+                if (message.TryGetProperty("error", out var error)) { if (number == Volatile.Read(ref accountReadId)) accountReadRefused = true; waiter.TrySetException(new CodexRemoteRpcException(!TrustProtocol ? "Actual app-server response error: " + error.GetRawText() : CodexTrustProtocolData.ErrorMessage(error), number)); continue; }
                 waiter.TrySetResult(message.GetProperty("result").Clone());
             }
         }
@@ -419,6 +419,10 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         }
         catch (Exception primary)
         {
+            // Optional fixed metadata belongs to this caught RPC only. Capture
+            // before retirement changes task state; it cannot replace the cause.
+            try { CodexRemoteRpcException.FindSingle(primary)?.CaptureStartup(SnapshotStartupDiagnostics()); }
+            catch (Exception) { /* Diagnostic unavailability cannot change failure or ownership. */ }
             usage?.FailIncompleteDispatch();
             // Startup can fail before the before-turn hook. Sample only this
             // already-released exact Linux owner, before retirement removes its

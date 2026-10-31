@@ -46,7 +46,7 @@ internal sealed class ToolFailureAttention
                 return name;
             }
             // No Message/Stack/Data/path/config/worker content is read or emitted.
-            var line = "DFCLI_FIRST_CAUGHT|" + System.Text.Json.JsonSerializer.Serialize(new
+            var fields = new
             {
                 Stage = failure.Stage,
                 Type = TypeOf(failure.Error),
@@ -54,7 +54,14 @@ internal sealed class ToolFailureAttention
                 InnerType = failure.Error.InnerException is { } inner ? TypeOf(inner) : null,
                 failure.CleanupAlreadyBegun,
                 failure.MarkerAlreadyEntered
-            });
+            };
+            var codex = Codex.CodexRemoteRpcException.FindSingle(failure.Error)?.StartupFailure;
+            var line = "DFCLI_FIRST_CAUGHT|" + (codex is null ? System.Text.Json.JsonSerializer.Serialize(fields) :
+                System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    fields.Stage, fields.Type, fields.HResult, fields.InnerType,
+                    fields.CleanupAlreadyBegun, fields.MarkerAlreadyEntered, CodexStartup = codex
+                }));
             if (System.Text.Encoding.UTF8.GetByteCount(line) > 1024) throw new IOException("Finite first-caught attention exceeded.");
             var write = actualErrors.WriteLineAsync(line.AsMemory(), CancellationToken.None);
             lock (gate) actualDiagnosticWrite = write;

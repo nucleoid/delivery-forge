@@ -1,10 +1,123 @@
+using System.Diagnostics;
 using System.Text.Json;
 using DeliveryForge.Planning;
 using DeliveryForge.Tool;
+using DeliveryForge.Tool.Codex;
 namespace DeliveryForge.Tool.Tests;
 
 public sealed class ProgramFailureTests
 {
+    static CodexStartupDiagnostics StartupFailureSnapshot(long id, int code, string sentinel)
+    {
+        var journal = new CodexStartupJournal(Stopwatch.GetTimestamp());
+        // config/read can occur while the stage still describes thread startup.
+        journal.SetStage(CodexStartupStage.ThreadStart);
+        journal.Client("config/read", id, CodexWireState.WriteEntered);
+        journal.Client("config/read", id, CodexWireState.WriteReturned);
+        using var actual = JsonDocument.Parse(JsonSerializer.Serialize(new { id, error = new { code, message = sentinel, data = new { auth = sentinel } } }));
+        journal.Server(actual.RootElement);
+        journal.Client("thread/start", 7, CodexWireState.WriteReturned);
+        using var other = JsonDocument.Parse(JsonSerializer.Serialize(new { id = 7, error = new { code = -32603, message = sentinel } }));
+        journal.Server(other.RootElement);
+        var pending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        return journal.Snapshot([7], new IOException(sentinel), new IOException(sentinel), Task.CompletedTask,
+            [Task.CompletedTask, pending.Task], false, false);
+    }
+
+    [Fact]
+    public void Caught_Codex_RPC_id_selects_only_its_actual_method_and_code_in_existing_attention()
+    {
+        const string secret = "private-prompt-auth-and-error@example.invalid";
+        var rpc = new CodexRemoteRpcException(secret, 5);
+        rpc.CaptureStartup(StartupFailureSnapshot(5, -32602, secret));
+        var first = rpc.StartupFailure;
+        rpc.CaptureStartup(StartupFailureSnapshot(5, -32000, "later-observation"));
+        Assert.Same(first, rpc.StartupFailure);
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var errors = new StringWriter();
+        var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention);
+        life.RecordFirstCaught("host-implement", new AggregateException(rpc, new IOException(secret)));
+        attention.EmitFirstCaughtOnce(); life.Check(); Assert.Empty(errors.ToString());
+        life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce(); attention.EmitFirstCaughtOnce();
+        var lines = errors.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => line.TrimEnd('\r')).ToArray();
+        Assert.Equal(2, lines.Length);
+        using var json = JsonDocument.Parse(lines[1]["DFCLI_FIRST_CAUGHT|".Length..]);
+        var facts = json.RootElement.GetProperty("CodexStartup");
+        Assert.Equal("ThreadStart", facts.GetProperty("Stage").GetString());
+        Assert.Equal("ConfigRead", facts.GetProperty("Method").GetString());
+        Assert.Equal(5, facts.GetProperty("RpcId").GetInt64()); Assert.Equal(-32602, facts.GetProperty("ErrorCode").GetInt32());
+        Assert.Equal("RanToCompletion", facts.GetProperty("PumpStatus").GetString()); Assert.Equal(1, facts.GetProperty("PendingTaskCount").GetInt32());
+        Assert.DoesNotContain(secret, errors.ToString(), StringComparison.Ordinal); Assert.DoesNotContain("later-observation", errors.ToString(), StringComparison.Ordinal);
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(lines[1]) <= 1024); Assert.False(attention.Unknown); Assert.False(life.HasExplicitUnknown);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Missing_or_overflowed_actual_RPC_wire_never_borrows_another_error(bool overflow)
+    {
+        var journal = new CodexStartupJournal(Stopwatch.GetTimestamp()); journal.SetStage(CodexStartupStage.Initialize);
+        journal.Client("config/read", 5, CodexWireState.WriteReturned);
+        using var other = JsonDocument.Parse("{\"id\":4,\"error\":{\"code\":-32603,\"message\":\"private\"}}");
+        for (var index = 0; index < (overflow ? 128 : 1); index++) journal.Server(other.RootElement);
+        if (overflow)
+        {
+            using var omitted = JsonDocument.Parse("{\"id\":5,\"error\":{\"code\":-32602,\"message\":\"private\"}}");
+            journal.Server(omitted.RootElement);
+        }
+        var rpc = new CodexRemoteRpcException("private", 5); rpc.CaptureStartup(journal.Snapshot([], null, null, null, [], false, false));
+        Assert.NotNull(rpc.StartupFailure); Assert.Equal(5, rpc.StartupFailure.RpcId);
+        Assert.Null(rpc.StartupFailure.Method); Assert.Null(rpc.StartupFailure.ErrorCode);
+    }
+
+    [Fact]
+    public void Unrelated_Codex_facts_do_not_change_generic_first_caught_output_bytes()
+    {
+        var unrelated = new CodexRemoteRpcException("unrelated-private", 5); unrelated.CaptureStartup(StartupFailureSnapshot(5, -32602, "unrelated-private"));
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var errors = new StringWriter();
+        var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention);
+        var actual = new IOException("original-private"); life.RecordFirstCaught("host-implement", actual);
+        life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce();
+        var line = Assert.Single(errors.ToString().Split('\n'), value => value.StartsWith("DFCLI_FIRST_CAUGHT|", StringComparison.Ordinal)).TrimEnd('\r');
+        var expected = "DFCLI_FIRST_CAUGHT|" + JsonSerializer.Serialize(new
+        {
+            Stage = "host-implement", Type = typeof(IOException).FullName, actual.HResult, InnerType = (string?)null,
+            CleanupAlreadyBegun = false, MarkerAlreadyEntered = false
+        });
+        Assert.Equal(expected, line); Assert.DoesNotContain("CodexStartup", line, StringComparison.Ordinal);
+        Assert.False(attention.Unknown); Assert.False(life.HasExplicitUnknown);
+    }
+
+    [Fact]
+    public void Codex_causal_reference_walk_rejects_distinct_errors_and_oversized_graphs()
+    {
+        var rpc = new CodexRemoteRpcException("private", 5); rpc.CaptureStartup(StartupFailureSnapshot(5, -32602, "private"));
+        Assert.Same(rpc, CodexRemoteRpcException.FindSingle(new AggregateException(rpc, rpc)));
+        Assert.Null(CodexRemoteRpcException.FindSingle(new AggregateException(rpc, new CodexRemoteRpcException("other", 7))));
+        Assert.Null(CodexRemoteRpcException.FindSingle(new AggregateException(Enumerable.Repeat<Exception>(rpc, 17))));
+        Exception large = rpc;
+        for (var index = 0; index < 16; index++) large = new IOException("private", large);
+        Assert.Null(CodexRemoteRpcException.FindSingle(large));
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var errors = new StringWriter();
+        var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention);
+        life.RecordFirstCaught("host-implement", large); life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce();
+        Assert.DoesNotContain("CodexStartup", errors.ToString(), StringComparison.Ordinal); Assert.False(attention.Unknown);
+    }
+
+    [Fact]
+    public void Long_actual_error_types_and_Codex_facts_fit_the_existing_attention_line_ceiling()
+    {
+        var rpc = new CodexRemoteRpcException("private", 5); rpc.CaptureStartup(StartupFailureSnapshot(5, int.MinValue, "private"));
+        Exception Wrap(Exception error) => new BoundaryABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.LayerAABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.LayerBABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.LayerCABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.EscapingBudgetException(error);
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var errors = new StringWriter();
+        var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention);
+        life.RecordFirstCaught("review-source-preparation", Wrap(Wrap(rpc))); life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce();
+        var line = Assert.Single(errors.ToString().Split('\n'), value => value.StartsWith("DFCLI_FIRST_CAUGHT|", StringComparison.Ordinal));
+        Assert.True(System.Text.Encoding.UTF8.GetByteCount(line) <= 1024);
+        using var json = JsonDocument.Parse(line["DFCLI_FIRST_CAUGHT|".Length..]);
+        Assert.Equal(int.MinValue, json.RootElement.GetProperty("CodexStartup").GetProperty("ErrorCode").GetInt32());
+        Assert.DoesNotContain("private", line, StringComparison.Ordinal); Assert.False(attention.Unknown); Assert.False(life.HasExplicitUnknown);
+    }
+
     sealed class NestedDiagnosticException(Exception? inner) : Exception("must-not-export", inner);
     sealed class GenericDiagnosticException<T>(Exception? inner) : Exception("must-not-export", inner);
     sealed class ÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉÉ(Exception? inner) : Exception("must-not-export", inner);

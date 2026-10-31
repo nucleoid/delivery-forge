@@ -11,6 +11,28 @@ internal enum CodexWireIdKind { None, ClientNumber, OtherNumber, String }
 internal sealed record CodexWireObservation(long ElapsedTicks, CodexStartupStage Stage, CodexWireDirection Direction, CodexWireMethod Method, CodexWireState State, CodexWireIdKind IdKind, long? ClientId, bool HasError, int? ErrorCode);
 internal sealed record CodexStartupDiagnostics(CodexStartupStage Stage, long OriginalStarted, long ElapsedTicks, IReadOnlyList<CodexWireObservation> Wire, bool WireBoundExceeded, int ReceivedMessages, int SentMessages, IReadOnlyList<long> PendingIds, string? ReplyFailureType, string? PumpFailureType, TaskStatus? PumpStatus, IReadOnlyList<TaskStatus> OriginalTasks, bool ThreadReceived, bool TurnReceived, CodexConfigReadDiagnostic ConfigurationDiagnostic = CodexConfigReadDiagnostic.NotObserved, CodexConfigOriginClass ConfigurationDestinationOrigin = CodexConfigOriginClass.NotObserved, string? LeafCounterFailureType = null, string? ExactImageBacking = null);
 
+internal sealed record CodexStartupFailureFacts(
+    string Stage, string? Method, long? RpcId, int? ErrorCode, string? PumpStatus, int PendingTaskCount)
+{
+    internal static CodexStartupFailureFacts From(CodexStartupDiagnostics snapshot, long clientId)
+    {
+        var id = clientId is >= 1 and <= 64 ? (long?)clientId : null;
+        var replies = snapshot.Wire.Where(row => row.Direction == CodexWireDirection.Server &&
+            row.State == CodexWireState.Received && row.IdKind == CodexWireIdKind.ClientNumber &&
+            row.ClientId == id && id is not null && row.HasError).ToArray();
+        var methods = snapshot.Wire.Where(row => row.Direction == CodexWireDirection.Client &&
+            row.IdKind == CodexWireIdKind.ClientNumber && row.ClientId == id && id is not null &&
+            row.State is CodexWireState.WriteEntered or CodexWireState.WriteReturned)
+            .Select(row => row.Method).Distinct().ToArray();
+        var method = replies.Length == 1 && methods.Length == 1 &&
+            methods[0] is not (CodexWireMethod.None or CodexWireMethod.Other) ? (CodexWireMethod?)methods[0] : null;
+        return new(Enum.GetName(snapshot.Stage) ?? "Unavailable", method is { } selected ? Enum.GetName(selected) : null,
+            id, replies.Length == 1 ? replies[0].ErrorCode : null,
+            snapshot.PumpStatus is { } pump ? Enum.GetName(pump) : null, snapshot.OriginalTasks.Count(status =>
+                status is not (TaskStatus.RanToCompletion or TaskStatus.Faulted or TaskStatus.Canceled)));
+    }
+}
+
 // Fixed Codex-only metadata. No prompts, params/results, account values, arbitrary
 // methods or string IDs enter this ledger. It issues no process/capability proof.
 internal sealed class CodexStartupJournal(long originalStarted)
@@ -101,4 +123,38 @@ internal sealed class CodexPendingReplies
 }
 
 // A correlated protocol error leaves the transport usable for optional metadata.
-internal sealed class CodexRemoteRpcException(string message) : IOException(message) { }
+internal sealed class CodexRemoteRpcException(string message, long clientId) : IOException(message)
+{
+    CodexStartupFailureFacts? startupFailure;
+    internal long ClientId { get; } = clientId;
+    internal CodexStartupFailureFacts? StartupFailure => Volatile.Read(ref startupFailure);
+    internal void CaptureStartup(CodexStartupDiagnostics snapshot) =>
+        Interlocked.CompareExchange(ref startupFailure, CodexStartupFailureFacts.From(snapshot, ClientId), null);
+
+    // Follow only the caught error's actual causal references. Missing, ambiguous
+    // or oversized graphs never borrow another worker's startup observation.
+    internal static CodexRemoteRpcException? FindSingle(Exception actual)
+    {
+        var seen = new HashSet<Exception>(ReferenceEqualityComparer.Instance) { actual };
+        var pending = new Queue<Exception>(); pending.Enqueue(actual);
+        CodexRemoteRpcException? found = null;
+        while (pending.TryDequeue(out var error))
+        {
+            if (error is CodexRemoteRpcException rpc)
+            {
+                if (found is not null && !ReferenceEquals(found, rpc)) return null;
+                found = rpc;
+            }
+            if (error is AggregateException wide && wide.InnerExceptions.Count > 16) return null;
+            IEnumerable<Exception> causes = error is AggregateException aggregate ? aggregate.InnerExceptions :
+                error.InnerException is { } inner ? [inner] : [];
+            foreach (var cause in causes)
+            {
+                if (seen.Contains(cause)) continue;
+                if (seen.Count >= 16) return null;
+                seen.Add(cause); pending.Enqueue(cause);
+            }
+        }
+        return found;
+    }
+}
