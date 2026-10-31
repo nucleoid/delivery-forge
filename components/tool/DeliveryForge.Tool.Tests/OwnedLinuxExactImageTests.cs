@@ -329,6 +329,68 @@ public sealed class OwnedLinuxExactImageTests
         finally { var closed = await session.RetireAsync(true); if (closed.KnownClosed) original.Dispose(); }
         // Retain the exact changed fixture namespace as evidence; no recursive deletion.
     }
+    [Fact(Timeout = 90000, Skip = "Creator-thread native lifetime requires Linux.", SkipUnless = nameof(IsLinux))]
+    public async Task Actual_duplex_survives_creator_thread_exit_while_original_parent_remains_alive()
+    {
+        using var affinity = new OwnedDuplexProcessTests.Affinity();
+        var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var selected = CopyNative(original); var scope = Scope(original);
+        BoundedFiles.ReserveExactLinuxImageReads(new(selected.Image.Path, selected.Image.Bytes, selected.Image.Sha256), original);
+        OwnedDuplexProcess? session = null; Exception? creationFailure = null;
+        var creator = new Thread(() =>
+        {
+            try { session = OwnedDuplexProcess.Open(new(selected.Image.Path, ["/proc/self/cgroup", "-"], selected.Directory, ActualOrdinaryCapture.ResourceEnvironment()), original, scope, selected.Image); }
+            catch (Exception failure) { creationFailure = failure; }
+        }) { IsBackground = true, Name = "exact-image-creator" };
+        var creatorStarted = false; var creatorJoined = false;
+        try
+        {
+            creator.Start(); creatorStarted = true;
+            creatorJoined = creator.Join(original.Remaining);
+            Assert.True(creatorJoined, "Actual native creator did not return within the SAME original WORK endpoint.");
+            // Join publishes this actual thread's result/failure and proves its
+            // lifetime ended. The containing process, original and stdin remain live.
+            if (creationFailure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(creationFailure).Throw();
+            Assert.NotNull(session); Assert.Null(session.StartupFailure); Assert.True(session.HasCreationOwnedExactLinuxImage);
+            original.CheckWork();
+            var membership = await ActualLfRow(session, original, 4096);
+            Assert.StartsWith("0::/", membership, StringComparison.Ordinal);
+            const string canary = "same native child after creator thread exit";
+            var sent = Encoding.ASCII.GetBytes(canary + "\n");
+            await session.Input.WriteAsync(sent, 0, sent.Length, original.Token);
+            await session.Input.FlushAsync(original.Token);
+            Assert.Equal(canary, await ActualLfRow(session, original, 4096));
+            session.CloseInputForCapture(); var end = new byte[1];
+            Assert.Equal(0, await session.Output.ReadAsync(end, 0, 1, original.Token));
+            var retired = await session.RetireAsync(false); HostTransportRetirement.RequireSuccessful(retired);
+            Assert.True(retired.RootExited && retired.KnownClosed && retired.OutputEof && retired.ErrorEof && retired.DispositionReturned);
+            Assert.Equal(0u, retired.ActiveProcesses); Assert.Equal(0, retired.ExitCode); Assert.False(session.HasUnknownIo);
+        }
+        finally
+        {
+            if (creatorStarted && !creatorJoined)
+            {
+                // Do not dispose the original or race retirement against an
+                // unjoined creator. Its bounded Open shares this cleanup endpoint.
+                try { original.BeginFailureCleanup(); creatorJoined = creator.Join(original.CleanupRemaining); }
+                catch { original.RetainUnknown(); throw; }
+                if (!creatorJoined) { original.RetainUnknown(); throw new IOException("Actual creator remains unjoined; original retained UNKNOWN."); }
+            }
+            if (session is not null)
+            {
+                var closed = await session.RetireAsync(true);
+                TestContext.Current.TestOutputHelper!.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    Kind = "ActualCreatorThreadNativeRetirement-v1", creatorStarted, creatorJoined, ParentProcessId = Environment.ProcessId,
+                    closed.KnownClosed, closed.RootExited, closed.ActiveProcesses, closed.ExitCode, closed.OutputEof, closed.ErrorEof,
+                    closed.DispositionReturned, CreationFailureType = creationFailure?.GetType().FullName
+                }));
+                if (closed.KnownClosed) original.Dispose();
+            }
+            else original.Dispose();
+        }
+        // Retain this fresh private fixture namespace; no recursive cleanup.
+    }
     [Fact(Timeout = 90000, Skip = "Sealed descriptor execution requires Linux.", SkipUnless = nameof(IsLinux))]
     public async Task Actual_ordinary_capture_uses_same_exact_image_scope_and_complete_retirement()
     {
