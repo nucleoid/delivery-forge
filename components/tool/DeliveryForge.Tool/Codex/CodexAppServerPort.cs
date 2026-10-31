@@ -21,7 +21,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     string[]? linuxWorkspaceRoots; bool linuxWorkspaceThreadVerified; WorkerEnvelopeException? linuxWorkspaceThreadRefusal;
     WorktreeManager.OwnedGitBinding? privateGit;
     bool UsesLinuxWorkspaceWrite => SelectLinuxWorkspaceWrite(OperatingSystem.IsLinux(), conformanceTrustRoute, runtimeTrust is not null, conformanceDangerFullAccess, linuxScope);
-    readonly Action<string>? conformanceLeafCounters; int conformanceCounterPhase;
+    readonly Action<string>? conformanceLeafCounters; int conformanceCounterPhase, runtimeCounterPhase;
     Exception? conformanceCounterFailure;
     bool TrustProtocol => runtimeTrust is not null || conformanceTrustRoute;
     WindowsImageUse? trustedImage;
@@ -92,6 +92,19 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         if (conformanceLeafCounters is null) return;
         conformanceCounterPhase = RequireLeafCounterPhase(conformanceCounterPhase, phase);
         original.Check(); conformanceLeafCounters(phase); original.Check();
+    }
+    void ObserveRuntimeLeafCounters(string phase)
+    {
+        if (!OperatingSystem.IsLinux() || runtimeTrust is null) return;
+        runtimeCounterPhase = RequireLeafCounterPhase(runtimeCounterPhase, phase);
+        original.Check();
+        var values = (process ?? throw new IOException("Actual runtime owner missing for leaf diagnostics.")).CaptureLeafCounters();
+        original.Check();
+        lock (trace)
+        {
+            if (trace.Count >= 4096) throw new IOException("Codex event trace exceeded.");
+            trace.Add(JsonSerializer.SerializeToElement(new { method = "owner/linux-leaf-counters", @params = new { phase, values } }));
+        }
     }
     internal static void RequireSuccessfulTerminalWithLeafCounters(JsonElement completed, Action capture)
     {
@@ -419,6 +432,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                 CodexRuntimeRoute.RequireObserved(observedChatgptAccount, observedProvider, observedModel);
             }
             ObserveConformanceLeafCounters("before-turn");
+            ObserveRuntimeLeafCounters("before-turn");
             object turnParameters = HostAssignmentPrompt.CodexTurnStart(actual, instructions!, threadId);
             if (confined)
             {
@@ -473,7 +487,11 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         try
         {
             original.Check(); var completed = await Keep(terminalWait!.Task).WaitAsync(remaining < original.Remaining ? remaining : original.Remaining, token).ConfigureAwait(false);
-            RequireSuccessfulTerminalWithLeafCounters(completed, () => ObserveConformanceLeafCounters("after-terminal"));
+            RequireSuccessfulTerminalWithLeafCounters(completed, () =>
+            {
+                ObserveConformanceLeafCounters("after-terminal");
+                ObserveRuntimeLeafCounters("after-terminal");
+            });
             if (TrustProtocol) await ObserveRoute(token).ConfigureAwait(false);
             shutdown = true; var retired = await Keep(process!.RetireAsync(false)).ConfigureAwait(false); HostTransportRetirement.RequireSuccessful(retired);
             if (pump is not null) await pump.WaitAsync(original.Remaining, token).ConfigureAwait(false); if (pumpFailure is not null) throw new IOException("Actual app-server protocol failed; no successful completion.", pumpFailure);

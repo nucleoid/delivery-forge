@@ -36,7 +36,9 @@ public sealed class OwnedDuplexProcess
     internal void AttachScopeProof(Func<bool> actualProof, Func<bool>? actualExactImage = null, Func<LinuxExactImageBacking?>? actualBacking = null) { if (creationOwnedScope is not null) throw new InvalidOperationException("Original scope proof already attached."); creationOwnedScope = actualProof; creationOwnedExactImage = actualExactImage; creationOwnedExactImageBacking = actualBacking; }
     Func<IReadOnlyDictionary<string, ulong?>>? leafCounters;
     internal void AttachLeafCounters(Func<IReadOnlyDictionary<string, ulong?>> capture) { if (leafCounters is not null) throw new IOException("Original leaf observer already attached."); leafCounters = capture; }
-    internal IReadOnlyDictionary<string, ulong?> CaptureLeafCounters()
+    // Read-only diagnostics from this live creation-owned scope. The returned
+    // values cannot create, adopt, resize or retire a process scope.
+    public IReadOnlyDictionary<string, ulong?> CaptureLeafCounters()
     {
         lock (gate)
         {
