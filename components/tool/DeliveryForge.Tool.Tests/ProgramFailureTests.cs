@@ -118,12 +118,12 @@ public sealed class ProgramFailureTests
         var owner = Task.Run(() =>
         {
             lock (DiagnosticField(startup.Port, "gate").GetValue(startup.Port)!)
-            lock (DiagnosticField(startup.Port, "tasks").GetValue(startup.Port)!)
-            lock (DiagnosticField(startup.Journal, "gate").GetValue(startup.Journal)!)
-            {
-                held.SetResult();
-                if (!release.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)) throw new TimeoutException("Diagnostic test release absent.");
-            }
+                lock (DiagnosticField(startup.Port, "tasks").GetValue(startup.Port)!)
+                    lock (DiagnosticField(startup.Journal, "gate").GetValue(startup.Journal)!)
+                    {
+                        held.SetResult();
+                        if (!release.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)) throw new TimeoutException("Diagnostic test release absent.");
+                    }
         }, TestContext.Current.CancellationToken);
         try
         {
