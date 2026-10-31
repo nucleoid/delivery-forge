@@ -10,6 +10,8 @@ public sealed class ToolLifetime : IDisposable, DeliveryForge.Evidence.IOwnedDup
 {
     readonly long started = Stopwatch.GetTimestamp(); TimeSpan total, work; readonly CancellationTokenSource linked;
     readonly object gate = new(); long cleanup; bool disposed, retainedUnknown, disposeRequested; ToolFailureAttention? attention;
+    static readonly object AmbiguousCodexStartup = new();
+    object? codexStartup;
     readonly HashSet<HostBridgeFrame> retainedBridgeFrames = new(ReferenceEqualityComparer.Instance);
     public ToolLifetime(TimeSpan total, CancellationToken token = default)
     {
@@ -47,6 +49,19 @@ public sealed class ToolLifetime : IDisposable, DeliveryForge.Evidence.IOwnedDup
     internal bool HasRetainedUnknown { get { lock (gate) return retainedUnknown || retainedBridgeFrames.Count != 0; } }
     internal bool HasExplicitUnknown { get { lock (gate) return retainedUnknown; } }
     internal void BindAttention(ToolFailureAttention actual) { lock (gate) { if (attention is not null) throw new IOException("Original failure attention already bound."); attention = actual; } }
+    internal void RegisterCodexStartup(Codex.CodexAppServerPort actual)
+    {
+        if (!actual.IsBoundToOriginal(this)) return;
+        var prior = Interlocked.CompareExchange(ref codexStartup, actual, null);
+        if (prior is not null && !ReferenceEquals(prior, actual)) Interlocked.Exchange(ref codexStartup, AmbiguousCodexStartup);
+    }
+    internal Codex.CodexStartupFailureFacts? ObserveActiveCodexStartup()
+    {
+        var selected = Volatile.Read(ref codexStartup);
+        if (selected is not Codex.CodexAppServerPort actual) return null;
+        var facts = actual.ObserveActiveStartup(this);
+        return ReferenceEquals(selected, Volatile.Read(ref codexStartup)) ? facts : null;
+    }
     internal void RecordFirstCaught(string stage, Exception actual)
     {
         bool cleanupBegun; lock (gate) cleanupBegun = cleanup != 0;

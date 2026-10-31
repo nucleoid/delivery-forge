@@ -20,6 +20,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     readonly bool conformanceDangerFullAccess;
     string[]? linuxWorkspaceRoots; bool linuxWorkspaceThreadVerified; WorkerEnvelopeException? linuxWorkspaceThreadRefusal;
     WorktreeManager.OwnedGitBinding? privateGit;
+    int startupActive;
     bool UsesLinuxWorkspaceWrite => SelectLinuxWorkspaceWrite(OperatingSystem.IsLinux(), conformanceTrustRoute, runtimeTrust is not null, conformanceDangerFullAccess, linuxScope);
     readonly Action<string>? conformanceLeafCounters; int conformanceCounterPhase, runtimeCounterPhase;
     Exception? conformanceCounterFailure;
@@ -136,7 +137,24 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         // caller retains its separate diagnostic type in startup metadata.
         System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
     }
-    public void BindOriginal(ToolLifetime actualOriginal) { lock (gate) { if (boundOriginal is not null && !ReferenceEquals(boundOriginal, actualOriginal)) throw new WorkerEnvelopeException("Codex original cannot be rebound or renewed."); actualOriginal.Check(); boundOriginal = actualOriginal; startup ??= new(actualOriginal.OriginalStarted); } }
+    public void BindOriginal(ToolLifetime actualOriginal)
+    {
+        lock (gate) { if (boundOriginal is not null && !ReferenceEquals(boundOriginal, actualOriginal)) throw new WorkerEnvelopeException("Codex original cannot be rebound or renewed."); actualOriginal.Check(); boundOriginal = actualOriginal; startup ??= new(actualOriginal.OriginalStarted); }
+        actualOriginal.RegisterCodexStartup(this);
+    }
+    internal bool IsBoundToOriginal(ToolLifetime actual) => ReferenceEquals(Volatile.Read(ref boundOriginal), actual);
+    // Diagnostic context only: no locks, I/O, task enrollment, waits or ownership checks.
+    internal CodexStartupFailureFacts? ObserveActiveStartup(ToolLifetime actual)
+    {
+        if (!IsBoundToOriginal(actual) || Volatile.Read(ref startupActive) != 1) return null;
+        var journal = Volatile.Read(ref startup); if (journal is null) return null;
+        var stage = journal.ObservedStage;
+        if (stage == CodexStartupStage.Accepted) return null;
+        var status = Volatile.Read(ref pump)?.Status;
+        if (!IsBoundToOriginal(actual) || Volatile.Read(ref startupActive) != 1 || journal.ObservedStage == CodexStartupStage.Accepted) return null;
+        return new(Enum.GetName(stage) ?? "Unavailable", null, null, null,
+            status is { } observed ? Enum.GetName(observed) : null, null, CodexStartupFailureFacts.ActiveStartupObservation);
+    }
     internal CodexStartupDiagnostics SnapshotStartupDiagnostics()
     {
         lock (gate) return (startup ?? throw new IOException("Actual Codex original not bound.")).Snapshot(pending.PendingIds, pending.Failure, pumpFailure, pump, OriginalTasks, threadId is not null, turnId is not null) with { LeafCounterFailureType = conformanceCounterFailure?.GetType().FullName, ExactImageBacking = process?.CreationOwnedExactLinuxImageBacking?.ToString() };
@@ -347,6 +365,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     public async Task<AgentAcceptedReceipt> StartAsync(AgentRequest actual, TimeSpan remaining, CancellationToken token)
     {
         original.Check(); (instructions ?? throw new WorkerEnvelopeException("Actual parent instructions required before any Codex dispatch.")).Require(actual); lock (gate) { if (startEntered) throw new WorkerEnvelopeException("App-server dispatch already entered; no retry."); startEntered = true; request = actual; }
+        Volatile.Write(ref startupActive, 1);
         try
         {
             if (actual.AdapterId != "codex.cli" || actual.AdapterVersion != selection.Version || remaining <= TimeSpan.Zero || remaining > original.WorkLimit) throw new WorkerEnvelopeException("Actual request/version/deadline differs from containing original.");
@@ -355,6 +374,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             runtimeTrust?.BindWorker(original, selection, actual.Worktree, actual.ResultDirectory, linuxScope);
             if (confined)
             {
+                startup!.SetStage(CodexStartupStage.PrivateObjectInitialization);
                 privateGit = actualGit.RequireOriginalBinding(actual.Worktree, original, actual.RunId);
                 await Keep(privateGit.EnablePrivateObjectWritesAsync(token)).WaitAsync(original.Remaining, token).ConfigureAwait(false);
                 original.Check();
@@ -444,7 +464,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             reportedUsage?.BeginTurn();
             startup.SetStage(CodexStartupStage.TurnStart); var turn = await Rpc("turn/start", turnParameters, token).ConfigureAwait(false); turnId = Text(turn.GetProperty("turn"), "id");
             lock (gate) { terminalWait = new(TaskCreationOptions.RunContinuationsAsynchronously); if (terminals.TryGetValue(turnId, out var early)) { if (Text(early.GetProperty("params"), "threadId") != threadId) throw new IOException("Early terminal has foreign actual thread."); terminalWait.TrySetResult(early); } binding = new(actual.AdapterId, actual.AdapterVersion, actual.RunId, actual.RequestIdentity, threadId, turnId); }
-            usage?.Check(); original.Check(); startup.SetStage(CodexStartupStage.Accepted); return new(actual.SchemaVersion, actual.RunId, actual.RequestIdentity, actual.PlanIdentity, actual.BaseCommit, actual.Worktree, actual.AdapterId, actual.AdapterVersion, threadId, turnId, DateTimeOffset.UtcNow, Profile.Capabilities);
+            usage?.Check(); original.Check(); startup.SetStage(CodexStartupStage.Accepted); Volatile.Write(ref startupActive, 0); return new(actual.SchemaVersion, actual.RunId, actual.RequestIdentity, actual.PlanIdentity, actual.BaseCommit, actual.Worktree, actual.AdapterId, actual.AdapterVersion, threadId, turnId, DateTimeOffset.UtcNow, Profile.Capabilities);
         }
         catch (Exception primary)
         {

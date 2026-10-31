@@ -6,7 +6,7 @@ internal sealed class ToolFailureAttention
 {
     readonly ToolLifetime original; readonly TextWriter actualErrors; readonly object gate = new();
     bool entered, returned; Task? actualWrite; Exception? primary, post;
-    (string Stage, Exception Error, bool CleanupAlreadyBegun, bool MarkerAlreadyEntered)? firstCaught;
+    (string Stage, Exception Error, bool CleanupAlreadyBegun, bool MarkerAlreadyEntered, Codex.CodexStartupFailureFacts? StartupContext)? firstCaught;
     bool diagnosticEntered, diagnosticReturned; Task? actualDiagnosticWrite; Exception? diagnosticPrimary, diagnosticPost;
     internal ToolFailureAttention(ToolLifetime original, TextWriter actualErrors) { this.original = original; this.actualErrors = actualErrors; }
     internal void CaptureFirstCaught(string stage, Exception actual, bool cleanupAlreadyBegun)
@@ -14,14 +14,41 @@ internal sealed class ToolFailureAttention
         // First catch wins, not necessarily the first internal throw or cause.
         // Cleanup and marker flags are observed under their respective gates;
         // no clock, output, wait or new cleanup entry occurs during capture.
-        lock (gate) firstCaught ??= (stage, actual, cleanupAlreadyBegun, entered);
+        lock (gate)
+        {
+            if (firstCaught is not null) return;
+            Codex.CodexStartupFailureFacts? context = null;
+            try { if (IsOuterStartupTimeout(stage, actual)) context = original.ObserveActiveCodexStartup(); }
+            catch (Exception) { /* Optional context cannot replace the actual first-caught failure. */ }
+            firstCaught = (stage, actual, cleanupAlreadyBegun, entered, context);
+        }
+    }
+    static bool IsOuterStartupTimeout(string stage, Exception actual)
+    {
+        if (stage is not ("standalone" or "host-implement")) return false;
+        var seen = new HashSet<Exception>(ReferenceEqualityComparer.Instance) { actual };
+        var pending = new Queue<Exception>(); pending.Enqueue(actual); var timeout = false;
+        while (pending.TryDequeue(out var error))
+        {
+            timeout |= error is TimeoutException or OperationCanceledException;
+            if (error is AggregateException wide && wide.InnerExceptions.Count > 16) return false;
+            IEnumerable<Exception> causes = error is AggregateException aggregate ? aggregate.InnerExceptions :
+                error.InnerException is { } inner ? [inner] : [];
+            foreach (var cause in causes)
+            {
+                if (seen.Contains(cause)) continue;
+                if (seen.Count >= 16) return false;
+                seen.Add(cause); pending.Enqueue(cause);
+            }
+        }
+        return timeout;
     }
     bool MarkerUnknownLocked => entered && !returned || actualWrite is not null && !actualWrite.IsCompleted;
     bool DiagnosticUnknownLocked => diagnosticEntered && !diagnosticReturned || actualDiagnosticWrite is not null && !actualDiagnosticWrite.IsCompleted;
     internal bool Unknown { get { lock (gate) return MarkerUnknownLocked || DiagnosticUnknownLocked; } }
     internal void EmitFirstCaughtOnce()
     {
-        (string Stage, Exception Error, bool CleanupAlreadyBegun, bool MarkerAlreadyEntered) failure;
+        (string Stage, Exception Error, bool CleanupAlreadyBegun, bool MarkerAlreadyEntered, Codex.CodexStartupFailureFacts? StartupContext) failure;
         lock (gate)
         {
             if (!returned || diagnosticEntered || firstCaught is not { } actual) return;
@@ -55,7 +82,7 @@ internal sealed class ToolFailureAttention
                 failure.CleanupAlreadyBegun,
                 failure.MarkerAlreadyEntered
             };
-            var codex = Codex.CodexRemoteRpcException.FindSingle(failure.Error)?.StartupFailure;
+            var codex = Codex.CodexRemoteRpcException.FindSingle(failure.Error)?.StartupFailure ?? failure.StartupContext;
             var line = "DFCLI_FIRST_CAUGHT|" + (codex is null ? System.Text.Json.JsonSerializer.Serialize(fields) :
                 System.Text.Json.JsonSerializer.Serialize(new
                 {

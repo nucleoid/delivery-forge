@@ -1,9 +1,10 @@
 using System.Diagnostics;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace DeliveryForge.Tool.Codex;
 
-internal enum CodexStartupStage { NotStarted, NativeImageVerification, NativeCreation, Initialize, InitializedNotification, ThreadStart, AccountRead, TurnStart, Accepted }
+internal enum CodexStartupStage { NotStarted, NativeImageVerification, NativeCreation, Initialize, InitializedNotification, ThreadStart, AccountRead, TurnStart, Accepted, PrivateObjectInitialization }
 internal enum CodexWireDirection { Client, Server }
 internal enum CodexWireMethod { None, Initialize, Initialized, ThreadStart, ThreadStarted, AccountRead, TurnStart, TurnStarted, TurnCompleted, TurnInterrupt, Other, ConfigRead }
 internal enum CodexWireState { WriteEntered, WriteReturned, Received }
@@ -12,8 +13,10 @@ internal sealed record CodexWireObservation(long ElapsedTicks, CodexStartupStage
 internal sealed record CodexStartupDiagnostics(CodexStartupStage Stage, long OriginalStarted, long ElapsedTicks, IReadOnlyList<CodexWireObservation> Wire, bool WireBoundExceeded, int ReceivedMessages, int SentMessages, IReadOnlyList<long> PendingIds, string? ReplyFailureType, string? PumpFailureType, TaskStatus? PumpStatus, IReadOnlyList<TaskStatus> OriginalTasks, bool ThreadReceived, bool TurnReceived, CodexConfigReadDiagnostic ConfigurationDiagnostic = CodexConfigReadDiagnostic.NotObserved, CodexConfigOriginClass ConfigurationDestinationOrigin = CodexConfigOriginClass.NotObserved, string? LeafCounterFailureType = null, string? ExactImageBacking = null);
 
 internal sealed record CodexStartupFailureFacts(
-    string Stage, string? Method, long? RpcId, int? ErrorCode, string? PumpStatus, int PendingTaskCount)
+    string Stage, string? Method, long? RpcId, int? ErrorCode, string? PumpStatus, int? PendingTaskCount,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Observation = null)
 {
+    internal const string ActiveStartupObservation = "ActiveStartupContextAtFirstCatch";
     internal static CodexStartupFailureFacts From(CodexStartupDiagnostics snapshot, long clientId)
     {
         var id = clientId is >= 1 and <= 64 ? (long?)clientId : null;
@@ -38,7 +41,9 @@ internal sealed record CodexStartupFailureFacts(
 internal sealed class CodexStartupJournal(long originalStarted)
 {
     readonly object gate = new(); readonly List<CodexWireObservation> wire = []; CodexStartupStage stage; bool exceeded; int received, sent; CodexConfigReadDiagnostic configurationDiagnostic; CodexConfigOriginClass configurationDestinationOrigin;
-    internal void SetStage(CodexStartupStage value) { lock (gate) stage = value; }
+    int observedStage;
+    internal CodexStartupStage ObservedStage => (CodexStartupStage)Volatile.Read(ref observedStage);
+    internal void SetStage(CodexStartupStage value) { lock (gate) { stage = value; Volatile.Write(ref observedStage, (int)value); } }
     static CodexWireMethod Method(string? method) => method switch
     {
         "initialize" => CodexWireMethod.Initialize,

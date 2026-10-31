@@ -1,12 +1,157 @@
 using System.Diagnostics;
+using System.Reflection;
 using System.Text.Json;
 using DeliveryForge.Planning;
+using DeliveryForge.Execution.Git;
+using DeliveryForge.Execution.Host;
 using DeliveryForge.Tool;
 using DeliveryForge.Tool.Codex;
 namespace DeliveryForge.Tool.Tests;
 
 public sealed class ProgramFailureTests
 {
+    // Diagnostic fixture only. The inert image/manager is never launched; reflection
+    // positions the real Port's existing private state without a production test seam.
+    static FieldInfo DiagnosticField(object value, string name) => value.GetType().GetField(name, BindingFlags.Instance | BindingFlags.NonPublic)
+        ?? throw new IOException("Actual diagnostic fixture field missing.");
+    static (CodexAppServerPort Port, CodexStartupJournal Journal) ActiveStartup(ToolLifetime original, bool active = true)
+    {
+        var image = Environment.ProcessPath ?? throw new IOException("Actual test process image required.");
+        var port = new CodexAppServerPort(new(image, 1, new string('a', 64), "diagnostic-fixture"),
+            new WorktreeManager(image), KnownAgentProfiles.CodexCli("diagnostic-fixture"));
+        port.BindOriginal(original);
+        var journal = (CodexStartupJournal)DiagnosticField(port, "startup").GetValue(port)!;
+        journal.SetStage(CodexStartupStage.PrivateObjectInitialization);
+        DiagnosticField(port, "startupActive").SetValue(port, active ? 1 : 0);
+        DiagnosticField(port, "pump").SetValue(port, Task.CompletedTask);
+        return (port, journal);
+    }
+    static string FirstCaughtLine(StringWriter errors) => Assert.Single(errors.ToString().Split('\n'),
+        line => line.StartsWith("DFCLI_FIRST_CAUGHT|", StringComparison.Ordinal)).TrimEnd('\r');
+
+    [Fact]
+    public async Task Independent_outer_timeout_freezes_only_same_original_startup_context_without_changing_failure()
+    {
+        const string secret = "private-config-auth-and-task@example.invalid";
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var errors = new StringWriter();
+        var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention);
+        var startup = ActiveStartup(life); var stillPending = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var timeout = await Assert.ThrowsAsync<TimeoutException>(() => stillPending.Task.WaitAsync(TimeSpan.FromMilliseconds(1), TestContext.Current.CancellationToken));
+        timeout.Data["unexported"] = secret; var started = life.OriginalStarted;
+        life.RecordFirstCaught("standalone", timeout);
+        startup.Journal.SetStage(CodexStartupStage.Accepted); DiagnosticField(startup.Port, "startupActive").SetValue(startup.Port, 0);
+        life.RecordFirstCaught("host-implement", new IOException(secret));
+        Assert.False(stillPending.Task.IsCompleted); Assert.Equal(started, life.OriginalStarted); life.Check();
+        var rethrown = await Assert.ThrowsAsync<TimeoutException>(() => CodexAppServerPort.RetireFailedStartupAsync(timeout, null, () => Task.CompletedTask));
+        Assert.Same(timeout, rethrown);
+        life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce(); attention.EmitFirstCaughtOnce();
+        var line = FirstCaughtLine(errors); using var json = JsonDocument.Parse(line["DFCLI_FIRST_CAUGHT|".Length..]);
+        Assert.Equal(typeof(TimeoutException).FullName, json.RootElement.GetProperty("Type").GetString());
+        var facts = json.RootElement.GetProperty("CodexStartup");
+        Assert.Equal("PrivateObjectInitialization", facts.GetProperty("Stage").GetString());
+        Assert.Equal("ActiveStartupContextAtFirstCatch", facts.GetProperty("Observation").GetString());
+        Assert.Equal("RanToCompletion", facts.GetProperty("PumpStatus").GetString());
+        foreach (var name in new[] { "Method", "RpcId", "ErrorCode", "PendingTaskCount" }) Assert.Equal(JsonValueKind.Null, facts.GetProperty(name).ValueKind);
+        Assert.DoesNotContain(secret, line, StringComparison.Ordinal); Assert.True(System.Text.Encoding.UTF8.GetByteCount(line) <= 1024);
+        Assert.False(attention.Unknown); Assert.False(life.HasExplicitUnknown);
+    }
+
+    [Theory]
+    [InlineData("foreign")]
+    [InlineData("inactive")]
+    [InlineData("accepted")]
+    [InlineData("ambiguous")]
+    [InlineData("unrelated")]
+    [InlineData("nonstartup-stage")]
+    [InlineData("oversized")]
+    public void Startup_context_omits_foreign_inactive_ambiguous_unrelated_and_nonstartup_failures(string scenario)
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var foreign = new ToolLifetime(TimeSpan.FromSeconds(120));
+        using var errors = new StringWriter(); var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention);
+        var startup = ActiveStartup(scenario == "foreign" ? foreign : life, scenario != "inactive");
+        if (scenario == "foreign") life.RegisterCodexStartup(startup.Port);
+        if (scenario == "accepted") startup.Journal.SetStage(CodexStartupStage.Accepted);
+        if (scenario == "ambiguous")
+        {
+            _ = ActiveStartup(life, false); startup.Port.BindOriginal(life);
+            Assert.Null(life.ObserveActiveCodexStartup());
+        }
+        Exception error = scenario == "unrelated" ? new IOException("private") : new OperationCanceledException("private");
+        if (scenario == "oversized") for (var index = 0; index < 16; index++) error = new IOException("private", error);
+        var stage = scenario == "nonstartup-stage" ? "standalone-owner-close" : "standalone";
+        life.RecordFirstCaught(stage, error); life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce();
+        var line = FirstCaughtLine(errors);
+        var expected = "DFCLI_FIRST_CAUGHT|" + JsonSerializer.Serialize(new
+        {
+            Stage = stage,
+            Type = error.GetType().FullName,
+            error.HResult,
+            InnerType = error.InnerException?.GetType().FullName,
+            CleanupAlreadyBegun = false,
+            MarkerAlreadyEntered = false
+        });
+        Assert.Equal(expected, line); Assert.DoesNotContain("CodexStartup", line, StringComparison.Ordinal);
+        Assert.False(attention.Unknown); Assert.False(life.HasExplicitUnknown);
+    }
+
+    [Fact]
+    public void Correlated_RPC_facts_keep_exact_bytes_and_precede_active_original_context()
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var errors = new StringWriter();
+        var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention); _ = ActiveStartup(life);
+        var rpc = new CodexRemoteRpcException("private", 5); rpc.CaptureStartup(StartupFailureSnapshot(5, -32602, "private"));
+        Assert.Equal("{\"Stage\":\"ThreadStart\",\"Method\":\"ConfigRead\",\"RpcId\":5,\"ErrorCode\":-32602,\"PumpStatus\":\"RanToCompletion\",\"PendingTaskCount\":1}", JsonSerializer.Serialize(rpc.StartupFailure));
+        life.RecordFirstCaught("standalone", new AggregateException(new TimeoutException("private"), rpc));
+        life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce();
+        using var json = JsonDocument.Parse(FirstCaughtLine(errors)["DFCLI_FIRST_CAUGHT|".Length..]);
+        var facts = json.RootElement.GetProperty("CodexStartup");
+        Assert.Equal("ConfigRead", facts.GetProperty("Method").GetString()); Assert.False(facts.TryGetProperty("Observation", out _));
+        Assert.Equal(JsonSerializer.Serialize(rpc.StartupFailure), facts.GetRawText());
+    }
+
+    [Fact(Timeout = 10000)]
+    public async Task Original_context_read_does_not_wait_for_Port_tasks_or_journal_locks()
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var errors = new StringWriter();
+        var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention); var startup = ActiveStartup(life);
+        var held = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously); using var release = new ManualResetEventSlim();
+        var owner = Task.Run(() =>
+        {
+            lock (DiagnosticField(startup.Port, "gate").GetValue(startup.Port)!)
+            lock (DiagnosticField(startup.Port, "tasks").GetValue(startup.Port)!)
+            lock (DiagnosticField(startup.Journal, "gate").GetValue(startup.Journal)!)
+            {
+                held.SetResult();
+                if (!release.Wait(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken)) throw new TimeoutException("Diagnostic test release absent.");
+            }
+        }, TestContext.Current.CancellationToken);
+        try
+        {
+            await held.Task.WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+            await Task.Run(() => life.RecordFirstCaught("host-implement", new TimeoutException("private")), TestContext.Current.CancellationToken)
+                .WaitAsync(TimeSpan.FromSeconds(2), TestContext.Current.CancellationToken);
+        }
+        finally { release.Set(); await owner.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken); }
+        life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce();
+        using var json = JsonDocument.Parse(FirstCaughtLine(errors)["DFCLI_FIRST_CAUGHT|".Length..]);
+        Assert.Equal("ActiveStartupContextAtFirstCatch", json.RootElement.GetProperty("CodexStartup").GetProperty("Observation").GetString());
+        Assert.False(attention.Unknown);
+    }
+
+    [Fact]
+    public void Long_error_types_and_original_startup_context_keep_existing_line_ceiling()
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120)); using var errors = new StringWriter();
+        var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention); _ = ActiveStartup(life);
+        Exception Wrap(Exception error) => new BoundaryABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.LayerAABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.LayerBABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.LayerCABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.EscapingBudgetException(error);
+        life.RecordFirstCaught("standalone", Wrap(Wrap(new TimeoutException("private-auth-config"))));
+        life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce();
+        var line = FirstCaughtLine(errors); Assert.True(System.Text.Encoding.UTF8.GetByteCount(line) <= 1024);
+        using var json = JsonDocument.Parse(line["DFCLI_FIRST_CAUGHT|".Length..]);
+        Assert.Equal("ActiveStartupContextAtFirstCatch", json.RootElement.GetProperty("CodexStartup").GetProperty("Observation").GetString());
+        Assert.DoesNotContain("private-auth-config", line, StringComparison.Ordinal); Assert.False(attention.Unknown); Assert.False(life.HasExplicitUnknown);
+    }
+
     static CodexStartupDiagnostics StartupFailureSnapshot(long id, int code, string sentinel)
     {
         var journal = new CodexStartupJournal(Stopwatch.GetTimestamp());
