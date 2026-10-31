@@ -404,6 +404,88 @@ public sealed class OwnedLinuxExactImageTests
         }
         // Retain this fresh private fixture namespace; no recursive cleanup.
     }
+    // Test-only delegated budget: hold the first real creator-thread WORK
+    // admission before any native birth, with no production hook or PID lookup.
+    sealed class HeldPreBirthBudget(ToolLifetime original) : IOwnedDuplexBudget, IOwnedFailureCleanup, IOwnedBudgetUnknownRetention
+    {
+        internal Thread? Caller, Creator;
+        internal readonly ManualResetEventSlim ReleaseBirth = new(false);
+        internal readonly TaskCompletionSource<bool> BirthEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal readonly TaskCompletionSource<bool> CleanupEntered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        int held;
+        public long OriginalStarted => original.OriginalStarted;
+        public TimeSpan WholeLimit => original.WholeLimit;
+        public TimeSpan WorkLimit => original.WorkLimit;
+        public CancellationToken Token => original.Token;
+        public TimeSpan CleanupRemaining => original.CleanupRemaining;
+        public void CheckWork()
+        {
+            if (!ReferenceEquals(Thread.CurrentThread, Volatile.Read(ref Caller)) && Interlocked.CompareExchange(ref held, 1, 0) == 0)
+            {
+                Volatile.Write(ref Creator, Thread.CurrentThread); BirthEntered.TrySetResult(true);
+                var left = original.WholeLimit - System.Diagnostics.Stopwatch.GetElapsedTime(original.OriginalStarted);
+                if (left <= TimeSpan.Zero || !ReleaseBirth.Wait(left)) throw new TimeoutException("Controlled pre-birth admission exceeded the SAME original whole endpoint.");
+            }
+            original.CheckWork();
+        }
+        public void BeginFailureCleanup() { original.BeginFailureCleanup(); CleanupEntered.TrySetResult(true); }
+        public void PreserveUnknown() => original.RetainUnknown();
+    }
+    [Fact(Timeout = 90000, Skip = "Actual creator cancellation settlement requires Linux.", SkipUnless = nameof(IsLinux))]
+    public async Task Actual_cancelled_prebirth_wait_settles_creator_before_return_and_retires_known_absent()
+    {
+        using var affinity = new OwnedDuplexProcessTests.Affinity();
+        using var cancel = CancellationTokenSource.CreateLinkedTokenSource(TestContext.Current.CancellationToken);
+        var original = new ToolLifetime(TimeSpan.FromSeconds(30), cancel.Token);
+        var selected = CopyNative(original); var scope = Scope(original); var budget = new HeldPreBirthBudget(original);
+        BoundedFiles.ReserveExactLinuxImageReads(new(selected.Image.Path, selected.Image.Bytes, selected.Image.Sha256), original);
+        Task<OwnedDuplexProcess>? open = null; OwnedDuplexProcess? session = null;
+        try
+        {
+            open = Task.Run(() =>
+            {
+                Volatile.Write(ref budget.Caller, Thread.CurrentThread);
+                return OwnedDuplexProcess.Open(new(selected.Image.Path, [], selected.Directory, ActualOrdinaryCapture.ResourceEnvironment()), budget, scope, selected.Image);
+            }, CancellationToken.None);
+            await budget.BirthEntered.Task.WaitAsync(original.Remaining, TestContext.Current.CancellationToken);
+            cancel.Cancel();
+#pragma warning disable xUnit1051 // SAME-original cleanup is intentionally independent of the canceled caller token.
+            var left = original.WholeLimit - System.Diagnostics.Stopwatch.GetElapsedTime(original.OriginalStarted);
+            var first = await Task.WhenAny(open, budget.CleanupEntered.Task).WaitAsync(left, CancellationToken.None);
+            Assert.Same(budget.CleanupEntered.Task, first);
+            Assert.False(open.IsCompleted); // Birth is still held, so Open cannot safely publish its streams.
+            budget.ReleaseBirth.Set();
+            session = await open.WaitAsync(original.CleanupRemaining, CancellationToken.None);
+            Assert.NotNull(session.StartupFailure); Assert.False(session.HasCreationOwnedLinuxScope);
+            var closed = await session.RetireAsync(true).WaitAsync(original.CleanupRemaining, CancellationToken.None);
+            Assert.True(closed.KnownClosed && closed.RootExited && closed.DispositionReturned);
+            Assert.Equal(0u, closed.ActiveProcesses); Assert.Null(closed.ExitCode); Assert.False(session.HasUnknownIo);
+            Assert.NotNull(budget.Creator); Assert.False(budget.Creator.IsAlive);
+#pragma warning restore xUnit1051
+            // This controlled interleaving has NO native child; it establishes
+            // birth cancellation/absence settlement, not post-child Stop coverage.
+        }
+        finally
+        {
+            try
+            {
+                try { original.BeginFailureCleanup(); }
+                finally { budget.ReleaseBirth.Set(); }
+                if (open is not null)
+                {
+#pragma warning disable xUnit1051 // SAME-original cleanup must finish the actual Open despite WORK cancellation.
+                    session ??= await open.WaitAsync(original.CleanupRemaining, CancellationToken.None);
+                    if (Volatile.Read(ref budget.Creator) is { } actualCreator && !actualCreator.Join(original.CleanupRemaining))
+                        throw new IOException("Controlled pre-birth creator remains unjoined.");
+                    var closed = await session.RetireAsync(true).WaitAsync(original.CleanupRemaining, CancellationToken.None);
+#pragma warning restore xUnit1051
+                    if (!closed.KnownClosed) { original.RetainUnknown(); throw new IOException("Controlled pre-birth original remains UNKNOWN."); }
+                }
+                budget.ReleaseBirth.Dispose(); original.Dispose();
+            }
+            catch { original.RetainUnknown(); throw; }
+        }
+    }
     [Fact(Timeout = 90000, Skip = "Sealed descriptor execution requires Linux.", SkipUnless = nameof(IsLinux))]
     public async Task Actual_ordinary_capture_uses_same_exact_image_scope_and_complete_retirement()
     {

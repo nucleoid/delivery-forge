@@ -13,7 +13,7 @@ internal sealed class LinuxDuplexCreator : IDisposable
     readonly ManualResetEventSlim rootExited = new(false);
     readonly TaskCompletionSource<bool> birth = new(TaskCreationOptions.RunContinuationsAsynchronously);
     Exception? birthFailure;
-    int startReturned, birthReturned, creationEntered, creationReturned, created;
+    int startEntered, startReturned, birthReturned, creationEntered, creationReturned, created;
     bool joined, dispositionEntered, rootExitObserved;
     internal bool BirthReturned => Volatile.Read(ref birthReturned) != 0;
     internal LinuxDuplexCreator(IOwnedDuplexBudget actual, OwnedDuplexProcess owner, Action create)
@@ -37,13 +37,43 @@ internal sealed class LinuxDuplexCreator : IDisposable
     }
     internal void StartAndWait()
     {
-        budget.CheckWork();
-        // The session already retains this frame before the actual Start call.
-        // A thrown/unreturned Start is not invented as a joined creator.
-        thread.Start(); Volatile.Write(ref startReturned, 1);
-        birth.Task.WaitAsync(budget.WorkLimit - Stopwatch.GetElapsedTime(budget.OriginalStarted), budget.Token).GetAwaiter().GetResult();
-        if (birthFailure is not null) ExceptionDispatchInfo.Capture(birthFailure).Throw();
-        budget.CheckWork();
+        try
+        {
+            budget.CheckWork();
+            // The session already retains this frame before the actual Start call.
+            Volatile.Write(ref startEntered, 1);
+            thread.Start(); Volatile.Write(ref startReturned, 1);
+            birth.Task.WaitAsync(budget.WorkLimit - Stopwatch.GetElapsedTime(budget.OriginalStarted), budget.Token).GetAwaiter().GetResult();
+            if (birthFailure is not null) ExceptionDispatchInfo.Capture(birthFailure).Throw();
+            budget.CheckWork();
+        }
+        catch (Exception primary)
+        {
+            if (Volatile.Read(ref startEntered) == 0)
+            {
+                // CheckWork refused before Thread.Start was entered: no creator
+                // or native birth exists. This is not an invented successful Join.
+                Volatile.Write(ref birthReturned, 1); session.LinuxBirthReturned(); birth.TrySetResult(true);
+            }
+            var secondary = new List<Exception>(2);
+            try
+            {
+                if (budget is IOwnedFailureCleanup cleanup) cleanup.BeginFailureCleanup();
+                else _ = budget.CleanupRemaining;
+            }
+            catch (Exception admission) { session.RecordOwnerFailure(admission); secondary.Add(admission); }
+            // Never publish a failed Open while ordinary birth can still mutate
+            // its streams, unless this SAME cleanup endpoint cannot settle it.
+            try { WaitForBirthInCleanupAsync().GetAwaiter().GetResult(); }
+            catch (Exception wait) { session.RecordOwnerFailure(wait); secondary.Add(wait); }
+            if (secondary.Count != 0) throw new AggregateException("Actual Linux birth failure and same-original cleanup failures.", new[] { primary }.Concat(secondary));
+            ExceptionDispatchInfo.Capture(primary).Throw();
+        }
+    }
+    internal async Task WaitForBirthInCleanupAsync()
+    {
+        await birth.Task.WaitAsync(budget.CleanupRemaining, CancellationToken.None).ConfigureAwait(false);
+        _ = budget.CleanupRemaining;
     }
     void Run(Action create)
     {
@@ -73,10 +103,12 @@ internal sealed class LinuxDuplexCreator : IDisposable
             if (budget is IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown();
         }
     }
-    internal bool Join(bool cleanup)
+    internal bool SettleCreator(bool cleanup)
     {
         Check();
-        if (Volatile.Read(ref startReturned) == 0 || !BirthReturned) return false;
+        if (!BirthReturned) return false;
+        if (Volatile.Read(ref startEntered) == 0) return true; // Known no Thread.Start, not joined.
+        if (Volatile.Read(ref startReturned) == 0) return false;
         if (ReferenceEquals(thread, Thread.CurrentThread)) throw new IOException("Actual Linux creator cannot join itself.");
         var left = cleanup ? budget.CleanupRemaining : budget.WorkLimit - Stopwatch.GetElapsedTime(budget.OriginalStarted);
         joined = thread.Join(left); Check(); return joined;
@@ -86,7 +118,8 @@ internal sealed class LinuxDuplexCreator : IDisposable
     {
         lock (signalGate)
         {
-            if (!joined || dispositionEntered) throw new IOException("Actual Linux creator must be joined before one disposition.");
+            if (!BirthReturned || Volatile.Read(ref startEntered) != 0 && !joined || dispositionEntered)
+                throw new IOException("Actual Linux creator must be absent before Start or joined before one disposition.");
             dispositionEntered = true; rootExited.Dispose();
         }
     }

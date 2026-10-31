@@ -126,7 +126,7 @@ public sealed class OwnedDuplexProcess
             // Linux may have real attached stderr even when its birth barrier
             // refused. Retain the existing bounded reader under SAME failure
             // cleanup; do not replace the creator failure or invent closure.
-            if (OperatingSystem.IsLinux() && session.error is not null && session.errorDrain is null)
+            if (OperatingSystem.IsLinux() && session.linuxCreator is not { BirthReturned: false } && session.error is not null && session.errorDrain is null)
             {
                 try
                 {
@@ -201,6 +201,12 @@ public sealed class OwnedDuplexProcess
         try
         {
             Admission(); // successful retirement remains WORK; actual failure latches parent synchronously.
+            if (opening && linuxCreator is not null)
+            {
+                cleanup = true; FailureAdmission();
+                await linuxCreator.WaitForBirthInCleanupAsync().ConfigureAwait(false);
+                Admission();
+            }
             if (opening) throw new IOException("Original creator still entered.");
             if (!inputCloseEntered && input is not null && Volatile.Read(ref writerBusy) == 0 && !ActualIo.Any(x => x.Kind.StartsWith("stdin", StringComparison.Ordinal) && x.Unknown)) { Admission(); try { CloseInputForCapture(cleanup); } catch (Exception failure) { lock (failures) if (!failures.Contains(failure)) failures.Add(failure); cleanup = true; } Admission(); }
             var native = ObserveOriginal(cleanup);

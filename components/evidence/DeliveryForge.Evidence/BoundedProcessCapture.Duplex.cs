@@ -24,7 +24,7 @@ internal static partial class BoundedProcessCapture
             finally { Failures(); }
         }, cleanup => { try { scope?.Stop(cleanup); } finally { Failures(); } }, cleanup =>
         {
-            if (creator is null || !creator.Join(cleanup)) return false;
+            if (creator is null || !creator.SettleCreator(cleanup)) return false;
             var known = true; try { if (scope is not null && !scope.DisposeKnown(cleanup)) return false; } finally { Failures(); }
             if (inputCloseEntered && !inputClosed) return false;
             bool FirstClose(IDisposable resource, string kind)
