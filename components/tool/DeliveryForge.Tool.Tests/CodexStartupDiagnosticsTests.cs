@@ -85,9 +85,9 @@ public sealed class CodexStartupDiagnosticsTests
         var facts = Assert.IsType<CodexRefusalFacts>(CodexTrustProtocolData.Refusal(wire, 4));
         Assert.Equal(signals, facts.HeuristicSignals); Assert.True(facts.HeuristicOnly);
         Assert.True(facts.MessageOmitted); Assert.True(facts.DataOmitted); Assert.False(facts.MessageBoundExceeded);
-        var bytes = Encoding.UTF8.GetBytes(message + ":" + secret);
-        Assert.Equal(bytes.Length, facts.MessageBytes);
-        Assert.Equal(Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes)).ToLowerInvariant(), facts.MessageSha256);
+        Assert.Equal("String", facts.MessageKind); Assert.Contains(facts.SizeBucket, new[] { "1-64", "65-256" });
+        Assert.DoesNotContain("Sha256", JsonSerializer.Serialize(facts), StringComparison.Ordinal);
+        Assert.DoesNotContain("Bytes", JsonSerializer.Serialize(facts), StringComparison.Ordinal);
         if (message.Contains("os error 13", StringComparison.Ordinal)) Assert.Equal(13, facts.OsErrorCode);
         var rpc = new CodexRemoteRpcException(CodexTrustProtocolData.ErrorMessage(CodexTrustProtocolData.Response(wire, "thread/start").GetProperty("error")), 4, facts);
         rpc.CaptureStartup(ThreadStartSnapshot());
@@ -106,10 +106,11 @@ public sealed class CodexStartupDiagnosticsTests
         Assert.Null(CodexTrustProtocolData.Refusal(wire, 3)); Assert.Null(CodexTrustProtocolData.Refusal(wire, 65));
         Assert.Null(CodexTrustProtocolData.Refusal(JsonSerializer.SerializeToElement(new { id = "4", error = new { message = "secret" } }), 4));
         var facts = Assert.IsType<CodexRefusalFacts>(CodexTrustProtocolData.Refusal(wire, 4));
-        Assert.Null(facts.MessageSha256); Assert.Null(facts.MessageBytes); Assert.True(facts.MessageBoundExceeded);
+        Assert.Null(facts.SizeBucket); Assert.Equal("String", facts.MessageKind); Assert.True(facts.MessageBoundExceeded);
         Assert.Equal("None", facts.HeuristicSignals); Assert.DoesNotContain("secret", JsonSerializer.Serialize(facts), StringComparison.Ordinal);
         var missing = Assert.IsType<CodexRefusalFacts>(CodexTrustProtocolData.Refusal(JsonSerializer.SerializeToElement(new { id = 4, error = new { code = -32603 } }), 4));
-        Assert.Null(missing.MessageSha256); Assert.False(missing.DataOmitted); Assert.False(missing.MessageBoundExceeded);
+        Assert.Equal("Missing", missing.MessageKind); Assert.Null(missing.SizeBucket); Assert.False(missing.MessageOmitted);
+        Assert.False(missing.DataOmitted); Assert.False(missing.MessageBoundExceeded);
     }
 
     [Fact]
@@ -132,6 +133,9 @@ public sealed class CodexStartupDiagnosticsTests
         Assert.Equal(typeof(IOException).FullName, observed.FailureType); Assert.Equal(cleanup.HResult, observed.HResult);
         Assert.DoesNotContain("private", JsonSerializer.Serialize(observed), StringComparison.Ordinal);
         Assert.Same(cleanup, await Assert.ThrowsAsync<IOException>(async () => await faulted));
+        var entered = CodexStartupCleanupFacts.Observe(null, true, cleanup, entered: true);
+        Assert.Equal("EnteredWithoutTask", entered.TaskState); Assert.Null(entered.KnownClosed); Assert.Null(entered.DispositionReturned);
+        Assert.Equal("NotEntered", CodexStartupCleanupFacts.Observe(null, null, null).TaskState);
     }
 
     [Fact]
@@ -186,7 +190,7 @@ public sealed class CodexStartupDiagnosticsTests
     }
 
     [Fact]
-    public void Actual_aggregate_startup_shape_keeps_refusal_hash_OS_code_and_full_cleanup_within_existing_marker()
+    public void Actual_aggregate_startup_shape_keeps_refusal_bucket_OS_code_and_full_cleanup_within_existing_marker()
     {
         const string secret = "private-token-and-path";
         var wire = JsonSerializer.SerializeToElement(new { id = 4, error = new { code = -32603, message = "read-only database: permission denied (os error 13); " + secret, data = new { token = secret } } });
@@ -202,12 +206,75 @@ public sealed class CodexStartupDiagnosticsTests
         Assert.True(Encoding.UTF8.GetByteCount(line) <= 1024);
         using var parsed = JsonDocument.Parse(line["DFCLI_FIRST_CAUGHT|".Length..]);
         var failure = parsed.RootElement.GetProperty("CodexFailure");
-        Assert.Equal(rpc.Refusal!.MessageSha256, failure.GetProperty("Refusal").GetProperty("Sha256").GetString());
+        Assert.Equal(rpc.Refusal!.SizeBucket, failure.GetProperty("Refusal").GetProperty("SizeBucket").GetString());
+        Assert.False(failure.GetProperty("Refusal").TryGetProperty("Sha256", out _));
+        Assert.False(failure.GetProperty("Refusal").TryGetProperty("Bytes", out _));
         Assert.Equal(13, failure.GetProperty("Refusal").GetProperty("OsErrorCode").GetInt32());
         Assert.Equal(typeof(IOException).FullName, failure.GetProperty("Cleanup").GetProperty("Failure").GetString());
         Assert.False(failure.GetProperty("Cleanup").GetProperty("KnownClosed").GetBoolean());
         Assert.True(failure.GetProperty("Cleanup").GetProperty("OutEof").GetBoolean());
         Assert.DoesNotContain(secret, line, StringComparison.Ordinal); Assert.False(attention.Unknown); Assert.False(life.HasExplicitUnknown);
+    }
+
+    [Fact]
+    public void RPC_without_startup_snapshot_retains_exact_legacy_marker_even_with_refusal_and_cleanup()
+    {
+        var wire = JsonSerializer.SerializeToElement(new { id = 4, error = new { message = "private vendor text" } });
+        var legacy = new CodexRemoteRpcException("private", 4);
+        var expanded = new CodexRemoteRpcException("private", 4, CodexTrustProtocolData.Refusal(wire, 4)); expanded.CaptureCleanup(null, true, new IOException("private"), entered: true);
+        using var before = new ToolLifetime(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        using var after = new ToolLifetime(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        var first = EmitRefusal(before, legacy); var second = EmitRefusal(after, expanded);
+        Assert.Equal(first.Line, second.Line); Assert.DoesNotContain("CodexStartup", second.Line, StringComparison.Ordinal); Assert.DoesNotContain("CodexFailure", second.Line, StringComparison.Ordinal);
+        Assert.False(first.Attention.Unknown); Assert.False(second.Attention.Unknown); Assert.False(after.HasExplicitUnknown);
+    }
+
+    [Theory]
+    [InlineData(0, "0")]
+    [InlineData(1, "1-64")]
+    [InlineData(64, "1-64")]
+    [InlineData(65, "65-256")]
+    [InlineData(257, "257-1024")]
+    [InlineData(1025, "1025-4096")]
+    [InlineData(4096, "1025-4096")]
+    public void Refusal_size_buckets_cannot_confirm_exact_message_content_or_length(int length, string expected)
+    {
+        CodexRefusalFacts Read(string text) => Assert.IsType<CodexRefusalFacts>(CodexTrustProtocolData.Refusal(JsonSerializer.SerializeToElement(new { id = 4, error = new { message = text } }), 4));
+        var first = Read(new string('x', length)); var differentContent = Read(new string('y', length));
+        Assert.Equal(expected, first.SizeBucket); Assert.Equal(first, differentContent);
+        if (length == 1) Assert.Equal(first, Read(new string('z', 64)));
+        Assert.DoesNotContain("Sha256", JsonSerializer.Serialize(first), StringComparison.Ordinal); Assert.DoesNotContain("Bytes", JsonSerializer.Serialize(first), StringComparison.Ordinal);
+        Assert.Equal("4097-16384", Read(new string('\u0800', 4096)).SizeBucket);
+    }
+
+    [Fact]
+    public void Nonstring_message_is_explicitly_present_omitted_without_string_hints_or_size()
+    {
+        foreach (var message in new object?[] { null, 13, new { token = "private-secret" } })
+        {
+            var facts = Assert.IsType<CodexRefusalFacts>(CodexTrustProtocolData.Refusal(JsonSerializer.SerializeToElement(new { id = 4, error = new { message } }), 4));
+            Assert.Equal("Other", facts.MessageKind); Assert.True(facts.MessageOmitted); Assert.Null(facts.SizeBucket); Assert.False(facts.MessageBoundExceeded);
+            Assert.Equal("None", facts.HeuristicSignals); Assert.Null(facts.OsErrorCode); Assert.DoesNotContain("private-secret", JsonSerializer.Serialize(facts), StringComparison.Ordinal);
+        }
+    }
+
+    [Theory]
+    [InlineData("cwd")]
+    [InlineData("roots")]
+    [InlineData("account")]
+    [InlineData("config")]
+    public void Actual_startup_control_validation_failure_never_formats_untrusted_server_values(string field)
+    {
+        const string secret = "private-account-path-and-token";
+        var method = field == "account" ? "account/read" : field == "config" ? "config/read" : "thread/start";
+        var result = field switch
+        {
+            "account" => JsonSerializer.SerializeToElement(new { account = new { type = secret } }),
+            "config" => JsonSerializer.SerializeToElement(new { routeStatus = secret, routeDiagnostic = secret }),
+            _ => JsonSerializer.SerializeToElement(new { cwd = field == "cwd" ? secret : "/expected", sandbox = new { type = "workspaceWrite", networkAccess = false, writableRoots = new[] { secret } } })
+        };
+        var failure = Record.Exception(() => InstalledCodexMalformedClientTests.RequireStartupReply(method, result, "/expected", "/expected-git"));
+        Assert.NotNull(failure); Assert.DoesNotContain(secret, failure.ToString(), StringComparison.Ordinal);
     }
 
     static CodexStartupDiagnostics ThreadStartSnapshot() => new(CodexStartupStage.ThreadStart, 1, 2,

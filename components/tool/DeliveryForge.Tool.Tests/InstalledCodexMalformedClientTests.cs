@@ -119,7 +119,9 @@ public sealed class InstalledCodexMalformedClientTests
             if (probe.LinuxScope?.RestrictiveChildPolicy != "nnp-user1000-ancestor-v3" || f.LinuxOwnerTrustedHelper is not null || f.LinuxDangerFullAccessOnce)
                 throw new IOException("Exact restrictive non-helper Linux startup selection required.");
             // Root must admit a NEW absent destination and its current project
-            // trust entries. Never capture/adopt the previous failed writer.
+            // trust entries. Thread/start may persist guest CLI session state in
+            // that approved profile. Do not override/delete it or change auth/
+            // global configuration. Never adopt the previous failed writer.
             if (Path.Exists(f.Worktree) || Path.Exists(f.ResultDirectory)) throw new IOException("Fresh startup worktree/result required.");
             var run = "startup-" + Guid.NewGuid().ToString("N"); var current = true;
             var parent = new ParentEffectAdmission(new object(), actual => current && actual == run, _ => current = false);
@@ -162,9 +164,7 @@ public sealed class InstalledCodexMalformedClientTests
                     }
                     else if (method == "thread/start")
                     {
-                        var result = message.GetProperty("result"); Assert.Equal(f.Worktree, result.GetProperty("cwd").GetString());
-                        var policy = result.GetProperty("sandbox"); Assert.Equal("workspaceWrite", policy.GetProperty("type").GetString()); Assert.False(policy.GetProperty("networkAccess").GetBoolean());
-                        Assert.All(policy.GetProperty("writableRoots").EnumerateArray(), root => Assert.Contains(root.GetString(), new[] { binding.Worktree, binding.GitDirectory }));
+                        RequireStartupReply(method, message.GetProperty("result"), f.Worktree, binding.GitDirectory);
                         threadCreated = true;
                     }
                     return CodexTrustProtocolData.Response(message, method);
@@ -176,9 +176,9 @@ public sealed class InstalledCodexMalformedClientTests
                 if (refused) return;
                 var initialized = probe.Protocol.WriteAsync(new { method = "initialized", @params = new { } }, phase.Token); probe.Calls.Add(initialized); await initialized;
                 var config = await Rpc(2, "config/read", new { cwd = f.Worktree, includeLayers = true }); if (refused) return;
-                _ = CodexConfigReadData.RequireSupported(config.GetProperty("result"));
+                RequireStartupReply("config/read", config.GetProperty("result"), f.Worktree, binding.GitDirectory);
                 var account = await Rpc(3, "account/read", new { refreshToken = false }); if (refused) return;
-                Assert.Equal("chatgpt", account.GetProperty("result").GetProperty("account").GetProperty("type").GetString());
+                RequireStartupReply("account/read", account.GetProperty("result"), f.Worktree, binding.GitDirectory);
                 _ = await Rpc(4, "thread/start", new { cwd = f.Worktree, sandbox = "workspace-write" });
                 // Deliberately no turn/start, task text or forward host owner.
             }
@@ -187,10 +187,31 @@ public sealed class InstalledCodexMalformedClientTests
             var retire = probe.Native.RetireAsync(false); probe.Calls.Add(retire); probe.Retirement = await retire.WaitAsync(probe.Original.Remaining, TestContext.Current.CancellationToken);
             Assert.Same(retire, probe.Native.OriginalRetirementTask); Assert.True(probe.Retirement.KnownClosed); Assert.False(probe.Native.HasUnknownIo);
             Assert.All(probe.Calls, call => Assert.True(call.IsCompletedSuccessfully)); Assert.All(probe.Protocol.EnteredTasks, call => Assert.True(call.IsCompletedSuccessfully));
-            var summary = JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualInstalledCodexWorkspaceStartupOnly-v1", f.Host, f.Worktree, Refused = refused, RefusedMethod = refusedMethod, RefusedId = refusedId, ErrorCode = errorCode, Refusal = refusal, ThreadCreated = threadCreated, TurnStartSent = false, ModelPromptSent = false, Retirement = CodexStartupCleanupFacts.Observe(retire, probe.Native.HasUnknownIo, null), GeneralConformanceAccepted = false, RuntimeCertified = false, AuthorityIssued = false }, BoundedFiles.Json);
+            var summary = JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualInstalledCodexWorkspaceStartupOnly-v1", f.Host, f.Worktree, Refused = refused, RefusedMethod = refusedMethod, RefusedId = refusedId, ErrorCode = errorCode, Refusal = refusal, ThreadCreated = threadCreated, TurnStartSent = false, ModelPromptSent = false, GuestCliSessionStateMayPersist = true, Retirement = CodexStartupCleanupFacts.Observe(retire, probe.Native.HasUnknownIo, null), GeneralConformanceAccepted = false, RuntimeCertified = false, AuthorityIssued = false }, BoundedFiles.Json);
             probe.Original.Check(); Directory.CreateDirectory(f.ResultDirectory); BoundedFiles.WriteNew(Path.Combine(f.ResultDirectory, "codex-workspace-startup-only.json"), summary, probe.Original);
         }
         catch (Exception error) { probe.Primary = error; throw; }
+    }
+
+    // Shared by the real control and managed privacy regressions. Assertions
+    // receive only booleans/fixed text, never arbitrary server/account values.
+    internal static void RequireStartupReply(string method, JsonElement result, string worktree, string gitDirectory)
+    {
+        static bool Is(JsonElement value, string key, string expected) => value.ValueKind == JsonValueKind.Object &&
+            value.TryGetProperty(key, out var field) && field.ValueKind == JsonValueKind.String && field.GetString() == expected;
+        if (method == "thread/start")
+        {
+            Assert.True(Is(result, "cwd", worktree), "Actual startup cwd mismatch.");
+            Assert.True(result.TryGetProperty("sandbox", out var policy) && Is(policy, "type", "workspaceWrite") &&
+                policy.TryGetProperty("networkAccess", out var network) && network.ValueKind == JsonValueKind.False, "Actual startup sandbox mismatch.");
+            Assert.True(policy.TryGetProperty("writableRoots", out var roots) && roots.ValueKind == JsonValueKind.Array &&
+                roots.EnumerateArray().All(root => root.ValueKind == JsonValueKind.String && (root.GetString() == worktree || root.GetString() == gitDirectory)), "Actual startup writable-root mismatch.");
+        }
+        else if (method == "account/read")
+            Assert.True(result.ValueKind == JsonValueKind.Object && result.TryGetProperty("account", out var account) && Is(account, "type", "chatgpt"), "Actual startup account type mismatch.");
+        else if (method == "config/read")
+            Assert.True(Is(result, "routeStatus", "owner-trusted-no-known-override"), "Actual startup configuration refused. Diagnostic=" + CodexConfigReadData.Diagnostic(result));
+        else throw new IOException("Unexpected startup-only reply method.");
     }
 
     [Fact(Timeout = 700000, Skip = "Actual Windows Job or selected Linux original scope required.", SkipUnless = nameof(IsWindowsOrLinux))]

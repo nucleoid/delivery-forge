@@ -101,7 +101,7 @@ internal sealed class ToolFailureAttention
             // Preserve the existing startup/default diagnostic exactly. New
             // optional facts are omitted on serialization/extent refusal, with
             // no additional output, cleanup entry or UNKNOWN transition.
-            if (rpc is not null && (rpc.Refusal is not null || rpc.StartupCleanup is not null))
+            if (codex is not null && rpc is not null && (rpc.Refusal is not null || rpc.StartupCleanup is not null))
             {
                 try
                 {

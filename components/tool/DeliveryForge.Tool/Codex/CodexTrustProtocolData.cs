@@ -69,16 +69,20 @@ internal static class CodexTrustProtocolData
         if (expectedId is < 1 or > 64 || message.ValueKind != JsonValueKind.Object ||
             !message.TryGetProperty("id", out var id) || id.ValueKind != JsonValueKind.Number || !id.TryGetInt64(out var actualId) || actualId != expectedId ||
             !message.TryGetProperty("error", out var error) || error.ValueKind != JsonValueKind.Object) return null;
-        string? hash = null; int? bytes = null, osCode = null; var exceeded = false; var signals = CodexRefusalSignal.None;
-        if (error.TryGetProperty("message", out var raw) && raw.ValueKind == JsonValueKind.String && raw.GetString() is { } text)
+        string? bucket = null; int? osCode = null; var exceeded = false; var signals = CodexRefusalSignal.None;
+        var present = error.TryGetProperty("message", out var raw);
+        var kind = !present ? "Missing" : raw.ValueKind == JsonValueKind.String ? "String" : "Other";
+        if (present && raw.ValueKind == JsonValueKind.String && raw.GetString() is { } text)
         {
             // Diagnostic-only bound; an oversized message does not change the
             // existing protocol admission, exception, cleanup or UNKNOWN state.
             exceeded = text.Length > 4096;
             if (!exceeded)
             {
-                var utf8 = System.Text.Encoding.UTF8.GetBytes(text); bytes = utf8.Length;
-                hash = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(utf8)).ToLowerInvariant();
+                // No hash or exact extent: short vendor messages can contain
+                // guessable private values. Retain only a fixed UTF8 size bucket.
+                bucket = System.Text.Encoding.UTF8.GetByteCount(text) switch
+                { 0 => "0", <= 64 => "1-64", <= 256 => "65-256", <= 1024 => "257-1024", <= 4096 => "1025-4096", _ => "4097-16384" };
                 bool Has(string value) => text.Contains(value, StringComparison.OrdinalIgnoreCase);
                 if (Has("os error") || Has("permission denied")) signals |= CodexRefusalSignal.OsError;
                 if (Has("unauthorized") || Has("authentication") || Has("not logged in")) signals |= CodexRefusalSignal.Authentication;
@@ -101,7 +105,7 @@ internal static class CodexTrustProtocolData
                 }
             }
         }
-        return new(hash, bytes, true, exceeded, error.TryGetProperty("data", out _), signals.ToString(), true, osCode);
+        return new(kind, bucket, present, exceeded, error.TryGetProperty("data", out _), signals.ToString(), true, osCode);
     }
     internal static string ErrorMessage(JsonElement error)
     {

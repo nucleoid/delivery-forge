@@ -14,8 +14,7 @@ internal sealed record CodexStartupDiagnostics(CodexStartupStage Stage, long Ori
 
 [Flags]
 internal enum CodexRefusalSignal { None = 0, OsError = 1, Authentication = 2, Model = 4, Resource = 8, ReadOnly = 16, Database = 32, PathMissing = 64 }
-internal sealed record CodexRefusalFacts([property: JsonPropertyName("Sha256")] string? MessageSha256,
-    [property: JsonPropertyName("Bytes")] int? MessageBytes, bool MessageOmitted,
+internal sealed record CodexRefusalFacts(string MessageKind, string? SizeBucket, bool MessageOmitted,
     [property: JsonPropertyName("OverBound")] bool MessageBoundExceeded, bool DataOmitted,
     [property: JsonPropertyName("Hints")] string HeuristicSignals, bool HeuristicOnly, int? OsErrorCode);
 internal sealed record CodexStartupCleanupFacts([property: JsonPropertyName("Task")] string TaskState, bool? KnownClosed, bool? RootExited,
@@ -26,13 +25,13 @@ internal sealed record CodexStartupCleanupFacts([property: JsonPropertyName("Tas
 {
     // No wait, stop, native observation, exception text or authority is added.
     // A completed task/result describes ONLY this actual retirement snapshot.
-    internal static CodexStartupCleanupFacts Observe(Task<DeliveryForge.Evidence.DuplexRetirement>? actual, bool? unknownIo, Exception? failure)
+    internal static CodexStartupCleanupFacts Observe(Task<DeliveryForge.Evidence.DuplexRetirement>? actual, bool? unknownIo, Exception? failure, bool entered = false)
     {
         var state = actual?.Status;
         var result = state == TaskStatus.RanToCompletion ? actual!.Result : null;
         var type = failure?.GetType().FullName;
         if (type is not null && (type.Length > 256 || type.Any(c => !char.IsAsciiLetterOrDigit(c) && c is not ('.' or '_' or '+' or '`')))) type = "ExceptionTypeUnavailable";
-        return new(state is { } status ? Enum.GetName(status) ?? "Unavailable" : "NotEntered",
+        return new(state is { } status ? Enum.GetName(status) ?? "Unavailable" : entered ? "EnteredWithoutTask" : "NotEntered",
             result?.KnownClosed, result?.RootExited, result?.ActiveProcesses, unknownIo, result?.OutputEof, result?.ErrorEof, result?.InputCloseReturned,
             result?.DispositionReturned, result?.ExitCode, type, failure?.HResult);
     }
@@ -164,8 +163,8 @@ internal sealed class CodexRemoteRpcException(string message, long clientId, Cod
     internal CodexStartupFailureFacts? StartupFailure => Volatile.Read(ref startupFailure);
     internal void CaptureStartup(CodexStartupDiagnostics snapshot) =>
         Interlocked.CompareExchange(ref startupFailure, CodexStartupFailureFacts.From(snapshot, ClientId), null);
-    internal void CaptureCleanup(Task<DeliveryForge.Evidence.DuplexRetirement>? actual, bool? unknownIo, Exception? failure) =>
-        Interlocked.CompareExchange(ref startupCleanup, CodexStartupCleanupFacts.Observe(actual, unknownIo, failure), null);
+    internal void CaptureCleanup(Task<DeliveryForge.Evidence.DuplexRetirement>? actual, bool? unknownIo, Exception? failure, bool entered = false) =>
+        Interlocked.CompareExchange(ref startupCleanup, CodexStartupCleanupFacts.Observe(actual, unknownIo, failure, entered), null);
 
     // Follow only the caught error's actual causal references. Missing, ambiguous
     // or oversized graphs never borrow another worker's startup observation.

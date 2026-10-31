@@ -491,17 +491,17 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             shutdown = true;
             await RetireFailedStartupAsync(primary, capture, async () =>
             {
-                Task<DuplexRetirement>? actualRetirement = null; Exception? cleanupFailure = null;
+                Task<DuplexRetirement>? actualRetirement = null; Exception? cleanupFailure = null; var retirementEntered = false;
                 try
                 {
-                    if (process is not null) { var stop = process.RetireAsync(true); actualRetirement = stop; lock (tasks) tasks.Add(stop); var closed = await stop.ConfigureAwait(false); CloseTrustedImage(closed.KnownClosed && !process.HasUnknownIo, true); }
+                    if (process is not null) { retirementEntered = true; var stop = process.RetireAsync(true); actualRetirement = stop; lock (tasks) tasks.Add(stop); var closed = await stop.ConfigureAwait(false); CloseTrustedImage(closed.KnownClosed && !process.HasUnknownIo, true); }
                     else CloseTrustedImage(!trustedNativeCreationEntered || trustedNativeCreationReturned, true);
                     if (usage is not null) await usage.JoinAsync(usageWatch, primary).ConfigureAwait(false);
                 }
                 catch (Exception cleanup) { cleanupFailure = cleanup; trustedImage?.RetainUnknown(); throw; }
                 finally
                 {
-                    try { CodexRemoteRpcException.FindSingle(primary)?.CaptureCleanup(actualRetirement, process?.HasUnknownIo, cleanupFailure); }
+                    try { CodexRemoteRpcException.FindSingle(primary)?.CaptureCleanup(actualRetirement, process?.HasUnknownIo, cleanupFailure, retirementEntered); }
                     catch (Exception) { /* Optional snapshot cannot replace primary/cleanup failure or add UNKNOWN. */ }
                 }
             }).ConfigureAwait(false);
