@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <IsPackable>false</IsPackable>
+    <GenerateAssemblyInfo>false</GenerateAssemblyInfo>
+    <GenerateTargetFrameworkAttribute>false</GenerateTargetFrameworkAttribute>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <DebugType>portable</DebugType>
+    <DebugSymbols>true</DebugSymbols>
+    <!-- A real compiler-emitted relative logical role also maps without a repository role. -->
+    <PathMap>$(MSBuildProjectDirectory)=census</PathMap>
+  </PropertyGroup>
+</Project>

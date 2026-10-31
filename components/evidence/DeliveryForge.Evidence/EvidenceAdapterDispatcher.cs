@@ -26,7 +26,7 @@ internal static class EvidenceAdapterDispatcher
         GateRequest request,
         CommandResult execution,
         EvidenceExecutionSnapshot snapshot) =>
-        request.Adapter switch
+        request.InstalledInvocation is { } actual ? actual.Normalize(execution, request.Capability) : request.Adapter switch
         {
             EvidenceAdapterKind.DotNet => NormalizeDotNet(request, execution, snapshot),
             EvidenceAdapterKind.Crap4CSharp =>
@@ -42,6 +42,7 @@ internal static class EvidenceAdapterDispatcher
         string gateDirectory,
         IDictionary<string, string> artifactHashes)
     {
+        request.InstalledInvocation?.Append(gateDirectory, artifactHashes);
         if (request.Adapter != EvidenceAdapterKind.DotNet || snapshot.TrxPath is null || !File.Exists(snapshot.TrxPath))
             return;
 

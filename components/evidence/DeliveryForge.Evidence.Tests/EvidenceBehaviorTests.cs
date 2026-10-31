@@ -208,8 +208,8 @@ public sealed class EvidenceBehaviorTests
             Encoding.UTF8.GetBytes("{\"outcome\":\"PASS\",\"reason\":\"ENUMERATION_NOT_IMPLEMENTED\"}"),
             new ToolCapability("mutate4csharp", "0.1.0-preview", "preview", true, false));
 
-        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Equal(GateOutcome.Error, result.Outcome);
         Assert.False(result.ProductionCapable);
-        Assert.Contains("certification", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("unsupported", result.Reason, StringComparison.OrdinalIgnoreCase);
     }
 }

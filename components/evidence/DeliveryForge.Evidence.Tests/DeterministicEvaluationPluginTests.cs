@@ -215,6 +215,61 @@ public sealed class DeterministicEvaluationPluginTests
         Assert.False(document.RootElement.TryGetProperty("authorityBinding", out _));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Custom_plugin_data_cannot_borrow_private_installed_producer_verification(bool hostileVerificationBit)
+    {
+        using var temp = new TempDirectory();
+        var original = TestEvidence.GateRequest(temp.Path);
+        // Deliberately hostile DATA through test friendship, never an installed acceptance.
+        // A public extension cannot issue this internal bit; even copied same-process DATA
+        // must not bypass the independently code-owned legacy registry boundary.
+        var claimed = new NormalizedEvidence(GateOutcome.Pass, "custom claimed PASS", false, false, [])
+        { ProducerVerified = hostileVerificationBit };
+        var plugin = new StubEvaluationPlugin("host.custom", "2.0.0", "custom-tool", claimed);
+        var registry = new TrustedEvaluationPluginRegistry(
+            [new TrustedEvaluationPluginRegistration("custom", plugin, "3.0.0", "custom-v1")]);
+        var request = original with
+        {
+            GateId = "custom",
+            Adapter = EvidenceAdapterKind.External,
+            Plugin = new EvaluationPluginSelection("host.custom", Enabled: true, Inputs: ["scope.custom"]),
+            Invocation = original.Invocation with { Arguments = ["evaluate"] },
+            Capability = ToolCapability.FromDetection(
+                "custom-tool", "3.0.0", "custom-v1", false, [],
+                original.Capability.ExecutablePath!, original.Capability.ExecutableIdentity!, ["evaluate"],
+                original.Invocation.WorkingDirectory),
+            Policy = new ResolvedEvidencePolicy(
+                TestEvidence.Identity('1'), TestEvidence.Identity('2'), TestEvidence.Commit('a'),
+                PolicyAuthorityKind.ProtectedGitBase, 0m, ["custom"], authorityVerified: true,
+                sourceRepositoryRoot: original.Invocation.WorkingDirectory,
+                requiredGatePluginBindings:
+                [new RequiredGatePluginBinding("custom", "host.custom", "2.0.0", "custom-tool")])
+        };
+        var result = await new GateRunner(
+            new StubCommandExecutor(TestEvidence.CommandResult()),
+            new SequenceRepositoryIdentityReader(TestEvidence.Repository(), TestEvidence.Repository()),
+            original.Invocation.WorkingDirectory, TestEvidence.Commit('a'), registry)
+            .RunAsync(request, TestContext.Current.CancellationToken);
+
+        // These witnesses exclude a preexecution refusal as the cause of INCOMPLETE.
+        Assert.Equal(0, result.Execution.ExitCode);
+        Assert.Equal(EvaluationPluginStatus.Executed, result.Plugin.Status);
+        Assert.Equal("PASS", result.Plugin.PluginRawOutcome);
+        Assert.False(result.SourceChanged);
+        Assert.False(result.Fixture);
+        Assert.False(result.ProductionCapable);
+        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Contains("advisory", result.Reason, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(result.TrustedReceiptProvenance);
+        using var receipt = System.Text.Json.JsonDocument.Parse(await File.ReadAllBytesAsync(
+            result.ReceiptPath, TestContext.Current.CancellationToken));
+        Assert.Equal("1.0.0", receipt.RootElement.GetProperty("schemaVersion").GetString());
+        Assert.Equal("INCOMPLETE", receipt.RootElement.GetProperty("outcome").GetString());
+        Assert.False(receipt.RootElement.TryGetProperty("authorityBinding", out _));
+    }
+
     [Fact]
     public async Task Disabled_plugin_is_distinct_and_cannot_satisfy_a_required_gate()
     {

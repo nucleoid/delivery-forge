@@ -91,11 +91,21 @@ public sealed class ReviewCoreTests
         Assert.Contains("git version", identity.GitVersion, StringComparison.Ordinal);
         Assert.Equal(Identity('e'), identity.PlanIdentity);
         Assert.Equal(Identity('a'), identity.ArtifactIdentities["tests"]);
+        Assert.Equal(bytes, await GitPatchIdentity.ExportVerifiedPatchAsync(controlled, identity, TestContext.Current.CancellationToken));
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ExportVerifiedPatchAsync(
+            controlled, identity with { PatchSha256 = Identity('9') }, TestContext.Current.CancellationToken));
 
         repository.Write("dirty.txt", "dirty"u8.ToArray());
+        await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ExportVerifiedPatchAsync(
+            controlled, identity, TestContext.Current.CancellationToken));
         await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(
             controlled, baseCommit, headCommit, Identity('e'), new Dictionary<string, string>(),
             TestContext.Current.CancellationToken));
+        File.Delete(Path.Combine(repository.Path, "dirty.txt"));
+        File.Delete(Path.Combine(repository.Path, ".git", "index"));
+        var missingIndex = await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ExportVerifiedPatchAsync(
+            controlled, identity, TestContext.Current.CancellationToken));
+        Assert.IsType<FileNotFoundException>(missingIndex.InnerException);
     }
 
     [Fact]
@@ -662,6 +672,7 @@ public sealed class ReviewCoreTests
 
     [Theory]
     [InlineData("ship", ReviewOutcome.Pass, 0)]
+    [InlineData("ship", ReviewOutcome.Incomplete, 1)]
     [InlineData("needs-attention", ReviewOutcome.Fail, 1)]
     [InlineData("do-not-ship", ReviewOutcome.Fail, 1)]
     [InlineData("anything-else", ReviewOutcome.Error, 1)]

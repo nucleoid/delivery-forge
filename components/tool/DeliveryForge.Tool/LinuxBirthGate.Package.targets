@@ -1,0 +1,32 @@
+<Project>
+  <!-- Fixed gate source project participates in the ordinary SDK graph. -->
+  <PropertyGroup>
+    <TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);_ForgePackageLinuxBirthGate</TargetsForTfmSpecificContentInPackage>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="$(MSBuildThisFileDirectory)../DeliveryForge.LinuxScopeBirthGate/DeliveryForge.LinuxScopeBirthGate.csproj" ReferenceOutputAssembly="false" Private="false" />
+  </ItemGroup>
+  <Target Name="_ForgeReadBuiltLinuxBirthGate">
+    <!-- GetLinuxBirthGateOutput deliberately has NO Build dependency. The no-build
+         pack requires existing complete outputs, never a hidden compiler call. -->
+    <MSBuild Projects="$(MSBuildThisFileDirectory)../DeliveryForge.LinuxScopeBirthGate/DeliveryForge.LinuxScopeBirthGate.csproj" Targets="GetLinuxBirthGateOutput" BuildInParallel="false" Properties="RuntimeIdentifier=linux-x64;SelfContained=false;UseSharedCompilation=false;BuildProjectReferences=false">
+      <Output TaskParameter="TargetOutputs" ItemName="_ForgeGateBuiltFile" />
+    </MSBuild>
+    <Error Condition="'@(_ForgeGateBuiltFile-&gt;Count())' != '5'" Text="Exact compiled five-file Linux gate closure required; build it before no-build pack." />
+  </Target>
+  <Target Name="_ForgeCopyLinuxBirthGate" AfterTargets="Build" DependsOnTargets="_ForgeReadBuiltLinuxBirthGate">
+    <Copy SourceFiles="@(_ForgeGateBuiltFile)" DestinationFolder="$(TargetDir)runtime/linux-x64/gate/" SkipUnchangedFiles="false">
+      <Output TaskParameter="CopiedFiles" ItemName="_ForgeGateCopied" />
+    </Copy>
+    <ItemGroup><FileWrites Include="@(_ForgeGateCopied)" /></ItemGroup>
+  </Target>
+  <!-- Supported NuGet inner-build content extension, not a late dynamic None
+       item after the pack collector may already have read its item vector. -->
+  <Target Name="_ForgePackageLinuxBirthGate" DependsOnTargets="_ForgeReadBuiltLinuxBirthGate">
+    <ItemGroup>
+      <TfmSpecificPackageFile Include="@(_ForgeGateBuiltFile)">
+        <PackagePath>tools/net10.0/any/runtime/linux-x64/gate/%(Filename)%(Extension)</PackagePath>
+      </TfmSpecificPackageFile>
+    </ItemGroup>
+  </Target>
+</Project>

@@ -214,7 +214,10 @@ internal sealed class OwnedQualityInterruptionRuntime : ICommandExecutor
     public static void RequireSuccessful(CommandResult result, string stage)
     {
         if (result.ExitCode != 0 || result.TimedOut || result.Cancelled || !result.OwnedProcessQuiescent)
-            throw new InvalidOperationException("INCOMPLETE actual " + stage + " failed/uncertain: " + result.StandardError);
+            throw new InvalidOperationException(
+                $"INCOMPLETE actual {stage} failed/uncertain: exit={result.ExitCode?.ToString() ?? "unknown"}; " +
+                $"timedOut={result.TimedOut}; cancelled={result.Cancelled}; quiescent={result.OwnedProcessQuiescent}" +
+                $"\nstdout:\n{result.StandardOutput}\nstderr:\n{result.StandardError}");
     }
     public static async Task WriteNewAsync(string path, byte[] bytes, CancellationToken token)
     {

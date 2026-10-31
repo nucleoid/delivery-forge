@@ -1,0 +1,490 @@
+using System.ComponentModel;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Text;
+namespace DeliveryForge.Evidence;
+
+// Internal kernel half of the creation-owned scope. Not constructible from public
+// DTOs/PIDs. The systemd birth owner must first bind its actual process, unit,
+// invocation and ControlGroup before calling Open. No namespace/config mutation.
+[SupportedOSPlatform("linux")]
+internal sealed class LinuxScopeKernel
+{
+    const int DirectoryFlag = 0x10000, NoFollow = 0x20000, CloseOnExec = 0x80000;
+    const long Cgroup2Magic = 0x63677270;
+    // Ordinary scopes keep their original ceilings. Exact-image admission selects
+    // the approved finite ceiling on this SAME counter; no prior debit is reset.
+    const long WorkReadByteLimit = 14L * 1024 * 1024, TotalReadByteLimit = 16L * 1024 * 1024;
+    const long ExactWorkReadByteLimit = 300031689L, ExactTotalReadByteLimit = 302128841L;
+    const int WorkCallLimit = 8192, TotalCallLimit = 16384;
+    readonly IOwnedDuplexBudget original; readonly object gate = new(); readonly List<Call> calls = []; readonly List<OwnedFd> descriptors = [];
+    bool exactImageEntered; long exactWorkReadByteLimit, exactTotalReadByteLimit;
+    OwnedFd? group, procDescriptors; Identity identity; string? originalPath; long readBytes; bool bound, stopEntered, closeEntered;
+    internal sealed class Call { internal required string Kind; internal bool Entered, Returned; internal long Result, ByteLimit, BytesRead; internal int Error, NativeReads, NativeReadLimit; internal byte[]? OriginalBuffer; internal Exception? Primary, Post; }
+    sealed class OwnedFd(int actual) { internal readonly int Actual = actual; internal bool CloseEntered, CloseInvoked, CloseReturned, Closed; internal Exception? Failure; }
+    readonly record struct Identity(ulong Inode, uint Major, uint Minor, ulong Mount);
+    internal IReadOnlyList<Call> ActualCalls { get { lock (gate) return calls.ToArray(); } }
+    internal bool Unknown { get { lock (gate) return calls.Any(x => x.Entered && !x.Returned) || descriptors.Any(x => !x.Closed && (x.CloseEntered || (!ReferenceEquals(x, group) && !ReferenceEquals(x, procDescriptors)))); } }
+    LinuxScopeKernel(IOwnedDuplexBudget original) { this.original = original; }
+    void Check(bool cleanup) { if (cleanup) _ = original.CleanupRemaining; else original.CheckWork(); }
+    long Native(string kind, Func<long> invoke, bool cleanup, byte[]? buffer = null)
+    {
+        Check(cleanup); Call row; lock (gate) { if (calls.Count >= (cleanup || !exactImageEntered ? TotalCallLimit : WorkCallLimit)) throw new IOException("Finite original Linux scope syscall ledger exhausted before invocation."); row = new() { Kind = kind, OriginalBuffer = buffer }; calls.Add(row); }
+        row.Entered = true; long result = 0; Exception? primary = null, post = null;
+        try { result = invoke(); row.Result = result; row.Error = result < 0 ? Marshal.GetLastPInvokeError() : 0; row.Returned = true; if (result < 0) throw new Win32Exception(row.Error, "Actual original scope syscall refused: " + kind); }
+        catch (Exception error) { primary = error; row.Primary = error; }
+        try { Check(cleanup); } catch (Exception error) { post = error; row.Post = error; }
+        if (primary is not null && post is not null) throw new AggregateException("Original scope syscall and independent endpoint post.", primary, post); if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw(); return result;
+    }
+    // One logical content-read frame, with actual return facts for every bounded
+    // syscall. Managed/precheck refusal after a known return is not native UNKNOWN.
+    long ExactImageRead(Call row, OwnedFd fd, byte[] buffer, int requested)
+    {
+        Check(false);
+        if (requested <= 0 || requested > buffer.Length || row.NativeReads >= row.NativeReadLimit ||
+            requested > row.ByteLimit - row.BytesRead || row.Entered && !row.Returned)
+            throw new IOException("Finite original sealed-image read plan exhausted before invocation.");
+        row.NativeReads++; row.Entered = true; row.Returned = false;
+        long result = 0; Exception? primary = null, post = null;
+        try
+        {
+            result = read(fd.Actual, buffer, (nuint)requested);
+            row.Result = result; row.Error = result < 0 ? Marshal.GetLastPInvokeError() : 0; row.Returned = true;
+            if (result < 0) throw new Win32Exception(row.Error, "Actual original sealed-image read refused.");
+            if (result > requested) throw new IOException("Actual original sealed-image read exceeded its request.");
+            row.BytesRead += result;
+        }
+        catch (Exception error) { primary = error; row.Primary ??= error; }
+        try { Check(false); } catch (Exception error) { post = error; row.Post ??= error; }
+        if (primary is not null && post is not null) throw new AggregateException("Original sealed-image read and independent endpoint post.", primary, post);
+        if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+        if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+        return result;
+    }
+    OwnedFd OpenFd(string path, int flags, bool cleanup, OwnedFd? parent = null)
+    {
+        OwnedFd? actual = null;
+        // Save the actual returned descriptor BEFORE the independent endpoint post.
+        Native("open:" + path, () => { var value = parent is null ? open(path, flags) : openat(parent.Actual, path, flags); if (value >= 0) { actual = new(value); lock (gate) descriptors.Add(actual); } return value; }, cleanup);
+        return actual ?? throw new IOException("Original open returned no retained descriptor.");
+    }
+    void Close(OwnedFd actual, bool cleanup, bool continueUninvoked = false)
+    {
+        Check(cleanup); lock (gate) { if (actual.CloseEntered && (!continueUninvoked || actual.CloseInvoked)) throw new IOException("Original scope descriptor first-close already entered; no retry."); actual.CloseEntered = true; }
+        try { Native("close-original-descriptor", () => { actual.CloseInvoked = true; var result = close(actual.Actual); actual.CloseReturned = true; actual.Closed = result == 0; return result; }, cleanup); } catch (Exception failure) { actual.Failure = failure; throw; }
+    }
+    // Same original private first-close sequence; no descriptor or scope adoption.
+    Exception? CloseExactImage(OwnedFd fd, bool cleanupClose, Exception? post)
+    {
+        void CloseImage(bool cleanup, bool continueUninvoked = false)
+        {
+            // Notify the same actual enclosing owner before its cleanup
+            // view: a successful subordinate disposal otherwise stays WORK.
+            if (cleanup && original is IOwnedFailureCleanup failure) failure.BeginFailureCleanup();
+            Close(fd, cleanup, continueUninvoked);
+        }
+        try { CloseImage(cleanupClose); }
+        catch (Exception failure)
+        {
+            post = post is null ? failure : new AggregateException("Original image close admission and first disposition.", post, failure);
+            // CloseEntered also records an attempt whose Native precheck or
+            // row admission refused. Only an uninvoked syscall may continue
+            // its SAME first close in cleanup; never retry a native effect.
+            if (!cleanupClose && !fd.CloseInvoked)
+            {
+                try { CloseImage(true, continueUninvoked: true); }
+                catch (Exception cleanup) { post = new AggregateException("Original WORK close admission and SAME cleanup first-close.", post, cleanup); }
+            }
+        }
+        return post;
+    }
+    static void Relative(string path) { if (path.Length is 0 or > 4096 || path.Contains('\0') || path.Contains('\\') || path.Split('/').Any(x => x is "" or "." or ".." || x.Any(char.IsControl))) throw new IOException("Closed original cgroup path required."); }
+    internal static LinuxScopeKernel Open(string actualControlGroup, string actualUnit, IOwnedDuplexBudget original)
+    {
+        original.CheckWork(); if (!OperatingSystem.IsLinux() || RuntimeInformation.ProcessArchitecture != Architecture.X64) throw new PlatformNotSupportedException("The source-owned scope ABI profile is Linux x64 only.");
+        if (!System.Text.RegularExpressions.Regex.IsMatch(actualUnit, "^delivery-forge-[a-f0-9]{32}\\.scope$", System.Text.RegularExpressions.RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100))) throw new IOException("Private fresh fixed unit syntax required.");
+        if (!actualControlGroup.StartsWith('/') || actualControlGroup == "/" || !actualControlGroup.EndsWith('/' + actualUnit, StringComparison.Ordinal) || !actualUnit.StartsWith("delivery-forge-", StringComparison.Ordinal) || !actualUnit.EndsWith(".scope", StringComparison.Ordinal)) throw new IOException("Actual privately created scope path mismatch.");
+        var relative = actualControlGroup[1..]; Relative(relative); var owner = new LinuxScopeKernel(original);
+        try
+        {
+            var current = owner.OpenFd("/sys/fs/cgroup", DirectoryFlag | NoFollow | CloseOnExec, false);
+            foreach (var component in relative.Split('/')) { original.CheckWork(); var next = owner.OpenFd(component, DirectoryFlag | NoFollow | CloseOnExec, false, current); owner.Close(current, false); current = next; }
+            owner.group = current; owner.originalPath = "/sys/fs/cgroup" + actualControlGroup; owner.identity = owner.ObserveIdentity(false); owner.bound = true;
+            owner.procDescriptors = owner.OpenFd("/proc/self/fd", DirectoryFlag | NoFollow | CloseOnExec, false);
+            StatFs procFs = default; owner.Native("fstatfs-original-proc-fd-directory", () => fstatfs(owner.procDescriptors.Actual, out procFs), false); if (procFs.Type != 0x9fa0) throw new IOException("Actual original fd observation requires procfs.");
+            if (owner.DescriptorPath(false) != owner.originalPath) throw new IOException("Original cgroup fd link differs before populated binding.");
+            var events = owner.Read("cgroup.events", false, 1024); if (!ParsePopulated(events)) throw new IOException("Actual original process was not observed in a populated created scope.");
+            return owner;
+        }
+        catch
+        { // Retain partially entered descriptors; do not re-open/retry/adopt.
+            lock (FailedCreations) FailedCreations.Add(owner); throw;
+        }
+    }
+    static readonly List<LinuxScopeKernel> FailedCreations = [];
+    Identity ObserveIdentity(bool cleanup)
+    {
+        if (group is null || group.CloseEntered) throw new IOException("Original cgroup descriptor unavailable or closing.");
+        StatFs fs = default; Native("fstatfs-original-cgroup", () => fstatfs(group.Actual, out fs), cleanup); if (fs.Type != Cgroup2Magic) throw new IOException("Actual original filesystem is not cgroup-v2.");
+        Statx observed = default; Native("statx-original-cgroup", () => statx(group.Actual, "", 0x1800, 0x17ff, out observed), cleanup);
+        if ((observed.Mask & 0x1103) != 0x1103 || (observed.Mode & 0xf000) != 0x4000) throw new IOException("Actual original cgroup directory identity unavailable."); return new(observed.Inode, observed.Major, observed.Minor, observed.Mount);
+    }
+    void Same(bool cleanup) { if (!bound || ObserveIdentity(cleanup) != identity) throw new IOException("Original cgroup kernel identity differs; no path adoption."); }
+    byte[] Read(string name, bool cleanup, int maximum)
+    {
+        Check(cleanup); if (name is not ("cgroup.events" or "memory.max" or "memory.swap.max" or "cpuset.cpus.effective" or "cpu.max" or "pids.max" or "pids.current" or "pids.events" or "memory.current" or "memory.events")) throw new IOException("Unlisted original cgroup observation.");
+        if (readBytes > (exactImageEntered ? (cleanup ? exactTotalReadByteLimit : exactWorkReadByteLimit) : (cleanup ? TotalReadByteLimit : WorkReadByteLimit)) - (maximum + 1)) throw new IOException("Complete cgroup observation byte quota exceeded before allocation."); readBytes += maximum + 1; var data = new byte[maximum + 1]; var fd = OpenFd(name, NoFollow | CloseOnExec, cleanup, group); var count = 0; Exception? primary = null, post = null;
+        try { while (count < data.Length) { Check(cleanup); var chunk = new byte[data.Length - count]; var n = (int)Native("read:" + name, () => read(fd.Actual, chunk, (nuint)chunk.Length), cleanup, chunk); if (n == 0) break; Buffer.BlockCopy(chunk, 0, data, count, n); count += n; } if (count > maximum) throw new IOException("Complete cgroup file exceeded its finite profile."); }
+        catch (Exception error) { primary = error; }
+        try { Close(fd, cleanup); Check(cleanup); } catch (Exception error) { post = error; }
+        if (primary is not null && post is not null) throw new AggregateException("Actual original cgroup read/first-close.", primary, post); if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw(); return data.AsSpan(0, count).ToArray();
+    }
+    // Diagnostic DATA from this already-owned leaf only. Each read reserves its
+    // complete maximum+EOF on the SAME original counter; no ancestor/path adoption.
+    internal IReadOnlyDictionary<string, byte[]> ReadLeafCounterBytes()
+    {
+        lock (gate)
+        {
+            Check(false); Same(false);
+            var raw = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+            foreach (var name in OwnedDuplexProcess.LeafCounterNames) raw.Add(name, Read(name, false, name.EndsWith(".events", StringComparison.Ordinal) ? 1024 : 256));
+            Same(false); Check(false); return raw;
+        }
+    }
+    // Invoked only by the private owner for its already-bound creator, while the
+    // verified gate is waiting for RELEASE. This method cannot bind/adopt a PID.
+    internal void RequireUnprivilegedCreator(int actualPid)
+    {
+        lock (gate)
+        {
+            Check(false); Same(false);
+            if (!exactImageEntered || actualPid <= 0) throw new IOException("Actual exact-image creator required before privilege observation.");
+            const int maximum = 8192, maximumReads = 32;
+            if (readBytes > exactWorkReadByteLimit - (maximum + 1)) throw new IOException("Original privilege-status byte credit exhausted before open.");
+            readBytes += maximum + 1; var bytes = new byte[maximum + 1]; var used = 0; var eof = false;
+            var fd = OpenFd("/proc/" + actualPid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/status", NoFollow | CloseOnExec, false);
+            Exception? primary = null, post = null;
+            try
+            {
+                StatFs fs = default; Native("fstatfs-original-creator-status", () => fstatfs(fd.Actual, out fs), false);
+                if (fs.Type != 0x9fa0) throw new IOException("Actual creator status requires procfs.");
+                for (var attempt = 0; attempt < maximumReads && used < bytes.Length; attempt++)
+                {
+                    var chunk = new byte[bytes.Length - used];
+                    var n = checked((int)Native("read-original-creator-status", () => read(fd.Actual, chunk, (nuint)chunk.Length), false, chunk));
+                    if (n == 0) { eof = true; break; }
+                    if (n > chunk.Length) throw new IOException("Actual creator status exceeded requested extent.");
+                    Buffer.BlockCopy(chunk, 0, bytes, used, n); used += n;
+                }
+                if (!eof || used > maximum) throw new IOException("Complete creator status exceeded finite read plan.");
+            }
+            catch (Exception failure) { primary = failure; }
+            post = CloseExactImage(fd, primary is not null, post);
+            if (primary is not null && post is not null) throw new AggregateException("Original creator status and first-close.", primary, post);
+            if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+            if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+            var required = new HashSet<string>(StringComparer.Ordinal) { "Pid", "Tgid", "Uid", "Gid", "NoNewPrivs", "CapInh", "CapPrm", "CapEff", "CapAmb", "Groups" };
+            var found = new Dictionary<string, string[]>(StringComparer.Ordinal);
+            foreach (var line in Utf8.GetString(bytes, 0, used).Split('\n'))
+            {
+                var colon = line.IndexOf(':'); if (colon < 0) continue; var key = line[..colon];
+                if (!required.Contains(key)) continue;
+                if (!found.TryAdd(key, line[(colon + 1)..].Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries))) throw new IOException("Duplicate creator privilege field.");
+            }
+            bool One(string key, string expected) => found.TryGetValue(key, out var values) && values.Length == 1 && values[0] == expected;
+            bool Identity(string key) => found.TryGetValue(key, out var values) && values.Length == 4 && values.All(value => value == "1000");
+            if (found.Count != required.Count || !One("Pid", actualPid.ToString(System.Globalization.CultureInfo.InvariantCulture)) || !One("Tgid", actualPid.ToString(System.Globalization.CultureInfo.InvariantCulture)) ||
+                !One("NoNewPrivs", "1") || !One("Groups", "1000") || !Identity("Uid") || !Identity("Gid") ||
+                new[] { "CapInh", "CapPrm", "CapEff", "CapAmb" }.Any(key => !One(key, "0000000000000000")))
+                throw new IOException("Actual creator must have NNP1, UID/GID1000 and zero inherited/permitted/effective/ambient capabilities before release.");
+            Same(false); Check(false);
+        }
+    }
+    // Selected conformance ancestor is observed only, never signalled/adopted.
+    // The actual original cgroup path must be below this root-controlled boundary.
+    internal void RequireConformanceAncestor(string expectedCpus)
+    {
+        lock (gate)
+        {
+            Check(false); Same(false);
+            const string path = "/sys/fs/cgroup/user.slice/user-1000.slice";
+            if (originalPath is null || !originalPath.StartsWith(path + "/", StringComparison.Ordinal)) throw new IOException("Original scope is outside selected forge ancestor.");
+            var held = new List<OwnedFd>(); Exception? primary = null, post = null;
+            void RootControlled(OwnedFd fd, bool directory)
+            {
+                StatFs fs = default; Native("fstatfs-selected-ancestor", () => fstatfs(fd.Actual, out fs), false);
+                Statx row = default; Native("statx-selected-ancestor", () => statx(fd.Actual, "", 0x1800, 0x17ff, out row), false);
+                if (fs.Type != Cgroup2Magic || (row.Mask & 0x111b) != 0x111b || row.Uid != 0 || row.Gid != 0 || (row.Mode & 0x12) != 0 || (row.Mode & 0xf000) != (directory ? 0x4000 : 0x8000)) throw new IOException("Actual selected ancestor/control is not root-controlled cgroup2.");
+            }
+            try
+            {
+                var ancestor = OpenFd("/sys/fs/cgroup", DirectoryFlag | NoFollow | CloseOnExec, false); held.Add(ancestor); RootControlled(ancestor, true);
+                foreach (var name in new[] { "user.slice", "user-1000.slice" })
+                { var next = OpenFd(name, DirectoryFlag | NoFollow | CloseOnExec, false, ancestor); held.Add(next); RootControlled(next, true); ancestor = next; }
+                Statx identity = default; Native("statx-held-conformance-ancestor", () => statx(ancestor.Actual, "", 0x1800, 0x17ff, out identity), false);
+                string Text(string name)
+                {
+                    const int maximum = 256; var limit = exactImageEntered ? exactWorkReadByteLimit : WorkReadByteLimit;
+                    if (readBytes > limit - (maximum + 1)) throw new IOException("Original ancestor read credit exhausted.");
+                    readBytes += maximum + 1; var bytes = new byte[maximum + 1]; var used = 0; var eof = false;
+                    var fd = OpenFd(name, NoFollow | CloseOnExec, false, ancestor); Exception? failure = null, closeFailure = null;
+                    try
+                    {
+                        RootControlled(fd, false);
+                        for (var attempt = 0; attempt < 4 && used < bytes.Length; attempt++)
+                        {
+                            var chunk = new byte[bytes.Length - used]; var n = checked((int)Native("read-selected-ancestor:" + name, () => read(fd.Actual, chunk, (nuint)chunk.Length), false, chunk));
+                            if (n == 0) { eof = true; break; }
+                            if (n > chunk.Length) throw new IOException("Actual ancestor read exceeded request.");
+                            Buffer.BlockCopy(chunk, 0, bytes, used, n); used += n;
+                        }
+                        if (!eof || used > maximum) throw new IOException("Complete selected ancestor metadata exceeded finite plan.");
+                    }
+                    catch (Exception error) { failure = error; }
+                    closeFailure = CloseExactImage(fd, failure is not null, closeFailure);
+                    if (failure is not null && closeFailure is not null) throw new AggregateException(failure, closeFailure);
+                    if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+                    if (closeFailure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(closeFailure).Throw();
+                    return Utf8.GetString(bytes, 0, used).TrimEnd('\n');
+                }
+                if (Text("memory.max") != "4294967296" || Text("memory.swap.max") != "0" || Text("cpuset.cpus.effective") != expectedCpus || Text("pids.max") != "128") throw new IOException("Selected ancestor resource limits differ.");
+                var cpu = Text("cpu.max").Split(' ');
+                if (cpu.Length != 2 || !ulong.TryParse(cpu[0], out var quota) || !ulong.TryParse(cpu[1], out var period) || period == 0 || quota / period != 2 || quota % period != 0) throw new IOException("Selected ancestor CPU quota differs.");
+                if (!uint.TryParse(Text("pids.current"), out var current) || current is < 1 or > 128) throw new IOException("Actual ancestor task population exceeds profile.");
+                Statx after = default; Native("statx-conformance-ancestor-post", () => statx(ancestor.Actual, "", 0x1800, 0x17ff, out after), false);
+                if (after.Inode != identity.Inode || after.Mount != identity.Mount || after.Major != identity.Major || after.Minor != identity.Minor) throw new IOException("Original conformance ancestor identity changed.");
+                RootControlled(ancestor, true); Same(false); Check(false);
+            }
+            catch (Exception error) { primary = error; }
+            foreach (var fd in held.AsEnumerable().Reverse()) post = CloseExactImage(fd, primary is not null || post is not null, post);
+            if (primary is not null && post is not null) throw new AggregateException("Selected ancestor observation and first-close.", primary, post);
+            if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+            if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+        }
+    }
+    static readonly UTF8Encoding Utf8 = new(false, true);
+    internal static bool ParsePopulated(byte[] complete)
+    {
+        var text = Utf8.GetString(complete); var seen = new HashSet<string>(StringComparer.Ordinal); bool? populated = null;
+        foreach (var line in text.Split('\n', StringSplitOptions.RemoveEmptyEntries)) { var row = line.Split(' '); if (row.Length != 2 || row[0] is not ("populated" or "frozen") || row[1] is not ("0" or "1") || !seen.Add(row[0])) throw new IOException("Malformed complete cgroup.events observation."); if (row[0] == "populated") populated = row[1] == "1"; }
+        return populated ?? throw new IOException("Actual populated value missing.");
+    }
+    string DescriptorPath(bool cleanup)
+    {
+        Check(cleanup); if (group is null || group.CloseEntered || procDescriptors is null || procDescriptors.CloseEntered) throw new IOException("Actual retained cgroup/proc descriptors required.");
+        var bytes = new byte[8193]; var count = (int)Native("readlinkat-original-cgroup-descriptor", () => readlinkat(procDescriptors.Actual, group.Actual.ToString(System.Globalization.CultureInfo.InvariantCulture), bytes, (nuint)bytes.Length), cleanup, bytes);
+        if (count <= 0 || count > 8192) throw new IOException("Complete original descriptor link exceeded finite profile."); var text = Utf8.GetString(bytes, 0, count); Check(cleanup); return text;
+    }
+    bool DeletedOriginal(bool cleanup)
+    {
+        Same(cleanup); var link = DescriptorPath(cleanup); Same(cleanup);
+        if (link == originalPath) return false;
+        // This is the actual retained fd's procfs link, never a caller path or
+        // ENOENT/adopted replacement. Names cannot themselves end in this suffix:
+        // the privately minted unit is strictly delivery-forge-<hex>.scope.
+        if (link == originalPath + " (deleted)") return true;
+        throw new IOException("Original cgroup descriptor was renamed or substituted; retain UNKNOWN.");
+    }
+    internal bool Empty(bool cleanup)
+    {
+        lock (gate)
+        {
+            if (DeletedOriginal(cleanup)) return true;
+            var raw = Read("cgroup.events", cleanup, 1024); var populated = ParsePopulated(raw); Same(cleanup); return !populated;
+        }
+        // A missing NAME, manager inactive state or root EOF never proves zero.
+        // Exact retained-kernel-fd unlink is a distinct supported-kernel proof:
+        // cgroup_destroy_locked rejects populated/live children before disabling
+        // migration and removing kernfs (Linuxv6.8 cgroup.c5536..5568).
+    }
+    // Called only after the private original creator/generation/group binding.
+    // Following THIS retained process's numbered proc descriptor is deliberate;
+    // no caller-supplied PID/path or resource name can issue ownership here.
+    internal void RequireExactImage(int actualPid, int actualFd, LinuxScopeImage selected, ulong inode, uint major, uint minor, LinuxExactImageBacking backing = LinuxExactImageBacking.SealedMemfd)
+    {
+        lock (gate)
+        {
+            LinuxExactImageBackingRules.Require(backing, selected.Path);
+            Check(false); Same(false); if (exactImageEntered || actualPid <= 0 || actualFd <= 2 || selected.Bytes < 64 || selected.Bytes > OwnedDuplexProcess.MaximumExactLinuxImageBytes) throw new IOException("One finite original exact-image descriptor observation required.");
+            // Admit complete image plus EOF before descriptor open. The SAME
+            // counter keeps its prior metadata debits; a small image cannot
+            // inherit the maximum image's unused extent as later read credit.
+            var byteLimit = selected.Bytes + 1;
+            if (byteLimit > ExactWorkReadByteLimit - readBytes) throw new IOException("Complete sealed-image observation exceeds remaining original kernel byte quota before open.");
+            exactWorkReadByteLimit = Math.Min(ExactWorkReadByteLimit, checked(readBytes + byteLimit + 3L * 1024 * 1024));
+            exactTotalReadByteLimit = Math.Min(ExactTotalReadByteLimit, checked(exactWorkReadByteLimit + 2L * 1024 * 1024));
+            readBytes += byteLimit; exactImageEntered = true; Check(false);
+            var firstOwned = descriptors.Count;
+            Exception? primary = null, post = null;
+            var rootChain = new List<(OwnedFd Fd, Statx Identity, OwnedFd? Parent, string Name)>();
+            OwnedFd? rootLeaf = null; Statx? rootVolume = null;
+            try
+            {
+                // OpenFd records returned ownership before its endpoint post.
+                // Keep that post, the path walk and every metadata check inside
+                // this observation's descriptor disposition scope.
+                var fd = OpenFd("/proc/" + actualPid.ToString(System.Globalization.CultureInfo.InvariantCulture) + "/fd/" + actualFd.ToString(System.Globalization.CultureInfo.InvariantCulture), CloseOnExec, false);
+                const int sealsRequired = 0x2f;
+                void Identity()
+                {
+                    Statx actual = default; Native(backing == LinuxExactImageBacking.RootControlledDisk ? "statx-original-root-disk-native-image" : "statx-original-sealed-native-image", () => statx(fd.Actual, "", 0x1000, backing == LinuxExactImageBacking.RootControlledDisk ? 0x17ffU : 0x7ffU, out actual), false);
+                    if (actual.Size != (ulong)selected.Bytes || actual.Inode != inode || actual.Major != major || actual.Minor != minor) throw new IOException("Actual selected image identity/extent differs.");
+                    if (backing == LinuxExactImageBacking.RootControlledDisk)
+                    {
+                        RequireRootFile(actual); RootFileSystem(fd); RecheckRootChain(actual);
+                    }
+                    else
+                    {
+                        if ((actual.Mask & 0x303) != 0x303 || (actual.Mode & 0xf000) != 0x8000 || (actual.Mode & 0x1ff) != 0x140) throw new IOException("Actual sealed image identity/extent/mode differs.");
+                        var seals = Native("fcntl-original-image-seals", () => fcntl(fd.Actual, 1034, 0), false);
+                        if ((seals & sealsRequired) != sealsRequired) throw new IOException("Complete actual immutable content/extent/exec/seal-set required.");
+                    }
+                }
+                static bool SameRoot(Statx a, Statx b) => a.Mask == b.Mask && a.Mode == b.Mode && a.Uid == b.Uid && a.Gid == b.Gid && a.Links == b.Links && a.Inode == b.Inode && a.Size == b.Size && a.Major == b.Major && a.Minor == b.Minor && a.Mount == b.Mount;
+                Statx RootStat(OwnedFd actual, string name = "", int flags = 0x1000)
+                {
+                    Statx value = default; Native("statx-root-controlled-chain", () => statx(actual.Actual, name, flags, 0x17ff, out value), false);
+                    if ((value.Mask & 0x131f) != 0x131f) throw new IOException("Complete root-controlled chain identity metadata required.");
+                    if (rootVolume is { } root) LinuxExactImageBackingRules.RequireRootMount(value.Mount, value.Major, value.Minor, root.Mount, root.Major, root.Minor);
+                    return value;
+                }
+                void RootFileSystem(OwnedFd actual)
+                {
+                    StatFs value = default; Native("fstatfs-root-controlled-chain", () => fstatfs(actual.Actual, out value), false);
+                    LinuxExactImageBackingRules.RequireRootLocalFileSystem(value.Type, value.Flags);
+                }
+                static void RequireRootDirectory(Statx value)
+                {
+                    LinuxExactImageBackingRules.RequireRootDirectoryMetadata(value.Uid, value.Mode);
+                }
+                void RequireRootFile(Statx value)
+                {
+                    if ((value.Mask & 0x131f) != 0x131f || value.Size != (ulong)selected.Bytes) throw new IOException("Complete root-controlled file metadata and exact extent required.");
+                    LinuxExactImageBackingRules.RequireRootFileMetadata(value.Uid, value.Links, value.Mode);
+                }
+                void RecheckRootChain(Statx imageIdentity)
+                {
+                    foreach (var row in rootChain)
+                    {
+                        var held = RootStat(row.Fd); RequireRootDirectory(held); RootFileSystem(row.Fd);
+                        Statx named;
+                        if (row.Parent is null) { named = default; Native("statx-root-path", () => statx(-100, "/", 0x100, 0x17ff, out named), false); }
+                        else named = RootStat(row.Parent, row.Name, 0x100);
+                        if (!SameRoot(held, row.Identity) || !SameRoot(named, row.Identity)) throw new IOException("Root-controlled directory link changed before release.");
+                    }
+                    var namedFile = RootStat(rootChain[^1].Fd, selected.Path.Split('/')[^1], 0x100); RequireRootFile(namedFile);
+                    if (rootLeaf is null) throw new IOException("Independent protected root leaf is absent.");
+                    RootFileSystem(rootLeaf);
+                    if (!SameRoot(namedFile, imageIdentity) || !SameRoot(RootStat(rootLeaf), imageIdentity)) throw new IOException("Original child descriptor differs from independently opened protected path.");
+                }
+                if (backing == LinuxExactImageBacking.RootControlledDisk)
+                {
+                    // At most 32 canonical components; every metadata open/stat/close
+                    // is on the SAME original finite syscall ledger. No extra image read.
+                    OwnedFd? parent = null; var directory = OpenFd("/", DirectoryFlag | NoFollow | CloseOnExec, false);
+                    var rootIdentity = RootStat(directory); RequireRootDirectory(rootIdentity); rootChain.Add((directory, rootIdentity, null, "/"));
+                    rootVolume = rootIdentity; LinuxExactImageBackingRules.RequireRootMount(rootIdentity.Mount, rootIdentity.Major, rootIdentity.Minor, rootIdentity.Mount, rootIdentity.Major, rootIdentity.Minor); RootFileSystem(directory);
+                    var parts = selected.Path[1..].Split('/');
+                    foreach (var name in parts.Take(parts.Length - 1))
+                    {
+                        parent = directory; directory = OpenFd(name, DirectoryFlag | NoFollow | CloseOnExec, false, parent);
+                        var value = RootStat(directory); RequireRootDirectory(value); rootChain.Add((directory, value, parent, name)); RootFileSystem(directory);
+                    }
+                    rootLeaf = OpenFd(parts[^1], 0x800 | NoFollow | CloseOnExec, false, directory);
+                    // The leaf is independently opened without following links; its full
+                    // identity must equal the actual held child descriptor below.
+                    // Only that descriptor is hashed; no second pathname content read.
+                }
+                Identity(); using var hash = System.Security.Cryptography.IncrementalHash.CreateHash(System.Security.Cryptography.HashAlgorithmName.SHA256);
+                Check(false); if (calls.Count >= WorkCallLimit) throw new IOException("Finite original Linux scope syscall ledger exhausted before invocation.");
+                var buffer = new byte[65536]; var elfHeader = new byte[64]; var elfUsed = 0; long consumed = 0;
+                var imageReads = new Call
+                {
+                    Kind = backing == LinuxExactImageBacking.RootControlledDisk ? "bounded-read-original-root-disk-native-image" : "bounded-read-original-sealed-native-image",
+                    OriginalBuffer = buffer,
+                    ByteLimit = byteLimit,
+                    NativeReadLimit = checked((int)((selected.Bytes + 65535) / 65536 + 1))
+                };
+                calls.Add(imageReads);
+                while (consumed < selected.Bytes)
+                {
+                    var requested = (int)Math.Min(buffer.Length, selected.Bytes - consumed);
+                    var n = ExactImageRead(imageReads, fd, buffer, requested);
+                    if (n <= 0 || n > requested) throw new IOException("Actual complete sealed image ended early.");
+                    if (elfUsed < 64) { var take = Math.Min(64 - elfUsed, (int)n); Buffer.BlockCopy(buffer, 0, elfHeader, elfUsed, take); elfUsed += take; }
+                    hash.AppendData(buffer, 0, (int)n); consumed += n; Check(false);
+                }
+                if (ExactImageRead(imageReads, fd, buffer, 1) != 0 || Convert.ToHexStringLower(hash.GetHashAndReset()) != selected.Sha256) throw new IOException("Actual complete sealed image hash/EOF differs.");
+                if (backing == LinuxExactImageBacking.RootControlledDisk)
+                {
+                    // Independent native-ELF header proof from the SAME paid read.
+                    if (elfUsed != 64 || elfHeader[0] != 0x7f || elfHeader[1] != (byte)'E' || elfHeader[2] != (byte)'L' || elfHeader[3] != (byte)'F' || elfHeader[4] != 2 || elfHeader[5] != 1 || elfHeader[6] != 1 || elfHeader[7] is not (0 or 3)) throw new IOException("Actual root-controlled ELF header differs.");
+                    var kind = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(elfHeader.AsSpan(16));
+                    var machine = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(elfHeader.AsSpan(18));
+                    var version = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(elfHeader.AsSpan(20));
+                    var phoff = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(elfHeader.AsSpan(32));
+                    var ehsize = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(elfHeader.AsSpan(52));
+                    var phsize = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(elfHeader.AsSpan(54));
+                    var phcount = System.Buffers.Binary.BinaryPrimitives.ReadUInt16LittleEndian(elfHeader.AsSpan(56));
+                    if (kind is not (2 or 3) || machine != 62 || version != 1 || ehsize != 64 || phsize != 56 || phcount is 0 or > 128 || phoff > (ulong)selected.Bytes || (ulong)phcount * phsize > (ulong)selected.Bytes - phoff) throw new IOException("Actual root-controlled native ELF table differs.");
+                }
+                Identity(); Same(false); Check(false);
+            }
+            catch (Exception failure) { primary = failure; }
+            var cleanupClose = primary is not null;
+            if (!cleanupClose)
+            {
+                try { Check(false); }
+                catch (Exception admission) { post = admission; cleanupClose = true; }
+            }
+            // Include an OpenFd endpoint-post refusal and metadata failures
+            // before a local chain row/leaf assignment. Never close an older fd
+            // or retry an entered first close; unresolved effects stay UNKNOWN.
+            for (var index = descriptors.Count - 1; index >= firstOwned; index--)
+                if (!descriptors[index].CloseEntered) post = CloseExactImage(descriptors[index], cleanupClose || post is not null, post);
+            if (primary is not null && post is not null) throw new AggregateException("Actual exact image and original first-close.", primary, post);
+            if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+            if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+        }
+    }
+    internal void RequireLimits(string expectedCpus, bool cleanup, bool restrictedChild = false) { lock (gate) RequireLimitsCore(expectedCpus, cleanup, restrictedChild); }
+    void RequireLimitsCore(string expectedCpus, bool cleanup, bool restrictedChild)
+    {
+        Same(cleanup);
+        string Text(string name) => Utf8.GetString(Read(name, cleanup, 256)).TrimEnd('\n');
+        if (Text("memory.max") != (restrictedChild ? "2147483648" : "4294967296") || Text("memory.swap.max") != "0" || Text("cpuset.cpus.effective") != expectedCpus || Text("pids.max") != (restrictedChild ? "64" : "128")) throw new IOException("Actual scope limits differ from selected closed ordinary or stricter child profile.");
+        var cpu = Text("cpu.max").Split(' '); if (cpu.Length != 2 || !ulong.TryParse(cpu[0], out var quota) || !ulong.TryParse(cpu[1], out var period) || period == 0 || quota / period > 2 || quota % period != 0 || quota / period != 2) throw new IOException("Actual cgroup CPU quota is not exactly two CPUs."); Same(cleanup);
+    }
+    internal void Kill(bool cleanup) { lock (gate) KillCore(cleanup); }
+    void KillCore(bool cleanup)
+    {
+        Same(cleanup); lock (gate) { if (stopEntered) throw new IOException("Actual original cgroup kill already entered; no retry."); stopEntered = true; }
+        var fd = OpenFd("cgroup.kill", 1 | NoFollow | CloseOnExec, cleanup, group); var data = new byte[] { (byte)'1' }; Exception? primary = null, post = null;
+        try { if (Native("write-original-cgroup.kill", () => write(fd.Actual, data, 1), cleanup, data) != 1) throw new IOException("Original cgroup kill did not accept exactly one byte."); } catch (Exception failure) { primary = failure; }
+        try { Close(fd, cleanup); Same(cleanup); } catch (Exception failure) { post = failure; }
+        if (primary is not null && post is not null) throw new AggregateException("Actual scope kill/independent post.", primary, post); if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+    }
+    internal void CloseEmpty(bool cleanup) { lock (gate) CloseEmptyCore(cleanup); }
+    internal bool KnownDisposed { get { lock (gate) return group is { Closed: true } && procDescriptors is { Closed: true } && descriptors.All(x => x.Closed) && calls.All(x => !x.Entered || x.Returned); } }
+    void CloseEmptyCore(bool cleanup)
+    {
+        if (!Empty(cleanup) || Unknown) throw new IOException("Actual original cgroup is not known empty/settled; retain."); if (closeEntered) throw new IOException("Scope first disposition already entered."); closeEntered = true;
+        Exception? primary = null, post = null; try { Close(group!, cleanup); } catch (Exception error) { primary = error; }
+        // Close proc observer independently only after the actual dependent group
+        // fd returned closed; a failed post does not erase that physical fact.
+        if (group is { Closed: true } && procDescriptors is not null) { try { Close(procDescriptors, cleanup || primary is not null); } catch (Exception error) { post = error; } }
+        if (primary is not null && post is not null) throw new AggregateException(primary, post); if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw(); if (post is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(post).Throw();
+    }
+    [StructLayout(LayoutKind.Explicit, Size = 256)] struct StatFs { [FieldOffset(0)] public long Type; [FieldOffset(80)] public ulong Flags; }
+    [StructLayout(LayoutKind.Explicit, Size = 256)] struct Statx { [FieldOffset(0)] public uint Mask; [FieldOffset(16)] public uint Links; [FieldOffset(20)] public uint Uid; [FieldOffset(24)] public uint Gid; [FieldOffset(28)] public ushort Mode; [FieldOffset(32)] public ulong Inode; [FieldOffset(40)] public ulong Size; [FieldOffset(136)] public uint Major; [FieldOffset(140)] public uint Minor; [FieldOffset(144)] public ulong Mount; }
+    [DllImport("libc", SetLastError = true)] static extern int open([MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
+    [DllImport("libc", SetLastError = true)] static extern int openat(int fd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags);
+    [DllImport("libc", SetLastError = true)] static extern int close(int fd);
+    [DllImport("libc", SetLastError = true)] static extern int fcntl(int fd, int command, int value);
+    [DllImport("libc", SetLastError = true)] static extern nint read(int fd, [Out] byte[] buffer, nuint count);
+    [DllImport("libc", SetLastError = true)] static extern nint write(int fd, byte[] buffer, nuint count);
+    [DllImport("libc", SetLastError = true)] static extern nint readlinkat(int fd, [MarshalAs(UnmanagedType.LPUTF8Str)] string name, [Out] byte[] buffer, nuint maximum);
+    [DllImport("libc", SetLastError = true)] static extern int fstatfs(int fd, out StatFs value);
+    [DllImport("libc", SetLastError = true)] static extern int statx(int fd, [MarshalAs(UnmanagedType.LPUTF8Str)] string path, int flags, uint mask, out Statx value);
+}
