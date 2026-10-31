@@ -30,6 +30,40 @@ public sealed class ProgramFailureTests
         line => line.StartsWith("DFCLI_FIRST_CAUGHT|", StringComparison.Ordinal)).TrimEnd('\r');
 
     [Fact]
+    public async Task Actual_failed_startup_is_inactive_before_unrelated_outer_timeout_capture()
+    {
+        using var life = new ToolLifetime(TimeSpan.FromSeconds(120), TestContext.Current.CancellationToken);
+        using var errors = new StringWriter(); var attention = new ToolFailureAttention(life, errors); life.BindAttention(attention);
+        var image = Environment.ProcessPath ?? throw new IOException("Actual test process image required.");
+        // Supported rows are inert adapter-routing DATA only: the real request
+        // deadline refusal below precedes image verification or any native birth.
+        var profile = new AgentAdapterProfile("codex.cli", "diagnostic-fixture",
+            new[] { AgentCapability.Launch, AgentCapability.CompletionEvidence }.Select(capability =>
+                new AgentCapabilityEvidence(capability, AgentCapabilityStatus.Supported, "inert routing control", "no native authority")).ToArray());
+        var port = new CodexAppServerPort(new(image, 1, new string('a', 64), "diagnostic-fixture"), new WorktreeManager(image), profile);
+        var adapter = new CodexHostAdapter(port);
+        var request = DeliveryForge.Execution.WorkerEnvelope.PrepareWorker(new(
+            "failed-startup-context", "sha256:" + new string('1', 64), new string('a', 40), "fixture/repo", Path.GetFullPath("."),
+            Path.GetFullPath("diagnostic-assigned"), Path.GetFullPath("diagnostic-results"), "PRIVATE-NOT-DISPATCHED",
+            ["control.txt"], [], "codex.cli", "diagnostic-fixture", [AgentCapability.Launch, AgentCapability.CompletionEvidence]));
+        adapter.BindInstructions(HostInstructionContext.FromParentSelection(request, "sha256:" + new string('c', 64),
+            "Refuse this inert startup before native work.", ["No image verification or process birth."], ["Reject the request deadline."]));
+        adapter.BindOriginal(life);
+        var failure = await Assert.ThrowsAsync<WorkerEnvelopeException>(() => adapter.StartAsync(request, life.WorkLimit + TimeSpan.FromSeconds(1), life.Token));
+        Assert.Equal("Actual request/version/deadline differs from containing original.", failure.Message);
+        var call = Assert.Single(adapter.ActualCalls); Assert.True(call.Entered); Assert.True(call.InvocationReturned);
+        Assert.True(call.ActualTask!.IsFaulted); Assert.Same(failure, call.InvocationFailure);
+        Assert.Null(port.OriginalProcess); Assert.Empty(port.OriginalTasks);
+        Assert.False((bool)DiagnosticField(port, "trustedNativeCreationEntered").GetValue(port)!);
+        Assert.Equal(CodexStartupStage.NotStarted, port.SnapshotStartupDiagnostics().Stage);
+        life.RecordFirstCaught("standalone", new AggregateException(failure, new TimeoutException("later independent timeout")));
+        life.BeginFailureCleanup(); attention.EmitFirstCaughtOnce();
+        Assert.DoesNotContain("CodexStartup", FirstCaughtLine(errors), StringComparison.Ordinal);
+        Assert.Equal(0, (int)DiagnosticField(port, "startupActive").GetValue(port)!);
+        Assert.Null(life.ObserveActiveCodexStartup()); Assert.False(attention.Unknown); Assert.False(life.HasExplicitUnknown);
+    }
+
+    [Fact]
     public async Task Independent_outer_timeout_freezes_only_same_original_startup_context_without_changing_failure()
     {
         const string secret = "private-config-auth-and-task@example.invalid";
