@@ -331,21 +331,21 @@ public sealed class CodexOneJobDangerFullAccessTests
 
     [Theory]
     [InlineData(true, true, false, false, true)]
-    [InlineData(true, false, true, false, false)]
-    [InlineData(true, true, true, false, false)]
-    [InlineData(true, false, false, false, false)]
+    [InlineData(true, false, true, false, true)]
+    [InlineData(true, true, true, false, true)]
+    [InlineData(true, false, false, false, true)]
     [InlineData(false, false, true, false, false)]
     [InlineData(false, true, false, false, false)]
     [InlineData(true, false, false, true, false)]
-    public void Only_disposable_conformance_selects_confined_roots_without_issuing_RuntimeTrust(bool linux, bool route, bool runtime, bool dfa, bool expected) =>
+    public void Every_selected_Linux_worker_uses_confined_roots_without_issuing_RuntimeTrust(bool linux, bool route, bool runtime, bool dfa, bool expected) =>
         Assert.Equal(expected, CodexAppServerPort.SelectLinuxWorkspaceWrite(linux, route, runtime, dfa, Scope()));
     [Fact]
-    public void Selected_conformance_refuses_bad_scope_while_production_selection_is_unchanged()
+    public void Every_confined_selection_refuses_missing_or_foreign_scope()
     {
         Assert.Throws<ToolUsageException>(() => CodexAppServerPort.SelectLinuxWorkspaceWrite(true, true, false, false, null));
         Assert.Throws<ToolUsageException>(() => CodexAppServerPort.SelectLinuxWorkspaceWrite(true, true, false, false, Scope() with { RestrictiveChildPolicy = "other" }));
-        Assert.False(CodexAppServerPort.SelectLinuxWorkspaceWrite(true, false, true, false, null));
-        Assert.False(CodexAppServerPort.SelectLinuxWorkspaceWrite(true, false, true, false, Scope() with { RestrictiveChildPolicy = "other" }));
+        Assert.Throws<ToolUsageException>(() => CodexAppServerPort.SelectLinuxWorkspaceWrite(true, false, true, false, null));
+        Assert.Throws<ToolUsageException>(() => CodexAppServerPort.SelectLinuxWorkspaceWrite(true, false, true, false, Scope() with { RestrictiveChildPolicy = "other" }));
         // Boolean selection cannot construct the private capability.
         Assert.Empty(typeof(InstalledHostAdmission.RuntimeTrust).GetConstructors());
     }

@@ -310,6 +310,8 @@ internal sealed class InstalledReviewHost : IDisposable
             environment["GIT_GRAFT_FILE"] = nul;
             environment["GIT_COMMON_DIR"] = provisioned.CommonDirectory;
             environment["GIT_OBJECT_DIRECTORY"] = provisioned.ObjectsPath;
+            provisioned.RequireValidatedPrivateObjects();
+            environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = provisioned.HasPrivateObjects ? provisioned.CommonObjectsPath : "";
             environment["GIT_INDEX_FILE"] = provisioned.IndexPath;
             environment["LC_ALL"] = "C"; environment["LANG"] = "C";
             var disabledFilters = filters.SelectMany(name => new[] { "process=", "smudge=", "clean=", "required=false" }

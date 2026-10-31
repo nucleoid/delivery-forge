@@ -1,4 +1,8 @@
 using System.Text;
+using System.Text.Json.Nodes;
+using System.Security.Cryptography;
+using DeliveryForge.Contracts.Serialization;
+using DeliveryForge.Contracts.Validation;
 using DeliveryForge.Coordination;
 using DeliveryForge.Evidence;
 using DeliveryForge.Execution;
@@ -422,11 +426,140 @@ public sealed class ProvisionedGitBindingTests
     {
         using var fixture = await Fixture.CreateAsync();
         var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        await binding.EnablePrivateObjectWritesAsync(TestContext.Current.CancellationToken);
         var roots = DeliveryForge.Tool.Codex.CodexAppServerPort.LinuxWorkspaceWriteRoots(fixture.InitialManager, fixture.Original, ConfinedRequest(fixture));
-        Assert.Equal(new[] { binding.Worktree, binding.GitDirectory, binding.ObjectsPath }, roots);
+        Assert.Equal(new[] { binding.Worktree, binding.GitDirectory }, roots);
         Assert.True(File.Exists(Path.Combine(fixture.Worker, ".git"))); Assert.False(Directory.Exists(Path.Combine(fixture.Worker, ".git")));
         Assert.DoesNotContain(fixture.Repository, roots); Assert.DoesNotContain(binding.CommonDirectory, roots);
         Assert.DoesNotContain(Path.Combine(binding.CommonDirectory, "refs"), roots);
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Actual_private_git_commit_is_observed_only_after_its_original_writer_closes_without_changing_common_objects()
+    {
+        const string protectedPolicy = """
+            {"Fixture":false,"Advisory":false,"AllowedFamilies":[{"Author":"gpt","Reviewer":"claude"}],"AllowedScopes":["source"],"AllowExactReuse":false,"Budget":{"MaximumRounds":2,"MaximumDuration":"00:00:30","MaximumTokens":4096,"MaximumCost":1.0},"ExemptionApprovers":[]}
+            """;
+        using var fixture = await Fixture.CreateAsync(forceCheckoutConversion: true, protectedPolicy: protectedPolicy);
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        using var writer = fixture.Manager.AcquireWriter(fixture.Worker, "owned", "private-object-writer");
+        var commonBefore = ObjectBodies(binding.CommonObjectsPath);
+        var baseHead = (await fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token)).HeadCommit;
+        await binding.EnablePrivateObjectWritesAsync(fixture.Original.Token);
+        File.WriteAllText(Path.Combine(fixture.Worker, "subject.txt"), "private committed candidate\n");
+        File.WriteAllText(Path.Combine(fixture.Worker, ".forge", "protected-policy.json"), "{}");
+        var actual = fixture.OpenOverlayGit(binding, "-c", "user.name=PrivateObjectFixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "commit", "-q", "-am", "private candidate");
+        binding.AttachPrivateObjectWriter(actual);
+        var before = fixture.Manager.ActualOwnedGitInvocations;
+        Assert.Throws<WorktreeBoundaryException>(binding.RequireValidatedPrivateObjects);
+        Assert.Equal(before, fixture.Manager.ActualOwnedGitInvocations);
+        await DrainAndRetire(actual, fixture.Original);
+        binding.ValidatePrivateObjectsAfterRetirement();
+        var candidate = await fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token);
+        Assert.True(candidate.IsClean); Assert.NotEqual(baseHead, candidate.HeadCommit);
+        await fixture.Manager.EnsureDescendsFromAsync(fixture.Worker, baseHead, candidate.HeadCommit, fixture.Original.Token);
+        Assert.Equal(commonBefore, ObjectBodies(binding.CommonObjectsPath));
+        Assert.NotEmpty(Directory.GetFiles(binding.ObjectsPath, "*", SearchOption.AllDirectories));
+        Assert.Equal("{}", File.ReadAllText(Path.Combine(fixture.Worker, ".forge", "protected-policy.json")));
+        // The existing review owner consumes BOTH namespaces, while protected
+        // policy is still resolved from the original base, never the candidate.
+        var planJson = JsonNode.Parse(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "ContractFixtures", "plan.json")))!.AsObject();
+        planJson["baseCommit"] = baseHead;
+        planJson["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(planJson.ToJsonString()));
+        var plan = CanonicalJson.Canonicalize(Encoding.UTF8.GetBytes(planJson.ToJsonString()));
+        var evidence = File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "ContractFixtures", "evidence-policy.json"));
+        var image = File.ReadAllBytes(fixture.GitImage);
+        var sourceOwner = new ProductionReviewSourceOwner(fixture.Executor, fixture.Original, fixture.Parent, "owned", fixture.Worker,
+            binding.GitDirectory, binding.CommonDirectory, fixture.GitImage, image.Length, Convert.ToHexStringLower(SHA256.HashData(image)),
+            await fixture.GitAt(fixture.Repository, "--version"), baseHead, candidate.HeadCommit,
+            () => actual.OriginalRetirementTask is { IsCompletedSuccessfully: true } closed && closed.Result.KnownClosed && !actual.HasUnknownIo,
+            ContractValidator.ParseAndValidate(plan).Identity, ContractValidator.ParseAndValidate(evidence).Identity,
+            ".forge/protected-policy.json", 1048576, binding);
+        using var review = await ReviewAuthorityHost.CreateProductionFromOwnedSourceAsync(sourceOwner, plan, evidence,
+            ".forge/protected-policy.json", 1048576, fixture.Original.Token);
+        Assert.Equal(candidate.HeadCommit, review.ObjectView.FrozenHeadCommit);
+        Assert.Equal(baseHead, review.Policy.SourceRevision);
+        Assert.Equal("sha256:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(protectedPolicy))), review.Policy.ContentIdentity);
+        Assert.True(review.Policy.Trusted); Assert.False(review.Policy.Fixture);
+        Assert.False(fixture.Original.HasExplicitUnknown);
+    }
+
+    [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    [InlineData("pack")]
+    [InlineData("routing")]
+    [InlineData("shadow")]
+    [InlineData("corrupt")]
+    public async Task Private_namespace_refusals_happen_before_any_trusted_parent_Git_birth(string change)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        string? shadowRelative = null; byte[]? shadowBody = null;
+        if (change == "shadow")
+        {
+            var source = Directory.GetFiles(binding.CommonObjectsPath, "*", SearchOption.AllDirectories)
+                .First(path => Path.GetFileName(Path.GetDirectoryName(path)!).Length == 2 && Path.GetFileName(path).Length == 38);
+            shadowRelative = Path.GetRelativePath(binding.CommonObjectsPath, source); shadowBody = File.ReadAllBytes(source);
+            await fixture.GitAt(fixture.Repository, "gc", "--prune=now");
+            Assert.False(File.Exists(source)); // The protected OID now lives in a base pack.
+        }
+        await binding.EnablePrivateObjectWritesAsync(fixture.Original.Token);
+        var actual = fixture.OpenOverlayGit(binding, "--version");
+        binding.AttachPrivateObjectWriter(actual);
+        await DrainAndRetire(actual, fixture.Original);
+        if (change == "pack") Directory.CreateDirectory(Path.Combine(binding.ObjectsPath, "pack"));
+        else if (change == "routing")
+        {
+            Directory.CreateDirectory(Path.Combine(binding.ObjectsPath, "info"));
+            File.WriteAllText(Path.Combine(binding.ObjectsPath, "info", "alternates"), fixture.Foreign + "\n");
+        }
+        else if (change == "shadow")
+        {
+            var path = Path.Combine(binding.ObjectsPath, shadowRelative!);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllBytes(path, shadowBody!);
+        }
+        else
+        {
+            Directory.CreateDirectory(Path.Combine(binding.ObjectsPath, "ab"));
+            File.WriteAllBytes(Path.Combine(binding.ObjectsPath, "ab", new string('0', 38)), [1, 2, 3, 4, 5, 6]);
+        }
+        var before = fixture.Manager.ActualOwnedGitInvocations;
+        Assert.Throws<WorktreeBoundaryException>(binding.ValidatePrivateObjectsAfterRetirement);
+        await Assert.ThrowsAsync<CoordinationUncertainException>(() => fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token));
+        Assert.Equal(before, fixture.Manager.ActualOwnedGitInvocations);
+        Assert.False(fixture.Original.HasExplicitUnknown);
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Private_writer_cannot_be_adopted_from_another_real_original()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        await binding.EnablePrivateObjectWritesAsync(fixture.Original.Token);
+        using var foreign = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var actual = OwnedDuplexProcess.Open(fixture.VersionInvocation(), foreign);
+        Assert.Throws<WorktreeBoundaryException>(() => binding.AttachPrivateObjectWriter(actual));
+        await DrainAndRetire(actual, foreign);
+        binding.RequireValidatedPrivateObjects();
+        Assert.False(fixture.Original.HasExplicitUnknown); Assert.False(foreign.HasExplicitUnknown);
+    }
+
+    static string[] ObjectBodies(string root) => Directory.GetFiles(root, "*", SearchOption.AllDirectories)
+        .Select(path => Path.GetRelativePath(root, path) + ":" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))))
+        .OrderBy(value => value, StringComparer.Ordinal).ToArray();
+
+    static async Task DrainAndRetire(OwnedDuplexProcess actual, ToolLifetime original)
+    {
+        Assert.Null(actual.StartupFailure);
+        using var bytes = new MemoryStream();
+        var output = actual.Output.CopyToAsync(bytes, original.Token);
+        actual.AttachOriginalOutputConsumer(output);
+        await output.WaitAsync(original.Remaining, original.Token);
+        var closed = await actual.RetireAsync(false).WaitAsync(original.Remaining, original.Token);
+        Assert.True(closed.KnownClosed); Assert.Equal(0u, closed.ActiveProcesses); Assert.Equal(0, closed.ExitCode);
+        Assert.True(closed.OutputEof); Assert.True(closed.ErrorEof); Assert.True(closed.InputCloseReturned); Assert.True(closed.DispositionReturned);
+        Assert.Empty(closed.Failures); Assert.False(actual.HasUnknownIo);
     }
     [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
     [InlineData("marker")]
@@ -439,6 +572,7 @@ public sealed class ProvisionedGitBindingTests
     {
         using var fixture = await Fixture.CreateAsync();
         var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        await binding.EnablePrivateObjectWritesAsync(TestContext.Current.CancellationToken);
         if (change is "marker" or "backpointer" or "common")
         {
             var path = change == "marker" ? Path.Combine(fixture.Worker, ".git") : Path.Combine(binding.GitDirectory, change == "backpointer" ? "gitdir" : "commondir");
@@ -469,6 +603,7 @@ public sealed class ProvisionedGitBindingTests
     {
         using var fixture = await Fixture.CreateAsync();
         var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        await binding.EnablePrivateObjectWritesAsync(TestContext.Current.CancellationToken);
         if (afterSelection) _ = DeliveryForge.Tool.Codex.CodexAppServerPort.LinuxWorkspaceWriteRoots(fixture.InitialManager, fixture.Original, ConfinedRequest(fixture));
         File.WriteAllText(Path.Combine(binding.GitDirectory, "config.worktree"), "[include]\npath = worker-controlled\n");
         var before = fixture.InitialManager.ActualOwnedGitInvocations;
@@ -538,7 +673,7 @@ public sealed class ProvisionedGitBindingTests
         internal readonly string GitImage = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
             .Where(Path.IsPathFullyQualified).Select(path => Path.Combine(path, "git.exe")).First(File.Exists);
         internal WorktreeManager Manager = null!, InitialManager = null!;
-        internal static async Task<Fixture> CreateAsync(bool forceCheckoutConversion = false)
+        internal static async Task<Fixture> CreateAsync(bool forceCheckoutConversion = false, string? protectedPolicy = null)
         {
             var value = new Fixture();
             try
@@ -550,7 +685,7 @@ public sealed class ProvisionedGitBindingTests
                 if (forceCheckoutConversion)
                 {
                     Directory.CreateDirectory(Path.Combine(value.Repository, ".forge"));
-                    File.WriteAllText(Path.Combine(value.Repository, ".forge", "protected-policy.json"), "{\"guard\":\"base\"}\n");
+                    File.WriteAllText(Path.Combine(value.Repository, ".forge", "protected-policy.json"), protectedPolicy ?? "{\"guard\":\"base\"}\n");
                     await value.Git("add", "--", ".forge/protected-policy.json");
                 }
                 await value.Git("-c", "user.name=BindingFixture", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "original");
@@ -577,6 +712,15 @@ public sealed class ProvisionedGitBindingTests
             environment["GIT_CONFIG_NOSYSTEM"] = "1"; environment["GIT_CONFIG_GLOBAL"] = "NUL";
             environment["GIT_CONFIG_SYSTEM"] = "NUL"; environment["GIT_TERMINAL_PROMPT"] = "0";
             return new(GitImage, ["--version"], Worker, environment) { EnvironmentIsComplete = true };
+        }
+        internal OwnedDuplexProcess OpenOverlayGit(WorktreeManager.OwnedGitBinding binding, params string[] arguments)
+        {
+            var environment = VersionInvocation().Environment!.ToDictionary(row => row.Key, row => row.Value, StringComparer.OrdinalIgnoreCase);
+            environment["GIT_DIR"] = binding.GitDirectory; environment["GIT_COMMON_DIR"] = binding.CommonDirectory;
+            environment["GIT_WORK_TREE"] = binding.Worktree; environment["GIT_INDEX_FILE"] = binding.IndexPath;
+            environment["GIT_OBJECT_DIRECTORY"] = binding.ObjectsPath; environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = binding.CommonObjectsPath;
+            return OwnedDuplexProcess.Open(new(GitImage, ["-c", "core.hooksPath=NUL", "-c", "core.fsmonitor=false", .. arguments],
+                Worker, environment) { EnvironmentIsComplete = true }, Original);
         }
         async Task<string> Git(params string[] arguments) => await GitAt(Repository, arguments);
         internal async Task<string> GitAt(string directory, params string[] arguments)

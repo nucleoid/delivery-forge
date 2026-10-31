@@ -82,6 +82,7 @@ public sealed class OwnedDuplexProcess
     bool opening = true, creationUnknown; long bytesRead, bytesWritten; int readerBusy, writerBusy; Task? errorDrain, outputConsumer; Task<DuplexRetirement>? retirement;
     readonly List<Exception> failures = []; readonly MemoryStream errorBytes = new();
     public bool HasRetainedOriginalOwner => actualOwner is not null;
+    internal bool IsOwnedBy(IOwnedDuplexBudget actual) => ReferenceEquals(budget, actual);
     public Exception? StartupFailure { get; private set; }
     public Task<DuplexRetirement>? OriginalRetirementTask { get { lock (gate) return retirement; } }
     public Task? OriginalErrorDrainTask => errorDrain; // actual task reference; no completion/control authority.

@@ -64,6 +64,19 @@ public sealed partial class ProductionReviewSourceOwner
     internal string SourceRoot { get; }
     internal string WorkerGitDirectory { get; }
     internal string CommonGitDirectory { get; }
+    internal string WorkerObjectsDirectory => provisionedBinding?.ObjectsPath ?? Path.Combine(CommonGitDirectory, "objects");
+    internal string WorkerAlternateObjectsDirectory => provisionedBinding is { HasPrivateObjects: true } binding ? binding.CommonObjectsPath : "";
+    internal void RequireValidatedPrivateObjects()
+    {
+        if (provisionedBinding is { HasPrivateObjects: true }) provisionedBinding.RequireValidatedPrivateObjects();
+    }
+    internal string[] ObjectCopyRoots()
+    {
+        Check(); RequireValidatedPrivateObjects();
+        return provisionedBinding is { HasPrivateObjects: true } binding
+            ? [binding.CommonObjectsPath, binding.ObjectsPath]
+            : [Path.Combine(CommonGitDirectory, "objects")];
+    }
     internal string GitExecutable { get; }
     internal string GitVersion { get; }
     internal string BaseCommit { get; }
@@ -248,6 +261,7 @@ public sealed partial class ProductionReviewSourceOwner
         var controlledRole = controlled is not null && SamePath(gitDirectory, controlled);
         if (!workerRole && !controlledRole)
             throw new ReviewPreflightException("Git evidence attempted a foreign object authority.");
+        if (workerRole) RequireValidatedPrivateObjects();
         string? patchPath = null;
         var dispatchEntered = false;
         var commandSucceeded = false;
@@ -273,9 +287,9 @@ public sealed partial class ProductionReviewSourceOwner
                 ["GIT_DIR"] = gitDirectory,
                 ["GIT_COMMON_DIR"] = workerRole ? CommonGitDirectory : gitDirectory,
                 ["GIT_WORK_TREE"] = SourceRoot,
-                ["GIT_OBJECT_DIRECTORY"] = Path.Combine(workerRole ? CommonGitDirectory : gitDirectory, "objects"),
+                ["GIT_OBJECT_DIRECTORY"] = workerRole ? WorkerObjectsDirectory : Path.Combine(gitDirectory, "objects"),
                 ["GIT_INDEX_FILE"] = Path.Combine(gitDirectory, "index"),
-                ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "",
+                ["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = workerRole ? WorkerAlternateObjectsDirectory : "",
                 ["GIT_CONFIG_COUNT"] = "0",
                 ["GIT_CONFIG_PARAMETERS"] = "",
                 ["GIT_CONFIG"] = Path.Combine(workerRole ? CommonGitDirectory : gitDirectory, "config"),
@@ -567,8 +581,12 @@ public sealed partial class ReviewAuthorityHost
                     if (File.Exists(Path.Combine(directory, "shallow")) || File.Exists(Path.Combine(directory, "info", "grafts")) || Directory.Exists(Path.Combine(directory, "refs", "replace")))
                         throw new ReviewPreflightException("Source uses incomplete or replacement object authority.");
                 }
-                var workerObjects = Path.Combine(owner.CommonGitDirectory, "objects");
-                if (File.Exists(Path.Combine(workerObjects, "info", "alternates"))) throw new ReviewPreflightException("External source object authority is unsupported.");
+                var objectRoots = owner.ObjectCopyRoots();
+                foreach (var objects in objectRoots)
+                {
+                    ProductionReviewSourceOwner.Plain(objects);
+                    if (File.Exists(Path.Combine(objects, "info", "alternates"))) throw new ReviewPreflightException("External source object authority is unsupported.");
+                }
                 var config = await owner.ReadFileAsync(Path.Combine(owner.CommonGitDirectory, "config"), 1048576, cancellationToken).ConfigureAwait(false);
                 if (new[] { "include", "promisor", "partialclone", "alternates" }.Any(s => Encoding.UTF8.GetString(config).Contains(s, StringComparison.OrdinalIgnoreCase)))
                     throw new ReviewPreflightException("Source Git contains external authority.");
@@ -579,7 +597,9 @@ public sealed partial class ReviewAuthorityHost
                 await owner.WriteFileAsync(Path.Combine(controlled, "HEAD"), Encoding.UTF8.GetBytes("ref: refs/heads/controlled\n"), cancellationToken).ConfigureAwait(false);
                 await owner.WriteFileAsync(Path.Combine(controlled, "config"), Encoding.UTF8.GetBytes("[core]\n\trepositoryformatversion = 0\n\tbare = true\n\tfilemode = true\n"), cancellationToken).ConfigureAwait(false);
                 await owner.WriteFileAsync(Path.Combine(controlled, "info", "attributes"), Encoding.UTF8.GetBytes(ProductionReviewSourceOwner.ArchiveAttributeText), cancellationToken).ConfigureAwait(false);
-                var copied = new Dictionary<string, string>(StringComparer.Ordinal); long copiedBytes = 0; int entries = 0;
+                var copied = new Dictionary<(int Root, string Relative), string>();
+                var destinations = new HashSet<string>(StringComparer.Ordinal);
+                long copiedBytes = 0; int entries = 0;
                 // One finite, self-contained synchronous object copy/verify
                 // operation. Parent admission retains its actual completion but
                 // releases its gate before the filesystem work. Nothing here
@@ -631,7 +651,7 @@ public sealed partial class ReviewAuthorityHost
                         var close = file is null ? null : owner.CloseResource(file, ref primary);
                         ProductionReviewSourceOwner.ThrowFailures(primary, close);
                     }
-                    void Inventory(string directory, bool copy, int depth = 0)
+                    void Inventory(string objectRoot, int rootIndex, string directory, bool copy, int depth = 0)
                     {
                         owner.Check(); cancellationToken.ThrowIfCancellationRequested(); ProductionReviewSourceOwner.Plain(directory);
                         if (depth > 64) throw new ReviewPreflightException("Owned object inventory exceeds64 directory levels.");
@@ -646,27 +666,44 @@ public sealed partial class ReviewAuthorityHost
                                 var path = iterator.Current;
                                 owner.Check(); cancellationToken.ThrowIfCancellationRequested(); ProductionReviewSourceOwner.Plain(path);
                                 if (++entries > 4096) throw new ReviewPreflightException("Owned object inventory exceeds4096 entries.");
-                                var relative = Path.GetRelativePath(workerObjects, path); var destination = Path.Combine(controlled, "objects", relative);
+                                var relative = Path.GetRelativePath(objectRoot, path); var destination = Path.Combine(controlled, "objects", relative);
                                 owner.Check(); var directoryEntry = Directory.Exists(path); owner.Check();
+                                if (rootIndex == 1)
+                                {
+                                    // This second root is the retained, validated private loose-object
+                                    // namespace, never another repository or object-routing source.
+                                    var name = Path.GetFileName(path);
+                                    if (depth == 0 ? !directoryEntry || name.Length != 2 || !name.All(char.IsAsciiHexDigitLower)
+                                        : depth != 1 || directoryEntry || name.Length != owner.BaseCommit.Length - 2 || !name.All(char.IsAsciiHexDigitLower))
+                                        throw new ReviewPreflightException("Private review objects must be ordinary loose objects.");
+                                }
                                 if (directoryEntry)
                                 {
                                     if (copy) { owner.Check(); Directory.CreateDirectory(destination); owner.Check(); }
-                                    Inventory(path, copy, depth + 1); continue;
+                                    Inventory(objectRoot, rootIndex, path, copy, depth + 1); continue;
                                 }
                                 var bytes = ReadObject(path);
                                 copiedBytes += bytes.Length; if (copiedBytes > 134217728) throw new ReviewPreflightException("Owned object inventory exceeds128MiB.");
                                 owner.Check(); var hash = Convert.ToHexStringLower(SHA256.HashData(bytes)); owner.Check();
-                                if (copy) { copied.Add(relative, hash); WriteObject(destination, bytes); }
-                                else if (!copied.Remove(relative, out var expected) || hash != expected) throw new ReviewPreflightException("Source objects changed during owned copy.");
+                                if (copy)
+                                {
+                                    if (!destinations.Add(relative)) throw new ReviewPreflightException("Object sources overlap in the controlled view.");
+                                    copied.Add((rootIndex, relative), hash); WriteObject(destination, bytes);
+                                }
+                                else if (!copied.Remove((rootIndex, relative), out var expected) || hash != expected) throw new ReviewPreflightException("Source objects changed during owned copy.");
                             }
                         }
                         catch (Exception failure) { primary = failure; }
                         var close = iterator is null ? null : owner.CloseResource(iterator, ref primary);
                         ProductionReviewSourceOwner.ThrowFailures(primary, close);
                     }
-                    Inventory(workerObjects, true); entries = 0; copiedBytes = 0;
-                    Inventory(workerObjects, false);
+                    // Both roots share the established entry and byte bounds on each
+                    // pass. The controlled view has no alternates or outside routing.
+                    for (var index = 0; index < objectRoots.Length; index++) Inventory(objectRoots[index], index, objectRoots[index], true);
+                    entries = 0; copiedBytes = 0;
+                    for (var index = 0; index < objectRoots.Length; index++) Inventory(objectRoots[index], index, objectRoots[index], false);
                     if (copied.Count != 0) throw new ReviewPreflightException("Source objects disappeared during owned copy.");
+                    owner.RequireValidatedPrivateObjects();
                     return true;
                 });
                 var freshIndex = await owner.ReadFileAsync(Path.Combine(owner.WorkerGitDirectory, "index"), 16777216, cancellationToken).ConfigureAwait(false);

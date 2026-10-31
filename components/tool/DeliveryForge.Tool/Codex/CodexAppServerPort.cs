@@ -19,6 +19,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     readonly bool conformanceTrustRoute;
     readonly bool conformanceDangerFullAccess;
     string[]? linuxWorkspaceRoots; bool linuxWorkspaceThreadVerified; WorkerEnvelopeException? linuxWorkspaceThreadRefusal;
+    WorktreeManager.OwnedGitBinding? privateGit;
     bool UsesLinuxWorkspaceWrite => SelectLinuxWorkspaceWrite(OperatingSystem.IsLinux(), conformanceTrustRoute, runtimeTrust is not null, conformanceDangerFullAccess, linuxScope);
     readonly Action<string>? conformanceLeafCounters; int conformanceCounterPhase;
     Exception? conformanceCounterFailure;
@@ -280,11 +281,11 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             type.ValueKind != JsonValueKind.String || type.GetString() != "dangerFullAccess")
             throw new WorkerEnvelopeException("Actual one-job Linux conformance cwd/dangerFullAccess policy differs; no turn is dispatched.");
     }
-    // Dedicated disposable conformance fixture only. Bound production RuntimeTrust
-    // keeps its previous policy until shared object integrity is separately solved.
+    // Filesystem policy does not issue runtime trust. Every Linux worker keeps
+    // shared objects read-only and writes only its assigned private Git namespace.
     internal static bool SelectLinuxWorkspaceWrite(bool linux, bool trustRoute, bool runtimeBound, bool dangerFullAccess, LinuxScopeSelection? scope)
     {
-        if (!linux || dangerFullAccess || !trustRoute || runtimeBound) return false;
+        if (!linux || dangerFullAccess) return false;
         if (scope?.RestrictiveChildPolicy != "nnp-user1000-ancestor-v3")
             throw new ToolUsageException("Confined Linux workspace policy requires the selected restrictive scope.");
         return true;
@@ -299,8 +300,9 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         owner.Check();
         var retained = git.RequireOriginalBinding(actual.Worktree, owner, actual.RunId);
         retained.RequireConfinedConformanceConfiguration();
+        if (!retained.HasPrivateObjects) throw new WorktreeBoundaryException("Confined worker private objects are not prepared.");
         var comparer = OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
-        var roots = new[] { retained.Worktree, retained.GitDirectory, retained.ObjectsPath }
+        var roots = new[] { retained.Worktree, retained.GitDirectory }
             .Select(path => Path.TrimEndingDirectorySeparator(BoundedFiles.Plain(path, true))).Distinct(comparer).ToArray();
         if (roots.Any(path => !Directory.Exists(path))) throw new WorktreeBoundaryException("Confined Git root disappeared.");
         retained.Check(); owner.Check(); return roots;
@@ -338,6 +340,12 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             usage = usageNode?.Register(); reportedUsage = usage is null ? null : new(usage); usage?.Check();
             var confined = UsesLinuxWorkspaceWrite;
             runtimeTrust?.BindWorker(original, selection, actual.Worktree, actual.ResultDirectory, linuxScope);
+            if (confined)
+            {
+                privateGit = actualGit.RequireOriginalBinding(actual.Worktree, original, actual.RunId);
+                await Keep(privateGit.EnablePrivateObjectWritesAsync(token)).WaitAsync(original.Remaining, token).ConfigureAwait(false);
+                original.Check();
+            }
             startup!.SetStage(CodexStartupStage.NativeImageVerification);
             // Reserve the actual gate and independent backing-specific verification
             // before pathname hashing or native birth; no ordinary Linux fallback.
@@ -354,8 +362,15 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             else trustedImage = runtimeTrust?.RetainWorkerImage(original, new(selection.Executable, selection.Bytes, selection.Sha256), token)
                 ?? WindowsImageUse.Open(new(selection.Executable, selection.Bytes, selection.Sha256), original, token);
             var environment = new Dictionary<string, string> { ["DOTNET_PROCESSOR_COUNT"] = "2", ["DOTNET_GCHeapHardLimit"] = "0x100000000", ["DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER"] = "1", ["MSBUILDDISABLENODEREUSE"] = "1" };
+            if (privateGit is not null)
+            {
+                environment["GIT_OBJECT_DIRECTORY"] = privateGit.ObjectsPath;
+                environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = privateGit.CommonObjectsPath;
+            }
             runtimeTrust?.Check(original); trustedImage?.Check(token);
-            startup.SetStage(CodexStartupStage.NativeCreation); trustedNativeCreationEntered = true; process = OwnedDuplexProcess.Open(new(selection.Executable, ["app-server"], actual.Worktree, environment), original, linuxScope, exactImage); trustedNativeCreationReturned = true; if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
+            startup.SetStage(CodexStartupStage.NativeCreation); trustedNativeCreationEntered = true; process = OwnedDuplexProcess.Open(new(selection.Executable, ["app-server"], actual.Worktree, environment), original, linuxScope, exactImage); trustedNativeCreationReturned = true;
+            privateGit?.AttachPrivateObjectWriter(process);
+            if (process.StartupFailure is Exception failure) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
             if (exactImage is not null && (!process.HasCreationOwnedExactLinuxImage || process.CreationOwnedExactLinuxImageBacking != linuxScope!.ExactImageBacking)) throw new IOException("Actual creation-owned exact Linux image/backing proof required before Codex protocol startup.");
             if (usage is not null) usageWatch = Keep(usage.WatchAsync(StopForReportedUsage));
             protocol = new(process.Input, process.Output, original); pump = Pump(original.Token); process.AttachOriginalOutputConsumer(pump); lock (tasks) tasks.Add(pump);
@@ -464,6 +479,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             if (pump is not null) await pump.WaitAsync(original.Remaining, token).ConfigureAwait(false); if (pumpFailure is not null) throw new IOException("Actual app-server protocol failed; no successful completion.", pumpFailure);
             usage?.RequireFinal(); if (usage is not null) await usage.JoinAsync(usageWatch).ConfigureAwait(false);
             runtimeTrust?.Check(original); trustedImage?.Check(token); CloseTrustedImage(true, false);
+            privateGit?.ValidatePrivateObjectsAfterRetirement();
             var snapshotTask = actualGit.ObserveAsync(request!.Worktree, token); var snapshot = await Keep(snapshotTask).WaitAsync(original.Remaining, token).ConfigureAwait(false); original.Check();
             original.Check(); var artifact = Path.Combine(request.ResultDirectory, "codex-app-server-events.json"); JsonElement[] rows; lock (trace) rows = trace.ToArray(); var raw = conformanceTrustRoute ? JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualCodexAppServerTrace-v1", Host = new StandaloneHostSelection(selection.Executable, selection.Bytes, selection.Sha256, selection.Version), Version = selection.Version, TrustRouteConformanceOnly = conformanceTrustRoute, ConformanceDangerFullAccess = conformanceDangerFullAccess, actual.RunId, actual.RequestIdentity, ThreadId = threadId, TurnId = turnId, Events = rows, ReportedUsage = usage?.Evidence(), Retirement = retired, PumpFailure = pumpFailure?.GetType().FullName, RuntimeCertified = false }, BoundedFiles.Json) : JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualCodexAppServerTrace-v1", TrustRouteConformanceOnly = conformanceTrustRoute, ConformanceDangerFullAccess = conformanceDangerFullAccess, actual.RunId, actual.RequestIdentity, ThreadId = threadId, TurnId = turnId, Events = rows, ReportedUsage = usage?.Evidence(), Retirement = retired, PumpFailure = pumpFailure?.GetType().FullName, RuntimeCertified = false }, BoundedFiles.Json); BoundedFiles.WriteNew(artifact, raw, original);
             usage?.RequireFinal();

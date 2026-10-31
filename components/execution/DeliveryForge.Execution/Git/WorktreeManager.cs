@@ -429,6 +429,7 @@ public sealed partial class WorktreeManager
             start.ArgumentList.Add("--work-tree=" + binding.Worktree);
             start.Environment["GIT_COMMON_DIR"] = binding.CommonDirectory;
             start.Environment["GIT_OBJECT_DIRECTORY"] = binding.ObjectsPath;
+            if (binding.HasPrivateObjects) start.Environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = binding.CommonObjectsPath;
             start.Environment["GIT_INDEX_FILE"] = binding.IndexPath;
         }
         start.ArgumentList.Add("-c"); start.ArgumentList.Add("core.hooksPath=" + disabledHooks);
@@ -562,7 +563,7 @@ public sealed partial class WorktreeManager
     private static extern uint GetFinalPathNameByHandle(
         SafeFileHandle file, StringBuilder filePath, uint filePathLength, uint flags);
 
-    private static void RejectSymlinkAncestors(string path)
+    internal static void RejectSymlinkAncestors(string path)
     {
         for (var current = new DirectoryInfo(Path.GetFullPath(path)); current is not null; current = current.Parent)
             if (current.Exists && (current.Attributes & FileAttributes.ReparsePoint) != 0)

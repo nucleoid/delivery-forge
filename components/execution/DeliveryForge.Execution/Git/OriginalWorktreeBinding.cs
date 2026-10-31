@@ -12,7 +12,7 @@ public sealed partial class WorktreeManager
 
     // Only PrepareAsync installs this object after its actual parent-owned add.
     // Even an internal lookalike cannot be used unless it is this retained entry.
-    internal sealed class OwnedGitBinding
+    internal sealed partial class OwnedGitBinding
     {
         static readonly List<(OwnedGitBinding Owner, FileStream Resource)> Unsettled = [];
         readonly WorktreeManager manager;
@@ -27,7 +27,8 @@ public sealed partial class WorktreeManager
         internal string GitDirectory { get; }
         internal string CommonDirectory { get; }
         internal string IndexPath => Path.Combine(GitDirectory, "index");
-        internal string ObjectsPath => Path.Combine(CommonDirectory, "objects");
+        internal string CommonObjectsPath => Path.Combine(CommonDirectory, "objects");
+        internal string ObjectsPath => HasPrivateObjects ? Path.Combine(GitDirectory, "objects") : CommonObjectsPath;
         internal string WriterPath => Path.Combine(GitDirectory, "delivery-forge-writer.lock");
 
         internal OwnedGitBinding(WorktreeManager manager, string worktree, string expectedCommon,
@@ -175,6 +176,7 @@ public sealed partial class WorktreeManager
             {
                 original.CheckWork();
                 VerifyMetadata(false);
+                RequireValidatedPrivateObjects();
                 Interlocked.Increment(ref manager.actualOwnedGitInvocations.Value);
                 return executor.ExecuteBoundedCaptureAsync(invocation, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, token, new OwnedWorkPhaseBudget(original));
             });
@@ -192,6 +194,7 @@ public sealed partial class WorktreeManager
                 {
                     actualOwner.Check();
                     VerifyMetadata(false);
+                    RequireValidatedPrivateObjects();
                     var allowance = actualOwner.Remaining();
                     entered = true;
                     actualOwner.NativeGitCaptureStarting();
