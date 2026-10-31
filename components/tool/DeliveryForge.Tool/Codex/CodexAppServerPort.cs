@@ -468,6 +468,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         }
         catch (Exception primary)
         {
+            Volatile.Write(ref startupActive, 0);
             // Optional fixed metadata belongs to this caught RPC only. Capture
             // before retirement changes task state; it cannot replace the cause.
             try { CodexRemoteRpcException.FindSingle(primary)?.CaptureStartup(SnapshotStartupDiagnostics()); }
