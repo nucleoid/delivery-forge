@@ -59,8 +59,13 @@ internal sealed class ToolFailureAttention
             var line = "DFCLI_FIRST_CAUGHT|" + (codex is null ? System.Text.Json.JsonSerializer.Serialize(fields) :
                 System.Text.Json.JsonSerializer.Serialize(new
                 {
-                    fields.Stage, fields.Type, fields.HResult, fields.InnerType,
-                    fields.CleanupAlreadyBegun, fields.MarkerAlreadyEntered, CodexStartup = codex
+                    fields.Stage,
+                    fields.Type,
+                    fields.HResult,
+                    fields.InnerType,
+                    fields.CleanupAlreadyBegun,
+                    fields.MarkerAlreadyEntered,
+                    CodexStartup = codex
                 }));
             if (System.Text.Encoding.UTF8.GetByteCount(line) > 1024) throw new IOException("Finite first-caught attention exceeded.");
             var write = actualErrors.WriteLineAsync(line.AsMemory(), CancellationToken.None);

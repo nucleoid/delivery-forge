@@ -80,8 +80,12 @@ public sealed class ProgramFailureTests
         var line = Assert.Single(errors.ToString().Split('\n'), value => value.StartsWith("DFCLI_FIRST_CAUGHT|", StringComparison.Ordinal)).TrimEnd('\r');
         var expected = "DFCLI_FIRST_CAUGHT|" + JsonSerializer.Serialize(new
         {
-            Stage = "host-implement", Type = typeof(IOException).FullName, actual.HResult, InnerType = (string?)null,
-            CleanupAlreadyBegun = false, MarkerAlreadyEntered = false
+            Stage = "host-implement",
+            Type = typeof(IOException).FullName,
+            actual.HResult,
+            InnerType = (string?)null,
+            CleanupAlreadyBegun = false,
+            MarkerAlreadyEntered = false
         });
         Assert.Equal(expected, line); Assert.DoesNotContain("CodexStartup", line, StringComparison.Ordinal);
         Assert.False(attention.Unknown); Assert.False(life.HasExplicitUnknown);
