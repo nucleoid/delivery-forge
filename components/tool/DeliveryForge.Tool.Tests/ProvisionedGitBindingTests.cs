@@ -553,7 +553,7 @@ public sealed class ProvisionedGitBindingTests
     {
         Assert.Null(actual.StartupFailure);
         using var bytes = new MemoryStream();
-        var output = actual.Output.CopyToAsync(bytes, original.Token);
+        var output = actual.Output.CopyToAsync(bytes, 16384, original.Token);
         actual.AttachOriginalOutputConsumer(output);
         await output.WaitAsync(original.Remaining, original.Token);
         var closed = await actual.RetireAsync(false).WaitAsync(original.Remaining, original.Token);
