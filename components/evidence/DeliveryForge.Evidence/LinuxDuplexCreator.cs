@@ -43,7 +43,9 @@ internal sealed class LinuxDuplexCreator : IDisposable
             // The session already retains this frame before the actual Start call.
             Volatile.Write(ref startEntered, 1);
             thread.Start(); Volatile.Write(ref startReturned, 1);
-            birth.Task.WaitAsync(budget.WorkLimit - Stopwatch.GetElapsedTime(budget.OriginalStarted), budget.Token).GetAwaiter().GetResult();
+            var left = budget.WorkLimit - Stopwatch.GetElapsedTime(budget.OriginalStarted);
+            if (left <= TimeSpan.Zero) throw new TimeoutException("Original Linux creator WORK endpoint expired.");
+            birth.Task.WaitAsync(left, budget.Token).GetAwaiter().GetResult();
             if (birthFailure is not null) ExceptionDispatchInfo.Capture(birthFailure).Throw();
             budget.CheckWork();
         }
@@ -64,15 +66,22 @@ internal sealed class LinuxDuplexCreator : IDisposable
             catch (Exception admission) { session.RecordOwnerFailure(admission); secondary.Add(admission); }
             // Never publish a failed Open while ordinary birth can still mutate
             // its streams, unless this SAME cleanup endpoint cannot settle it.
-            try { WaitForBirthInCleanupAsync().GetAwaiter().GetResult(); }
-            catch (Exception wait) { session.RecordOwnerFailure(wait); secondary.Add(wait); }
+            if (Volatile.Read(ref startEntered) == 0 || Volatile.Read(ref startReturned) != 0)
+            {
+                try { WaitForBirthInCleanupAsync().GetAwaiter().GetResult(); }
+                catch (Exception wait) { session.RecordOwnerFailure(wait); secondary.Add(wait); }
+            }
             if (secondary.Count != 0) throw new AggregateException("Actual Linux birth failure and same-original cleanup failures.", new[] { primary }.Concat(secondary));
             ExceptionDispatchInfo.Capture(primary).Throw();
         }
     }
     internal async Task WaitForBirthInCleanupAsync()
     {
-        await birth.Task.WaitAsync(budget.CleanupRemaining, CancellationToken.None).ConfigureAwait(false);
+        if (Volatile.Read(ref startEntered) != 0 && Volatile.Read(ref startReturned) == 0 && !BirthReturned)
+            throw new IOException("Actual Linux Thread.Start return remains UNKNOWN; no birth wait is possible.");
+        var left = budget.CleanupRemaining;
+        if (left <= TimeSpan.Zero) throw new TimeoutException("Original Linux creator cleanup endpoint expired.");
+        await birth.Task.WaitAsync(left, CancellationToken.None).ConfigureAwait(false);
         _ = budget.CleanupRemaining;
     }
     void Run(Action create)
@@ -111,6 +120,7 @@ internal sealed class LinuxDuplexCreator : IDisposable
         if (Volatile.Read(ref startReturned) == 0) return false;
         if (ReferenceEquals(thread, Thread.CurrentThread)) throw new IOException("Actual Linux creator cannot join itself.");
         var left = cleanup ? budget.CleanupRemaining : budget.WorkLimit - Stopwatch.GetElapsedTime(budget.OriginalStarted);
+        if (left <= TimeSpan.Zero) throw new TimeoutException("Original Linux creator settlement endpoint expired.");
         joined = thread.Join(left); Check(); return joined;
         void Check() { if (cleanup) _ = budget.CleanupRemaining; else budget.CheckWork(); }
     }

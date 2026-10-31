@@ -456,7 +456,7 @@ public sealed class OwnedLinuxExactImageTests
             Assert.False(open.IsCompleted); // Birth is still held, so Open cannot safely publish its streams.
             budget.ReleaseBirth.Set();
             session = await open.WaitAsync(original.CleanupRemaining, CancellationToken.None);
-            Assert.NotNull(session.StartupFailure); Assert.False(session.HasCreationOwnedLinuxScope);
+            Assert.IsAssignableFrom<OperationCanceledException>(session.StartupFailure); Assert.False(session.HasCreationOwnedLinuxScope);
             var closed = await session.RetireAsync(true).WaitAsync(original.CleanupRemaining, CancellationToken.None);
             Assert.True(closed.KnownClosed && closed.RootExited && closed.DispositionReturned);
             Assert.Equal(0u, closed.ActiveProcesses); Assert.Null(closed.ExitCode); Assert.False(session.HasUnknownIo);
