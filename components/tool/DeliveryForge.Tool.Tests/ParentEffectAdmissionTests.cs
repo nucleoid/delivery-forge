@@ -146,7 +146,7 @@ public sealed class ParentEffectAdmissionTests
                 releaseFirst.Task.WaitAsync(TimeSpan.FromSeconds(5), fixture.Original.Token).GetAwaiter().GetResult();
                 return first.Task;
             });
-        });
+        }, TestContext.Current.CancellationToken);
         try
         {
             await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
@@ -156,7 +156,7 @@ public sealed class ParentEffectAdmissionTests
                 {
                     secondEntered.SetResult(); return second.Task;
                 });
-            });
+            }, TestContext.Current.CancellationToken);
             await secondEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             await secondCaller.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
             Assert.Equal(2, fixture.Admission.EnteredCount); Assert.False(fixture.Admission.AllKnownSettled);
