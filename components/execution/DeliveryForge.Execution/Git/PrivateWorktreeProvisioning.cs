@@ -27,7 +27,8 @@ public sealed partial class WorktreeManager
         if (_originalBudget is null || _originalExecutor is null || cleanupObservation)
             throw new WorktreeBoundaryException("Private administration requires the actual forward original.");
         _originalBudget.CheckWork();
-        if (_effectAdmission is not null) _effectAdmission.CheckCurrent(_effectRunId!);
+        if (_effectAdmission is ICoordinatedSynchronousEffectAdmission parent) parent.CheckCurrent(_effectRunId!);
+        else if (_effectAdmission is not null) throw new WorktreeBoundaryException("Private administration requires synchronous parent admission.");
         lock (actualOwnedGitInvocations)
         {
             if (actualOwnedGitInvocations.ProvisioningStarted || !ownedGit.IsEmpty || !privateAdministrations.IsEmpty)
