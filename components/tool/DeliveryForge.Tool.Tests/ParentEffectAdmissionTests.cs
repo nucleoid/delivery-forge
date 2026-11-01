@@ -128,6 +128,57 @@ public sealed class ParentEffectAdmissionTests
         finally { Assert.True(creator.Join(TimeSpan.FromSeconds(5))); }
     }
 
+    [Fact(Timeout = 15000)]
+    public async Task Overlapping_async_prefixes_retain_distinct_actual_tasks_until_both_originals_settle()
+    {
+        using var fixture = new RenewalFixture(TestContext.Current.CancellationToken);
+        var firstEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var secondEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirst = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var first = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var second = new TaskCompletionSource<int>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Task<int>? returnedFirst = null, returnedSecond = null; Task? secondCaller = null;
+        var firstCaller = Task.Run(() =>
+        {
+            returnedFirst = fixture.Admission.EnterAsync("owned", () =>
+            {
+                firstEntered.SetResult();
+                releaseFirst.Task.WaitAsync(TimeSpan.FromSeconds(5), fixture.Original.Token).GetAwaiter().GetResult();
+                return first.Task;
+            });
+        });
+        try
+        {
+            await firstEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            secondCaller = Task.Run(() =>
+            {
+                returnedSecond = fixture.Admission.EnterAsync("owned", () =>
+                {
+                    secondEntered.SetResult(); return second.Task;
+                });
+            });
+            await secondEntered.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            await secondCaller.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.Equal(2, fixture.Admission.EnteredCount); Assert.False(fixture.Admission.AllKnownSettled);
+            Assert.Null(returnedFirst); Assert.Same(second.Task, returnedSecond);
+            second.SetResult(2); Assert.Equal(2, await returnedSecond!);
+            await Task.WhenAll(fixture.Admission.OriginalObservers).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.False(fixture.Admission.AllKnownSettled); // First invocation has not returned its Task.
+            first.SetResult(1); Assert.False(fixture.Admission.AllKnownSettled);
+            releaseFirst.SetResult();
+            await firstCaller.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.Same(first.Task, returnedFirst); Assert.NotSame(returnedFirst, returnedSecond);
+            Assert.Equal(1, await returnedFirst!);
+            await Task.WhenAll(fixture.Admission.OriginalObservers).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.True(fixture.Admission.AllKnownSettled); Assert.False(fixture.Revoked);
+        }
+        finally
+        {
+            releaseFirst.TrySetResult(); first.TrySetResult(1); second.TrySetResult(2);
+            await Task.WhenAll(firstCaller, secondCaller ?? Task.CompletedTask).WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None);
+        }
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

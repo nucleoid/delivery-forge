@@ -106,6 +106,7 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
     public Task<T> EnterAsync<T>(string runId, Func<Task<T>> invoke)
     {
         ArgumentNullException.ThrowIfNull(invoke);
+        OriginalInvocation row;
         while (true)
         {
             ParentRenewalHandoff.Pending? pending;
@@ -120,18 +121,28 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
                         original?.RecordFirstCaught("parent-effect-ledger-exhausted", exhausted);
                         revoke(exhausted); throw exhausted;
                     }
-                    var row = new OriginalInvocation { Entered = true }; originals.Add(row);
-                    try
-                    {
-                        var actual = invoke(); row.Task = actual; row.Returned = true;
-                        if (actual is null) throw new IOException("Actual original effect returned no task.");
-                        row.Observation = actual.ContinueWith(_ => { lock (originalGate) ObserveReturnedFailures(); }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
-                        return actual;
-                    }
-                    catch (Exception error) { row.Failure = error; retainedUncertain = true; revoke(error); throw; }
+                    // Retain the original obligation before releasing admission, as in
+                    // EnterSynchronous. A creator may check currentness on another thread.
+                    row = new OriginalInvocation { Entered = true }; originals.Add(row);
+                    break;
                 }
             }
             WaitForRenewal(pending);
         }
+        try
+        {
+            // Admission is cooperative: recheck before invocation; later revocation
+            // cannot erase this retained original or its actual returned Task.
+            CheckCurrent(runId);
+            var actual = invoke();
+            lock (originalGate)
+            {
+                row.Task = actual; row.Returned = true;
+                if (actual is null) throw new IOException("Actual original effect returned no task.");
+                row.Observation = actual.ContinueWith(_ => { lock (originalGate) ObserveReturnedFailures(); }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            }
+            return actual;
+        }
+        catch (Exception error) { lock (originalGate) { row.Failure = error; retainedUncertain = true; revoke(error); } throw; }
     }
 }
