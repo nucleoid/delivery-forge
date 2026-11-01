@@ -6,7 +6,7 @@ internal sealed class ToolFailureAttention
 {
     readonly ToolLifetime original; readonly TextWriter actualErrors; readonly object gate = new();
     bool entered, returned; Task? actualWrite; Exception? primary, post;
-    (string Stage, Exception Error, bool CleanupAlreadyBegun, bool MarkerAlreadyEntered, Codex.CodexStartupFailureFacts? StartupContext, Codex.CodexProtocolFailureFacts? ProtocolFacts)? firstCaught;
+    (string Stage, Exception Error, bool CleanupAlreadyBegun, bool MarkerAlreadyEntered, Codex.CodexStartupFailureFacts? StartupContext, Codex.CodexProtocolFailureFacts? ProtocolFacts, Claude.ClaudeReviewerObservationFacts? ReviewerFacts)? firstCaught;
     bool diagnosticEntered, diagnosticReturned; Task? actualDiagnosticWrite; Exception? diagnosticPrimary, diagnosticPost;
     internal ToolFailureAttention(ToolLifetime original, TextWriter actualErrors) { this.original = original; this.actualErrors = actualErrors; }
     internal void CaptureFirstCaught(string stage, Exception actual, bool cleanupAlreadyBegun)
@@ -23,7 +23,10 @@ internal sealed class ToolFailureAttention
             Codex.CodexProtocolFailureFacts? protocol = null;
             try { protocol = Codex.CodexProtocolFailure.FindSingle(actual); }
             catch (Exception) { /* Optional code-owned facts cannot replace the actual failure. */ }
-            firstCaught = (stage, actual, cleanupAlreadyBegun, entered, context, protocol);
+            Claude.ClaudeReviewerObservationFacts? reviewer = null;
+            try { reviewer = Claude.ClaudeReviewerObservationFailure.FindSingle(actual); }
+            catch (Exception) { /* Optional code-owned facts cannot replace the actual failure. */ }
+            firstCaught = (stage, actual, cleanupAlreadyBegun, entered, context, protocol, reviewer);
         }
     }
     static bool IsOuterStartupTimeout(string stage, Exception actual)
@@ -51,7 +54,7 @@ internal sealed class ToolFailureAttention
     internal bool Unknown { get { lock (gate) return MarkerUnknownLocked || DiagnosticUnknownLocked; } }
     internal void EmitFirstCaughtOnce()
     {
-        (string Stage, Exception Error, bool CleanupAlreadyBegun, bool MarkerAlreadyEntered, Codex.CodexStartupFailureFacts? StartupContext, Codex.CodexProtocolFailureFacts? ProtocolFacts) failure;
+        (string Stage, Exception Error, bool CleanupAlreadyBegun, bool MarkerAlreadyEntered, Codex.CodexStartupFailureFacts? StartupContext, Codex.CodexProtocolFailureFacts? ProtocolFacts, Claude.ClaudeReviewerObservationFacts? ReviewerFacts) failure;
         lock (gate)
         {
             if (!returned || diagnosticEntered || firstCaught is not { } actual) return;
@@ -133,6 +136,24 @@ internal sealed class ToolFailureAttention
                         fields.CleanupAlreadyBegun,
                         fields.MarkerAlreadyEntered,
                         CodexProtocol = protocol
+                    });
+                    if (System.Text.Encoding.UTF8.GetByteCount(candidate) <= 1024) line = candidate;
+                }
+                catch (Exception) { /* Keep the original diagnostic unchanged. */ }
+            }
+            if (codex is null && failure.ProtocolFacts is null && failure.ReviewerFacts is { } reviewer)
+            {
+                try
+                {
+                    var candidate = "DFCLI_FIRST_CAUGHT|" + System.Text.Json.JsonSerializer.Serialize(new
+                    {
+                        fields.Stage,
+                        fields.Type,
+                        fields.HResult,
+                        fields.InnerType,
+                        fields.CleanupAlreadyBegun,
+                        fields.MarkerAlreadyEntered,
+                        ReviewerObservation = reviewer
                     });
                     if (System.Text.Encoding.UTF8.GetByteCount(candidate) <= 1024) line = candidate;
                 }

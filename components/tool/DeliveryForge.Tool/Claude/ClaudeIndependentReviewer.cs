@@ -151,8 +151,14 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
                 "No supported independent-review production contract exists for this platform; no settings, authentication, native observation or prompt was dispatched."));
     internal static ToolResult BudgetIncomplete(string runId, BudgetDecision decision) =>
         ToolResult.Incomplete("INDEPENDENT_REVIEW_BUDGET", decision.Reason, new { runId, decision.Findings });
-    async Task<BoundedCommandCaptureResult> Observe(string[] arguments)
+    async Task<BoundedCommandCaptureResult> Observe(ClaudeReviewerObservationOperation operation)
     {
+        string[] arguments = operation switch
+        {
+            ClaudeReviewerObservationOperation.Version => ["--version"],
+            ClaudeReviewerObservationOperation.AuthStatus => ["auth", "status"],
+            _ => throw new ArgumentOutOfRangeException(nameof(operation))
+        };
         Current(); usage?.Check(); VerifyImage();
         var nativeArguments = actualUserSettings.ObservationArguments(arguments);
         var nativeInvocation = actualUserSettings.Invocation(selection.Image.Path, nativeArguments, actualWorkingDirectory.Path);
@@ -191,28 +197,18 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
         }
         var settled = Settled(capture);
         if (!settled) RetainUncertain("Original reviewer observation retains native/stream uncertainty.");
-        if (!settled || capture.CaptureBoundExceeded || capture.Command.ExitCode != 0 || capture.Command.TimedOut || capture.Command.Cancelled)
-        {
-            var failure = new IOException("Actual reviewer observation is incomplete.");
-            // The exact capture remains on this private owner's retained Task.
-            // Account output is never copied into public exception/log DATA.
-            failure.Data["ReviewerObservation"] = new
-            {
-                Arguments = arguments,
-                capture.Command.ExitCode,
-                capture.Command.Cancelled,
-                capture.Command.TimedOut,
-                capture.RootExitObserved,
-                capture.StandardOutputDrainCompleted,
-                capture.StandardErrorDrainCompleted,
-                capture.OwnershipKind,
-                capture.CaptureBoundExceeded,
-                StandardOutputHash = Hash(capture.StandardOutputBytes),
-                StandardErrorHash = Hash(capture.StandardErrorBytes)
-            };
-            throw failure;
-        }
+        RequireSuccessfulObservation(operation, capture);
         Current(); VerifyImage(); return capture;
+    }
+    internal static void RequireSuccessfulObservation(ClaudeReviewerObservationOperation operation, BoundedCommandCaptureResult capture)
+    {
+        if (!Settled(capture) || capture.CaptureBoundExceeded || capture.Command.ExitCode != 0 || capture.Command.TimedOut || capture.Command.Cancelled)
+            throw ClaudeReviewerObservationFailure.CaptureIncomplete(operation, capture);
+    }
+    internal static void RequireObservedVersion(BoundedCommandCaptureResult capture, string expected)
+    {
+        if (new UTF8Encoding(false, true).GetString(capture.StandardOutputBytes).Trim() != expected)
+            throw ClaudeReviewerObservationFailure.VersionMismatch(capture);
     }
     void RetainUncertain(string reason) { uncertain = true; original.RetainUnknown(); parent.RetainUncertain(runId, reason); }
     static bool Settled(BoundedCommandCaptureResult capture) => capture.Command.OwnedProcessQuiescent && capture.RootExitObserved &&
@@ -326,10 +322,10 @@ internal sealed class ClaudeIndependentReviewer(IndependentClaudeReviewSelection
             var evidence = await prepareEvidence(phaseStop.Token).ConfigureAwait(false);
             _ = Remaining(started); var patch = evidence.Patch; var frozenPlan = evidence.FrozenPlan;
             phase = ReviewPhase.VersionObservation;
-            var version = await Observe(["--version"]).ConfigureAwait(false);
-            if (new UTF8Encoding(false, true).GetString(version.StandardOutputBytes).Trim() != selection.Version) throw new IOException("Actual reviewer version differs from its selected image profile.");
+            var version = await Observe(ClaudeReviewerObservationOperation.Version).ConfigureAwait(false);
+            RequireObservedVersion(version, selection.Version);
             phase = ReviewPhase.AuthObservation;
-            var auth = await Observe(["auth", "status"]).ConfigureAwait(false);
+            var auth = await Observe(ClaudeReviewerObservationOperation.AuthStatus).ConfigureAwait(false);
             phase = ReviewPhase.SubscriptionValidation;
             ClaudeIndependentReviewData.RequireSubscription(auth.StandardOutputBytes);
             actualUserSettings.RequireObservedConfigurationDirectory(auth.StandardOutputBytes);

@@ -332,4 +332,40 @@ public sealed class ClaudeReviewerUserSettingsTests
         Assert.DoesNotContain("secret-sentinel", error.ToString());
     }
 
+    [Theory]
+    [InlineData("version")]
+    [InlineData("auth")]
+    [InlineData("review")]
+    public void Owner_child_environment_carries_both_strict_Linux_server_flags(string purpose)
+    {
+        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(_ => "synthetic-os-value");
+        var arguments = purpose == "review" ? ClaudeIndependentReviewData.RestrictedReviewArguments(5)
+            : ClaudeIndependentReviewData.RestrictedObservationArguments(purpose == "auth" ? ["auth", "status"] : ["--version"]);
+        var invocation = ClaudeIndependentReviewData.PinnedSettingsInvocation("fixture-image", arguments, "fixture-cwd", selected);
+        // Apply the actual complete environment without creating a child. These
+        // are the exact two required values in LinuxCommandScope.Prepare.
+        var child = new ProcessStartInfo();
+        CommandEnvironment.Complete(child, invocation);
+        Assert.False(invocation.InheritEnvironment); Assert.True(invocation.EnvironmentIsComplete);
+        Assert.True(child.Environment.TryGetValue("DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER", out var server));
+        Assert.Equal("1", server);
+        Assert.True(child.Environment.TryGetValue("MSBUILDDISABLENODEREUSE", out var reuse));
+        Assert.Equal("1", reuse);
+    }
+
+    [Theory]
+    [InlineData("DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER", true)]
+    [InlineData("DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER", false)]
+    [InlineData("MSBUILDDISABLENODEREUSE", true)]
+    [InlineData("MSBUILDDISABLENODEREUSE", false)]
+    public void Owner_child_environment_refuses_missing_or_changed_strict_Linux_server_flags(string name, bool missing)
+    {
+        var selected = new Dictionary<string, string>(
+            ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(_ => "synthetic-os-value"), StringComparer.Ordinal);
+        if (missing) selected.Remove(name); else selected[name] = "0";
+        var error = Assert.Throws<ToolUsageException>(() =>
+            ClaudeIndependentReviewData.PinnedSettingsInvocation("fixture-image", ["--version"], "fixture-cwd", selected));
+        Assert.DoesNotContain(name, error.Message, StringComparison.Ordinal);
+    }
+
 }

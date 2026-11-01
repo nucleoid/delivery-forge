@@ -11,6 +11,91 @@ namespace DeliveryForge.Tool.Tests;
 // runtime-trust binding, review receipt or capability is created by this test.
 public sealed class ClaudeReviewerObservationNativeTests
 {
+    [Fact(Timeout = 45000)]
+    [Trait("Category", "InstalledLocalRealObservation")]
+    public async Task Actual_selected_Linux_Claude_version_observation_uses_exact_production_scope_and_environment()
+    {
+        if (!OperatingSystem.IsLinux()) Assert.Skip("Actual selected Linux reviewer observation only.");
+        const string key = "DELIVERY_FORGE_NATIVE_CONFORMANCE_CLAUDE_COMPLETE";
+        var path = Environment.GetEnvironmentVariable(key);
+        if (path is null) Assert.Skip("Explicit pinned Linux Claude fixture is absent; no native observation acceptance.");
+        var expected = Environment.GetEnvironmentVariable(key + "_SHA256")
+            ?? throw new IOException("The selected Linux Claude fixture requires its exact byte pin.");
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var raw = BoundedFiles.Read(path!, original, 65536);
+        Assert.True(BoundedFiles.Sha(raw) == expected, "Selected Linux Claude fixture changed.");
+        _ = CanonicalJson.Canonicalize(raw);
+        var selected = JsonSerializer.Deserialize<InstalledNativeHostConformanceTests.Fixture>(raw, BoundedFiles.Json)
+            ?? throw new IOException("Selected Linux Claude fixture is null.");
+        if (selected.Kind != "RootAdmittedNativeConformanceProvisioningFixture-v2" || selected.Adapter != "claude-code.cli" ||
+            selected.CaseKind != "completion" || selected.Host is null || selected.LinuxScopeProfile is null ||
+            selected.Host.Executable != "/claude-official-520bc6c1f40af466bd03a278b5ae1af1a2938bc7de5b9e5cb15526da20d71cfe" ||
+            selected.Host.Bytes != 290532720 || selected.Host.Sha256 != "520bc6c1f40af466bd03a278b5ae1af1a2938bc7de5b9e5cb15526da20d71cfe" ||
+            selected.Host.Version != "2.1.306 (Claude Code)")
+            throw new IOException("Exact selected Linux Claude image and scope required.");
+        var scopeBytes = BoundedFiles.Read(selected.LinuxScopeProfile.Path, original, 65536);
+        if (scopeBytes.LongLength != selected.LinuxScopeProfile.Bytes || BoundedFiles.Sha(scopeBytes) != selected.LinuxScopeProfile.Sha256)
+            throw new IOException("Selected Linux scope profile changed.");
+        var scope = JsonSerializer.Deserialize<LinuxScopeSelection>(scopeBytes, BoundedFiles.Json)
+            ?? throw new IOException("Selected Linux scope is null.");
+        if (scope.RestrictiveChildPolicy != "nnp-user1000-ancestor-v3" || scope.ExactImageBacking != LinuxExactImageBacking.RootControlledDisk)
+            throw new IOException("Existing selected confined root-disk scope required; no ordinary fallback.");
+        var root = Path.Combine(Path.GetTempPath(), "forge-claude-linux-version-" + Guid.NewGuid().ToString("N"));
+        var cwd = ClaudeReviewerWorkingDirectory.Create(original, "version-only-" + Guid.NewGuid().ToString("N"),
+            Path.Combine(root, "artifacts"), Path.Combine(root, "parent"), Path.Combine(root, "worker"), Path.Combine(root, "results"));
+        // Same production environment; do not repair missing flags only in the
+        // control or inherit ambient resource/auth/model configuration.
+        var environment = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(Environment.GetEnvironmentVariable);
+        var arguments = ClaudeIndependentReviewData.RestrictedObservationArguments(["--version"]);
+        var invocation = ClaudeIndependentReviewData.PinnedSettingsInvocation(selected.Host.Executable, arguments, cwd.Path, environment);
+        ClaudeIndependentReviewData.RequirePinnedSettingsIsolation(invocation.Arguments, observation: true);
+        ClaudeIndependentReviewData.RequirePinnedSettingsInvocation(invocation, environment);
+        var image = new AdmissionFile(selected.Host.Executable, selected.Host.Bytes, selected.Host.Sha256);
+        BoundedCommandCaptureResult? capture = null; ClaudeReviewerObservationFacts? failureFacts = null;
+        var entered = false; var knownClosed = false; var versionMatches = false;
+        try
+        {
+            cwd.Check(); BoundedFiles.VerifyNativeImage(image, original, original.Token);
+            BoundedFiles.ReserveExactLinuxImageReads(image, original);
+            entered = true;
+            capture = await new ProcessCommandExecutor(scope, original).ExecuteBoundedCaptureAsync(invocation,
+                original.Remaining, 65536, original.Token, new OwnedWorkPhaseBudget(original), scope,
+                new LinuxScopeImage(image.Path, image.Bytes, image.Sha256));
+            try
+            {
+                ClaudeIndependentReviewer.RequireSuccessfulObservation(ClaudeReviewerObservationOperation.Version, capture);
+                ActualOrdinaryCapture.Require(capture); knownClosed = true;
+                ClaudeIndependentReviewer.RequireObservedVersion(capture, selected.Host.Version); versionMatches = true;
+            }
+            catch (IOException failure) { failureFacts = ClaudeReviewerObservationFailure.FindSingle(failure); throw; }
+            cwd.Check(); ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(environment, Environment.GetEnvironmentVariable);
+            original.Check();
+        }
+        finally
+        {
+            if (capture is not null)
+                TestContext.Current.TestOutputHelper!.WriteLine(JsonSerializer.Serialize(new
+                {
+                    Operation = "version",
+                    capture.Command.ExitCode,
+                    capture.Command.TimedOut,
+                    capture.Command.Cancelled,
+                    capture.RootExitObserved,
+                    capture.StandardOutputDrainCompleted,
+                    capture.StandardErrorDrainCompleted,
+                    capture.CaptureBoundExceeded,
+                    capture.OwnershipKind,
+                    KnownClosed = knownClosed,
+                    VersionMatches = versionMatches,
+                    ReviewerObservation = failureFacts,
+                    ProductionAuthority = false,
+                    AuthOrModelDispatched = false
+                }));
+            if (entered && !knownClosed) original.RetainUnknown();
+        }
+        // The fresh neutral namespace and actual owner evidence are preserved.
+    }
+
     [Theory(Timeout = 45000)]
     [InlineData(false)]
     [InlineData(true)]
