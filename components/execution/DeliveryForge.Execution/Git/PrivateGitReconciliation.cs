@@ -140,13 +140,13 @@ public sealed partial class WorktreeManager
             });
             foreach (var kind in new[] { "tree", "commit", "tag" })
             {
-                foreach (var group in staged.Where(item => item.Kind == kind).Chunk(48))
+                foreach (var group in staged.Where(item => item.Kind == kind).Chunk(44))
                 {
                     var expected = string.Concat(group.Select(item => item.Oid + "\n"));
                     // Controlled relative OID arguments avoid supplied stdin,
                     // which the selected Linux capture intentionally refuses.
-                    // 16 fixed arguments + at most 48 leaves fit the existing
-                    // Linux 64-argument guard; at most 88 structural captures.
+                    // 20 fixed arguments + at most 44 leaves fit the existing
+                    // Linux 64-argument guard; at most 96 structural captures.
                     var checkedBodies = await ReconciliationCaptureAsync(ObjectsPath, CommonObjectsPath, bodyRoot,
                         "Private candidate structural preflight", token,
                         ["hash-object", "--no-filters", "-t", kind, "--", .. group.Select(item => item.Oid)]).ConfigureAwait(false);
@@ -355,7 +355,7 @@ public sealed partial class WorktreeManager
             environment["GIT_NO_LAZY_FETCH"] = "1"; environment["GIT_TERMINAL_PROMPT"] = "0"; environment["GIT_OPTIONAL_LOCKS"] = "0";
             environment["LC_ALL"] = "C"; environment["LANG"] = "C";
             var invocation = new CommandInvocation(manager._gitExecutable,
-                ["--no-optional-locks", "-c", "core.hooksPath=" + nullDevice, "-c", "core.fsmonitor=false", "-c", "core.commitGraph=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", .. arguments], workingDirectory, environment)
+                ["--no-optional-locks", "-c", "core.hooksPath=" + nullDevice, "-c", "core.fsmonitor=false", "-c", "core.commitGraph=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "-c", "core.longpaths=true", "-c", "advice.graftFileDeprecated=false", .. arguments], workingDirectory, environment)
             { EnvironmentIsComplete = true };
             var capture = await parent.EnterAsync(RunId, () =>
             {

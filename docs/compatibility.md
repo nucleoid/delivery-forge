@@ -194,7 +194,7 @@ COMMON. Before any COMMON write, the parent reserves the known import costs and
 stages canonical tree/commit/tag bodies outside COMMON. Git's strict format
 check (`hash-object --no-filters -t TYPE`, without `-w` or `--literally`) must
 return the exact object hashes with empty stderr. Controlled OID filename
-arguments are grouped in batches of at most 48 (at most 88 native captures),
+arguments are grouped in batches of at most 44 (at most 96 native captures),
 within the existing Linux 64-argument guard,
 so this uses no supplied stdin or new Linux capture capability. Deferred Git
 checks of attributes/modules referenced by those new objects can still refuse
