@@ -204,7 +204,9 @@ parsers provide them. It does not change Git globally or the unselected route.
 An actual private-overlay traversal enumerates the candidate closure outside the
 anchored base, with at most 4,096 unique object IDs. Every delta object requires
 a retained validated private copy; an unprotected COMMON-only delta dependency
-refuses. Unreachable private objects stay private. Forge recompresses each validated canonical body into its own
+refuses. This conservative traversal can also refuse a restore from older base
+history if Git reuses the COMMON object without writing a private copy. It does
+not promise support for every revert or restore. Unreachable private objects stay private. Forge recompresses each validated canonical body into its own
 bounded complete zlib encoding; worker compressed bytes are never copied into
 COMMON. Before any COMMON write, the parent reserves the known import costs and
 stages canonical tree/commit/tag bodies outside COMMON. Git's strict format
@@ -267,21 +269,28 @@ under the same 4,096-entry, 16-MiB-file and 128-MiB combined-byte profile. It ca
 write at most that pass's generated encoded bytes (at most 128 MiB) to COMMON.
 Source encoding, canonical content, generated encoding, COMMON collision
 comparisons, structural body writes/reads, actual Git collision body reads and
-exact encoded readback consume this pass's allowance. Known costs are reserved
-before any COMMON write and the exact prepared encodings are reused. Passing
+exact encoded readback consume this pass's allowance. These known body-byte
+costs are reserved before any COMMON object write, and the exact prepared
+encodings are reused. Passing
 canonical validation alone does not reserve this separate import allowance;
-an encoding or known cost refusal leaves COMMON untouched. Staged body files
+an encoding or body-byte preflight refusal leaves COMMON objects untouched.
+This does not reserve later admission rows, ledger I/O, or WORK time. Those can
+still expire after promotion, leaving partial objects or a candidate ref with an
+UNKNOWN disposition and no replay. Staged body files
 remain evidence, with no automatic cleanup. The bounded preflight and promotion
 each use one synchronous parent admission with chunk currentness/deadline
 checks, not one retained ledger row per object. Earlier effects, the bounded
 structural/collision captures and graph proofs still consume the unchanged
 cumulative parent ledger. Small OID argument/output and metadata overhead remain
-subject to the existing native/cumulative I/O limits, separately from this body
-accumulator. All
-additional metadata, object reads/writes and native
-proof calls must fit the unchanged cumulative Tool/kernel limits and original
-WORK interval; the profile is no new I/O allowance. Selected-run accounting must
-include this pass before dispatch. No packs, fallback import or automatic
+subject to their existing native/cumulative I/O limits, separately from this body
+accumulator. In-process object reads and writes enforce this local byte counter
+and phase checks; they are not dynamically charged to a cumulative Tool/kernel
+I/O ledger by this code. Selected-run accounting must include this pass and the
+separate native proof costs before dispatch. A deployment without that accounting
+has no aggregate I/O-cap certification from these checks. The 128-MiB counter
+also is not a heap limit: trimmed retained arrays, transient compression/stream
+buffers, managed allocation overhead and runtime memory need separate headroom
+under the unchanged process-memory limit. No packs, fallback import or automatic
 reconciliation replay is supported.
 
 The complete bounded private inventory admits at most 32 distinct base-object

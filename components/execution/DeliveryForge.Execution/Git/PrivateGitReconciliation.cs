@@ -103,8 +103,9 @@ public sealed partial class WorktreeManager
             var staged = new List<PreparedImport>();
             var collisions = 0;
             var bodyRoot = Path.Combine(GitDirectory, "forge-reconciliation-bodies-" + Guid.NewGuid().ToString("N"));
-            // Reserve every known read/encoding/proof cost BEFORE any COMMON
-            // write. Canonical validation is not an import-budget reservation.
+            // Preflight canonical-body byte costs BEFORE any COMMON object
+            // write. This does not reserve later admission rows or WORK time.
+            // Canonical validation is not an import-budget reservation.
             // Retain these exact outputs; do not recompress during promotion.
             parent.EnterSynchronous(RunId, () =>
             {
@@ -118,7 +119,7 @@ public sealed partial class WorktreeManager
                     using var canonical = new MemoryStream();
                     bytes += LooseGitObjectInventory.ValidateObject(oid, encoded,
                         checked((int)Math.Min(ImportFileBytes, ImportBytes - bytes)), () => CheckReconciliation(token), canonical);
-                    var expected = canonical.GetBuffer().AsMemory(0, checked((int)canonical.Length));
+                    var expected = canonical.ToArray().AsMemory();
                     // A valid canonical body need not imply that the worker's
                     // original compressed stream has no ignored trailing bytes.
                     // Only Forge's fresh complete encoding may enter COMMON.
