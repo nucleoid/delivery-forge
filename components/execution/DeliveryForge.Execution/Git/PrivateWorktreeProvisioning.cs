@@ -54,9 +54,13 @@ public sealed partial class WorktreeManager
         var privateDirectory = Path.Combine(directory, ".delivery-forge-private-admin-" + id);
         var state = new PrivateAdministrationProvisioning
         {
-            Manager = this, Worktree = root, CommonDirectory = common,
-            PrivateDirectory = privateDirectory, JournalPath = privateDirectory + ".provisioning.json",
-            BaseAnchorRef = "refs/delivery-forge/private/" + id + "/base", FrozenBaseCommit = baseCommit
+            Manager = this,
+            Worktree = root,
+            CommonDirectory = common,
+            PrivateDirectory = privateDirectory,
+            JournalPath = privateDirectory + ".provisioning.json",
+            BaseAnchorRef = "refs/delivery-forge/private/" + id + "/base",
+            FrozenBaseCommit = baseCommit
         };
         if (IsWithin(state.PrivateDirectory, root) || IsWithin(state.PrivateDirectory, common))
             throw new WorktreeBoundaryException("Private administration must be outside both worker and COMMON.");
@@ -228,9 +232,14 @@ public sealed partial class WorktreeManager
             // ownership. Keep the association before changing routing files.
             var journal = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
             {
-                Kind = "PrivateAdministrationProvisioning-DATA-v1", RunId = _effectRunId,
-                state.Worktree, state.CommonDirectory, RegisteredDirectory = registered,
-                state.PrivateDirectory, state.BaseAnchorRef, state.FrozenBaseCommit,
+                Kind = "PrivateAdministrationProvisioning-DATA-v1",
+                RunId = _effectRunId,
+                state.Worktree,
+                state.CommonDirectory,
+                RegisteredDirectory = registered,
+                state.PrivateDirectory,
+                state.BaseAnchorRef,
+                state.FrozenBaseCommit,
                 OriginalCommonDirectoryBytesBase64 = Convert.ToBase64String(commondir),
                 OriginalMarkerBytesBase64 = Convert.ToBase64String(marker),
                 Authority = false
