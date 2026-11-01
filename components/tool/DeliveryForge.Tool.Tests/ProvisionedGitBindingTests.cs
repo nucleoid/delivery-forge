@@ -842,14 +842,17 @@ public sealed class ProvisionedGitBindingTests
         await fixture.GitAt(fixture.Repository, "fsck", "--full", "--strict", "--no-reflogs", "--no-dangling");
         var observed = await fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token);
         Assert.True(observed.IsClean); Assert.Equal(candidate, observed.HeadCommit);
-        await AssertProductionReview(fixture, binding, actual, baseHead, candidate, protectedPolicy);
         // This destination is a fresh local bare fixture, never an external remote.
         await fixture.GitAt(fixture.Foreign, "init", "--bare", "-q");
         await fixture.GitAt(fixture.Repository, "-c", "protocol.file.allow=always", "push", fixture.Foreign, candidateRef + ":refs/heads/fixture-candidate");
         Assert.Equal(candidate, await fixture.GitAt(fixture.Foreign, "rev-parse", "refs/heads/fixture-candidate"));
         await fixture.GitAt(fixture.Foreign, "cat-file", "-e", candidate + "^{commit}");
         Assert.NotEmpty(Directory.GetFiles(binding.ObjectsPath, "*", SearchOption.AllDirectories));
-        Assert.True(File.Exists(binding.IndexPath)); Assert.False(fixture.Original.HasExplicitUnknown);
+        Assert.True(File.Exists(binding.IndexPath));
+        // Disposing the real review ends this same original's WORK phase, so
+        // every forward Git proof above must complete before that disposition.
+        await AssertProductionReview(fixture, binding, actual, baseHead, candidate, protectedPolicy);
+        Assert.False(fixture.Original.HasExplicitUnknown);
     }
 
     [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
