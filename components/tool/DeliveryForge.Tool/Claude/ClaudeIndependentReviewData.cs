@@ -64,18 +64,19 @@ internal static class ClaudeIndependentReviewData
         foreach (var name in PinnedOsNames)
             if (read(name) is { } value) selected.Add(name, value);
         selected.Add("DOTNET_PROCESSOR_COUNT", "2"); selected.Add("DOTNET_GCHeapHardLimit", "0x100000000");
+        selected.Add("DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER", "1"); selected.Add("MSBUILDDISABLENODEREUSE", "1");
         selected.Add("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1"); selected.Add("DISABLE_COMPACT", "1");
         RequirePinnedSettingsReviewEnvironment(selected);
         return new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(selected);
     }
     internal static void RequirePinnedSettingsReviewEnvironment(IReadOnlyDictionary<string, string>? environment)
     {
-        if (environment is null || environment.Count > PinnedOsNames.Length + 4) throw new ToolUsageException(EnvironmentRefusal);
+        if (environment is null || environment.Count > PinnedOsNames.Length + 6) throw new ToolUsageException(EnvironmentRefusal);
         var selected = new Dictionary<string, string>(StringComparer.Ordinal); var total = 0;
         foreach (var row in environment)
         {
             if (row.Key is null || row.Value is null || row.Value.Length is < 1 or > 4096 || row.Value.Any(char.IsControl) ||
-                row.Key is not ("DOTNET_PROCESSOR_COUNT" or "DOTNET_GCHeapHardLimit" or "CLAUDE_CODE_SDK_READS_SESSION_STATE" or "DISABLE_COMPACT") && !PinnedOsNames.Contains(row.Key, StringComparer.Ordinal) ||
+                row.Key is not ("DOTNET_PROCESSOR_COUNT" or "DOTNET_GCHeapHardLimit" or "DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER" or "MSBUILDDISABLENODEREUSE" or "CLAUDE_CODE_SDK_READS_SESSION_STATE" or "DISABLE_COMPACT") && !PinnedOsNames.Contains(row.Key, StringComparer.Ordinal) ||
                 !selected.TryAdd(row.Key, row.Value) || total > 16384 - row.Key.Length - row.Value.Length)
                 throw new ToolUsageException(EnvironmentRefusal);
             total += row.Key.Length + row.Value.Length;
@@ -83,6 +84,8 @@ internal static class ClaudeIndependentReviewData
         if (selected.Count != environment.Count || RequiredPinnedOsNames.Any(name => !selected.ContainsKey(name)) ||
             !selected.TryGetValue("DOTNET_PROCESSOR_COUNT", out var processors) || processors != "2" ||
             !selected.TryGetValue("DOTNET_GCHeapHardLimit", out var heap) || heap != "0x100000000" ||
+            !selected.TryGetValue("DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER", out var server) || server != "1" ||
+            !selected.TryGetValue("MSBUILDDISABLENODEREUSE", out var reuse) || reuse != "1" ||
             !selected.TryGetValue("CLAUDE_CODE_SDK_READS_SESSION_STATE", out var session) || session != "1" ||
             !selected.TryGetValue("DISABLE_COMPACT", out var compact) || compact != "1")
             throw new ToolUsageException(EnvironmentRefusal);
