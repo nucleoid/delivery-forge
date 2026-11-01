@@ -61,10 +61,13 @@ public sealed class ClaudeReviewerObservationNativeTests
             capture = await new ProcessCommandExecutor(scope, original).ExecuteBoundedCaptureAsync(invocation,
                 original.Remaining, 65536, original.Token, new OwnedWorkPhaseBudget(original), scope,
                 new LinuxScopeImage(image.Path, image.Bytes, image.Sha256));
+            // Closure is independent of semantic success, quota, or a retained
+            // native error. Preserve actual closed-tree evidence before assertions.
+            knownClosed = IsKnownClosedLinuxCapture(capture);
             try
             {
                 ClaudeIndependentReviewer.RequireSuccessfulObservation(ClaudeReviewerObservationOperation.Version, capture);
-                ActualOrdinaryCapture.Require(capture); knownClosed = true;
+                ActualOrdinaryCapture.Require(capture);
                 ClaudeIndependentReviewer.RequireObservedVersion(capture, selected.Host.Version); versionMatches = true;
             }
             catch (IOException failure) { failureFacts = ClaudeReviewerObservationFailure.FindSingle(failure); throw; }
@@ -95,6 +98,13 @@ public sealed class ClaudeReviewerObservationNativeTests
         }
         // The fresh neutral namespace and actual owner evidence are preserved.
     }
+
+    internal static bool IsKnownClosedLinuxCapture(BoundedCommandCaptureResult capture) =>
+        capture.OwnershipKind == BoundedCaptureOwnershipKind.LinuxCreationOwnedScope &&
+        capture.Command.OwnedProcessQuiescent && capture.RootExitObserved &&
+        capture.StandardOutputDrainCompleted && capture.StandardErrorDrainCompleted &&
+        capture.Command.LifecycleDiagnostics?.OwnedTree is
+            { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 };
 
     [Theory(Timeout = 45000)]
     [InlineData(false)]

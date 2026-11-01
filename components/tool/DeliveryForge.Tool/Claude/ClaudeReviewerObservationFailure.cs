@@ -10,6 +10,7 @@ internal enum ClaudeReviewerObservationOperation { Version, AuthStatus }
 internal sealed record ClaudeReviewerObservationFacts(string Code, string Operation, int? ExitCode,
     bool TimedOut, bool Cancelled, bool RootExitObserved, bool OwnedProcessQuiescent,
     bool StandardOutputDrainCompleted, bool StandardErrorDrainCompleted, bool CaptureBoundExceeded,
+    bool NativeFailurePresent, bool? OwnedTreeCreationOwned, bool? OwnedTreeSettlementObserved, int? OwnedTreeActiveProcesses,
     string? OwnershipKind, int? StandardOutputBytes, int? StandardErrorBytes);
 
 internal static class ClaudeReviewerObservationFailure
@@ -31,10 +32,16 @@ internal static class ClaudeReviewerObservationFailure
             {
                 var output = capture.StandardOutputBytes.Length;
                 var stderr = capture.StandardErrorBytes.Length;
+                var lifecycle = capture.Command.LifecycleDiagnostics;
+                var ownedTree = lifecycle?.OwnedTree;
+                var active = ownedTree?.ActiveProcesses;
                 facts.Add(error, new(code, name, capture.Command.ExitCode, capture.Command.TimedOut, capture.Command.Cancelled,
                     capture.RootExitObserved, capture.Command.OwnedProcessQuiescent,
                     capture.StandardOutputDrainCompleted, capture.StandardErrorDrainCompleted, capture.CaptureBoundExceeded,
-                    Enum.GetName(capture.OwnershipKind), output <= 65536 ? output : null, stderr <= 65536 ? stderr : null));
+                    lifecycle?.NativeFailure is not null, ownedTree?.CreationOwned, ownedTree?.SettlementObserved,
+                    active is >= 0 and <= 4096 ? active : null, Enum.GetName(capture.OwnershipKind),
+                    operation == ClaudeReviewerObservationOperation.Version && output <= 65536 ? output : null,
+                    operation == ClaudeReviewerObservationOperation.Version && stderr <= 65536 ? stderr : null));
             }
         }
         catch (Exception) { /* Optional facts cannot replace the original observation refusal. */ }

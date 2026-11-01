@@ -23,6 +23,10 @@ public sealed class ClaudeReviewerObservationFailureTests
     [InlineData("quota")]
     [InlineData("owner")]
     [InlineData("native")]
+    [InlineData("tree-absent")]
+    [InlineData("tree-creation")]
+    [InlineData("tree-settlement")]
+    [InlineData("tree-active")]
     public void Production_capture_boundary_reports_fixed_facts_without_private_output(string scenario)
     {
         var capture = Capture(scenario);
@@ -38,7 +42,11 @@ public sealed class ClaudeReviewerObservationFailureTests
         Assert.Equal(capture.StandardOutputDrainCompleted, facts.StandardOutputDrainCompleted);
         Assert.Equal(capture.StandardErrorDrainCompleted, facts.StandardErrorDrainCompleted);
         Assert.Equal(capture.CaptureBoundExceeded, facts.CaptureBoundExceeded);
-        Assert.Equal(Encoding.UTF8.GetByteCount(Secret), facts.StandardOutputBytes);
+        Assert.Equal(capture.Command.LifecycleDiagnostics?.NativeFailure is not null, facts.NativeFailurePresent);
+        Assert.Equal(capture.Command.LifecycleDiagnostics?.OwnedTree?.CreationOwned, facts.OwnedTreeCreationOwned);
+        Assert.Equal(capture.Command.LifecycleDiagnostics?.OwnedTree?.SettlementObserved, facts.OwnedTreeSettlementObserved);
+        Assert.Equal(capture.Command.LifecycleDiagnostics?.OwnedTree?.ActiveProcesses, facts.OwnedTreeActiveProcesses);
+        Assert.Null(facts.StandardOutputBytes); Assert.Null(facts.StandardErrorBytes);
         using var life = new ToolLifetime(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
         var line = Emit(life, new ThrowingTextException(error));
         using var json = JsonDocument.Parse(line[Prefix.Length..]);
@@ -49,6 +57,47 @@ public sealed class ClaudeReviewerObservationFailureTests
         Assert.DoesNotContain("Hash", line, StringComparison.Ordinal);
         Assert.False(diagnostic.TryGetProperty("Arguments", out _));
         Assert.False(diagnostic.TryGetProperty("Data", out _));
+    }
+
+    [Theory]
+    [InlineData("exit", true)]
+    [InlineData("timeout", true)]
+    [InlineData("cancel", true)]
+    [InlineData("quota", true)]
+    [InlineData("native", true)]
+    [InlineData("success", true)]
+    [InlineData("root", false)]
+    [InlineData("stdout", false)]
+    [InlineData("stderr", false)]
+    [InlineData("owner", false)]
+    [InlineData("tree-absent", false)]
+    [InlineData("tree-creation", false)]
+    [InlineData("tree-settlement", false)]
+    [InlineData("tree-active", false)]
+    public void Linux_probe_classifies_actual_closure_before_semantic_failure(string scenario, bool closed)
+    {
+        var capture = Capture(scenario);
+        var knownClosed = ClaudeReviewerObservationNativeTests.IsKnownClosedLinuxCapture(capture);
+        Assert.Equal(closed, knownClosed);
+        if (scenario != "success")
+            Assert.Throws<IOException>(() => ClaudeIndependentReviewer.RequireSuccessfulObservation(ClaudeReviewerObservationOperation.Version, capture));
+        else
+            Assert.Throws<IOException>(() => ClaudeIndependentReviewer.RequireObservedVersion(capture, "different-version"));
+        // A semantic refusal never changes the already observed closure state.
+        Assert.Equal(closed, knownClosed);
+    }
+
+    [Theory]
+    [InlineData(-1, null)]
+    [InlineData(4097, null)]
+    [InlineData(4096, 4096)]
+    public void Optional_active_process_fact_has_a_finite_nonnegative_range(int active, int? expected)
+    {
+        var capture = Capture("tree-active", active: active);
+        var error = ClaudeReviewerObservationFailure.CaptureIncomplete(ClaudeReviewerObservationOperation.Version, capture);
+        var facts = Assert.IsType<ClaudeReviewerObservationFacts>(ClaudeReviewerObservationFailure.FindSingle(error));
+        Assert.Equal(expected, facts.OwnedTreeActiveProcesses);
+        Assert.Equal(Encoding.UTF8.GetByteCount(Secret), facts.StandardOutputBytes);
     }
 
     [Fact]
@@ -113,7 +162,7 @@ public sealed class ClaudeReviewerObservationFailureTests
         Assert.DoesNotContain("ReviewerObservation", line, StringComparison.Ordinal);
     }
 
-    static BoundedCommandCaptureResult Capture(string scenario, string output = Secret)
+    static BoundedCommandCaptureResult Capture(string scenario, string output = Secret, int active = 1)
     {
         var command = new CommandResult(scenario == "exit" ? 17 : 0, output, Secret,
             scenario == "timeout", scenario == "cancel", DateTimeOffset.UnixEpoch, DateTimeOffset.UnixEpoch,
@@ -121,7 +170,11 @@ public sealed class ClaudeReviewerObservationFailureTests
         {
             LifecycleDiagnostics = new(false, false, null, null, false, true, true, true, 0,
                 new(true, false, false, output), new(true, false, false, Secret))
-            { OwnedTree = new(true, true, 0), NativeFailure = scenario == "native" ? Secret : null }
+            {
+                OwnedTree = scenario == "tree-absent" ? null :
+                    new(scenario != "tree-creation", scenario != "tree-settlement", scenario == "tree-active" ? active : 0),
+                NativeFailure = scenario == "native" ? Secret : null
+            }
         };
         return new(command, Encoding.UTF8.GetBytes(output), Encoding.UTF8.GetBytes(Secret), scenario == "quota",
             scenario != "root", scenario != "stdout", scenario != "stderr", ownershipKind: BoundedCaptureOwnershipKind.LinuxCreationOwnedScope);
