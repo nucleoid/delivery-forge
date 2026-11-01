@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
 using DeliveryForge.Execution.Git;
@@ -7,6 +8,50 @@ namespace DeliveryForge.Execution.Tests.Repositories;
 
 public sealed class PrivateLooseGitObjectsTests
 {
+    [Fact(Timeout = 30000)]
+    public void Same_held_private_object_refuses_a_real_second_hard_link()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "forge-private-object-links-" + Guid.NewGuid().ToString("N"));
+        Assert.False(Path.Exists(root));
+        Directory.CreateDirectory(root);
+        TestContext.Current.TestOutputHelper!.WriteLine("Retained actual private-object hard-link fixture: " + root);
+        var path = Path.Combine(root, "original");
+        var link = Path.Combine(root, "second-link");
+        File.WriteAllBytes(path, Encoding.UTF8.GetBytes("retained private-object hard-link fixture\n"));
+        using var held = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        Assert.True(PrivateObjectLinks.HasOneLink(held));
+        if (OperatingSystem.IsLinux()) _ = PrivateObjectLinks.Identity(path, directory: false);
+
+        if (OperatingSystem.IsLinux())
+        {
+            var returned = Link(path, link);
+            var error = Marshal.GetLastPInvokeError();
+            Assert.True(returned == 0, "Actual Linux link failed; errno=" + error);
+        }
+        else if (OperatingSystem.IsWindows())
+        {
+            var returned = CreateHardLink(link, path, IntPtr.Zero);
+            var error = Marshal.GetLastPInvokeError();
+            Assert.True(returned, "Actual Windows CreateHardLinkW failed; Win32=" + error);
+        }
+        else throw new PlatformNotSupportedException("Actual private-object hard-link control requires Linux or Windows.");
+
+        // Keep the SAME live descriptor across the namespace change; no reopen
+        // or disposed-descriptor reuse can manufacture this link-count result.
+        Assert.False(PrivateObjectLinks.HasOneLink(held));
+        if (OperatingSystem.IsLinux())
+            Assert.Throws<WorktreeBoundaryException>(() => PrivateObjectLinks.Identity(path, directory: false));
+        // Windows path Identity is deliberately a no-op; its held native query
+        // above is the production hard-link guard. Retain both names on all outcomes.
+    }
+
+    [DllImport("libc", EntryPoint = "link", SetLastError = true)]
+    static extern int Link([MarshalAs(UnmanagedType.LPUTF8Str)] string existing, [MarshalAs(UnmanagedType.LPUTF8Str)] string link);
+
+    [DllImport("kernel32.dll", EntryPoint = "CreateHardLinkW", CharSet = CharSet.Unicode, SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    static extern bool CreateHardLink(string link, string existing, IntPtr securityAttributes);
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
