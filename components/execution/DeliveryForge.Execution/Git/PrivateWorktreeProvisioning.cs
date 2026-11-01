@@ -64,12 +64,70 @@ public sealed partial class WorktreeManager
         if (actual != baseCommit) throw new WorktreeBoundaryException("Private administration base is not the exact frozen commit.");
         // Exclusive ref creation precedes unregistering. This common reachable
         // root protects H0 even when its original branch/reflog/index disappear.
-        _ = await GitAsync(parentCheckout, token, "update-ref", state.BaseAnchorRef, baseCommit, new string('0', baseCommit.Length)).ConfigureAwait(false);
+        await CreateFreshCommonRefAsync(common, state.BaseAnchorRef, baseCommit, token).ConfigureAwait(false);
         state.AnchorCreated = true;
         var anchored = (await GitAsync(parentCheckout, token, "rev-parse", "--verify", state.BaseAnchorRef + "^{commit}").ConfigureAwait(false)).TrimEnd('\r', '\n');
         _originalBudget.CheckWork(); parent.CheckCurrent(_effectRunId);
         if (anchored != baseCommit) throw new WorktreeBoundaryException("Fresh original base anchor readback differs.");
         return state;
+    }
+
+    // Git's zero-old-OID update-ref can dereference a dangling symref; even
+    // --no-deref is not a portable fresh-name test on the selected files backend.
+    // Hold its standard physical lock while checking both loose and packed refs.
+    internal async Task CreateFreshCommonRefAsync(string common, string refName, string oid, CancellationToken token)
+    {
+        const string prefix = "refs/delivery-forge/private/";
+        if (_originalBudget is null || _originalExecutor is null || cleanupObservation ||
+            _effectAdmission is not ICoordinatedSynchronousEffectAdmission parent || _effectRunId is null ||
+            !LooseGitObjectInventory.IsOid(oid) || !refName.StartsWith(prefix, StringComparison.Ordinal))
+            throw new WorktreeBoundaryException("Fresh COMMON ref requires the actual original parent and code-owned name/OID.");
+        var suffix = refName[prefix.Length..];
+        if (suffix.Length is not (69 or 74) || suffix[64] != '/' ||
+            !suffix[..64].All(char.IsAsciiHexDigitLower) || suffix[65..] is not ("base" or "candidate"))
+            throw new WorktreeBoundaryException("Only an exact code-owned base or candidate ref may be created.");
+        common = CanonicalPath(common);
+        void Check()
+        {
+            _originalBudget.CheckWork(); parent.CheckCurrent(_effectRunId); token.ThrowIfCancellationRequested();
+            RejectSymlinkAncestors(common);
+        }
+        Check();
+        var storage = await RunGitAsync(common, token, "config", "--local", "--get", "extensions.refStorage").ConfigureAwait(false);
+        Check();
+        if (!(storage.ExitCode == 1 && storage.Stdout.Length == 0) &&
+            !(storage.ExitCode == 0 && storage.Stdout.TrimEnd('\r', '\n') == "files"))
+            throw new WorktreeBoundaryException("Fresh COMMON refs require the existing Git files storage profile.");
+        var path = Path.Combine(common, refName.Replace('/', Path.DirectorySeparatorChar));
+        var lockPath = path + ".lock";
+        var bytes = Encoding.ASCII.GetBytes(oid + "\n");
+        var metadata = new OwnedGitBinding(this, common, common, common, [], [], []);
+        parent.EnterSynchronous(_effectRunId, () =>
+        {
+            Check(); RejectSymlinkAncestors(path); RejectSymlinkAncestors(lockPath);
+            RequireAbsentPrivatePath(path);
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            Check(); RejectSymlinkAncestors(path); RejectSymlinkAncestors(lockPath);
+            metadata.CreateFreshRefLock(lockPath, bytes);
+            Check(); return true;
+        });
+        // The closed but retained .lock continues to exclude cooperating Git
+        // writers. Errors preserve it; no failure path deletes or replays it.
+        var absent = await GitExitCodeAsync(common, token, "show-ref", "--verify", "--quiet", refName).ConfigureAwait(false);
+        Check();
+        if (absent != 1) throw new WorktreeBoundaryException("Fresh COMMON ref is present, packed, or could not be proved absent.");
+        parent.EnterSynchronous(_effectRunId, () =>
+        {
+            Check(); RejectSymlinkAncestors(path); RejectSymlinkAncestors(lockPath);
+            RequireAbsentPrivatePath(path);
+            if (!metadata.Read(lockPath).AsSpan().SequenceEqual(bytes))
+                throw new WorktreeBoundaryException("Original fresh COMMON ref lock bytes changed.");
+            Check(); File.Move(lockPath, path, overwrite: false); Check();
+            return true;
+        });
+        var actual = (await GitAsync(common, token, "rev-parse", "--verify", refName).ConfigureAwait(false)).TrimEnd('\r', '\n');
+        Check();
+        if (actual != oid) throw new WorktreeBoundaryException("Fresh COMMON ref actual readback differs.");
     }
 
     static void RequireAbsentPrivatePath(string path)
@@ -177,29 +235,35 @@ public sealed partial class WorktreeManager
             if (actual != FrozenBaseCommit) throw new WorktreeBoundaryException("Original common base anchor changed or disappeared.");
         }
 
-        internal void RewriteProvisioningMetadata(string path, byte[] expected, byte[] replacement)
+        internal void RewriteProvisioningMetadata(string path, byte[] expected, byte[] replacement) =>
+            WriteProvisioningMetadata(path, expected, replacement);
+
+        internal void CreateFreshRefLock(string path, byte[] bytes) => WriteProvisioningMetadata(path, null, bytes);
+
+        void WriteProvisioningMetadata(string path, byte[]? expected, byte[] replacement)
         {
             FileStream? file = null; Exception? primary = null, close = null;
             try
             {
                 Phase(false); RejectSymlinkAncestors(path);
-                if (expected.Length > 4096 || replacement.Length > 4096 ||
-                    (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+                if ((expected?.Length ?? 0) > 4096 || replacement.Length > 4096 ||
+                    expected is not null && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
                     throw new WorktreeBoundaryException("Private admin metadata requires bounded plain existing files.");
                 // Open preserves the existing Windows Hidden attribute. Never
                 // recreate the worker marker or adopt a replacement namespace.
-                file = new FileStream(path, FileMode.Open, FileAccess.ReadWrite, FileShare.Read);
+                file = new FileStream(path, expected is null ? FileMode.CreateNew : FileMode.Open,
+                    FileAccess.ReadWrite, expected is null ? FileShare.None : FileShare.Read);
                 if (!PrivateObjectLinks.HasOneLink(file.SafeFileHandle) ||
-                    WriterNamespaceIdentityReader.Observe(file.SafeFileHandle, path).Outcome != WriterNamespaceIdentityOutcome.Match || file.Length != expected.Length)
+                    WriterNamespaceIdentityReader.Observe(file.SafeFileHandle, path).Outcome != WriterNamespaceIdentityOutcome.Match || file.Length != (expected?.Length ?? 0))
                     throw new WorktreeBoundaryException("Original metadata handle identity or extent differs.");
-                var actual = new byte[expected.Length]; var offset = 0;
+                var actual = new byte[expected?.Length ?? 0]; var offset = 0;
                 while (offset < actual.Length)
                 {
                     Phase(false); var count = file.Read(actual, offset, actual.Length - offset);
                     if (count == 0) throw new WorktreeBoundaryException("Original metadata ended before its exact expected bytes.");
                     offset += count;
                 }
-                if (!actual.AsSpan().SequenceEqual(expected) || file.ReadByte() != -1)
+                if ((expected is not null && !actual.AsSpan().SequenceEqual(expected)) || file.ReadByte() != -1)
                     throw new WorktreeBoundaryException("Original metadata bytes changed before relocation rewrite.");
                 Phase(false); file.Position = 0; file.SetLength(0); file.Write(replacement); file.Flush(flushToDisk: true); Phase(false);
                 if (!PrivateObjectLinks.HasOneLink(file.SafeFileHandle) ||
@@ -209,10 +273,14 @@ public sealed partial class WorktreeManager
             catch (Exception failure) { primary = failure; }
             if (file is not null)
             {
+                // If forward currentness expires after the write, latch that
+                // failure but still attempt first close under the SAME original
+                // cleanup allowance. Joining/closing never grants forward work.
+                if (primary is null) { try { Phase(false); } catch (Exception failure) { primary = failure; } }
                 var returned = false;
                 try
                 {
-                    if (primary is null) Phase(false); else _ = original.CleanupRemaining;
+                    if (primary is not null) _ = original.CleanupRemaining;
                     file.Dispose(); returned = true;
                     if (primary is null) Phase(false); else _ = original.CleanupRemaining;
                 }

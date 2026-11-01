@@ -163,6 +163,10 @@ ancestry and connectivity through COMMON alone, then compare-and-creates a fresh
 candidate ref and checks its value. Forward observation and review then use
 COMMON alone. Private source objects, administration, base and candidate refs
 remain retained; cleanup cannot import, retry or adopt a partial attempt.
+Fresh base/candidate refs require Git's files ref backend. Publication holds a
+fresh ordinary ref lock, refuses existing loose, packed or symbolic refs, and
+uses a no-overwrite rename; a dangling symbolic ref cannot redirect publication.
+Other ref backends refuse this finite profile. Failed locks remain evidence.
 
 The short import-to-candidate-ref interval follows ordinary Git's concurrency
 contract: external destructive `gc --prune=now` must not overlap it. Forge's

@@ -8,6 +8,7 @@ using DeliveryForge.Evidence;
 using DeliveryForge.Execution;
 using DeliveryForge.Execution.Host;
 using DeliveryForge.Execution.Git;
+using DeliveryForge.Review;
 
 namespace DeliveryForge.Tool.Tests;
 
@@ -887,9 +888,10 @@ public sealed class ProvisionedGitBindingTests
     }
 
     [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task Private_administration_refuses_changed_inventory_or_existing_candidate_without_adoption(bool candidateCollision)
+    [InlineData("inventory")]
+    [InlineData("candidate")]
+    [InlineData("dangling-candidate")]
+    public async Task Private_administration_refuses_changed_inventory_or_existing_candidate_without_adoption(string obstruction)
     {
         using var fixture = await Fixture.CreateAsync(privateAdministration: true);
         var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
@@ -902,23 +904,52 @@ public sealed class ProvisionedGitBindingTests
         binding.AttachPrivateObjectWriter(actual); await DrainAndRetire(actual, fixture.Original);
         await binding.ValidatePrivateObjectsAfterRetirementAsync(fixture.Original.Token);
         var candidateRefPath = Path.Combine(binding.CommonDirectory, candidateRef.Replace('/', Path.DirectorySeparatorChar));
+        const string foreignRef = "refs/heads/foreign-uncreated";
+        var foreignRefPath = Path.Combine(binding.CommonDirectory, foreignRef.Replace('/', Path.DirectorySeparatorChar));
         byte[]? collisionBytes = null;
-        if (candidateCollision)
+        if (obstruction != "inventory")
         {
-            await fixture.GitAt(fixture.Repository, "update-ref", candidateRef, baseHead, new string('0', baseHead.Length));
+            if (obstruction == "dangling-candidate")
+                await fixture.GitAt(fixture.Repository, "symbolic-ref", candidateRef, foreignRef);
+            else
+                await fixture.GitAt(fixture.Repository, "update-ref", candidateRef, baseHead, new string('0', baseHead.Length));
             collisionBytes = File.ReadAllBytes(candidateRefPath);
         }
         else Directory.CreateDirectory(Path.Combine(binding.ObjectsPath, "pack"));
+        Assert.False(File.Exists(foreignRefPath));
         await Assert.ThrowsAsync<WorktreeBoundaryException>(() => binding.ReconcilePrivateObjectsAfterRetirementAsync(fixture.Original.Token));
         Assert.False(binding.HasReconciledObjects); Assert.Equal(binding.ObjectsPath, binding.ReadObjectsPath);
-        if (candidateCollision)
+        if (obstruction != "inventory")
             Assert.Equal(collisionBytes, File.ReadAllBytes(candidateRefPath));
         else
         {
             Assert.True(Directory.Exists(Path.Combine(binding.ObjectsPath, "pack")));
             Assert.False(File.Exists(candidateRefPath));
         }
+        Assert.False(File.Exists(foreignRefPath));
         Assert.True(File.Exists(binding.IndexPath));
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Private_administration_refuses_dangling_base_anchor_before_provisioning_without_dereferencing_it()
+    {
+        using var fixture = await Fixture.CreateAsync(privateAdministration: true, prepare: false);
+        var baseHead = await fixture.GitAt(fixture.Repository, "rev-parse", "HEAD");
+        var common = await fixture.GitAt(fixture.Repository, "rev-parse", "--path-format=absolute", "--git-common-dir");
+        var id = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("owned\0" + Path.GetFullPath(fixture.Worker))));
+        var anchor = "refs/delivery-forge/private/" + id + "/base";
+        const string foreignRef = "refs/heads/foreign-base-uncreated";
+        await fixture.GitAt(fixture.Repository, "symbolic-ref", anchor, foreignRef);
+        var anchorPath = Path.Combine(common, anchor.Replace('/', Path.DirectorySeparatorChar));
+        var foreignRefPath = Path.Combine(common, foreignRef.Replace('/', Path.DirectorySeparatorChar));
+        var before = File.ReadAllBytes(anchorPath);
+        Assert.False(File.Exists(foreignRefPath));
+        await Assert.ThrowsAsync<WorktreeBoundaryException>(() =>
+            fixture.Manager.PrepareAsync(fixture.Repository, fixture.Worker, baseHead, fixture.Original.Token));
+        Assert.Equal(before, File.ReadAllBytes(anchorPath));
+        Assert.False(File.Exists(foreignRefPath));
+        Assert.False(Directory.Exists(fixture.Worker));
+        Assert.False(Directory.Exists(Path.Combine(fixture.Root, ".delivery-forge-private-admin-" + id)));
     }
 
     static string[] ObjectBodies(string root) => Directory.GetFiles(root, "*", SearchOption.AllDirectories)
@@ -1069,7 +1100,7 @@ public sealed class ProvisionedGitBindingTests
         internal readonly string GitImage = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
             .Where(Path.IsPathFullyQualified).Select(path => Path.Combine(path, "git.exe")).First(File.Exists);
         internal WorktreeManager Manager = null!, InitialManager = null!;
-        internal static async Task<Fixture> CreateAsync(bool forceCheckoutConversion = false, string? protectedPolicy = null, bool privateAdministration = false)
+        internal static async Task<Fixture> CreateAsync(bool forceCheckoutConversion = false, string? protectedPolicy = null, bool privateAdministration = false, bool prepare = true)
         {
             var value = new Fixture();
             try
@@ -1094,9 +1125,12 @@ public sealed class ProvisionedGitBindingTests
                 value.InitialManager = new WorktreeManager(value.GitImage, value.Executor, value.Original);
                 if (privateAdministration) value.InitialManager.SelectPrivateAdministrationForConfinedWorker();
                 value.Manager = value.InitialManager.WithParentAdmission(value.Parent, "owned");
-                await value.Manager.PrepareAsync(value.Repository, value.Worker, head, TestContext.Current.CancellationToken);
-                var observed = await value.Manager.ObserveAsync(value.Worker, TestContext.Current.CancellationToken);
-                Assert.Equal(head, observed.HeadCommit); Assert.True(observed.IsClean);
+                if (prepare)
+                {
+                    await value.Manager.PrepareAsync(value.Repository, value.Worker, head, TestContext.Current.CancellationToken);
+                    var observed = await value.Manager.ObserveAsync(value.Worker, TestContext.Current.CancellationToken);
+                    Assert.Equal(head, observed.HeadCommit); Assert.True(observed.IsClean);
+                }
                 return value;
             }
             catch { value.Dispose(); throw; }

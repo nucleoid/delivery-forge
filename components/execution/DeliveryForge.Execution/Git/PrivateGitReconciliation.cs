@@ -97,7 +97,7 @@ public sealed partial class WorktreeManager
             _ = await CommonGitAsync(token, "fsck", "--connectivity-only", "--no-reflogs", "--no-dangling", candidate).ConfigureAwait(false);
             RequireValidatedPrivateObjects(); CheckSameHead(head);
             await VerifyBaseAnchorAsync(token).ConfigureAwait(false);
-            _ = await CommonGitAsync(token, "update-ref", candidateRef, candidate, new string('0', candidate.Length)).ConfigureAwait(false);
+            await manager.CreateFreshCommonRefAsync(CommonDirectory, candidateRef, candidate, token).ConfigureAwait(false);
             var retained = await CommonGitAsync(token, "rev-parse", "--verify", candidateRef + "^{commit}").ConfigureAwait(false);
             if (retained.TrimEnd('\r', '\n') != candidate)
                 throw new WorktreeBoundaryException("Original COMMON candidate ref readback differs after publication.");
@@ -164,10 +164,11 @@ public sealed partial class WorktreeManager
             catch (Exception failure) { primary = failure; }
             if (file is not null)
             {
+                if (primary is null) { try { Phase(false); } catch (Exception failure) { primary = failure; } }
                 var returned = false;
                 try
                 {
-                    if (primary is null) Phase(false); else _ = original.CleanupRemaining;
+                    if (primary is not null) _ = original.CleanupRemaining;
                     file.Dispose(); returned = true;
                     if (primary is null) Phase(false); else _ = original.CleanupRemaining;
                 }
