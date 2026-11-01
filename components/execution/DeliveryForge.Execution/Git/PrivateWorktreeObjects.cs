@@ -313,17 +313,17 @@ internal sealed class LooseGitObjectInventory
     LooseGitObjectInventory(string root, Dictionary<string, Epoch> epochs) { this.root = root; this.epochs = epochs; }
     internal bool IsBaseDuplicate(string oid) => baseDuplicates.Contains(oid);
     internal string[] BaseDuplicateIds() => baseDuplicates.ToArray();
-    internal string[] NewObjectIds(Action check)
+    internal string[] ReachableObjectIds(HashSet<string> reachable, Action check)
     {
         Verify(check);
         return epochs.Where(row => !row.Value.Directory)
             .Select(row => Path.GetRelativePath(root, row.Key).Replace("/", "", StringComparison.Ordinal).Replace("\\", "", StringComparison.Ordinal))
-            .Where(oid => !baseDuplicates.Contains(oid)).Order(StringComparer.Ordinal).ToArray();
+            .Where(reachable.Contains).Order(StringComparer.Ordinal).ToArray();
     }
 
     internal byte[] ReadForImport(string oid, int maximum, Action check, Func<string, int, byte[]> read)
     {
-        if (!IsOid(oid) || baseDuplicates.Contains(oid)) throw new WorktreeBoundaryException("Only an original validated new object may be imported.");
+        if (!IsOid(oid)) throw new WorktreeBoundaryException("Only an original validated candidate object may be imported.");
         var path = Path.Combine(root, oid[..2], oid[2..]);
         if (!epochs.TryGetValue(path, out var epoch) || epoch.Directory)
             throw new WorktreeBoundaryException("Import object is absent from the retained private inventory.");

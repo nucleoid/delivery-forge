@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 using DeliveryForge.Coordination;
 using DeliveryForge.Evidence;
 
@@ -8,15 +10,15 @@ namespace DeliveryForge.Execution.Git;
 
 public sealed partial class WorktreeManager
 {
-    bool privateAdministrationSelected;
     ConcurrentDictionary<string, PrivateAdministrationProvisioning> privateAdministrations = new(
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
     internal sealed class PrivateAdministrationProvisioning
     {
         internal required WorktreeManager Manager;
-        internal required string Worktree, CommonDirectory, PrivateDirectory, BaseAnchorRef, FrozenBaseCommit;
+        internal required string Worktree, CommonDirectory, PrivateDirectory, JournalPath, BaseAnchorRef, FrozenBaseCommit;
         internal string? RegisteredDirectory;
+        internal (ulong Volume, ulong Low, ulong High) OriginalDirectoryIdentity;
         internal bool AnchorCreated, MoveEntered, MoveReturned, Complete;
     }
 
@@ -33,7 +35,7 @@ public sealed partial class WorktreeManager
         {
             if (actualOwnedGitInvocations.ProvisioningStarted || !ownedGit.IsEmpty || !privateAdministrations.IsEmpty)
                 throw new WorktreeBoundaryException("Private administration must be selected before provisioning or writer birth.");
-            privateAdministrationSelected = true;
+            actualOwnedGitInvocations.PrivateAdministrationSelected = true;
         }
     }
 
@@ -48,16 +50,18 @@ public sealed partial class WorktreeManager
         var directory = Path.GetDirectoryName(root) ?? throw new WorktreeBoundaryException("Private admin sibling parent is absent.");
         RejectSymlinkAncestors(directory);
         if (!Directory.Exists(directory)) throw new WorktreeBoundaryException("Private admin sibling parent must already exist.");
-        var id = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(_effectRunId + "\0" + root)));
+        var id = PrivateAdministrationId(_effectRunId, root);
+        var privateDirectory = Path.Combine(directory, ".delivery-forge-private-admin-" + id);
         var state = new PrivateAdministrationProvisioning
         {
             Manager = this, Worktree = root, CommonDirectory = common,
-            PrivateDirectory = Path.Combine(directory, ".delivery-forge-private-admin-" + id),
+            PrivateDirectory = privateDirectory, JournalPath = privateDirectory + ".provisioning.json",
             BaseAnchorRef = "refs/delivery-forge/private/" + id + "/base", FrozenBaseCommit = baseCommit
         };
         if (IsWithin(state.PrivateDirectory, root) || IsWithin(state.PrivateDirectory, common))
             throw new WorktreeBoundaryException("Private administration must be outside both worker and COMMON.");
         RequireAbsentPrivatePath(state.PrivateDirectory);
+        RequireAbsentPrivatePath(state.JournalPath);
         if (!privateAdministrations.TryAdd(root, state))
             throw new WorktreeBoundaryException("Private administration provisioning cannot adopt or replay.");
         var actual = (await GitAsync(parentCheckout, token, "rev-parse", "--verify", baseCommit + "^{commit}").ConfigureAwait(false)).TrimEnd('\r', '\n');
@@ -70,6 +74,58 @@ public sealed partial class WorktreeManager
         _originalBudget.CheckWork(); parent.CheckCurrent(_effectRunId);
         if (anchored != baseCommit) throw new WorktreeBoundaryException("Fresh original base anchor readback differs.");
         return state;
+    }
+
+    static string PrivateAdministrationId(string runId, string worktree) =>
+        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(runId + "\0" + Path.GetFullPath(worktree))));
+
+    async Task RequireFilesRefStorageAsync(string common, CancellationToken token)
+    {
+        var storage = await RunGitAsync(common, token, "config", "--local", "--get", "extensions.refStorage").ConfigureAwait(false);
+        if (!(storage.ExitCode == 1 && storage.Stdout.Length == 0) &&
+            !(storage.ExitCode == 0 && storage.Stdout.TrimEnd('\r', '\n') == "files"))
+            throw new WorktreeBoundaryException("Fresh COMMON refs require the existing Git files storage profile.");
+    }
+
+    async Task RequireNoPrivateProvisioningAsync(string parentCheckout, string worktree, CancellationToken token)
+    {
+        const string refusal = "Unstarted cleanup refuses retained or durable private provisioning effects.";
+        var root = Path.GetFullPath(worktree);
+        if (privateAdministrations.ContainsKey(root)) throw new WorktreeBoundaryException(refusal);
+        if (_originalBudget is null) return; // Existing unbound legacy utility route.
+        if (_effectAdmission is not ICoordinatedSynchronousEffectAdmission parent || _effectRunId is null)
+            throw new WorktreeBoundaryException("Unstarted private provisioning observation requires the actual parent/run.");
+        void Check() { _originalBudget.CheckWork(); parent.CheckCurrent(_effectRunId); token.ThrowIfCancellationRequested(); }
+        var id = PrivateAdministrationId(_effectRunId, root);
+        var privateDirectory = Path.Combine(Path.GetDirectoryName(root)!, ".delivery-forge-private-admin-" + id);
+        Check();
+        var common = CanonicalPath((await GitAsync(parentCheckout, token, "rev-parse", "--path-format=absolute", "--git-common-dir").ConfigureAwait(false)).TrimEnd('\r', '\n'));
+        Check(); RejectSymlinkAncestors(common);
+        await RequireFilesRefStorageAsync(common, token).ConfigureAwait(false);
+        void CheckPaths()
+        {
+            Check();
+            if (privateAdministrations.ContainsKey(root)) throw new WorktreeBoundaryException(refusal);
+            foreach (var path in new[] { privateDirectory, privateDirectory + ".provisioning.json",
+                Path.Combine(common, "refs", "delivery-forge", "private", id, "base"),
+                Path.Combine(common, "refs", "delivery-forge", "private", id, "base.lock"),
+                Path.Combine(common, "refs", "delivery-forge", "private", id, "candidate"),
+                Path.Combine(common, "refs", "delivery-forge", "private", id, "candidate.lock") })
+            {
+                RejectSymlinkAncestors(path);
+                try { _ = File.GetAttributes(path); }
+                catch (FileNotFoundException) { continue; }
+                catch (DirectoryNotFoundException) { continue; }
+                throw new WorktreeBoundaryException(refusal);
+            }
+        }
+        CheckPaths();
+        foreach (var leaf in new[] { "base", "candidate" })
+        {
+            var absent = await GitExitCodeAsync(common, token, "show-ref", "--verify", "--quiet", "refs/delivery-forge/private/" + id + "/" + leaf).ConfigureAwait(false);
+            CheckPaths();
+            if (absent != 1) throw new WorktreeBoundaryException(refusal);
+        }
     }
 
     // Git's zero-old-OID update-ref can dereference a dangling symref; even
@@ -93,11 +149,8 @@ public sealed partial class WorktreeManager
             RejectSymlinkAncestors(common);
         }
         Check();
-        var storage = await RunGitAsync(common, token, "config", "--local", "--get", "extensions.refStorage").ConfigureAwait(false);
+        await RequireFilesRefStorageAsync(common, token).ConfigureAwait(false);
         Check();
-        if (!(storage.ExitCode == 1 && storage.Stdout.Length == 0) &&
-            !(storage.ExitCode == 0 && storage.Stdout.TrimEnd('\r', '\n') == "files"))
-            throw new WorktreeBoundaryException("Fresh COMMON refs require the existing Git files storage profile.");
         var path = Path.Combine(common, refName.Replace('/', Path.DirectorySeparatorChar));
         var lockPath = path + ".lock";
         var bytes = Encoding.ASCII.GetBytes(oid + "\n");
@@ -164,12 +217,30 @@ public sealed partial class WorktreeManager
                 throw new WorktreeBoundaryException("Original registered admin/base/backpointer association differs.");
             RequireAbsentPrivatePath(state.PrivateDirectory);
             var before = PrivateObjectLinks.Identity(registered, directory: true);
+            state.OriginalDirectoryIdentity = metadata.ReadPrivateDirectoryIdentity(registered);
             var siblingParent = Path.GetDirectoryName(state.PrivateDirectory)!;
             var target = PrivateObjectLinks.Identity(siblingParent, directory: true);
             if (OperatingSystem.IsLinux() ? before.Device != target.Device :
                 !string.Equals(Path.GetPathRoot(registered), Path.GetPathRoot(state.PrivateDirectory), PathComparison()))
                 throw new WorktreeBoundaryException("Private administration move requires the same filesystem.");
             state.RegisteredDirectory = registered;
+            // DATA survives failure/restart but can never reconstruct ownership.
+            // Keep the original association before changing either routing file.
+            var journal = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                Kind = "PrivateAdministrationProvisioning-DATA-v1", RunId = _effectRunId,
+                state.Worktree, state.CommonDirectory, RegisteredDirectory = registered,
+                state.PrivateDirectory, state.BaseAnchorRef, state.FrozenBaseCommit,
+                Authority = false
+            });
+            metadata.CreateFreshProvisioningData(state.JournalPath, journal);
+            // Before freeing the registry slot, stop .git from resolving to it.
+            // Failure before the move leaves the old admin retained and the
+            // private target absent; no rollback/replay or foreign-slot adoption.
+            metadata.RewriteProvisioningMetadata(Path.Combine(registered, "commondir"), commondir,
+                Encoding.UTF8.GetBytes(state.CommonDirectory + "\n"));
+            metadata.RewriteProvisioningMetadata(Path.Combine(state.Worktree, ".git"), marker,
+                Encoding.UTF8.GetBytes("gitdir: " + state.PrivateDirectory + "\n"));
             _originalBudget.CheckWork(); parent.CheckCurrent(_effectRunId!);
             state.MoveEntered = true;
             try { Directory.Move(registered, state.PrivateDirectory); state.MoveReturned = true; }
@@ -184,14 +255,12 @@ public sealed partial class WorktreeManager
                 throw;
             }
             _originalBudget.CheckWork(); parent.CheckCurrent(_effectRunId!);
-            RequireAbsentPrivatePath(registered);
+            RequireForeignOrAbsentRegistration(state, metadata, cleanup: false);
             var after = PrivateObjectLinks.Identity(state.PrivateDirectory, directory: true);
             if (OperatingSystem.IsLinux() && (before.Device != after.Device || before.Inode != after.Inode))
                 throw new WorktreeBoundaryException("Private admin identity changed across its no-copy move.");
-            metadata.RewriteProvisioningMetadata(Path.Combine(state.PrivateDirectory, "commondir"), commondir,
-                Encoding.UTF8.GetBytes(state.CommonDirectory + "\n"));
-            metadata.RewriteProvisioningMetadata(Path.Combine(state.Worktree, ".git"), marker,
-                Encoding.UTF8.GetBytes("gitdir: " + state.PrivateDirectory + "\n"));
+            if (metadata.ReadPrivateDirectoryIdentity(state.PrivateDirectory) != state.OriginalDirectoryIdentity)
+                throw new WorktreeBoundaryException("Original private admin directory identity changed across relocation.");
             if (!metadata.Read(Path.Combine(state.PrivateDirectory, "gitdir")).AsSpan().SequenceEqual(gitdir) ||
                 OwnedGitBinding.Text(metadata.Read(Path.Combine(state.PrivateDirectory, "HEAD"))) != state.FrozenBaseCommit)
                 throw new WorktreeBoundaryException("Moved private admin no longer joins the original worker/base.");
@@ -201,7 +270,21 @@ public sealed partial class WorktreeManager
         });
     }
 
-    void RequirePrivateAdministrationCapture(PrivateAdministrationProvisioning state, string root, string common, string admin)
+    static void RequireForeignOrAbsentRegistration(PrivateAdministrationProvisioning state, OwnedGitBinding metadata, bool cleanup)
+    {
+        var registered = state.RegisteredDirectory!;
+        RejectSymlinkAncestors(registered);
+        try { _ = File.GetAttributes(registered); }
+        catch (FileNotFoundException) { return; }
+        catch (DirectoryNotFoundException) { return; }
+        // Git may legitimately reuse a freed basename, even while that foreign
+        // admin is still being populated. Its different identity grants no
+        // authority here; never inspect or require its mutable backpointer.
+        if (metadata.ReadPrivateDirectoryIdentity(registered, cleanup) == state.OriginalDirectoryIdentity)
+            throw new WorktreeBoundaryException("Original private worker admin was registered again.");
+    }
+
+    void RequirePrivateAdministrationCapture(PrivateAdministrationProvisioning state, string root, string common, string admin, bool cleanup = false)
     {
         if (!ReferenceEquals(state.Manager, this) || !privateAdministrations.TryGetValue(root, out var retained) ||
             !ReferenceEquals(retained, state) || !state.AnchorCreated || !state.MoveReturned || !state.Complete ||
@@ -209,18 +292,85 @@ public sealed partial class WorktreeManager
             !string.Equals(admin, state.PrivateDirectory, PathComparison()) || state.RegisteredDirectory is null ||
             IsWithin(admin, root) || IsWithin(admin, common))
             throw new WorktreeBoundaryException("Private admin capture is not this completed original relocation.");
-        RejectSymlinkAncestors(state.RegisteredDirectory);
-        RequireAbsentPrivatePath(state.RegisteredDirectory);
         RejectSymlinkAncestors(admin);
+        var metadata = new OwnedGitBinding(this, root, common, admin, [], [], []);
+        if (metadata.ReadPrivateDirectoryIdentity(admin, cleanup) != state.OriginalDirectoryIdentity)
+            throw new WorktreeBoundaryException("Original private admin directory identity changed.");
+        RequireForeignOrAbsentRegistration(state, metadata, cleanup);
     }
 
     internal sealed partial class OwnedGitBinding
     {
+        static readonly List<(OwnedGitBinding Owner, SafeFileHandle Resource)> UnsettledPrivateDirectories = [];
+
+        internal (ulong Volume, ulong Low, ulong High) ReadPrivateDirectoryIdentity(string path, bool cleanup = false)
+        {
+            Phase(cleanup); RejectSymlinkAncestors(path);
+            if (OperatingSystem.IsLinux())
+            {
+                var value = PrivateObjectLinks.Identity(path, directory: true);
+                Phase(cleanup); return (value.Device, value.Inode, 0);
+            }
+            if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Private admin directory identity supports Linux/Windows only.");
+            SafeFileHandle? held = null; Exception? primary = null, close = null;
+            (ulong Volume, ulong Low, ulong High)? result = null;
+            try
+            {
+                Phase(cleanup);
+                held = CreateFile(path, 0, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero,
+                    FileMode.Open, 0x02200000, IntPtr.Zero); // BACKUP_SEMANTICS | OPEN_REPARSE_POINT.
+                if (held.IsInvalid || !GetPrivateDirectoryAttributes(held, 9, out var attributes, 8) ||
+                    (attributes.Attributes & 0x410) != 0x10 || !GetPrivateDirectoryId(held, 18, out var id, 24) ||
+                    (id.Low | id.High) == 0)
+                    throw new WorktreeBoundaryException("Original plain private admin directory identity is unavailable.");
+                result = (id.Volume, id.Low, id.High); Phase(cleanup);
+            }
+            catch (Exception failure) { primary = failure; }
+            if (held is not null)
+            {
+                if (primary is null) { try { Phase(cleanup); } catch (Exception failure) { primary = failure; } }
+                var returned = false;
+                try
+                {
+                    if (primary is not null) _ = original.CleanupRemaining;
+                    held.Dispose(); returned = true;
+                    if (primary is null) Phase(cleanup); else _ = original.CleanupRemaining;
+                }
+                catch (Exception failure)
+                {
+                    close = failure;
+                    if (!returned)
+                    {
+                        lock (UnsettledPrivateDirectories) UnsettledPrivateDirectories.Add((this, held)); Uncertain = true;
+                        try { if (original is IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown(); }
+                        catch (Exception observation) { close = new AggregateException(close, observation); }
+                        try { parent.RetainUncertain(RunId, "Private admin directory identity first disposition did not return."); }
+                        catch (Exception observation) { close = new AggregateException(close, observation); }
+                    }
+                }
+            }
+            if (primary is not null && close is not null) throw new AggregateException("Private admin directory identity and first disposition failed.", primary, close);
+            if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
+            if (close is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(close).Throw();
+            return result ?? throw new WorktreeBoundaryException("Original private admin directory identity returned no DATA.");
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        struct PrivateDirectoryId { internal ulong Volume, Low, High; }
+        [StructLayout(LayoutKind.Sequential)]
+        struct PrivateDirectoryAttributes { internal uint Attributes, ReparseTag; }
+        [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool GetPrivateDirectoryId(SafeFileHandle handle, int informationClass, out PrivateDirectoryId information, uint size);
+        [DllImport("kernel32.dll", EntryPoint = "GetFileInformationByHandleEx", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        static extern bool GetPrivateDirectoryAttributes(SafeFileHandle handle, int informationClass, out PrivateDirectoryAttributes information, uint size);
+
         void VerifyPrivateAdministrationMetadata(bool cleanup)
         {
             if (privateAdministration is not { } state) return;
             Phase(cleanup);
-            manager.RequirePrivateAdministrationCapture(state, Worktree, CommonDirectory, GitDirectory);
+            manager.RequirePrivateAdministrationCapture(state, Worktree, CommonDirectory, GitDirectory, cleanup);
             Phase(cleanup);
         }
 
@@ -239,6 +389,8 @@ public sealed partial class WorktreeManager
             WriteProvisioningMetadata(path, expected, replacement);
 
         internal void CreateFreshRefLock(string path, byte[] bytes) => WriteProvisioningMetadata(path, null, bytes);
+
+        internal void CreateFreshProvisioningData(string path, byte[] bytes) => WriteProvisioningMetadata(path, null, bytes);
 
         void WriteProvisioningMetadata(string path, byte[]? expected, byte[] replacement)
         {

@@ -1,3 +1,4 @@
+using System.IO.Compression;
 using System.Text;
 using DeliveryForge.Evidence;
 
@@ -63,38 +64,58 @@ public sealed partial class WorktreeManager
             if (!LooseGitObjectInventory.IsOid(candidate) || FrozenBaseCommit is not { } baseline || candidate.Length != baseline.Length)
                 throw new WorktreeBoundaryException("Private candidate must be one detached commit in the frozen base object format.");
             var candidateRef = CandidateRef ?? throw new WorktreeBoundaryException("Original candidate ref is absent.");
+            var closure = await manager.GitAsync(Worktree, token, "rev-list", "--objects", "--no-object-names",
+                "--missing=error", candidate, "^" + baseline).ConfigureAwait(false);
+            var reachable = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var line in closure.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var oid = line.TrimEnd('\r');
+                if (!LooseGitObjectInventory.IsOid(oid) || oid.Length != baseline.Length ||
+                    reachable.Count >= 4096 || !reachable.Add(oid))
+                    throw new WorktreeBoundaryException("Candidate object closure exceeds the finite unique object profile.");
+            }
+            CheckReconciliation(token); RequireValidatedPrivateObjects(); CheckSameHead(head);
+            var objects = privateInventory!.ReachableObjectIds(reachable, () => CheckReconciliation(token));
 
             // Like ordinary Git writes, this short import-to-ref interval must
             // not overlap external destructive gc --prune=now. Parent admission
             // serializes Forge effects; it does not lock arbitrary external Git.
-            // The private phase is safe for COMMON maintenance because its admin
-            // is unregistered and its original base is separately anchored.
+            // The private phase protects the frozen base closure. COMMON objects
+            // outside it are not protected against external ref removal/pruning.
             long bytes = 0;
-            foreach (var oid in privateInventory!.NewObjectIds(() => CheckReconciliation(token)))
+            // One bounded synchronous batch, not one retained ledger row per
+            // object. Every chunk still checks original WORK/currentness; no
+            // native invocation or await runs inside this admission factory.
+            parent.EnterSynchronous(RunId, () =>
             {
-                CheckReconciliation(token);
-                var encoded = privateInventory.ReadForImport(oid,
-                    checked((int)Math.Min(ImportFileBytes, ImportBytes - bytes)),
-                    () => CheckReconciliation(token), ReadPrivateObject);
-                bytes += encoded.Length;
-                using var canonical = new MemoryStream();
-                bytes += LooseGitObjectInventory.ValidateObject(oid, encoded,
-                    checked((int)Math.Min(ImportFileBytes, ImportBytes - bytes)), () => CheckReconciliation(token), canonical);
-                var expected = canonical.GetBuffer().AsMemory(0, checked((int)canonical.Length));
-                parent.EnterSynchronous(RunId, () =>
+                foreach (var oid in objects)
                 {
                     CheckReconciliation(token);
-                    ImportLooseObject(oid, encoded, expected, ref bytes, token);
-                    CheckReconciliation(token); return true;
-                });
-            }
+                    var encoded = privateInventory.ReadForImport(oid,
+                        checked((int)Math.Min(ImportFileBytes, ImportBytes - bytes)),
+                        () => CheckReconciliation(token), ReadPrivateObject);
+                    bytes += encoded.Length;
+                    using var canonical = new MemoryStream();
+                    bytes += LooseGitObjectInventory.ValidateObject(oid, encoded,
+                        checked((int)Math.Min(ImportFileBytes, ImportBytes - bytes)), () => CheckReconciliation(token), canonical);
+                    var expected = canonical.GetBuffer().AsMemory(0, checked((int)canonical.Length));
+                    // A valid canonical body need not imply that the worker's
+                    // original compressed stream has no ignored trailing bytes.
+                    // Only Forge's fresh complete encoding may enter COMMON.
+                    var trustedEncoding = EncodeCanonical(expected,
+                        checked((int)Math.Min(ImportFileBytes, ImportBytes - bytes)), token);
+                    bytes += trustedEncoding.Length;
+                    ImportLooseObject(oid, trustedEncoding, expected, ref bytes, token);
+                }
+                CheckReconciliation(token); return true;
+            });
             RequireValidatedPrivateObjects(); CheckSameHead(head);
             await VerifyBaseAnchorAsync(token).ConfigureAwait(false);
             // Every graph proof deliberately uses COMMON only, never the worker
             // alternate. No successful overlay read can certify this transport.
             _ = await CommonGitAsync(token, "cat-file", "-e", candidate + "^{commit}").ConfigureAwait(false);
             _ = await CommonGitAsync(token, "merge-base", "--is-ancestor", baseline, candidate).ConfigureAwait(false);
-            _ = await CommonGitAsync(token, "fsck", "--connectivity-only", "--no-reflogs", "--no-dangling", candidate).ConfigureAwait(false);
+            _ = await CommonGitAsync(token, "fsck", "--full", "--strict", "--no-reflogs", "--no-dangling", candidate).ConfigureAwait(false);
             RequireValidatedPrivateObjects(); CheckSameHead(head);
             await VerifyBaseAnchorAsync(token).ConfigureAwait(false);
             await manager.CreateFreshCommonRefAsync(CommonDirectory, candidateRef, candidate, token).ConfigureAwait(false);
@@ -115,6 +136,34 @@ public sealed partial class WorktreeManager
         {
             if (!Read(Path.Combine(GitDirectory, "HEAD"), cleanup).AsSpan().SequenceEqual(expected))
                 throw new WorktreeBoundaryException("Private candidate HEAD changed during or after reconciliation.");
+        }
+
+        byte[] EncodeCanonical(ReadOnlyMemory<byte> canonical, int maximum, CancellationToken token)
+        {
+            if (maximum < 6) throw new WorktreeBoundaryException("Canonical recompression exceeds its remaining shared allowance.");
+            using var encoded = new BoundedCompressionBuffer(maximum);
+            using (var compressor = new ZLibStream(encoded, CompressionLevel.Fastest, leaveOpen: true))
+            {
+                for (var offset = 0; offset < canonical.Length;)
+                {
+                    CheckReconciliation(token); var count = Math.Min(65536, canonical.Length - offset);
+                    compressor.Write(canonical.Span.Slice(offset, count)); offset += count;
+                }
+                CheckReconciliation(token);
+            }
+            CheckReconciliation(token); return encoded.ToArray();
+        }
+
+        sealed class BoundedCompressionBuffer(int maximum) : MemoryStream
+        {
+            void Bound(int count)
+            {
+                if (count < 0 || count > maximum - Length)
+                    throw new WorktreeBoundaryException("Canonical compressed extent exceeds its finite allowance.");
+            }
+            public override void Write(byte[] buffer, int offset, int count) { Bound(count); base.Write(buffer, offset, count); }
+            public override void Write(ReadOnlySpan<byte> buffer) { Bound(buffer.Length); base.Write(buffer); }
+            public override void WriteByte(byte value) { Bound(1); base.WriteByte(value); }
         }
 
         void ImportLooseObject(string oid, byte[] encoded, ReadOnlyMemory<byte> canonical, ref long bytes, CancellationToken token)

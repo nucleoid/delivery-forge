@@ -55,9 +55,8 @@ public sealed partial class WorktreeManager
         actualOwnedGitInvocations = source.actualOwnedGitInvocations; _effectAdmission = admission; _effectRunId = runId;
         ownedGit = source.ownedGit;
         privateAdministrations = source.privateAdministrations;
-        lock (actualOwnedGitInvocations) privateAdministrationSelected = source.privateAdministrationSelected;
     }
-    sealed class InvocationCounter { internal long Value; internal bool ProvisioningStarted; }
+    sealed class InvocationCounter { internal long Value; internal bool ProvisioningStarted, PrivateAdministrationSelected; }
     InvocationCounter actualOwnedGitInvocations = new();
     public long ActualOwnedGitInvocations => Interlocked.Read(ref actualOwnedGitInvocations.Value);
     // Read-only same-original stopped-checkpoint path; never provisioning,
@@ -106,6 +105,7 @@ public sealed partial class WorktreeManager
         RejectParentOrNested(CanonicalPath(parentCheckout), CanonicalPath(resultDirectory));
         if (Directory.Exists(worktree) || File.Exists(worktree) || Directory.Exists(resultDirectory) || File.Exists(resultDirectory))
             throw new WorktreeBoundaryException("Unstarted cleanup refuses existing or ambiguous worktree/result paths; their absence alone is not closure proof.");
+        await RequireNoPrivateProvisioningAsync(parentCheckout, worktree, cancellationToken).ConfigureAwait(false);
         var registered = await GitAsync(parentCheckout, cancellationToken, "worktree", "list", "--porcelain", "-z").ConfigureAwait(false);
         var paths = registered.Split('\0').Where(item => item.StartsWith("worktree ", StringComparison.Ordinal)).Select(item => item[9..]).ToArray();
         if (paths.Length == 0 || paths.Any(path => !Path.IsPathFullyQualified(path)) ||
@@ -115,7 +115,12 @@ public sealed partial class WorktreeManager
 
     public async Task PrepareAsync(string parentCheckout, string destination, string baseCommit, CancellationToken cancellationToken = default)
     {
-        lock (actualOwnedGitInvocations) actualOwnedGitInvocations.ProvisioningStarted = true;
+        bool privateAdministrationSelected;
+        lock (actualOwnedGitInvocations)
+        {
+            actualOwnedGitInvocations.ProvisioningStarted = true;
+            privateAdministrationSelected = actualOwnedGitInvocations.PrivateAdministrationSelected;
+        }
         ValidateDestination(parentCheckout, destination);
         if (Directory.Exists(destination) && Directory.EnumerateFileSystemEntries(destination).Any())
             throw new WorktreeBoundaryException("Worker destination must not contain existing files.");

@@ -379,6 +379,8 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             {
                 startup!.SetStage(CodexStartupStage.PrivateObjectInitialization);
                 privateGit = actualGit.RequireOriginalBinding(actual.Worktree, original, actual.RunId);
+                if (!privateGit.HasPrivateAdministration)
+                    throw new WorktreeBoundaryException("Confined worker requires its original private Git administration before private-object initialization or native birth.");
                 await Keep(privateGit.EnablePrivateObjectWritesAsync(token)).WaitAsync(original.Remaining, token).ConfigureAwait(false);
                 original.Check();
             }
