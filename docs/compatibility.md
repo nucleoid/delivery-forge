@@ -157,7 +157,21 @@ refusal before Codex birth; a truncated prefix is never a complete inventory.
 Malformed, duplicate, empty or mixed-format OID inventories also refuse. This is
 an availability limit, not support for arbitrary repository sizes. The later
 loose-private inventory has separate existing limits of 4,096 entries, 16 MiB
-per file and 128 MiB total; these do not enlarge the base-OID capture allowance.
+per file and 128 MiB of encoded/private canonical and compared COMMON canonical
+bytes; these do not enlarge the base-OID capture allowance. Type-query output
+(up to 64 bytes per query), stderr capture and filesystem-operation overhead are
+separately bounded by their existing capture/profile limits, not this accumulator.
+
+The complete bounded private inventory admits at most 32 distinct base-object
+comparisons before the first COMMON query. Each comparison uses two native
+captures (type and body), hence at most 64 such captures per validation. This is
+a lower availability profile, not a larger resource allowance or support for
+4,096 duplicates. The same cumulative parent ledger and original WORK/cleanup
+endpoint can still refuse a smaller inventory. A pending or faulted validation
+attempt is never usable inventory; successful forward validation includes an
+explicit same-parent postcheck before publication. Ordinary async validation
+refusals conservatively retain the parent's existing uncertain state, even when
+no native comparison started; known native retirement does not clear it.
 
 Source and managed controls do not replace actual Linux worker-commit,
 confinement, protected-review and recovery acceptance. Current golden acceptance

@@ -111,6 +111,41 @@ public sealed class PrivateLooseGitObjectsTests
         Assert.Throws<WorktreeBoundaryException>(() => snapshot.Verify(() => { }));
     }
 
+    [Theory]
+    [InlineData(32)]
+    [InlineData(33)]
+    public async Task Complete_duplicate_preflight_refuses_excess_before_any_common_read(int count)
+    {
+        using var temporary = new TemporaryDirectory();
+        var bodies = new Dictionary<string, byte[]>(StringComparer.Ordinal);
+        for (var index = 0; index < count; index++)
+        {
+            var body = Encoding.UTF8.GetBytes("base-" + index);
+            var raw = Encoding.ASCII.GetBytes("blob " + body.Length + "\0").Concat(body).ToArray();
+            var oid = Convert.ToHexStringLower(SHA1.HashData(raw));
+            Write(temporary.Path, oid, Encode(raw)); bodies.Add(oid, body);
+        }
+        var calls = 0;
+        var actual = LooseGitObjectInventory.CaptureAsync(temporary.Path,
+            new HashSet<string>(bodies.Keys, StringComparer.Ordinal), () => { }, Read,
+            (oid, type, maximum, token) =>
+            {
+                calls++; Assert.Equal("blob", type); Assert.True(bodies[oid].Length <= maximum);
+                return Task.FromResult(bodies[oid]);
+            }, TestContext.Current.CancellationToken);
+        if (count == 33)
+        {
+            await Assert.ThrowsAsync<WorktreeBoundaryException>(() => actual);
+            Assert.Equal(0, calls);
+        }
+        else
+        {
+            var snapshot = await actual;
+            Assert.Equal(32, calls); Assert.Equal(32, snapshot.BaseDuplicateIds().Length);
+            snapshot.Verify(() => { });
+        }
+    }
+
     static LooseGitObjectInventory Capture(string root) => LooseGitObjectInventory.Capture(root,
         new HashSet<string>(StringComparer.Ordinal) { new string('a', 40) }, () => { }, Read);
     static byte[] Read(string path, int maximum)

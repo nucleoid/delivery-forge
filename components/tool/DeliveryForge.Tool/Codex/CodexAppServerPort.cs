@@ -572,9 +572,17 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         {
             // Only the retained actual writer can enter this phase. A prior
             // validation task is joined, including its failure, never replayed.
-            await Keep(privateGit.ValidatePrivateObjectsAfterRetirementAsync(CancellationToken.None, cleanup: true))
-                .WaitAsync(original.CleanupRemaining, CancellationToken.None).ConfigureAwait(false);
-            privateGit.RequireValidatedPrivateObjects(cleanup: true);
+            try
+            {
+                await Keep(privateGit.ValidatePrivateObjectsAfterRetirementAsync(CancellationToken.None, cleanup: true))
+                    .WaitAsync(original.CleanupRemaining, CancellationToken.None).ConfigureAwait(false);
+                privateGit.RequireValidatedPrivateObjects(cleanup: true);
+            }
+            catch (Exception validation)
+            {
+                if (interruptFailure is not null) throw new AggregateException("Codex private validation and interrupt failure after same-original retirement.", validation, interruptFailure);
+                throw;
+            }
         }
         return new(actual, action, nativeKnownClosed ? AgentActivityState.Quiescent : AgentActivityState.Unknown, nativeKnownClosed, "actual-private-original-app-server-retirement", "Interrupt response alone never proves quiescence; original root/Job/IO/disposition joined. InterruptFailure=" + interruptFailure?.GetType().FullName);
     }

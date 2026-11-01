@@ -465,7 +465,11 @@ public sealed class ProvisionedGitBindingTests
         using (var file = File.Create(duplicate))
         using (var compressor = new System.IO.Compression.ZLibStream(file, System.IO.Compression.CompressionLevel.NoCompression))
             compressor.Write(Encoding.UTF8.GetBytes("blob 9\0original\n"));
+        var nativeBeforeComparison = fixture.Manager.ActualOwnedGitInvocations;
+        var entriesBeforeComparison = fixture.Parent.Inner.EnteredCount;
         await binding.ValidatePrivateObjectsAfterRetirementAsync(fixture.Original.Token);
+        Assert.Equal(nativeBeforeComparison + 2, fixture.Manager.ActualOwnedGitInvocations);
+        Assert.Equal(entriesBeforeComparison + 3, fixture.Parent.Inner.EnteredCount); // One validation and two actual COMMON captures.
         Assert.True(binding.IsValidatedBaseDuplicate(baseBlob));
         var candidate = await fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token);
         Assert.True(candidate.IsClean); Assert.NotEqual(baseHead, candidate.HeadCommit);
@@ -496,8 +500,10 @@ public sealed class ProvisionedGitBindingTests
         Assert.False(fixture.Original.HasExplicitUnknown);
     }
 
-    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
-    public async Task Cleanup_joins_the_published_pending_validation_and_keeps_its_original_work_failure()
+    [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Cleanup_joins_the_published_pending_validation_and_keeps_its_original_work_failure(bool corruptMarker)
     {
         using var fixture = await Fixture.CreateAsync();
         var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
@@ -519,15 +525,25 @@ public sealed class ProvisionedGitBindingTests
         {
             await fixture.Parent.CompletedCaptureHeld.Task.WaitAsync(fixture.Original.Remaining, fixture.Original.Token);
             Assert.False(actual.IsCompleted);
+            if (corruptMarker)
+            {
+                // Preserve Git's existing Hidden marker attributes on Windows.
+                using var metadata = new FileStream(Path.Combine(fixture.Worker, ".git"), FileMode.Open, FileAccess.Write, FileShare.Read);
+                metadata.SetLength(0); metadata.Write(Encoding.UTF8.GetBytes("gitdir: " + fixture.Foreign + "\n"));
+            }
+            else fixture.Original.BeginFailureCleanup(); // The containing Stop already entered SAME cleanup.
             cleanup = binding.ValidatePrivateObjectsAfterRetirementAsync(CancellationToken.None, cleanup: true);
             Assert.Same(actual, cleanup); Assert.Same(actual, binding.PrivateObjectValidation);
         }
         finally { fixture.Parent.HoldCompletedCapture.TrySetResult(true); }
         var failure = await Record.ExceptionAsync(() => actual);
-        Assert.IsType<TimeoutException>(failure); // Cleanup entered the same original and revoked WORK.
+        if (corruptMarker) Assert.IsType<WorktreeBoundaryException>(failure); // Original WORK metadata postcheck.
+        else Assert.IsType<TimeoutException>(failure);
         Assert.Same(failure, await Record.ExceptionAsync(() => cleanup!));
         Assert.Same(actual, binding.ValidatePrivateObjectsAfterRetirementAsync(CancellationToken.None, cleanup: true));
         Assert.Equal(before + 1, fixture.Manager.ActualOwnedGitInvocations); // No body query, retry or second attempt.
+        Assert.Throws<WorktreeBoundaryException>(() => binding.RequireValidatedPrivateObjects(cleanup: true));
+        if (corruptMarker) Assert.Equal("gitdir: " + fixture.Foreign + "\n", File.ReadAllText(Path.Combine(fixture.Worker, ".git")));
         Assert.False(fixture.Original.HasExplicitUnknown);
     }
 
@@ -556,6 +572,9 @@ public sealed class ProvisionedGitBindingTests
         }
         var before = fixture.Manager.ActualOwnedGitInvocations;
         await Assert.ThrowsAsync<WorktreeBoundaryException>(() => binding.ValidatePrivateObjectsAfterRetirementAsync(fixture.Original.Token));
+        await Task.WhenAll(fixture.Parent.Inner.OriginalObservers).WaitAsync(fixture.Original.Remaining, TestContext.Current.CancellationToken);
+        Assert.False(fixture.Parent.Inner.AllKnownSettled); // Existing conservative async refusal policy, even before native birth.
+        Assert.False(fixture.Parent.Current);
         await Assert.ThrowsAsync<CoordinationUncertainException>(() => fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token));
         Assert.Equal(before, fixture.Manager.ActualOwnedGitInvocations);
         Assert.False(fixture.Original.HasExplicitUnknown);
@@ -674,6 +693,83 @@ public sealed class ProvisionedGitBindingTests
         Assert.False(actual.HasUnknownIo); Assert.False(fixture.Original.HasExplicitUnknown);
     }
 
+    [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Actual_Control_preserves_validation_and_prior_interrupt_failures_after_known_retirement(bool interruptFails)
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        await binding.EnablePrivateObjectWritesAsync(fixture.Original.Token);
+        var writer = fixture.OpenOverlayGit(binding, "--version");
+        binding.AttachPrivateObjectWriter(writer); await DrainAndRetire(writer, fixture.Original);
+        var retirement = writer.OriginalRetirementTask;
+        // Partial-state fixture only: real writer/retirement and actual Control,
+        // with the existing reflection convention, not full startup acceptance.
+        var port = new DeliveryForge.Tool.Codex.CodexAppServerPort(
+            new(fixture.GitImage, 1, new string('a', 64), "control-fixture"), fixture.InitialManager,
+            KnownAgentProfiles.CodexCli("control-fixture"));
+        port.BindOriginal(fixture.Original);
+        System.Reflection.FieldInfo Field(string name) => typeof(DeliveryForge.Tool.Codex.CodexAppServerPort)
+            .GetField(name, System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+            ?? throw new IOException("Existing Control fixture field missing.");
+        var actualBinding = new AgentRunBinding("codex.cli", "control-fixture", "owned", "fixture-request", "fixture-run", "fixture-task");
+        Field("binding").SetValue(port, actualBinding); Field("process").SetValue(port, writer);
+        Field("privateGit").SetValue(port, binding);
+        var interrupt = new IOException("Exact retained interrupt failure.");
+        if (interruptFails)
+        {
+            Field("turnId").SetValue(port, "fixture-turn");
+            ((DeliveryForge.Tool.Codex.CodexPendingReplies)Field("pending").GetValue(port)!).Fail(interrupt);
+        }
+        Directory.CreateDirectory(Path.Combine(binding.ObjectsPath, "pack"));
+        var validation = binding.ValidatePrivateObjectsAfterRetirementAsync(fixture.Original.Token);
+        var validationFailure = await Assert.ThrowsAsync<WorktreeBoundaryException>(() => validation);
+        var before = fixture.Manager.ActualOwnedGitInvocations;
+        var failure = await Record.ExceptionAsync(() => port.ControlAsync(actualBinding, AgentControlAction.Stop,
+            fixture.Original.Remaining, TestContext.Current.CancellationToken));
+        if (interruptFails)
+        {
+            var combined = Assert.IsType<AggregateException>(failure);
+            Assert.Equal(2, combined.InnerExceptions.Count);
+            Assert.Same(validationFailure, combined.InnerExceptions[0]); Assert.Same(interrupt, combined.InnerExceptions[1]);
+        }
+        else Assert.Same(validationFailure, failure);
+        Assert.Same(retirement, writer.OriginalRetirementTask); Assert.Same(validation, binding.PrivateObjectValidation);
+        Assert.Contains(validation, port.OriginalTasks);
+        Assert.Equal(before, fixture.Manager.ActualOwnedGitInvocations);
+        Assert.True(Directory.Exists(Path.Combine(binding.ObjectsPath, "pack")));
+        Assert.True((await retirement!.WaitAsync(fixture.Original.CleanupRemaining, TestContext.Current.CancellationToken)).KnownClosed);
+        Assert.False(writer.HasUnknownIo); Assert.False(fixture.Original.HasExplicitUnknown);
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Pending_validation_is_not_authority_and_revoked_return_never_publishes_inventory()
+    {
+        using var fixture = await Fixture.CreateAsync();
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        await binding.EnablePrivateObjectWritesAsync(fixture.Original.Token);
+        var writer = fixture.OpenOverlayGit(binding, "--version");
+        binding.AttachPrivateObjectWriter(writer); await DrainAndRetire(writer, fixture.Original);
+        fixture.Parent.HoldCompletedValidation = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        var before = fixture.Manager.ActualOwnedGitInvocations;
+        var actual = binding.ValidatePrivateObjectsAfterRetirementAsync(fixture.Original.Token);
+        try
+        {
+            await fixture.Parent.CompletedValidationHeld.Task.WaitAsync(fixture.Original.Remaining, TestContext.Current.CancellationToken);
+            Assert.False(actual.IsCompleted);
+            Assert.Throws<WorktreeBoundaryException>(binding.RequireValidatedPrivateObjects);
+            fixture.Parent.Current = false;
+        }
+        finally { fixture.Parent.HoldCompletedValidation.TrySetResult(true); }
+        var failure = await Assert.ThrowsAsync<CoordinationUncertainException>(() => actual);
+        var cleanup = binding.ValidatePrivateObjectsAfterRetirementAsync(CancellationToken.None, cleanup: true);
+        Assert.Same(actual, cleanup); Assert.Same(failure, await Record.ExceptionAsync(() => cleanup));
+        Assert.Throws<WorktreeBoundaryException>(() => binding.RequireValidatedPrivateObjects(cleanup: true));
+        Assert.Equal(before, fixture.Manager.ActualOwnedGitInvocations);
+        Assert.False(fixture.Original.HasExplicitUnknown);
+    }
+
     static string[] ObjectBodies(string root) => Directory.GetFiles(root, "*", SearchOption.AllDirectories)
         .Select(path => Path.GetRelativePath(root, path) + ":" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))))
         .OrderBy(value => value, StringComparer.Ordinal).ToArray();
@@ -763,6 +859,8 @@ public sealed class ProvisionedGitBindingTests
         internal bool ObserveNativeReturn;
         internal Task? ObservedNativeTask;
         internal TaskCompletionSource<bool>? HoldCompletedCapture;
+        internal TaskCompletionSource<bool>? HoldCompletedValidation;
+        internal readonly TaskCompletionSource<bool> CompletedValidationHeld = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource<bool> CompletedCaptureHeld = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal WriterLease? ActualWriter;
         internal PostBirthParent() => Inner = new(new object(), run => Current && run == "owned", _ => Current = false);
@@ -784,6 +882,14 @@ public sealed class ProvisionedGitBindingTests
                 ObservedNativeTask = returned;
                 return returned;
             });
+            async Task<T> HoldValidation(Task<T> value)
+            {
+                var result = await value.ConfigureAwait(false);
+                CompletedValidationHeld.TrySetResult(true);
+                await HoldCompletedValidation!.Task.WaitAsync(TestContext.Current.CancellationToken).ConfigureAwait(false);
+                return result;
+            }
+            if (HoldCompletedValidation is not null && typeof(T) == typeof(LooseGitObjectInventory)) return HoldValidation(actual);
             return selectedRelease is not null && typeof(T) == typeof(BoundedCommandCaptureResult) ? Hold(actual) : actual;
         }
         public T EnterSynchronous<T>(string runId, Func<T> invoke)

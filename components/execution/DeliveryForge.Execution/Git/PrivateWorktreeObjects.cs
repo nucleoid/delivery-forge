@@ -101,6 +101,8 @@ public sealed partial class WorktreeManager
         internal Task ValidatePrivateObjectsAfterRetirementAsync(CancellationToken token, bool cleanup = false)
         {
             RequireRetained();
+            // Joining retained work grants no inventory or Git authority.
+            if (cleanup && Volatile.Read(ref privateObjectValidation) is { } retained) return retained.Task;
             Phase(cleanup); VerifyMetadata(cleanup); RequirePrivateWriterClosed();
             var prior = Volatile.Read(ref privateObjectValidation);
             if (prior is not null)
@@ -127,20 +129,23 @@ public sealed partial class WorktreeManager
         {
             try
             {
-                Task<bool> Begin()
+                Task<LooseGitObjectInventory> Begin()
                 {
                     Phase(cleanup); VerifyMetadata(cleanup); RequirePrivateWriterClosed();
                     return ValidateCoreAsync(token, cleanup);
                 }
-                // Completion includes the original parent admission postcheck.
-                // Cleanup retains the same original endpoint, with no forward grant.
-                await (cleanup ? Begin() : parent.EnterAsync(RunId, Begin)).ConfigureAwait(false);
+                // Async admission retains the actual Task but has no postcheck.
+                // Ordinary async refusals conservatively retain parent uncertainty.
+                var snapshot = await (cleanup ? Begin() : parent.EnterAsync(RunId, Begin)).ConfigureAwait(false);
+                Phase(cleanup); VerifyMetadata(cleanup); RequirePrivateWriterClosed();
+                if (!cleanup) parent.CheckCurrent(RunId);
+                privateInventory = snapshot;
                 attempt.TrySetResult(true);
             }
             catch (Exception failure) { attempt.TrySetException(failure); }
         }
 
-        async Task<bool> ValidateCoreAsync(CancellationToken token, bool cleanup)
+        async Task<LooseGitObjectInventory> ValidateCoreAsync(CancellationToken token, bool cleanup)
         {
             // Never execute native Git while the admission factory's gate is held.
             await Task.Yield();
@@ -150,8 +155,7 @@ public sealed partial class WorktreeManager
                 (path, maximum) => ReadPrivateObject(path, maximum, cleanup),
                 (oid, type, maximum, cancellation) => ReadCommonObjectAsync(oid, type, maximum, cancellation, cleanup),
                 token).ConfigureAwait(false);
-            CheckPhase(); privateInventory = snapshot;
-            return true;
+            CheckPhase(); return snapshot;
         }
 
         internal bool IsValidatedBaseDuplicate(string oid)
@@ -225,7 +229,12 @@ public sealed partial class WorktreeManager
         internal void RequireValidatedPrivateObjects(bool cleanup)
         {
             if (!HasPrivateObjects) return;
-            if (privateObjectWriter is not null) RequirePrivateWriterClosed();
+            if (privateObjectWriter is not null)
+            {
+                RequirePrivateWriterClosed();
+                if (Volatile.Read(ref privateObjectValidation)?.Task.IsCompletedSuccessfully != true)
+                    throw new WorktreeBoundaryException("Private Git validation has not completed successfully.");
+            }
             if (privateInventory is null) throw new WorktreeBoundaryException("Private Git objects have not passed original post-retirement validation.");
             privateInventory.Verify(() => Phase(cleanup));
         }
@@ -294,6 +303,7 @@ public sealed partial class WorktreeManager
 internal sealed class LooseGitObjectInventory
 {
     const int MaximumEntries = 4096, MaximumFileBytes = 16 * 1024 * 1024;
+    internal const int MaximumBaseComparisons = 32;
     const long MaximumBytes = 128L * 1024 * 1024;
     readonly string root;
     readonly Dictionary<string, Epoch> epochs;
@@ -329,6 +339,12 @@ internal sealed class LooseGitObjectInventory
         Func<string, string, int, CancellationToken, Task<byte[]>> readCommon, CancellationToken token)
     {
         var epochs = Inventory(root, check); long bytes = 0;
+        // Refuse excess fan-out from the complete bounded inventory before any
+        // COMMON callback/native birth. Each comparison uses two retained captures.
+        var comparisons = epochs.Count(row => !row.Value.Directory && protectedObjects.Contains(
+            Path.GetRelativePath(root, row.Key).Replace("/", "", StringComparison.Ordinal).Replace("\\", "", StringComparison.Ordinal)));
+        if (comparisons > MaximumBaseComparisons)
+            throw new WorktreeBoundaryException("Private base duplicates exceed the32-comparison profile.");
         var result = new LooseGitObjectInventory(root, epochs); var format = protectedObjects.First().Length;
         foreach (var (path, epoch) in epochs)
         {
