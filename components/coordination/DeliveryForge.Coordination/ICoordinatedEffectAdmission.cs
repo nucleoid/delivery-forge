@@ -1,6 +1,8 @@
 namespace DeliveryForge.Coordination;
 
-/// <summary>Original parent-owned admission. Implementations enroll the actual invocation under the same revocation gate.
+/// <summary>Original parent-owned admission. Implementations reserve each original obligation under the same revocation gate.
+/// Invocation runs outside the gate after a currentness recheck; admitted prefixes may overlap.
+/// This is cooperative admission, not an atomic revocation fence across process creation.
 /// Saved DATA cannot implement ownership; the bound parent retains the original task and uncertain invocation.</summary>
 public interface ICoordinatedEffectAdmission
 {

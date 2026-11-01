@@ -200,7 +200,64 @@ public sealed class ParentEffectAdmissionTests
         if (cancel) Assert.IsAssignableFrom<OperationCanceledException>(error);
         else Assert.IsType<CoordinationUncertainException>(error);
         Assert.Equal(0, calls); Assert.True(revoked); Assert.Equal(1, admission.EnteredCount);
-        Assert.False(admission.AllKnownSettled); // The retained reservation is never erased.
+        Assert.True(admission.AllKnownSettled); // The retained refusal is settled, not erased.
+        Assert.Throws<CoordinationUncertainException>(() => { _ = admission.EnterAsync("owned", () => { calls++; return Task.FromResult(7); }); });
+        Assert.Equal(0, calls); Assert.Equal(1, admission.EnteredCount);
+        Assert.False(original.HasExplicitUnknown);
+    }
+
+    [Fact(Timeout = 15000)]
+    public async Task Renewal_failure_after_async_reservation_settles_without_entering_callback()
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var gate = new object(); var handoff = new ParentRenewalHandoff(gate, original);
+        var began = new TaskCompletionSource<ParentRenewalHandoff.Pending>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var checks = 0; var calls = 0; var current = true; var revoked = false;
+        void Revoke(Exception error) { lock (gate) { revoked = true; current = false; handoff.Revoke(error); } }
+        var admission = new ParentEffectAdmission(gate, _ =>
+        {
+            if (++checks == 1)
+            {
+                var started = handoff.Begin("owned", handoff.Elapsed + TimeSpan.FromSeconds(10));
+                current = false; began.SetResult(started); return true;
+            }
+            return current && ParentCoordinationHost.OriginalCanAdmitEffects(original);
+        }, Revoke, handoff, original);
+        var waiting = Task.Run(() =>
+        {
+            _ = admission.EnterAsync("owned", () => { Interlocked.Increment(ref calls); return Task.FromResult(7); });
+        }, TestContext.Current.CancellationToken);
+        var pending = await began.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        try
+        {
+            await WaitForWaiters(pending, 1, waiting);
+            Assert.Equal(1, admission.EnteredCount); Assert.False(admission.AllKnownSettled); Assert.Equal(0, calls);
+            Revoke(new IOException("Fixed original renewal failure."));
+            await Assert.ThrowsAsync<IOException>(() => waiting.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken));
+            await Task.WhenAll(admission.OriginalObservers).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.True(revoked); Assert.True(admission.AllKnownSettled); Assert.Equal(0, calls);
+            Assert.False(original.HasExplicitUnknown);
+            Assert.Throws<CoordinationUncertainException>(() => { _ = admission.EnterAsync("owned", () => { calls++; return Task.FromResult(7); }); });
+            Assert.Equal(0, calls); Assert.Equal(1, admission.EnteredCount);
+        }
+        finally
+        {
+            Revoke(new IOException("Fixture original closed."));
+            try { await waiting.WaitAsync(TimeSpan.FromSeconds(5), CancellationToken.None); }
+            catch (IOException) { }
+        }
+    }
+
+    [Fact]
+    public void Reentrant_pending_currentness_refuses_without_stranding_the_original_installer()
+    {
+        using var fixture = new RenewalFixture(TestContext.Current.CancellationToken);
+        var pending = fixture.Begin();
+        lock (fixture.Gate)
+            Assert.Throws<CoordinationUncertainException>(() => fixture.Admission.CheckCurrent("owned"));
+        Assert.True(fixture.Revoked); Assert.Equal(0, pending.WaitingCount);
+        Assert.True(pending.Settlement.Task.IsFaulted); Assert.True(fixture.Admission.AllKnownSettled);
+        Assert.Throws<CoordinationUncertainException>(() => fixture.Install(pending));
     }
 
     [Fact]

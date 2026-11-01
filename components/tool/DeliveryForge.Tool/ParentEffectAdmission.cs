@@ -129,11 +129,13 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
             }
             WaitForRenewal(pending);
         }
+        var invoked = false;
         try
         {
             // Admission is cooperative: recheck before invocation; later revocation
             // cannot erase this retained original or its actual returned Task.
             CheckCurrent(runId);
+            invoked = true;
             var actual = invoke();
             lock (originalGate)
             {
@@ -143,6 +145,24 @@ internal sealed class ParentEffectAdmission(object originalGate, Func<string, bo
             }
             return actual;
         }
-        catch (Exception error) { lock (originalGate) { row.Failure = error; retainedUncertain = true; revoke(error); } throw; }
+        catch (Exception error)
+        {
+            lock (originalGate)
+            {
+                row.Failure = error;
+                if (!invoked)
+                {
+                    // This refusal preceded the callback. Retain the failed reservation
+                    // as settled, as EnterSynchronous does; no external effect was entered.
+                    var refused = Task.FromException<T>(error);
+                    row.Task = refused; row.Returned = true; row.Synchronous = true;
+                    row.Observation = refused.ContinueWith(_ => { lock (originalGate) ObserveReturnedFailures(); }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                    _ = refused.Exception;
+                }
+                else retainedUncertain = true;
+                revoke(error);
+            }
+            throw;
+        }
     }
 }
