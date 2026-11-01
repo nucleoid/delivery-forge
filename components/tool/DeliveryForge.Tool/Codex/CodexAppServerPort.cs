@@ -80,7 +80,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         if (acceptedProfile.Capabilities is null || acceptedProfile.Capabilities.Count is < 1 or > 6 || acceptedProfile.Capabilities.Any(row => row is null) || string.IsNullOrWhiteSpace(selection.Version) || selection.Version.Length > 256) throw new ToolUsageException("Finite complete actual native version/profile required BEFORE capability snapshot.");
         if (acceptedProfile.AdapterId != "codex.cli" || acceptedProfile.AdapterVersion != selection.Version || acceptedProfile.Capabilities.Any(x => (x.Capability is AgentCapability.Pause or AgentCapability.Resume) && x.Status == AgentCapabilityStatus.Supported)) throw new ToolUsageException("Stable app-server has interrupt, not same-turn pause/resume; exact accepted Codex version required.");
         this.selection = selection; this.actualGit = actualGit; Profile = acceptedProfile with { Capabilities = Array.AsReadOnly(acceptedProfile.Capabilities.ToArray()) };
-        if (UsesLinuxWorkspaceWrite) actualGit.SelectPrivateAdministrationForConfinedWorker();
+        if (linuxScope?.RestrictiveChildPolicy == "nnp-user1000-ancestor-v3" && UsesLinuxWorkspaceWrite) actualGit.SelectPrivateAdministrationForConfinedWorker();
     }
     internal static int RequireLeafCounterPhase(int previous, string phase) => (previous, phase) switch
     {
