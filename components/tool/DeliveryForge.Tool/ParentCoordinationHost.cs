@@ -295,13 +295,20 @@ public sealed class ParentCoordinationHost : ICoordinatedSynchronousEffectAdmiss
         {
             failure ??= error; revoked = true;
             renewalHandoff.Revoke(error);
-            // Admission closes before any stop task can run. Never discard an entered uncertain original.
+            // Admission closes and retains the stop before its body can run.
+            // Revoke can be called with this same monitor already held: never
+            // enter reviewer/native cleanup synchronously under that caller.
             if (opened && !closed && bridge is not null && owner is not null && lossStop is null)
-                lossStop = StopOwnedAfterRevocation(bridge, parentRunId!);
+            {
+                var start = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                lossStop = StopOwnedAfterRevocation(bridge, parentRunId!, start.Task);
+                start.SetResult();
+            }
         }
     }
-    async Task StopOwnedAfterRevocation(OwnerHostBridge actualBridge, string runId)
+    async Task StopOwnedAfterRevocation(OwnerHostBridge actualBridge, string runId, Task start)
     {
+        await start.ConfigureAwait(false);
         try { var result = await actualBridge.StopRetainedAsync(runId).ConfigureAwait(false); lock (gate) fixtureStopResult = result; }
         catch (Exception error) { lock (gate) failure ??= error; original.RetainUnknown(); }
     }
