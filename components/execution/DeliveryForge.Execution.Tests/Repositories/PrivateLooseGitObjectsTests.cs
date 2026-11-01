@@ -8,7 +8,7 @@ namespace DeliveryForge.Execution.Tests.Repositories;
 
 public sealed class PrivateLooseGitObjectsTests
 {
-    [Fact(Timeout = 30000)]
+    [Fact]
     public void Same_held_private_object_refuses_a_real_second_hard_link()
     {
         var root = Path.Combine(Path.GetTempPath(), "forge-private-object-links-" + Guid.NewGuid().ToString("N"));
@@ -40,7 +40,10 @@ public sealed class PrivateLooseGitObjectsTests
         // or disposed-descriptor reuse can manufacture this link-count result.
         Assert.False(PrivateObjectLinks.HasOneLink(held));
         if (OperatingSystem.IsLinux())
-            Assert.Throws<WorktreeBoundaryException>(() => PrivateObjectLinks.Identity(path, directory: false));
+        {
+            var rejected = Assert.Throws<WorktreeBoundaryException>(() => PrivateObjectLinks.Identity(path, directory: false));
+            Assert.Equal("Private object namespace contains a redirected type or hard-linked file.", rejected.Message);
+        }
         // Windows path Identity is deliberately a no-op; its held native query
         // above is the production hard-link guard. Retain both names on all outcomes.
     }
