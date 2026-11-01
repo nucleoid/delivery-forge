@@ -1273,7 +1273,7 @@ public sealed class ProvisionedGitBindingTests
         Assert.True(capture.Command.LifecycleDiagnostics?.OwnedTree is { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 });
         Assert.True((File.GetAttributes(reused) & FileAttributes.ReparsePoint) != 0);
         var target = Assert.IsAssignableFrom<FileSystemInfo>(Directory.ResolveLinkTarget(reused, returnFinalTarget: true));
-        Assert.True(string.Equals(Path.GetFullPath(binding.GitDirectory), Path.GetFullPath(target.FullName), StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(Path.GetFullPath(binding.GitDirectory), Path.GetFullPath(target.FullName), ignoreCase: true);
         var before = fixture.Manager.ActualOwnedGitInvocations;
         var error = Assert.Throws<WorktreeBoundaryException>(() => binding.Check());
         Assert.Equal("Private admin directory cannot be a reparse point or symbolic link.", error.Message);
