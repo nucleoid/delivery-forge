@@ -1000,7 +1000,7 @@ public sealed class ProvisionedGitBindingTests
     }
 
     [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
-    [InlineData("ident", "missingEmail")]
+    [InlineData("ident", "badName")]
     [InlineData("gitmodules", "gitmodulesUrl")]
     public async Task Hash_valid_private_semantic_errors_refuse_before_any_common_import_or_candidate_ref(string error, string diagnostic)
     {
