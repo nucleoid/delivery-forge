@@ -13,6 +13,8 @@ public sealed partial class WorktreeManager
         OwnedDuplexProcess? privateObjectWriter;
         HashSet<string>? baseObjectIds;
         LooseGitObjectInventory? privateInventory;
+        TaskCompletionSource<bool>? privateObjectValidation;
+        internal Task? PrivateObjectValidation => Volatile.Read(ref privateObjectValidation)?.Task;
         internal bool HasPrivateObjects { get; private set; }
 
         // Selected native route only. Ordinary provisioning, Windows adapters and
@@ -96,36 +98,145 @@ public sealed partial class WorktreeManager
                 throw new WorktreeBoundaryException("Actual original private-object writer is not known closed.");
         }
 
-        internal void ValidatePrivateObjectsAfterRetirement()
+        internal Task ValidatePrivateObjectsAfterRetirementAsync(CancellationToken token, bool cleanup = false)
         {
-            parent.EnterSynchronous(RunId, () =>
+            RequireRetained();
+            Phase(cleanup); VerifyMetadata(cleanup); RequirePrivateWriterClosed();
+            var prior = Volatile.Read(ref privateObjectValidation);
+            if (prior is not null)
             {
-                Check();
-                if (!HasPrivateObjects || baseObjectIds is null || privateInventory is not null)
-                    throw new WorktreeBoundaryException("Private object validation cannot adopt or replay.");
-                RequirePrivateWriterClosed();
-                // No caller-supplied quiescence bool or retirement DATA can enter
-                // this phase. The actual retained native owner is the boundary.
-                privateInventory = LooseGitObjectInventory.Capture(ObjectsPath, baseObjectIds, () => Phase(false), ReadPrivateObject);
-                RequirePrivateWriterClosed();
-                return true;
-            });
+                if (cleanup) return prior.Task;
+                throw new WorktreeBoundaryException("Private object validation cannot replay its original attempt.");
+            }
+            if (!HasPrivateObjects || baseObjectIds is null || privateInventory is not null)
+                throw new WorktreeBoundaryException("Private object validation cannot adopt or replay.");
+            var attempt = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            prior = Interlocked.CompareExchange(ref privateObjectValidation, attempt, null);
+            if (prior is not null)
+            {
+                if (cleanup) return prior.Task;
+                throw new WorktreeBoundaryException("Private object validation cannot replay its original attempt.");
+            }
+            // Publish the joinable task BEFORE starting its body. There is no
+            // started-without-task interval and no private gate/parent-gate order.
+            _ = CompleteValidationAttemptAsync(attempt, token, cleanup);
+            return attempt.Task;
         }
 
-        internal void RequireValidatedPrivateObjects()
+        async Task CompleteValidationAttemptAsync(TaskCompletionSource<bool> attempt, CancellationToken token, bool cleanup)
+        {
+            try
+            {
+                Task<bool> Begin()
+                {
+                    Phase(cleanup); VerifyMetadata(cleanup); RequirePrivateWriterClosed();
+                    return ValidateCoreAsync(token, cleanup);
+                }
+                // Completion includes the original parent admission postcheck.
+                // Cleanup retains the same original endpoint, with no forward grant.
+                await (cleanup ? Begin() : parent.EnterAsync(RunId, Begin)).ConfigureAwait(false);
+                attempt.TrySetResult(true);
+            }
+            catch (Exception failure) { attempt.TrySetException(failure); }
+        }
+
+        async Task<bool> ValidateCoreAsync(CancellationToken token, bool cleanup)
+        {
+            // Never execute native Git while the admission factory's gate is held.
+            await Task.Yield();
+            void CheckPhase() { Phase(cleanup); VerifyMetadata(cleanup); RequirePrivateWriterClosed(); }
+            CheckPhase();
+            var snapshot = await LooseGitObjectInventory.CaptureAsync(ObjectsPath, baseObjectIds!, CheckPhase,
+                (path, maximum) => ReadPrivateObject(path, maximum, cleanup),
+                (oid, type, maximum, cancellation) => ReadCommonObjectAsync(oid, type, maximum, cancellation, cleanup),
+                token).ConfigureAwait(false);
+            CheckPhase(); privateInventory = snapshot;
+            return true;
+        }
+
+        internal bool IsValidatedBaseDuplicate(string oid)
+        {
+            RequireValidatedPrivateObjects();
+            return privateInventory!.IsBaseDuplicate(oid);
+        }
+
+        internal string[] CaptureValidatedBaseDuplicateIds()
+        {
+            RequireValidatedPrivateObjects();
+            return privateInventory!.BaseDuplicateIds();
+        }
+
+        async Task<byte[]> ReadCommonObjectAsync(string oid, string type, int maximum, CancellationToken token, bool cleanup)
+        {
+            if (baseObjectIds is null || !baseObjectIds.Contains(oid) || type is not ("blob" or "tree" or "commit" or "tag") || maximum is < 0 or > 16777216)
+                throw new WorktreeBoundaryException("Only a captured base object may be compared with the private duplicate.");
+            var executor = manager._originalExecutor ?? throw new WorktreeBoundaryException("Actual original Git executor is absent.");
+            var nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+            var environment = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
+                .Where(row => !((string)row.Key).StartsWith("GIT_", StringComparison.OrdinalIgnoreCase))
+                .ToDictionary(row => (string)row.Key, row => row.Value?.ToString() ?? "", OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            environment["GIT_DIR"] = CommonDirectory; environment["GIT_COMMON_DIR"] = CommonDirectory;
+            environment["GIT_OBJECT_DIRECTORY"] = CommonObjectsPath; environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "";
+            environment["GIT_CONFIG_NOSYSTEM"] = "1"; environment["GIT_CONFIG_GLOBAL"] = nullDevice; environment["GIT_CONFIG_SYSTEM"] = nullDevice;
+            environment["GIT_NO_REPLACE_OBJECTS"] = "1"; environment["GIT_GRAFT_FILE"] = nullDevice;
+            environment["GIT_NO_LAZY_FETCH"] = "1"; environment["GIT_TERMINAL_PROMPT"] = "0"; environment["GIT_OPTIONAL_LOCKS"] = "0";
+            environment["LC_ALL"] = "C"; environment["LANG"] = "C";
+            async Task<byte[]> Read(string argument, int bound)
+            {
+                void CheckPhase()
+                {
+                    Phase(cleanup); VerifyMetadata(cleanup); RequirePrivateWriterClosed(); RejectSymlinkAncestors(CommonObjectsPath);
+                    if (Path.Exists(Path.Combine(CommonObjectsPath, "info", "alternates")) || Path.Exists(Path.Combine(CommonObjectsPath, "info", "http-alternates")))
+                        throw new WorktreeBoundaryException("Common object comparison cannot route to another namespace.");
+                }
+                var invocation = new CommandInvocation(manager._gitExecutable,
+                    ["--no-optional-locks", "-c", "core.hooksPath=" + nullDevice, "-c", "core.fsmonitor=false", "cat-file", argument, oid],
+                    Worktree, environment) { EnvironmentIsComplete = true };
+                Task<BoundedCommandCaptureResult> Birth()
+                {
+                    CheckPhase(); token.ThrowIfCancellationRequested();
+                    Interlocked.Increment(ref manager.actualOwnedGitInvocations.Value);
+                    IOwnedDuplexBudget phase = cleanup ? new OwnedCleanupPhaseBudget(original) : new OwnedWorkPhaseBudget(original);
+                    return executor.ExecuteBoundedCaptureAsync(invocation, TimeSpan.FromSeconds(30), Math.Max(1, bound), token, phase);
+                }
+                var capture = await (cleanup ? Birth() : parent.EnterAsync(RunId, Birth)).ConfigureAwait(false);
+                await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+                var command = capture.Command; var facts = command.LifecycleDiagnostics;
+                if (capture.CaptureBoundExceeded || capture.StandardErrorBytes.Length != 0 || command.ExitCode != 0 || command.TimedOut || command.Cancelled || !command.OwnedProcessQuiescent ||
+                    !capture.RootExitObserved || !capture.StandardOutputDrainCompleted || !capture.StandardErrorDrainCompleted || facts?.NativeFailure is not null ||
+                    facts?.OwnedTree is not { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 } ||
+                    OperatingSystem.IsLinux() && capture.OwnershipKind != BoundedCaptureOwnershipKind.LinuxCreationOwnedScope)
+                    throw new WorktreeBoundaryException("Original common-object comparison did not close successfully.");
+                CheckPhase();
+                if (capture.StandardOutputBytes.Length > bound) throw new WorktreeBoundaryException("Common object exceeds its remaining shared allowance.");
+                return capture.StandardOutputBytes;
+            }
+            // Keep arbitrary object bodies as bytes. The first fixed query proves
+            // the real common type; cat-file's typed form does not apply filters.
+            var actualType = await Read("-t", 64).ConfigureAwait(false);
+            if (!actualType.AsSpan().SequenceEqual(Encoding.ASCII.GetBytes(type + "\n")))
+                throw new WorktreeBoundaryException("Private and common canonical object types differ.");
+            return await Read(type, maximum).ConfigureAwait(false);
+        }
+
+        internal void RequireValidatedPrivateObjects() => RequireValidatedPrivateObjects(cleanup: false);
+
+        internal void RequireValidatedPrivateObjects(bool cleanup)
         {
             if (!HasPrivateObjects) return;
             if (privateObjectWriter is not null) RequirePrivateWriterClosed();
             if (privateInventory is null) throw new WorktreeBoundaryException("Private Git objects have not passed original post-retirement validation.");
-            privateInventory.Verify(() => Phase(false));
+            privateInventory.Verify(() => Phase(cleanup));
         }
 
-        byte[] ReadPrivateObject(string path, int maximum)
+        byte[] ReadPrivateObject(string path, int maximum) => ReadPrivateObject(path, maximum, false);
+
+        byte[] ReadPrivateObject(string path, int maximum, bool cleanup)
         {
             FileStream? file = null; byte[]? result = null; Exception? primary = null, close = null;
             try
             {
-                Phase(false); RejectSymlinkAncestors(path);
+                Phase(cleanup); RejectSymlinkAncestors(path);
                 file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
                 if (WriterNamespaceIdentityReader.Observe(file.SafeFileHandle, path).Outcome != WriterNamespaceIdentityOutcome.Match ||
                     !PrivateObjectLinks.HasOneLink(file.SafeFileHandle))
@@ -135,16 +246,16 @@ public sealed partial class WorktreeManager
                 result = new byte[checked((int)size)]; var offset = 0;
                 while (offset < result.Length)
                 {
-                    Phase(false); var count = file.Read(result, offset, Math.Min(65536, result.Length - offset)); Phase(false);
+                    Phase(cleanup); var count = file.Read(result, offset, Math.Min(65536, result.Length - offset)); Phase(cleanup);
                     if (count == 0) throw new WorktreeBoundaryException("Private Git object ended before its captured extent.");
                     offset += count;
                 }
-                Phase(false);
+                Phase(cleanup);
                 if (file.ReadByte() != -1 || file.Length != size ||
                     WriterNamespaceIdentityReader.Observe(file.SafeFileHandle, path).Outcome != WriterNamespaceIdentityOutcome.Match ||
                     !PrivateObjectLinks.HasOneLink(file.SafeFileHandle))
                     throw new WorktreeBoundaryException("Private Git object identity or extent changed during capture.");
-                Phase(false);
+                Phase(cleanup);
             }
             catch (Exception failure) { primary = failure; }
             if (file is not null)
@@ -152,9 +263,9 @@ public sealed partial class WorktreeManager
                 var returned = false;
                 try
                 {
-                    if (primary is null) Phase(false); else _ = original.CleanupRemaining;
+                    if (primary is null) Phase(cleanup); else _ = original.CleanupRemaining;
                     file.Dispose(); returned = true;
-                    if (primary is null) Phase(false); else _ = original.CleanupRemaining;
+                    if (primary is null) Phase(cleanup); else _ = original.CleanupRemaining;
                 }
                 catch (Exception failure)
                 {
@@ -185,7 +296,10 @@ internal sealed class LooseGitObjectInventory
     const long MaximumBytes = 128L * 1024 * 1024;
     readonly string root;
     readonly Dictionary<string, Epoch> epochs;
+    readonly HashSet<string> baseDuplicates = new(StringComparer.Ordinal);
     LooseGitObjectInventory(string root, Dictionary<string, Epoch> epochs) { this.root = root; this.epochs = epochs; }
+    internal bool IsBaseDuplicate(string oid) => baseDuplicates.Contains(oid);
+    internal string[] BaseDuplicateIds() => baseDuplicates.ToArray();
     internal static bool IsOid(string text) => text.Length is 40 or 64 && text.All(char.IsAsciiHexDigitLower);
     static bool Hex(string text) => text.All(char.IsAsciiHexDigitLower);
 
@@ -209,7 +323,44 @@ internal sealed class LooseGitObjectInventory
         var result = new LooseGitObjectInventory(root, epochs); result.Verify(check); return result;
     }
 
-    internal static int ValidateObject(string oid, byte[] encoded, int maximumInflated, Action check)
+    internal static async Task<LooseGitObjectInventory> CaptureAsync(string root, HashSet<string> protectedObjects,
+        Action check, Func<string, int, byte[]> read,
+        Func<string, string, int, CancellationToken, Task<byte[]>> readCommon, CancellationToken token)
+    {
+        var epochs = Inventory(root, check); long bytes = 0;
+        var result = new LooseGitObjectInventory(root, epochs); var format = protectedObjects.First().Length;
+        foreach (var (path, epoch) in epochs)
+        {
+            if (epoch.Directory) continue;
+            check(); token.ThrowIfCancellationRequested();
+            var oid = Path.GetRelativePath(root, path).Replace("/", "", StringComparison.Ordinal).Replace("\\", "", StringComparison.Ordinal);
+            if (oid.Length != format) throw new WorktreeBoundaryException("Private object format differs from the original namespace.");
+            var available = Math.Min(MaximumFileBytes, MaximumBytes - bytes);
+            if (epoch.Length > available) throw new WorktreeBoundaryException("Private Git objects exceed the existing128MiB allowance.");
+            var encoded = read(path, checked((int)available));
+            if (encoded.Length > available) throw new WorktreeBoundaryException("Private object read exceeds its shared allowance.");
+            bytes += encoded.Length; epoch.Verify(path); check();
+            using var canonical = protectedObjects.Contains(oid) ? new MemoryStream() : null;
+            bytes += ValidateObject(oid, encoded, checked((int)Math.Min(MaximumFileBytes, MaximumBytes - bytes)), check, canonical);
+            if (canonical is not null)
+            {
+                var raw = canonical.ToArray(); var header = Array.IndexOf(raw, (byte)0) + 1;
+                var type = Encoding.ASCII.GetString(raw, 0, Array.IndexOf(raw, (byte)' '));
+                if (header > MaximumBytes - bytes) throw new WorktreeBoundaryException("Base comparison exceeds the existing shared allowance.");
+                var maximum = checked((int)Math.Min(MaximumFileBytes - header, MaximumBytes - bytes - header));
+                var common = await readCommon(oid, type, maximum, token).ConfigureAwait(false);
+                check(); epoch.Verify(path);
+                bytes += checked(header + common.Length);
+                if (common.Length > maximum || bytes > MaximumBytes || !raw.AsSpan(header).SequenceEqual(common))
+                    throw new WorktreeBoundaryException("Private base duplicate differs from the actual common canonical object.");
+                result.baseDuplicates.Add(oid);
+            }
+            check();
+        }
+        result.Verify(check); return result;
+    }
+
+    internal static int ValidateObject(string oid, byte[] encoded, int maximumInflated, Action check, Stream? canonical = null)
     {
         if (!IsOid(oid) || encoded.Length is < 6 or > MaximumFileBytes || maximumInflated < 1)
             throw new WorktreeBoundaryException("Private loose object encoding exceeds its finite profile.");
@@ -225,7 +376,7 @@ internal sealed class LooseGitObjectInventory
                 check(); var count = inflate.Read(buffer, 0, Math.Min(buffer.Length, maximumInflated - total + 1)); check();
                 if (count == 0) break;
                 if (count > maximumInflated - total) throw new WorktreeBoundaryException("Private Git object inflated extent exceeds its finite allowance.");
-                total += count; hash.AppendData(buffer, 0, count);
+                total += count; hash.AppendData(buffer, 0, count); canonical?.Write(buffer, 0, count);
                 foreach (var value in buffer.AsSpan(0, count))
                 {
                     a = (a + value) % 65521; b = (b + a) % 65521;

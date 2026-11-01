@@ -45,17 +45,57 @@ public sealed class PrivateLooseGitObjectsTests
         Assert.Throws<WorktreeBoundaryException>(() => Capture(temporary.Path));
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Base_duplicate_requires_actual_canonical_bytes_not_compressed_equality(bool sha256)
+    {
+        using var temporary = new TemporaryDirectory();
+        var body = new byte[] { 0, 255, 128, 10, 13, 0 };
+        var raw = Encoding.ASCII.GetBytes("blob 6\0").Concat(body).ToArray();
+        var oid = Convert.ToHexStringLower(sha256 ? SHA256.HashData(raw) : SHA1.HashData(raw));
+        Write(temporary.Path, oid, Encode(raw));
+        var calls = 0;
+        var snapshot = await LooseGitObjectInventory.CaptureAsync(temporary.Path,
+            new HashSet<string>(StringComparer.Ordinal) { oid }, () => { }, Read,
+            (actual, type, maximum, token) =>
+            {
+                Assert.Equal(oid, actual); Assert.Equal("blob", type); Assert.True(maximum >= body.Length); calls++;
+                return Task.FromResult(body);
+            }, TestContext.Current.CancellationToken);
+        Assert.Equal(1, calls); Assert.True(snapshot.IsBaseDuplicate(oid)); snapshot.Verify(() => { });
+        await Assert.ThrowsAsync<WorktreeBoundaryException>(() => LooseGitObjectInventory.CaptureAsync(temporary.Path,
+            new HashSet<string>(StringComparer.Ordinal) { oid }, () => { }, Read,
+            (_, _, _, _) => Task.FromResult(new byte[] { 0, 255, 129, 10, 13, 0 }), TestContext.Current.CancellationToken));
+    }
+
     [Fact]
-    public void Protected_object_ids_refuse_shadowing_even_when_the_base_copy_is_packed_elsewhere()
+    public async Task Invalid_private_content_never_dispatches_a_trusted_base_read()
+    {
+        using var temporary = new TemporaryDirectory();
+        var oid = new string('a', 40); Write(temporary.Path, oid, Encode(Encoding.UTF8.GetBytes("blob 4\0mine")));
+        var calls = 0;
+        await Assert.ThrowsAsync<WorktreeBoundaryException>(() => LooseGitObjectInventory.CaptureAsync(temporary.Path,
+            new HashSet<string>(StringComparer.Ordinal) { oid }, () => { }, Read,
+            (_, _, _, _) => { calls++; return Task.FromResult(Array.Empty<byte>()); }, TestContext.Current.CancellationToken));
+        Assert.Equal(0, calls);
+    }
+
+    [Fact]
+    public async Task A_base_comparison_cannot_accept_a_private_file_replaced_during_the_await()
     {
         using var temporary = new TemporaryDirectory();
         var raw = Encoding.UTF8.GetBytes("blob 4\0base");
         var oid = Convert.ToHexStringLower(SHA1.HashData(raw));
-        Write(temporary.Path, oid, Encode(raw));
-        // Protected names come from the real base-only native inventory, not
-        // from whether a same-name loose file happens to exist in Common.
-        Assert.Throws<WorktreeBoundaryException>(() => LooseGitObjectInventory.Capture(temporary.Path,
-            new HashSet<string>(StringComparer.Ordinal) { oid }, () => { }, Read));
+        var path = Write(temporary.Path, oid, Encode(raw));
+        await Assert.ThrowsAsync<WorktreeBoundaryException>(() => LooseGitObjectInventory.CaptureAsync(temporary.Path,
+            new HashSet<string>(StringComparer.Ordinal) { oid }, () => { }, Read,
+            async (_, _, _, token) =>
+            {
+                await Task.Yield(); token.ThrowIfCancellationRequested();
+                File.Delete(path); Write(temporary.Path, oid, Encode(raw));
+                return Encoding.UTF8.GetBytes("base");
+            }, TestContext.Current.CancellationToken));
     }
 
     [Fact]

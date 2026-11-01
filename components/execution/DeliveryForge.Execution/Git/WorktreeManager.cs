@@ -455,6 +455,7 @@ public sealed partial class WorktreeManager
             {
                 actualBudget.CheckWork();
                 binding?.Check(cleanupObservation);
+                if (cleanupObservation) binding?.RequireValidatedPrivateObjects(cleanup: true);
                 Interlocked.Increment(ref actualOwnedGitInvocations.Value);
                 return actualExecutor.ExecuteBoundedCaptureAsync(invocation, TimeSpan.FromSeconds(30), 16 * 1024 * 1024, cancellationToken, new OwnedWorkPhaseBudget(actualBudget));
             }

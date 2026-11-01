@@ -526,7 +526,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             if (pump is not null) await pump.WaitAsync(original.Remaining, token).ConfigureAwait(false); if (pumpFailure is not null) throw new IOException("Actual app-server protocol failed; no successful completion.", pumpFailure);
             usage?.RequireFinal(); if (usage is not null) await usage.JoinAsync(usageWatch).ConfigureAwait(false);
             runtimeTrust?.Check(original); trustedImage?.Check(token); CloseTrustedImage(true, false);
-            privateGit?.ValidatePrivateObjectsAfterRetirement();
+            if (privateGit is not null) await Keep(privateGit.ValidatePrivateObjectsAfterRetirementAsync(token)).WaitAsync(original.Remaining, token).ConfigureAwait(false);
             var snapshotTask = actualGit.ObserveAsync(request!.Worktree, token); var snapshot = await Keep(snapshotTask).WaitAsync(original.Remaining, token).ConfigureAwait(false); original.Check();
             original.Check(); var artifact = Path.Combine(request.ResultDirectory, "codex-app-server-events.json"); JsonElement[] rows; lock (trace) rows = trace.ToArray(); var raw = conformanceTrustRoute ? JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualCodexAppServerTrace-v1", Host = new StandaloneHostSelection(selection.Executable, selection.Bytes, selection.Sha256, selection.Version), Version = selection.Version, TrustRouteConformanceOnly = conformanceTrustRoute, ConformanceDangerFullAccess = conformanceDangerFullAccess, actual.RunId, actual.RequestIdentity, ThreadId = threadId, TurnId = turnId, Events = rows, ReportedUsage = usage?.Evidence(), Retirement = retired, PumpFailure = pumpFailure?.GetType().FullName, RuntimeCertified = false }, BoundedFiles.Json) : JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualCodexAppServerTrace-v1", TrustRouteConformanceOnly = conformanceTrustRoute, ConformanceDangerFullAccess = conformanceDangerFullAccess, actual.RunId, actual.RequestIdentity, ThreadId = threadId, TurnId = turnId, Events = rows, ReportedUsage = usage?.Evidence(), Retirement = retired, PumpFailure = pumpFailure?.GetType().FullName, RuntimeCertified = false }, BoundedFiles.Json); BoundedFiles.WriteNew(artifact, raw, original);
             usage?.RequireFinal();
@@ -566,9 +566,17 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         try { if (turnId is not null && terminalWait?.Task.IsCompleted != true) _ = await Rpc("turn/interrupt", new { threadId, turnId }, token).ConfigureAwait(false); } catch (Exception error) { interruptFailure = error; }
         // WORK may already be closed by the containing stop latch. Regardless of
         // interrupt availability, only this original owner can stop its own Job.
-        shutdown = true; var retired = await Keep(process!.RetireAsync(true)).ConfigureAwait(false); CloseTrustedImage(retired.KnownClosed && !process.HasUnknownIo, true); lock (gate) terminalWait?.TrySetException(new OperationCanceledException("Original owner stop settled or remains explicitly unknown.")); pending.Fail(new OperationCanceledException("Original app-server stopped; no RPC replay."));
+        shutdown = true; var retired = await Keep(process!.RetireAsync(true)).ConfigureAwait(false); var nativeKnownClosed = retired.KnownClosed && !process.HasUnknownIo; CloseTrustedImage(nativeKnownClosed, true); lock (gate) terminalWait?.TrySetException(new OperationCanceledException("Original owner stop settled or remains explicitly unknown.")); pending.Fail(new OperationCanceledException("Original app-server stopped; no RPC replay."));
         if (usage is not null) await usage.JoinAsync(usageWatch).ConfigureAwait(false);
-        return new(actual, action, retired.KnownClosed ? AgentActivityState.Quiescent : AgentActivityState.Unknown, retired.KnownClosed, "actual-private-original-app-server-retirement", "Interrupt response alone never proves quiescence; original root/Job/IO/disposition joined. InterruptFailure=" + interruptFailure?.GetType().FullName);
+        if (nativeKnownClosed && privateGit is { HasPrivateObjects: true })
+        {
+            // Only the retained actual writer can enter this phase. A prior
+            // validation task is joined, including its failure, never replayed.
+            await Keep(privateGit.ValidatePrivateObjectsAfterRetirementAsync(CancellationToken.None, cleanup: true))
+                .WaitAsync(original.CleanupRemaining, CancellationToken.None).ConfigureAwait(false);
+            privateGit.RequireValidatedPrivateObjects(cleanup: true);
+        }
+        return new(actual, action, nativeKnownClosed ? AgentActivityState.Quiescent : AgentActivityState.Unknown, nativeKnownClosed, "actual-private-original-app-server-retirement", "Interrupt response alone never proves quiescence; original root/Job/IO/disposition joined. InterruptFailure=" + interruptFailure?.GetType().FullName);
     }
     public Task<AgentControlResult> ObserveUnstartedAsync(AgentRunBinding actual, TimeSpan remaining, CancellationToken token)
     {

@@ -123,3 +123,43 @@ decision still returns INCOMPLETE. Linux independent review remains INCOMPLETE
 until a separate immutable exact-image primitive is implemented. This source
 profile is not a positive installed-worker, reviewer, golden or full-quality
 acceptance; those require actual execution under the existing limits.
+
+### Confined Linux Codex deployment pairing
+
+The current Linux non-DFA Codex route requires the compatible managed Tool,
+selected exact-image birth-gate closure and `nnp-user1000-ancestor-v3` scope
+configuration together. This requirement applies to all such Codex workers,
+including those without runtime trust; the v3 token alone issues no runtime or
+review authority. Verify the complete pair before admitting new workers. A
+missing or older scope refuses admission; there is no broader-write fallback.
+The worker shell must preserve `GIT_OBJECT_DIRECTORY` and
+`GIT_ALTERNATE_OBJECT_DIRECTORIES`. The assigned private object/index namespace
+is writable; the parent common object namespace remains a read-only alternate.
+Windows, other adapters and explicitly selected conformance DFA routes retain
+their existing requirements. This documents the current source contract, not a
+new policy, resource allowance or assertion of production compatibility.
+
+Rollback first stops new admission and drains each actual original owner through
+its existing known-close boundary. Retained UNKNOWN work remains retained. Restore
+a mutually compatible Tool, birth-gate closure and scope configuration together;
+do not flip the profile beneath a live original. Do not resume a private-object
+worktree using an older common-only reader, delete its private objects, or use
+markers as authority. Preserve failed work and evidence. Stock-Git maintenance
+and accepted-candidate private-object transport remain separate unresolved
+production requirements; rollback does not repair them. No service, login,
+authentication or resource-limit change is implied by this procedure.
+
+Private-object initialization captures the complete common object-ID inventory
+with `git cat-file --batch-all-objects --batch-check=%(objectname) --unordered`,
+including packed objects. Its existing native capture limit is 16 MiB, within the
+same remaining original WORK interval. Over-limit or incomplete capture is a
+refusal before Codex birth; a truncated prefix is never a complete inventory.
+Malformed, duplicate, empty or mixed-format OID inventories also refuse. This is
+an availability limit, not support for arbitrary repository sizes. The later
+loose-private inventory has separate existing limits of 4,096 entries, 16 MiB
+per file and 128 MiB total; these do not enlarge the base-OID capture allowance.
+
+Source and managed controls do not replace actual Linux worker-commit,
+confinement, protected-review and recovery acceptance. Current golden acceptance
+and the large-inventory refusal/paired rollback scenarios remain pending; these
+notes do not certify runtime behavior or resolve the other production findings.

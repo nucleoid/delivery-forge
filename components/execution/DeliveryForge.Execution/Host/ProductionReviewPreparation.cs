@@ -66,6 +66,7 @@ public sealed partial class ProductionReviewSourceOwner
     internal string CommonGitDirectory { get; }
     internal string WorkerObjectsDirectory => provisionedBinding?.ObjectsPath ?? Path.Combine(CommonGitDirectory, "objects");
     internal string WorkerAlternateObjectsDirectory => provisionedBinding is { HasPrivateObjects: true } binding ? binding.CommonObjectsPath : "";
+    HashSet<string>? copiedBaseDuplicateIds;
     internal void RequireValidatedPrivateObjects()
     {
         if (provisionedBinding is { HasPrivateObjects: true }) provisionedBinding.RequireValidatedPrivateObjects();
@@ -73,9 +74,19 @@ public sealed partial class ProductionReviewSourceOwner
     internal string[] ObjectCopyRoots()
     {
         Check(); RequireValidatedPrivateObjects();
-        return provisionedBinding is { HasPrivateObjects: true } binding
-            ? [binding.CommonObjectsPath, binding.ObjectsPath]
-            : [Path.Combine(CommonGitDirectory, "objects")];
+        if (provisionedBinding is { HasPrivateObjects: true } binding)
+        {
+            copiedBaseDuplicateIds = new(binding.CaptureValidatedBaseDuplicateIds(), StringComparer.Ordinal);
+            return [binding.CommonObjectsPath, binding.ObjectsPath];
+        }
+        return [Path.Combine(CommonGitDirectory, "objects")];
+    }
+    internal bool IsValidatedBaseDuplicate(string relative)
+    {
+        var oid = relative.Replace("/", "", StringComparison.Ordinal).Replace("\\", "", StringComparison.Ordinal);
+        // ObjectCopyRoots captured the accepted set once for this synchronous
+        // two-pass copy. The existing final inventory verification still runs.
+        return (copiedBaseDuplicateIds ?? throw new ReviewPreflightException("No accepted private duplicate snapshot for this copy.")).Contains(oid);
     }
     internal string GitExecutable { get; }
     internal string GitVersion { get; }
@@ -687,8 +698,14 @@ public sealed partial class ReviewAuthorityHost
                                 owner.Check(); var hash = Convert.ToHexStringLower(SHA256.HashData(bytes)); owner.Check();
                                 if (copy)
                                 {
-                                    if (!destinations.Add(relative)) throw new ReviewPreflightException("Object sources overlap in the controlled view.");
-                                    copied.Add((rootIndex, relative), hash); WriteObject(destination, bytes);
+                                    copied.Add((rootIndex, relative), hash);
+                                    // Only a duplicate proven against COMMON canonical bytes may
+                                    // be omitted; its base may live inside an already copied pack.
+                                    if (rootIndex != 1 || !owner.IsValidatedBaseDuplicate(relative))
+                                    {
+                                        if (!destinations.Add(relative)) throw new ReviewPreflightException("Object sources overlap in the controlled view.");
+                                        WriteObject(destination, bytes);
+                                    }
                                 }
                                 else if (!copied.Remove((rootIndex, relative), out var expected) || hash != expected) throw new ReviewPreflightException("Source objects changed during owned copy.");
                             }
