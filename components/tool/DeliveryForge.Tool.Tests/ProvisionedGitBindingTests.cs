@@ -606,7 +606,7 @@ public sealed class ProvisionedGitBindingTests
         Assert.Equal(index, File.ReadAllBytes(binding.IndexPath));
         Assert.Equal(common, ObjectBodies(binding.CommonObjectsPath));
         Assert.Equal(started, fixture.Original.OriginalStarted); Assert.Equal(whole, fixture.Original.WholeLimit);
-        Assert.True(actual.OriginalRetirementTask!.Result.KnownClosed); Assert.False(actual.HasUnknownIo);
+        Assert.True((await actual.OriginalRetirementTask!.WaitAsync(fixture.Original.CleanupRemaining, TestContext.Current.CancellationToken)).KnownClosed); Assert.False(actual.HasUnknownIo);
         Assert.False(fixture.Original.HasExplicitUnknown);
     }
 
@@ -670,7 +670,7 @@ public sealed class ProvisionedGitBindingTests
         Assert.Same(validation, binding.ValidatePrivateObjectsAfterRetirementAsync(TestContext.Current.CancellationToken, cleanup: true));
         await Assert.ThrowsAsync<WorktreeBoundaryException>(() => fixture.InitialManager.ObserveOwnedCleanupAsync(fixture.Worker, TestContext.Current.CancellationToken));
         Assert.Equal(births, fixture.Manager.ActualOwnedGitInvocations);
-        Assert.True(Directory.Exists(forbidden)); Assert.True(actual.OriginalRetirementTask!.Result.KnownClosed);
+        Assert.True(Directory.Exists(forbidden)); Assert.True((await actual.OriginalRetirementTask!.WaitAsync(fixture.Original.CleanupRemaining, TestContext.Current.CancellationToken)).KnownClosed);
         Assert.False(actual.HasUnknownIo); Assert.False(fixture.Original.HasExplicitUnknown);
     }
 
