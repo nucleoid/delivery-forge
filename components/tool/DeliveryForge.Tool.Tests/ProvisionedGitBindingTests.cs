@@ -896,6 +896,9 @@ public sealed class ProvisionedGitBindingTests
         var commonPath = Path.Combine(binding.CommonObjectsPath, oid[..2], oid[2..]);
         var original = File.ReadAllBytes(privatePath);
         var poisoned = original.Concat(new byte[] { 0x71, 0x39, 0x7f, 0x00 }).Concat(original[^4..]).ToArray();
+        // Git marks this exact fixture-owned loose object read-only on Windows.
+        var attributes = File.GetAttributes(privatePath);
+        File.SetAttributes(privatePath, attributes & ~FileAttributes.ReadOnly);
         File.WriteAllBytes(privatePath, poisoned);
         Assert.False(File.Exists(commonPath));
 
