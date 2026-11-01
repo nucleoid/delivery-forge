@@ -61,8 +61,8 @@ public sealed class ClaudeReviewerObservationNativeTests
             capture = await new ProcessCommandExecutor(scope, original).ExecuteBoundedCaptureAsync(invocation,
                 original.Remaining, 65536, original.Token, new OwnedWorkPhaseBudget(original), scope,
                 new LinuxScopeImage(image.Path, image.Bytes, image.Sha256));
-            // Closure is independent of semantic success, quota, or a retained
-            // native error. Preserve actual closed-tree evidence before assertions.
+            // Classify settlement before semantic success or quota assertions;
+            // production settlement still requires no native failure.
             knownClosed = IsKnownClosedLinuxCapture(capture);
             try
             {
@@ -103,8 +103,8 @@ public sealed class ClaudeReviewerObservationNativeTests
         capture.OwnershipKind == BoundedCaptureOwnershipKind.LinuxCreationOwnedScope &&
         capture.Command.OwnedProcessQuiescent && capture.RootExitObserved &&
         capture.StandardOutputDrainCompleted && capture.StandardErrorDrainCompleted &&
-        capture.Command.LifecycleDiagnostics?.OwnedTree is
-        { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 };
+        capture.Command.LifecycleDiagnostics is
+        { NativeFailure: null, OwnedTree: { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 } };
 
     [Theory(Timeout = 45000)]
     [InlineData(false)]

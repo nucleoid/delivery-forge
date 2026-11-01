@@ -64,7 +64,7 @@ public sealed class ClaudeReviewerObservationFailureTests
     [InlineData("timeout", true)]
     [InlineData("cancel", true)]
     [InlineData("quota", true)]
-    [InlineData("native", true)]
+    [InlineData("native", false)]
     [InlineData("success", true)]
     [InlineData("root", false)]
     [InlineData("stdout", false)]
