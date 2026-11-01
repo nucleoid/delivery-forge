@@ -71,18 +71,96 @@ public sealed class ParentEffectAdmissionTests
     }
 
     [Fact]
-    public void Bounded_nested_fast_check_keeps_atomic_birth_and_actual_task_identity()
+    public void Bounded_nested_fast_check_retains_admission_without_holding_gate_and_actual_task_identity()
     {
         using var fixture = new RenewalFixture(TestContext.Current.CancellationToken);
         var began = System.Diagnostics.Stopwatch.GetTimestamp();
         var actual = Task.FromResult(7);
         var returned = fixture.Admission.EnterAsync("owned", () =>
         {
-            Assert.True(Monitor.IsEntered(fixture.Gate));
+            Assert.False(Monitor.IsEntered(fixture.Gate));
             fixture.Admission.CheckCurrent("owned", began, TimeSpan.FromSeconds(5));
             return actual;
         });
         Assert.Same(actual, returned); Assert.False(fixture.Revoked);
+    }
+
+    [Fact(Timeout = 15000)]
+    public async Task Async_creator_can_check_same_parent_on_another_thread_before_returning_actual_task()
+    {
+        using var fixture = new RenewalFixture(TestContext.Current.CancellationToken);
+        using var creatorEntered = new ManualResetEventSlim();
+        var creatorReturned = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var actual = Task.FromResult(7);
+        var began = System.Diagnostics.Stopwatch.GetTimestamp();
+        var creator = new Thread(() =>
+        {
+            var entered = false;
+            try
+            {
+                creatorEntered.Set();
+                // Old admission holds this monitor while waiting for this same creator.
+                // Bound the reproduction so old-source failure never strands a thread.
+                entered = Monitor.TryEnter(fixture.Gate, TimeSpan.FromSeconds(2));
+                if (!entered) throw new IOException("Creator could not enter original admission.");
+                fixture.Admission.CheckCurrent("owned", began, TimeSpan.FromSeconds(5));
+                Assert.Equal(1, fixture.Admission.EnteredCount);
+                Assert.False(fixture.Admission.AllKnownSettled);
+                creatorReturned.SetResult();
+            }
+            catch (Exception error) { creatorReturned.TrySetException(error); }
+            finally { if (entered) Monitor.Exit(fixture.Gate); }
+        });
+        try
+        {
+            var returned = fixture.Admission.EnterAsync("owned", () =>
+            {
+                creator.Start();
+                Assert.True(creatorEntered.Wait(TimeSpan.FromSeconds(5)));
+                creatorReturned.Task.WaitAsync(TimeSpan.FromSeconds(5), fixture.Original.Token).GetAwaiter().GetResult();
+                return actual;
+            });
+            Assert.Same(actual, returned); Assert.Equal(7, await returned);
+            await Task.WhenAll(fixture.Admission.OriginalObservers).WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+            Assert.True(fixture.Admission.AllKnownSettled);
+            Assert.False(fixture.Revoked); Assert.False(fixture.Original.HasExplicitUnknown);
+        }
+        finally { Assert.True(creator.Join(TimeSpan.FromSeconds(5))); }
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Async_reserved_original_rechecks_revocation_or_cancellation_before_invocation(bool cancel)
+    {
+        using var cancellation = new CancellationTokenSource();
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), cancellation.Token);
+        var gate = new object(); var checks = 0; var calls = 0; var current = true; var revoked = false;
+        var admission = new ParentEffectAdmission(gate, _ =>
+        {
+            if (++checks == 1)
+            {
+                if (cancel) cancellation.Cancel(); else current = false;
+                return true;
+            }
+            return current && ParentCoordinationHost.OriginalCanAdmitEffects(original);
+        }, _ => revoked = true, original: original);
+        var error = Assert.ThrowsAny<Exception>(() => { _ = admission.EnterAsync("owned", () => { calls++; return Task.FromResult(7); }); });
+        if (cancel) Assert.IsAssignableFrom<OperationCanceledException>(error);
+        else Assert.IsType<CoordinationUncertainException>(error);
+        Assert.Equal(0, calls); Assert.True(revoked); Assert.Equal(1, admission.EnteredCount);
+        Assert.False(admission.AllKnownSettled); // The retained reservation is never erased.
+    }
+
+    [Fact]
+    public void Async_null_task_retains_original_uncertainty_and_refuses_second_invocation()
+    {
+        var current = true; var calls = 0;
+        var admission = new ParentEffectAdmission(new object(), _ => current, _ => current = false);
+        Assert.Throws<IOException>(() => { _ = admission.EnterAsync<int>("owned", () => { calls++; return null!; }); });
+        Assert.False(admission.AllKnownSettled); Assert.Equal(1, admission.EnteredCount);
+        Assert.Throws<CoordinationUncertainException>(() => { _ = admission.EnterAsync("owned", () => { calls++; return Task.FromResult(7); }); });
+        Assert.Equal(1, calls);
     }
 
     [Fact(Timeout = 15000)]
@@ -264,18 +342,26 @@ public sealed class ParentEffectAdmissionTests
         Assert.Same(pending, fixture.Handoff.Snapshot("owned"));
     }
 
-    [Fact]
-    public void Nested_pending_check_refuses_instead_of_waiting_under_outer_original_gate()
+    [Fact(Timeout = 15000)]
+    public async Task Nested_async_creator_pending_renewal_releases_gate_for_original_installer()
     {
         using var fixture = new RenewalFixture(TestContext.Current.CancellationToken);
-        Assert.Throws<CoordinationUncertainException>(() =>
+        var pendingReturned = new TaskCompletionSource<ParentRenewalHandoff.Pending>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var actual = Task.FromResult(7); Task<int>? returned = null;
+        var waiting = Task.Run(() =>
         {
-            _ = fixture.Admission.EnterAsync("owned", () =>
+            returned = fixture.Admission.EnterAsync("owned", () =>
             {
-                fixture.Begin(); fixture.Admission.CheckCurrent("owned"); return Task.FromResult(1);
+                var pending = fixture.Begin(); pendingReturned.SetResult(pending);
+                fixture.Admission.CheckCurrent("owned"); return actual;
             });
-        });
-        Assert.True(fixture.Revoked); Assert.False(fixture.Admission.AllKnownSettled);
+        }, TestContext.Current.CancellationToken);
+        var pending = await pendingReturned.Task.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        await WaitForWaiters(pending, 1, waiting);
+        Assert.Equal(1, fixture.Admission.EnteredCount); Assert.False(fixture.Admission.AllKnownSettled);
+        fixture.Install(pending);
+        await waiting.WaitAsync(TimeSpan.FromSeconds(5), TestContext.Current.CancellationToken);
+        Assert.Same(actual, returned); Assert.True(fixture.Admission.AllKnownSettled); Assert.False(fixture.Revoked);
     }
 
     [Theory(Timeout = 15000)]
