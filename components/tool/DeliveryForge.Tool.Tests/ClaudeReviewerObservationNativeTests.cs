@@ -104,7 +104,7 @@ public sealed class ClaudeReviewerObservationNativeTests
         capture.Command.OwnedProcessQuiescent && capture.RootExitObserved &&
         capture.StandardOutputDrainCompleted && capture.StandardErrorDrainCompleted &&
         capture.Command.LifecycleDiagnostics?.OwnedTree is
-            { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 };
+        { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 };
 
     [Theory(Timeout = 45000)]
     [InlineData(false)]
