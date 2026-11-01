@@ -950,12 +950,108 @@ public sealed class ProvisionedGitBindingTests
     }
 
     static (string Oid, byte[] Encoded) EncodePrivateBlob(string content)
+        => EncodeFixtureObject("blob", Encoding.UTF8.GetBytes(content));
+
+    static (string Oid, byte[] Encoded) EncodeFixtureObject(string type, byte[] body)
     {
-        var body = Encoding.UTF8.GetBytes(content);
-        var canonical = Encoding.ASCII.GetBytes("blob " + body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\0").Concat(body).ToArray();
+        var canonical = Encoding.ASCII.GetBytes(type + " " + body.Length.ToString(System.Globalization.CultureInfo.InvariantCulture) + "\0").Concat(body).ToArray();
         using var encoded = new MemoryStream();
         using (var compress = new ZLibStream(encoded, CompressionLevel.SmallestSize, leaveOpen: true)) compress.Write(canonical);
         return (Convert.ToHexStringLower(SHA1.HashData(canonical)), encoded.ToArray());
+    }
+
+    static string WriteFixtureObject(string objects, (string Oid, byte[] Encoded) value)
+    {
+        var path = Path.Combine(objects, value.Oid[..2], value.Oid[2..]);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        Assert.False(File.Exists(path)); File.WriteAllBytes(path, value.Encoded); return path;
+    }
+
+    static byte[] FixtureTree(string name, string blob) => Encoding.ASCII.GetBytes("100644 " + name + "\0").Concat(Convert.FromHexString(blob)).ToArray();
+
+    static byte[] FixtureCommit(string tree, string parent) => Encoding.ASCII.GetBytes(
+        "tree " + tree + "\nparent " + parent + "\nauthor Fixture <fixture@example.invalid> 1 +0000\ncommitter Fixture <fixture@example.invalid> 1 +0000\n\nfixture semantic preflight\n");
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Hash_valid_private_tree_with_dot_git_entry_refuses_before_any_common_import_or_candidate_ref()
+    {
+        using var fixture = await Fixture.CreateAsync(privateAdministration: true);
+        Assert.Equal("sha1", await fixture.GitAt(fixture.Repository, "rev-parse", "--show-object-format"));
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        var baseline = Assert.IsType<string>(binding.FrozenBaseCommit);
+        var candidateRef = Assert.IsType<string>(binding.CandidateRef);
+        var blob = await fixture.GitAt(fixture.Repository, "rev-parse", "HEAD:subject.txt");
+        await binding.EnablePrivateObjectWritesAsync(fixture.Original.Token);
+        var writer = fixture.OpenOverlayGit(binding, "--version"); binding.AttachPrivateObjectWriter(writer);
+        await DrainAndRetire(writer, fixture.Original);
+        var badTree = EncodeFixtureObject("tree", FixtureTree(".git", blob));
+        var treePath = WriteFixtureObject(binding.ObjectsPath, badTree);
+        var candidate = EncodeFixtureObject("commit", FixtureCommit(badTree.Oid, baseline));
+        var commitPath = WriteFixtureObject(binding.ObjectsPath, candidate);
+        File.WriteAllText(Path.Combine(binding.GitDirectory, "HEAD"), candidate.Oid + "\n");
+        await binding.ValidatePrivateObjectsAfterRetirementAsync(fixture.Original.Token);
+        var before = ObjectBodies(binding.CommonObjectsPath);
+        var failure = await Assert.ThrowsAsync<WorktreeBoundaryException>(() => binding.ReconcilePrivateObjectsAfterRetirementAsync(fixture.Original.Token));
+        Assert.Equal("Private candidate structural preflight did not close successfully.", failure.Message);
+        Assert.False(binding.HasReconciledObjects); Assert.Equal(before, ObjectBodies(binding.CommonObjectsPath));
+        var refPath = Path.Combine(binding.CommonDirectory, candidateRef.Replace('/', Path.DirectorySeparatorChar));
+        Assert.False(File.Exists(refPath)); Assert.False(File.Exists(refPath + ".lock"));
+        Assert.Equal(badTree.Encoded, File.ReadAllBytes(treePath)); Assert.Equal(candidate.Encoded, File.ReadAllBytes(commitPath));
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Unrelated_common_tree_with_fsck_error_does_not_refuse_a_valid_private_candidate()
+    {
+        using var fixture = await Fixture.CreateAsync(privateAdministration: true);
+        Assert.Equal("sha1", await fixture.GitAt(fixture.Repository, "rev-parse", "--show-object-format"));
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        var blob = await fixture.GitAt(fixture.Repository, "rev-parse", "HEAD:subject.txt");
+        var legacy = EncodeFixtureObject("tree", FixtureTree(".git", blob));
+        var legacyPath = WriteFixtureObject(binding.CommonObjectsPath, legacy);
+        await fixture.GitAtExpectingExit(fixture.Repository, 1, "fsck", "--full", "--strict", "--no-reflogs", "--no-dangling");
+        await binding.EnablePrivateObjectWritesAsync(fixture.Original.Token);
+        File.WriteAllText(Path.Combine(fixture.Worker, "subject.txt"), "valid candidate beside retained unrelated COMMON error\n");
+        var writer = fixture.OpenOverlayGit(binding, "-c", "user.name=TargetedProofFixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "commit", "-q", "-am", "valid targeted candidate");
+        binding.AttachPrivateObjectWriter(writer); await DrainAndRetire(writer, fixture.Original);
+        var candidate = await fixture.GitAt(fixture.Worker, "rev-parse", "HEAD");
+        await binding.ValidatePrivateObjectsAfterRetirementAsync(fixture.Original.Token);
+        await binding.ReconcilePrivateObjectsAfterRetirementAsync(fixture.Original.Token);
+        Assert.True(binding.HasReconciledObjects);
+        Assert.Equal(candidate, await fixture.GitAt(fixture.Repository, "rev-parse", Assert.IsType<string>(binding.CandidateRef)));
+        await fixture.GitAt(fixture.Repository, "cat-file", "-e", candidate + "^{commit}");
+        await fixture.GitAtExpectingExit(fixture.Repository, 1, "fsck", "--full", "--strict", "--no-reflogs", "--no-dangling");
+        Assert.Equal(legacy.Encoded, File.ReadAllBytes(legacyPath)); Assert.False(fixture.Original.HasExplicitUnknown);
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Candidate_delta_with_only_unprotected_common_blob_refuses_before_any_common_import()
+    {
+        using var fixture = await Fixture.CreateAsync(privateAdministration: true);
+        Assert.Equal("sha1", await fixture.GitAt(fixture.Repository, "rev-parse", "--show-object-format"));
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        var baseline = Assert.IsType<string>(binding.FrozenBaseCommit);
+        var candidateRef = Assert.IsType<string>(binding.CandidateRef);
+        var commonOnly = EncodePrivateBlob("unprotected COMMON-only candidate delta dependency\n");
+        var commonPath = WriteFixtureObject(binding.CommonObjectsPath, commonOnly);
+        await binding.EnablePrivateObjectWritesAsync(fixture.Original.Token);
+        var writer = fixture.OpenOverlayGit(binding, "--version"); binding.AttachPrivateObjectWriter(writer);
+        await DrainAndRetire(writer, fixture.Original);
+        var tree = EncodeFixtureObject("tree", FixtureTree("extra.txt", commonOnly.Oid));
+        var treePath = WriteFixtureObject(binding.ObjectsPath, tree);
+        var candidate = EncodeFixtureObject("commit", FixtureCommit(tree.Oid, baseline));
+        var commitPath = WriteFixtureObject(binding.ObjectsPath, candidate);
+        File.WriteAllText(Path.Combine(binding.GitDirectory, "HEAD"), candidate.Oid + "\n");
+        Assert.False(File.Exists(Path.Combine(binding.ObjectsPath, commonOnly.Oid[..2], commonOnly.Oid[2..])));
+        await binding.ValidatePrivateObjectsAfterRetirementAsync(fixture.Original.Token);
+        var before = ObjectBodies(binding.CommonObjectsPath);
+        var failure = await Assert.ThrowsAsync<WorktreeBoundaryException>(() => binding.ReconcilePrivateObjectsAfterRetirementAsync(fixture.Original.Token));
+        Assert.Equal("Candidate delta requires a validated private copy of every object outside the frozen base closure.", failure.Message);
+        Assert.False(binding.HasReconciledObjects); Assert.Equal(before, ObjectBodies(binding.CommonObjectsPath));
+        var refPath = Path.Combine(binding.CommonDirectory, candidateRef.Replace('/', Path.DirectorySeparatorChar));
+        Assert.False(File.Exists(refPath)); Assert.False(File.Exists(refPath + ".lock"));
+        Assert.Equal(commonOnly.Encoded, File.ReadAllBytes(commonPath));
+        Assert.Equal(tree.Encoded, File.ReadAllBytes(treePath)); Assert.Equal(candidate.Encoded, File.ReadAllBytes(commitPath));
     }
 
     [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
@@ -1048,6 +1144,7 @@ public sealed class ProvisionedGitBindingTests
             Assert.False(File.Exists(anchorPath));
             Assert.Equal(Encoding.ASCII.GetBytes(baseHead + "\n"), File.ReadAllBytes(anchorPath + ".lock"));
         }
+        else Assert.False(File.Exists(anchorPath + ".lock"));
         Assert.False(File.Exists(foreignRefPath));
         Assert.False(Directory.Exists(fixture.Worker));
         Assert.False(Directory.Exists(Path.Combine(fixture.Root, ".delivery-forge-private-admin-" + id)));
@@ -1064,8 +1161,9 @@ public sealed class ProvisionedGitBindingTests
         if (order == "view-after-view") fixture.Manager.SelectPrivateAdministrationForConfinedWorker();
         var laterView = fixture.InitialManager.WithParentAdmission(fixture.Parent, "owned");
         var head = await fixture.GitAt(fixture.Repository, "rev-parse", "HEAD");
-        await laterView.PrepareAsync(fixture.Repository, fixture.Worker, head, fixture.Original.Token);
-        var binding = laterView.RequireOriginalBinding(fixture.Worker);
+        var preparing = order == "root-after-view" ? fixture.Manager : laterView;
+        await preparing.PrepareAsync(fixture.Repository, fixture.Worker, head, fixture.Original.Token);
+        var binding = preparing.RequireOriginalBinding(fixture.Worker);
         Assert.True(binding.HasPrivateAdministration);
         Assert.Same(binding, fixture.Manager.RequireOriginalBinding(fixture.Worker));
         Assert.Same(binding, fixture.InitialManager.RequireOriginalBinding(fixture.Worker));
@@ -1130,6 +1228,26 @@ public sealed class ProvisionedGitBindingTests
         Assert.Equal(refusal, (await Assert.ThrowsAsync<WorktreeBoundaryException>(() =>
             fresh.ValidateUnprovisionedPathsAsync(fixture.Repository, fixture.Worker, result, fixture.Original.Token))).Message);
         Assert.True(File.Exists(anchorPath)); Assert.False(Directory.Exists(result));
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Empty_deterministic_private_ref_directory_refuses_unstarted_clearance()
+    {
+        using var fixture = await Fixture.CreateAsync(privateAdministration: true, prepare: false);
+        var common = await fixture.GitAt(fixture.Repository, "rev-parse", "--path-format=absolute", "--git-common-dir");
+        var id = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("owned\0" + Path.GetFullPath(fixture.Worker))));
+        var retained = Path.Combine(common, "refs", "delivery-forge", "private", id);
+        Directory.CreateDirectory(retained); Assert.Empty(Directory.EnumerateFileSystemEntries(retained));
+        var result = Path.Combine(fixture.Root, "unstarted-empty-directory-result");
+        const string expected = "Unstarted cleanup refuses retained or durable private provisioning effects.";
+        Assert.Equal(expected, (await Assert.ThrowsAsync<WorktreeBoundaryException>(() =>
+            fixture.Manager.ValidateUnprovisionedPathsAsync(fixture.Repository, fixture.Worker, result, fixture.Original.Token))).Message);
+        var fresh = new WorktreeManager(fixture.GitImage, fixture.Executor, fixture.Original)
+            .WithParentAdmission(new PostBirthParent(), "owned");
+        Assert.Equal(expected, (await Assert.ThrowsAsync<WorktreeBoundaryException>(() =>
+            fresh.ValidateUnprovisionedPathsAsync(fixture.Repository, fixture.Worker, result, fixture.Original.Token))).Message);
+        Assert.True(Directory.Exists(retained)); Assert.Empty(Directory.EnumerateFileSystemEntries(retained));
+        Assert.False(Directory.Exists(fixture.Worker)); Assert.False(Directory.Exists(result));
     }
 
     static string[] ObjectBodies(string root) => Directory.GetFiles(root, "*", SearchOption.AllDirectories)

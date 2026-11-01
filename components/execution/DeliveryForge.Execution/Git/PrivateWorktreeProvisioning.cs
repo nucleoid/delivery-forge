@@ -101,12 +101,12 @@ public sealed partial class WorktreeManager
         Check();
         var common = CanonicalPath((await GitAsync(parentCheckout, token, "rev-parse", "--path-format=absolute", "--git-common-dir").ConfigureAwait(false)).TrimEnd('\r', '\n'));
         Check(); RejectSymlinkAncestors(common);
-        await RequireFilesRefStorageAsync(common, token).ConfigureAwait(false);
         void CheckPaths()
         {
             Check();
             if (privateAdministrations.ContainsKey(root)) throw new WorktreeBoundaryException(refusal);
             foreach (var path in new[] { privateDirectory, privateDirectory + ".provisioning.json",
+                Path.Combine(common, "refs", "delivery-forge", "private", id),
                 Path.Combine(common, "refs", "delivery-forge", "private", id, "base"),
                 Path.Combine(common, "refs", "delivery-forge", "private", id, "base.lock"),
                 Path.Combine(common, "refs", "delivery-forge", "private", id, "candidate"),
@@ -224,13 +224,15 @@ public sealed partial class WorktreeManager
                 !string.Equals(Path.GetPathRoot(registered), Path.GetPathRoot(state.PrivateDirectory), PathComparison()))
                 throw new WorktreeBoundaryException("Private administration move requires the same filesystem.");
             state.RegisteredDirectory = registered;
-            // DATA survives failure/restart but can never reconstruct ownership.
-            // Keep the original association before changing either routing file.
+            // Flushed DATA is diagnostic evidence, not crash durability or
+            // ownership. Keep the association before changing routing files.
             var journal = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
             {
                 Kind = "PrivateAdministrationProvisioning-DATA-v1", RunId = _effectRunId,
                 state.Worktree, state.CommonDirectory, RegisteredDirectory = registered,
                 state.PrivateDirectory, state.BaseAnchorRef, state.FrozenBaseCommit,
+                OriginalCommonDirectoryBytesBase64 = Convert.ToBase64String(commondir),
+                OriginalMarkerBytesBase64 = Convert.ToBase64String(marker),
                 Authority = false
             });
             metadata.CreateFreshProvisioningData(state.JournalPath, journal);
@@ -243,7 +245,16 @@ public sealed partial class WorktreeManager
                 Encoding.UTF8.GetBytes("gitdir: " + state.PrivateDirectory + "\n"));
             _originalBudget.CheckWork(); parent.CheckCurrent(_effectRunId!);
             state.MoveEntered = true;
-            try { Directory.Move(registered, state.PrivateDirectory); state.MoveReturned = true; }
+            try
+            {
+                if (OperatingSystem.IsLinux())
+                {
+                    if (RenamePrivateAdministrationNoReplace(-100, registered, -100, state.PrivateDirectory, 1) != 0)
+                        throw new WorktreeBoundaryException("Linux private admin no-replace rename failed; errno=" + Marshal.GetLastPInvokeError());
+                }
+                else Directory.Move(registered, state.PrivateDirectory);
+                state.MoveReturned = true;
+            }
             catch (Exception primary)
             {
                 var failures = new List<Exception> { primary };
@@ -270,17 +281,18 @@ public sealed partial class WorktreeManager
         });
     }
 
+    [DllImport("libc", EntryPoint = "renameat2", SetLastError = true)]
+    static extern int RenamePrivateAdministrationNoReplace(int oldDirectory,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string oldPath, int newDirectory,
+        [MarshalAs(UnmanagedType.LPUTF8Str)] string newPath, uint flags);
+
     static void RequireForeignOrAbsentRegistration(PrivateAdministrationProvisioning state, OwnedGitBinding metadata, bool cleanup)
     {
         var registered = state.RegisteredDirectory!;
-        RejectSymlinkAncestors(registered);
-        try { _ = File.GetAttributes(registered); }
-        catch (FileNotFoundException) { return; }
-        catch (DirectoryNotFoundException) { return; }
         // Git may legitimately reuse a freed basename, even while that foreign
         // admin is still being populated. Its different identity grants no
         // authority here; never inspect or require its mutable backpointer.
-        if (metadata.ReadPrivateDirectoryIdentity(registered, cleanup) == state.OriginalDirectoryIdentity)
+        if (metadata.ReadPrivateDirectoryIdentity(registered, cleanup, foreignSlot: true) == state.OriginalDirectoryIdentity)
             throw new WorktreeBoundaryException("Original private worker admin was registered again.");
     }
 
@@ -303,12 +315,36 @@ public sealed partial class WorktreeManager
     {
         static readonly List<(OwnedGitBinding Owner, SafeFileHandle Resource)> UnsettledPrivateDirectories = [];
 
-        internal (ulong Volume, ulong Low, ulong High) ReadPrivateDirectoryIdentity(string path, bool cleanup = false)
+        bool ForeignSlotAbsentOrNonPlain(string path, bool cleanup)
         {
-            Phase(cleanup); RejectSymlinkAncestors(path);
+            Phase(cleanup);
+            FileAttributes attributes;
+            try { attributes = File.GetAttributes(path); }
+            catch (FileNotFoundException) { Phase(cleanup); return true; }
+            catch (DirectoryNotFoundException) { Phase(cleanup); return true; }
+            Phase(cleanup);
+            return (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != FileAttributes.Directory;
+        }
+
+        internal (ulong Volume, ulong Low, ulong High) ReadPrivateDirectoryIdentity(string path, bool cleanup = false, bool foreignSlot = false)
+        {
+            Phase(cleanup);
+            RejectSymlinkAncestors(foreignSlot ? Path.GetDirectoryName(path)! : path);
+            // Only this old, freed registry slot may yield the zero sentinel.
+            // The original private directory still requires its exact identity.
+            if (foreignSlot && ForeignSlotAbsentOrNonPlain(path, cleanup)) return default;
             if (OperatingSystem.IsLinux())
             {
-                var value = PrivateObjectLinks.Identity(path, directory: true);
+                (ulong Device, ulong Inode, long ChangedSeconds, uint ChangedNanoseconds) value;
+                try { value = PrivateObjectLinks.Identity(path, directory: true); }
+                catch (WorktreeBoundaryException) when (foreignSlot)
+                {
+                    // statx's bounded helper has no errno result. Do not turn
+                    // arbitrary failures into absence: inspect the namespace
+                    // again under the same phase, and retain unreadable entries.
+                    if (ForeignSlotAbsentOrNonPlain(path, cleanup)) return default;
+                    throw;
+                }
                 Phase(cleanup); return (value.Device, value.Inode, 0);
             }
             if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Private admin directory identity supports Linux/Windows only.");
@@ -319,11 +355,39 @@ public sealed partial class WorktreeManager
                 Phase(cleanup);
                 held = CreateFile(path, 0, FileShare.ReadWrite | FileShare.Delete, IntPtr.Zero,
                     FileMode.Open, 0x02200000, IntPtr.Zero); // BACKUP_SEMANTICS | OPEN_REPARSE_POINT.
-                if (held.IsInvalid || !GetPrivateDirectoryAttributes(held, 9, out var attributes, 8) ||
-                    (attributes.Attributes & 0x410) != 0x10 || !GetPrivateDirectoryId(held, 18, out var id, 24) ||
-                    (id.Low | id.High) == 0)
-                    throw new WorktreeBoundaryException("Original plain private admin directory identity is unavailable.");
-                result = (id.Volume, id.Low, id.High); Phase(cleanup);
+                if (held.IsInvalid)
+                {
+                    var error = Marshal.GetLastPInvokeError();
+                    if (foreignSlot && error is 2 or 3 or 303) result = default((ulong, ulong, ulong));
+                    else throw new WorktreeBoundaryException("Original plain private admin directory identity is unavailable.");
+                }
+                else if (!GetPrivateDirectoryAttributes(held, 9, out var attributes, 8))
+                {
+                    var error = Marshal.GetLastPInvokeError();
+                    if (foreignSlot && error is 2 or 3 or 303) result = default((ulong, ulong, ulong));
+                    else throw new WorktreeBoundaryException("Original plain private admin directory attributes are unavailable.");
+                }
+                else if ((attributes.Attributes & 0x410) != 0x10)
+                {
+                    if (foreignSlot) result = default((ulong, ulong, ulong));
+                    else throw new WorktreeBoundaryException("Original private admin directory is not plain.");
+                }
+                else
+                {
+                    if (!GetPrivateDirectoryId(held, 18, out var id, 24))
+                    {
+                        var error = Marshal.GetLastPInvokeError();
+                        if (foreignSlot && error is 2 or 3 or 303) result = default((ulong, ulong, ulong));
+                        else throw new WorktreeBoundaryException("Original plain private admin directory identity is unavailable.");
+                    }
+                    else
+                    {
+                        if ((id.Low | id.High) == 0)
+                            throw new WorktreeBoundaryException("Original plain private admin directory identity is unavailable.");
+                        result = (id.Volume, id.Low, id.High);
+                    }
+                }
+                Phase(cleanup);
             }
             catch (Exception failure) { primary = failure; }
             if (held is not null)

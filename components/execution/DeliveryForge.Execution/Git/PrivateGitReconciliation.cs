@@ -10,6 +10,11 @@ public sealed partial class WorktreeManager
     {
         const int ImportFileBytes = 16 * 1024 * 1024;
         const long ImportBytes = 128L * 1024 * 1024;
+        sealed record PreparedImport(string Oid, string Kind, ReadOnlyMemory<byte> Canonical,
+            int BodyOffset, byte[] Encoded, byte[] CommonEncoding, bool Existing)
+        {
+            internal ReadOnlyMemory<byte> Body => Canonical[BodyOffset..];
+        }
         TaskCompletionSource<bool>? privateObjectReconciliation;
         bool reconciledObjects;
         byte[]? reconciledHead;
@@ -76,16 +81,19 @@ public sealed partial class WorktreeManager
             }
             CheckReconciliation(token); RequireValidatedPrivateObjects(); CheckSameHead(head);
             var objects = privateInventory!.ReachableObjectIds(reachable, () => CheckReconciliation(token));
+            if (objects.Length != reachable.Count)
+                throw new WorktreeBoundaryException("Candidate delta requires a validated private copy of every object outside the frozen base closure.");
 
-            // Like ordinary Git writes, this short import-to-ref interval must
-            // not overlap external destructive gc --prune=now. Parent admission
-            // serializes Forge effects; it does not lock arbitrary external Git.
-            // The private phase protects the frozen base closure. COMMON objects
-            // outside it are not protected against external ref removal/pruning.
+            // ALL object-deleting maintenance, including expiry-based gc, must
+            // be serialized outside promotion through the post-ref proof.
+            // Parent admission does not exclude arbitrary external Git.
             long bytes = 0;
-            // One bounded synchronous batch, not one retained ledger row per
-            // object. Every chunk still checks original WORK/currentness; no
-            // native invocation or await runs inside this admission factory.
+            var staged = new List<PreparedImport>();
+            var collisions = 0;
+            var bodyRoot = Path.Combine(GitDirectory, "forge-reconciliation-bodies-" + Guid.NewGuid().ToString("N"));
+            // Reserve every known read/encoding/proof cost BEFORE any COMMON
+            // write. Canonical validation is not an import-budget reservation.
+            // Retain these exact outputs; do not recompress during promotion.
             parent.EnterSynchronous(RunId, () =>
             {
                 foreach (var oid in objects)
@@ -105,23 +113,93 @@ public sealed partial class WorktreeManager
                     var trustedEncoding = EncodeCanonical(expected,
                         checked((int)Math.Min(ImportFileBytes, ImportBytes - bytes)), token);
                     bytes += trustedEncoding.Length;
-                    ImportLooseObject(oid, trustedEncoding, expected, ref bytes, token);
+                    var separator = expected.Span.IndexOf((byte)0);
+                    var space = expected.Span[..separator].IndexOf((byte)' ');
+                    var kind = Encoding.ASCII.GetString(expected.Span[..space]);
+                    var target = Path.Combine(CommonObjectsPath, oid[..2], oid[2..]);
+                    RejectSymlinkAncestors(target);
+                    var existing = Path.Exists(target);
+                    if (existing && ++collisions > 32)
+                        throw new WorktreeBoundaryException("Canonical import preflight exceeds its finite 32 COMMON loose-collision comparison profile.");
+                    var commonEncoding = existing ? CompareExistingLooseObject(oid, target, expected, ref bytes, token) : trustedEncoding;
+                    var prepared = new PreparedImport(oid, kind, expected, separator + 1, trustedEncoding, commonEncoding, existing);
+                    ReserveImportBytes(ref bytes, commonEncoding.Length); // exact encoded readback after promotion.
+                    if (existing) ReserveImportBytes(ref bytes, prepared.Body.Length); // actual Git raw-body comparison.
+                    if (kind != "blob") ReserveImportBytes(ref bytes, prepared.Body.Length * 2L); // body file write + Git read.
+                    staged.Add(prepared);
+                }
+                if (staged.Any(item => item.Kind != "blob"))
+                {
+                    RejectSymlinkAncestors(bodyRoot);
+                    if (Path.Exists(bodyRoot)) throw new WorktreeBoundaryException("Fresh canonical body staging path already exists.");
+                    Directory.CreateDirectory(bodyRoot); RejectSymlinkAncestors(bodyRoot);
+                    foreach (var item in staged.Where(item => item.Kind != "blob"))
+                        WriteImportFile(Path.Combine(bodyRoot, item.Oid), item.Body, token);
                 }
                 CheckReconciliation(token); return true;
             });
+            foreach (var kind in new[] { "tree", "commit", "tag" })
+            {
+                foreach (var group in staged.Where(item => item.Kind == kind).Chunk(48))
+                {
+                    var expected = string.Concat(group.Select(item => item.Oid + "\n"));
+                    // Controlled relative OID arguments avoid supplied stdin,
+                    // which the selected Linux capture intentionally refuses.
+                    // 16 fixed arguments + at most 48 leaves fit the existing
+                    // Linux 64-argument guard; at most 88 structural captures.
+                    var checkedBodies = await ReconciliationCaptureAsync(ObjectsPath, CommonObjectsPath, bodyRoot,
+                        "Private candidate structural preflight", token,
+                        ["hash-object", "--no-filters", "-t", kind, "--", .. group.Select(item => item.Oid)]).ConfigureAwait(false);
+                    if (!checkedBodies.StandardOutputBytes.AsSpan().SequenceEqual(Encoding.ASCII.GetBytes(expected)))
+                        throw new WorktreeBoundaryException("Private candidate structural preflight returned different Git object hashes.");
+                }
+            }
+            foreach (var item in staged.Where(item => item.Existing))
+            {
+                var capture = await ReconciliationCaptureAsync(CommonObjectsPath, null, Worktree,
+                    "COMMON collision canonical preflight", token, "cat-file", item.Kind, item.Oid).ConfigureAwait(false);
+                if (!capture.StandardOutputBytes.AsSpan().SequenceEqual(item.Body.Span))
+                    throw new WorktreeBoundaryException("COMMON collision canonical preflight differs from the validated private body.");
+            }
             RequireValidatedPrivateObjects(); CheckSameHead(head);
             await VerifyBaseAnchorAsync(token).ConfigureAwait(false);
+            parent.EnterSynchronous(RunId, () =>
+            {
+                foreach (var item in staged)
+                {
+                    CheckReconciliation(token);
+                    var target = Path.Combine(CommonObjectsPath, item.Oid[..2], item.Oid[2..]);
+                    RejectSymlinkAncestors(target);
+                    if (item.Existing)
+                    {
+                        if (!File.Exists(target)) throw new WorktreeBoundaryException("Preflight COMMON object disappeared before promotion.");
+                    }
+                    else ImportLooseObject(item.Oid, item.Encoded, token);
+                }
+                // Fresh Forge encodings are byte-for-byte checked. Existing
+                // encodings were additionally read by actual Git above.
+                foreach (var item in staged)
+                {
+                    var target = Path.Combine(CommonObjectsPath, item.Oid[..2], item.Oid[2..]);
+                    var actual = ReadPrivateObject(target, item.CommonEncoding.Length);
+                    if (!actual.AsSpan().SequenceEqual(item.CommonEncoding))
+                        throw new WorktreeBoundaryException("COMMON encoded readback differs from its canonical preflight.");
+                    CheckReconciliation(token);
+                }
+                CheckReconciliation(token); return true;
+            });
             // Every graph proof deliberately uses COMMON only, never the worker
             // alternate. No successful overlay read can certify this transport.
             _ = await CommonGitAsync(token, "cat-file", "-e", candidate + "^{commit}").ConfigureAwait(false);
             _ = await CommonGitAsync(token, "merge-base", "--is-ancestor", baseline, candidate).ConfigureAwait(false);
-            _ = await CommonGitAsync(token, "fsck", "--full", "--strict", "--no-reflogs", "--no-dangling", candidate).ConfigureAwait(false);
+            await VerifyCommonDeltaAsync(candidate, baseline, reachable, token).ConfigureAwait(false);
             RequireValidatedPrivateObjects(); CheckSameHead(head);
             await VerifyBaseAnchorAsync(token).ConfigureAwait(false);
             await manager.CreateFreshCommonRefAsync(CommonDirectory, candidateRef, candidate, token).ConfigureAwait(false);
             var retained = await CommonGitAsync(token, "rev-parse", "--verify", candidateRef + "^{commit}").ConfigureAwait(false);
             if (retained.TrimEnd('\r', '\n') != candidate)
                 throw new WorktreeBoundaryException("Original COMMON candidate ref readback differs after publication.");
+            await VerifyCommonDeltaAsync(candidateRef, baseline, reachable, token).ConfigureAwait(false);
             parent.EnterSynchronous(RunId, () =>
             {
                 CheckReconciliation(token); RequireValidatedPrivateObjects(); CheckSameHead(head);
@@ -130,6 +208,22 @@ public sealed partial class WorktreeManager
                 return true;
             });
             return true;
+        }
+
+        static void ReserveImportBytes(ref long bytes, long additional)
+        {
+            if (additional < 0 || additional > ImportBytes - bytes)
+                throw new WorktreeBoundaryException("Canonical import preflight exceeds its unchanged shared byte allowance.");
+            bytes += additional;
+        }
+
+        async Task VerifyCommonDeltaAsync(string candidate, string baseline, HashSet<string> expected, CancellationToken token)
+        {
+            var output = await CommonGitAsync(token, "rev-list", "--objects", "--no-object-names", "--missing=error",
+                candidate, "^" + baseline).ConfigureAwait(false);
+            var actual = output.Split('\n', StringSplitOptions.RemoveEmptyEntries).Select(line => line.TrimEnd('\r')).ToArray();
+            if (actual.Length != expected.Count || !expected.SetEquals(actual))
+                throw new WorktreeBoundaryException("COMMON candidate delta differs from the validated private closure.");
         }
 
         void CheckSameHead(byte[] expected, bool cleanup = false)
@@ -166,14 +260,14 @@ public sealed partial class WorktreeManager
             public override void WriteByte(byte value) { Bound(1); base.WriteByte(value); }
         }
 
-        void ImportLooseObject(string oid, byte[] encoded, ReadOnlyMemory<byte> canonical, ref long bytes, CancellationToken token)
+        void ImportLooseObject(string oid, byte[] encoded, CancellationToken token)
         {
             var fanout = Path.Combine(CommonObjectsPath, oid[..2]);
             var target = Path.Combine(fanout, oid[2..]);
             RejectSymlinkAncestors(fanout); CheckReconciliation(token);
             if (!Directory.Exists(fanout)) Directory.CreateDirectory(fanout);
             RejectSymlinkAncestors(target); CheckReconciliation(token);
-            if (Path.Exists(target)) { bytes = CompareExistingLooseObject(oid, target, canonical, bytes, token); return; }
+            if (Path.Exists(target)) throw new WorktreeBoundaryException("COMMON target appeared after canonical preflight.");
             var temporary = Path.Combine(fanout, "tmp_forge_" + Guid.NewGuid().ToString("N"));
             WriteImportFile(temporary, encoded, token);
             CheckReconciliation(token); RejectSymlinkAncestors(target);
@@ -183,7 +277,7 @@ public sealed partial class WorktreeManager
             CheckReconciliation(token);
         }
 
-        long CompareExistingLooseObject(string oid, string target, ReadOnlyMemory<byte> expected, long bytes, CancellationToken token)
+        byte[] CompareExistingLooseObject(string oid, string target, ReadOnlyMemory<byte> expected, ref long bytes, CancellationToken token)
         {
             var available = checked((int)Math.Min(ImportFileBytes, ImportBytes - bytes));
             var existing = ReadPrivateObject(target, available);
@@ -193,10 +287,10 @@ public sealed partial class WorktreeManager
                 checked((int)Math.Min(ImportFileBytes, ImportBytes - bytes)), () => CheckReconciliation(token), actual);
             if (!actual.GetBuffer().AsSpan(0, checked((int)actual.Length)).SequenceEqual(expected.Span))
                 throw new WorktreeBoundaryException("Existing COMMON loose object differs from the validated candidate object.");
-            return bytes;
+            return existing;
         }
 
-        void WriteImportFile(string path, byte[] encoded, CancellationToken token)
+        void WriteImportFile(string path, ReadOnlyMemory<byte> encoded, CancellationToken token)
         {
             FileStream? file = null; Exception? primary = null, close = null;
             try
@@ -206,7 +300,7 @@ public sealed partial class WorktreeManager
                 for (var offset = 0; offset < encoded.Length;)
                 {
                     CheckReconciliation(token); var count = Math.Min(65536, encoded.Length - offset);
-                    file.Write(encoded, offset, count); offset += count; CheckReconciliation(token);
+                    file.Write(encoded.Span.Slice(offset, count)); offset += count; CheckReconciliation(token);
                 }
                 file.Flush(flushToDisk: true); CheckReconciliation(token);
             }
@@ -241,19 +335,27 @@ public sealed partial class WorktreeManager
 
         async Task<string> CommonGitAsync(CancellationToken token, params string[] arguments)
         {
+            var capture = await ReconciliationCaptureAsync(CommonObjectsPath, null, Worktree,
+                "COMMON reconciliation Git", token, arguments).ConfigureAwait(false);
+            return new UTF8Encoding(false, true).GetString(capture.StandardOutputBytes);
+        }
+
+        async Task<BoundedCommandCaptureResult> ReconciliationCaptureAsync(string objectRoot, string? alternateRoot,
+            string workingDirectory, string operation, CancellationToken token, params string[] arguments)
+        {
             var executor = manager._originalExecutor ?? throw new WorktreeBoundaryException("Original Git executor is absent.");
             var nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
             var environment = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
                 .Where(row => !((string)row.Key).StartsWith("GIT_", StringComparison.OrdinalIgnoreCase))
                 .ToDictionary(row => (string)row.Key, row => row.Value?.ToString() ?? "", OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
             environment["GIT_DIR"] = CommonDirectory; environment["GIT_COMMON_DIR"] = CommonDirectory;
-            environment["GIT_OBJECT_DIRECTORY"] = CommonObjectsPath; environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = "";
+            environment["GIT_OBJECT_DIRECTORY"] = objectRoot; environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = alternateRoot ?? "";
             environment["GIT_CONFIG_NOSYSTEM"] = "1"; environment["GIT_CONFIG_GLOBAL"] = nullDevice; environment["GIT_CONFIG_SYSTEM"] = nullDevice;
             environment["GIT_NO_REPLACE_OBJECTS"] = "1"; environment["GIT_GRAFT_FILE"] = nullDevice;
             environment["GIT_NO_LAZY_FETCH"] = "1"; environment["GIT_TERMINAL_PROMPT"] = "0"; environment["GIT_OPTIONAL_LOCKS"] = "0";
             environment["LC_ALL"] = "C"; environment["LANG"] = "C";
             var invocation = new CommandInvocation(manager._gitExecutable,
-                ["--no-optional-locks", "-c", "core.hooksPath=" + nullDevice, "-c", "core.fsmonitor=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", .. arguments], Worktree, environment)
+                ["--no-optional-locks", "-c", "core.hooksPath=" + nullDevice, "-c", "core.fsmonitor=false", "-c", "core.commitGraph=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", .. arguments], workingDirectory, environment)
             { EnvironmentIsComplete = true };
             var capture = await parent.EnterAsync(RunId, () =>
             {
@@ -262,13 +364,13 @@ public sealed partial class WorktreeManager
                 return executor.ExecuteBoundedCaptureAsync(invocation, TimeSpan.FromSeconds(30), ImportFileBytes, token, new OwnedWorkPhaseBudget(original));
             }).ConfigureAwait(false);
             var command = capture.Command; var facts = command.LifecycleDiagnostics;
-            if (capture.CaptureBoundExceeded || command.ExitCode != 0 || command.TimedOut || command.Cancelled || !command.OwnedProcessQuiescent ||
+            if (capture.CaptureBoundExceeded || capture.StandardErrorBytes.Length != 0 || command.ExitCode != 0 || command.TimedOut || command.Cancelled || !command.OwnedProcessQuiescent ||
                 !capture.RootExitObserved || !capture.StandardOutputDrainCompleted || !capture.StandardErrorDrainCompleted || facts?.NativeFailure is not null ||
                 facts?.OwnedTree is not { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 } ||
                 OperatingSystem.IsLinux() && capture.OwnershipKind != BoundedCaptureOwnershipKind.LinuxCreationOwnedScope)
-                throw new WorktreeBoundaryException("COMMON reconciliation Git did not close successfully.");
+                throw new WorktreeBoundaryException(operation + " did not close successfully.");
             CheckReconciliation(token);
-            return new UTF8Encoding(false, true).GetString(capture.StandardOutputBytes);
+            return capture;
         }
     }
 }

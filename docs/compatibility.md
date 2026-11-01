@@ -159,13 +159,20 @@ this run's administration. Selection is shared by the original manager and its
 parent views, and confined birth refuses an unselected retained binding.
 
 Before relocation, a bounded sibling `<private-admin>.provisioning.json` records
-the run, worker, COMMON, registered/private paths, frozen base and anchor as
-durable DATA. It grants no adoption or replay authority. The registered
+the run, worker, COMMON, registered/private paths, frozen base, anchor and original
+marker/commondir bytes as file-flushed DATA. It grants no adoption or replay
+authority. File flush does not guarantee that a newly created directory entry
+survives power loss on Linux; no crash-durable journal or atomic routing rewrite
+is claimed. The registered
 `commondir` is made absolute and the worker marker is redirected to the fresh
 private destination before the one directory move. A failed rewrite or move
 therefore cannot leave the worker pointing at a freed registry name later reused
-by another run. Unstarted cleanup refuses retained or durable provisioning
-effects, including fresh-process discovery; registry absence alone is insufficient.
+by another run. Linux relocation uses `renameat2(RENAME_NOREPLACE)` and refuses
+if unsupported or if the destination appeared; Windows retains its no-overwrite
+directory move. Unstarted cleanup refuses retained or observed provisioning
+effects, including the deterministic ref directory and fresh-process discovery;
+registry absence alone is insufficient. Its read-only ref absence query also
+works for an unselected repository using another ref backend.
 
 For partial provisioning, stop new admission and establish the actual original
 owner's closure before any recovery effects. Preserve and hash the worker marker,
@@ -179,12 +186,28 @@ older reader nor a new owner may resume, delete or adopt the partial attempt.
 Only after actual writer retirement and successful canonical private-object
 validation may that same parent reconcile reachable loose objects into COMMON.
 An actual private-overlay traversal enumerates the candidate closure outside the
-anchored base, with at most 4,096 unique object IDs. Unreachable private objects
-stay private. Forge recompresses each validated canonical body into its own
+anchored base, with at most 4,096 unique object IDs. Every delta object requires
+a retained validated private copy; an unprotected COMMON-only delta dependency
+refuses. Unreachable private objects stay private. Forge recompresses each validated canonical body into its own
 bounded complete zlib encoding; worker compressed bytes are never copied into
-COMMON. The copy uses fresh files and no-overwrite moves, proves commit type,
-ancestry and full strict Git integrity through COMMON alone, then creates a fresh
-candidate ref and checks its value. Forward observation and review then use
+COMMON. Before any COMMON write, the parent reserves the known import costs and
+stages canonical tree/commit/tag bodies outside COMMON. Git's strict format
+check (`hash-object --no-filters -t TYPE`, without `-w` or `--literally`) must
+return the exact object hashes with empty stderr. Controlled OID filename
+arguments are grouped in batches of at most 48 (at most 88 native captures),
+within the existing Linux 64-argument guard,
+so this uses no supplied stdin or new Linux capture capability. Deferred Git
+checks of attributes/modules referenced by those new objects can still refuse
+within the unchanged native limits.
+
+At most 32 existing COMMON loose collisions are compared canonically and read
+by actual Git before promotion. The copy uses fresh files and no-overwrite
+moves. All promoted/existing encodings must read back byte-for-byte as their
+retained preflight encodings; existing encodings also passed the actual Git body
+comparison. COMMON-only commit type, ancestry and targeted delta connectivity
+are proved, then a fresh candidate ref is created and its value and delta are
+checked again. This avoids a strict scan of unrelated historical COMMON objects.
+Forward observation and review then use
 COMMON alone. Private source objects, administration, base and candidate refs
 remain retained; cleanup cannot import, retry or adopt a partial attempt.
 Fresh base/candidate refs require Git's files ref backend. Publication holds a
@@ -192,17 +215,18 @@ fresh ordinary ref lock, refuses existing loose, packed or symbolic refs, and
 uses a no-overwrite rename; a dangling symbolic ref cannot redirect publication.
 Other ref backends refuse this finite profile. Failed locks remain evidence.
 
-The short import-to-candidate-ref interval follows ordinary Git's concurrency
-contract: external destructive `gc --prune=now` must not overlap it. Forge's
+All object-deleting maintenance, including ordinary expiry-based `git gc` and
+`gc --prune=now`, must be serialized outside promotion through the final
+post-publication connectivity check. Forge's
 parent admission serializes its own effects, not arbitrary external Git. This
-does not claim safety against concurrent destructive maintenance during import.
+does not claim safety against concurrent pruning during that interval.
 Maintenance acceptance must exercise the separate live/private phase and then
 serialize import. Only the frozen base closure is protected by the base anchor;
 objects read from other COMMON refs or previously unreachable COMMON objects
-have no such retention guarantee. External removal of those refs/objects may
-refuse the candidate. A validated private copy needed by the candidate is
-recompressed/imported even if it was classified as a COMMON duplicate; a missing
-COMMON-only dependency remains a refusal, not replay authority. Actual Linux
+have no such retention guarantee. A delta with no validated private copy refuses
+before COMMON writes even if its COMMON copy currently exists. A validated
+private copy is recompressed/imported even if classified as a COMMON duplicate.
+Any refusal is not replay authority. Actual Linux
 installed acceptance remains required.
 
 Private-object initialization captures the complete common object-ID inventory
@@ -221,12 +245,19 @@ separately bounded by their existing capture/profile limits, not this accumulato
 Reconciliation performs an additional bounded read/canonical-comparison pass
 under the same 4,096-entry, 16-MiB-file and 128-MiB combined-byte profile. It can
 write at most that pass's generated encoded bytes (at most 128 MiB) to COMMON.
-Source encoding, canonical content, generated encoding and COMMON collision
-comparison consume this pass's remaining allowance. The bounded import is one
-synchronous parent admission with chunk currentness/deadline checks, not one
-retained ledger row per object. Earlier effects and native proofs still consume
-the unchanged cumulative parent ledger. Full COMMON integrity checking also
-consumes the existing native read budget; a large store can refuse. All
+Source encoding, canonical content, generated encoding, COMMON collision
+comparisons, structural body writes/reads, actual Git collision body reads and
+exact encoded readback consume this pass's allowance. Known costs are reserved
+before any COMMON write and the exact prepared encodings are reused. Passing
+canonical validation alone does not reserve this separate import allowance;
+an encoding or known cost refusal leaves COMMON untouched. Staged body files
+remain evidence, with no automatic cleanup. The bounded preflight and promotion
+each use one synchronous parent admission with chunk currentness/deadline
+checks, not one retained ledger row per object. Earlier effects, the bounded
+structural/collision captures and graph proofs still consume the unchanged
+cumulative parent ledger. Small OID argument/output and metadata overhead remain
+subject to the existing native/cumulative I/O limits, separately from this body
+accumulator. All
 additional metadata, object reads/writes and native
 proof calls must fit the unchanged cumulative Tool/kernel limits and original
 WORK interval; the profile is no new I/O allowance. Selected-run accounting must
