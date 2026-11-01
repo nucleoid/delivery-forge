@@ -191,7 +191,8 @@ public sealed partial class WorktreeManager
                 }
                 var invocation = new CommandInvocation(manager._gitExecutable,
                     ["--no-optional-locks", "-c", "core.hooksPath=" + nullDevice, "-c", "core.fsmonitor=false", "cat-file", argument, oid],
-                    Worktree, environment) { EnvironmentIsComplete = true };
+                    Worktree, environment)
+                { EnvironmentIsComplete = true };
                 Task<BoundedCommandCaptureResult> Birth()
                 {
                     CheckPhase(); token.ThrowIfCancellationRequested();
