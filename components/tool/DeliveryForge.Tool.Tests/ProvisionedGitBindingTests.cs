@@ -479,6 +479,13 @@ public sealed class ProvisionedGitBindingTests
         Assert.Equal("{}", File.ReadAllText(Path.Combine(fixture.Worker, ".forge", "protected-policy.json")));
         // The existing review owner consumes BOTH namespaces, while protected
         // policy is still resolved from the original base, never the candidate.
+        await AssertProductionReview(fixture, binding, actual, baseHead, candidate.HeadCommit, protectedPolicy);
+        Assert.False(fixture.Original.HasExplicitUnknown);
+    }
+
+    static async Task AssertProductionReview(Fixture fixture, WorktreeManager.OwnedGitBinding binding, OwnedDuplexProcess actual,
+        string baseHead, string candidate, string protectedPolicy)
+    {
         var planJson = JsonNode.Parse(File.ReadAllBytes(Path.Combine(AppContext.BaseDirectory, "ContractFixtures", "plan.json")))!.AsObject();
         planJson["baseCommit"] = baseHead;
         planJson["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(planJson.ToJsonString()));
@@ -487,17 +494,16 @@ public sealed class ProvisionedGitBindingTests
         var image = File.ReadAllBytes(fixture.GitImage);
         var sourceOwner = new ProductionReviewSourceOwner(fixture.Executor, fixture.Original, fixture.Parent, "owned", fixture.Worker,
             binding.GitDirectory, binding.CommonDirectory, fixture.GitImage, image.Length, Convert.ToHexStringLower(SHA256.HashData(image)),
-            await fixture.GitAt(fixture.Repository, "--version"), baseHead, candidate.HeadCommit,
+            await fixture.GitAt(fixture.Repository, "--version"), baseHead, candidate,
             () => actual.OriginalRetirementTask is { IsCompletedSuccessfully: true } closed && closed.Result.KnownClosed && !actual.HasUnknownIo,
             ContractValidator.ParseAndValidate(plan).Identity, ContractValidator.ParseAndValidate(evidence).Identity,
             ".forge/protected-policy.json", 1048576, binding);
         using var review = await ReviewAuthorityHost.CreateProductionFromOwnedSourceAsync(sourceOwner, plan, evidence,
             ".forge/protected-policy.json", 1048576, fixture.Original.Token);
-        Assert.Equal(candidate.HeadCommit, review.ObjectView.FrozenHeadCommit);
+        Assert.Equal(candidate, review.ObjectView.FrozenHeadCommit);
         Assert.Equal(baseHead, review.Policy.SourceRevision);
         Assert.Equal("sha256:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(protectedPolicy))), review.Policy.ContentIdentity);
         Assert.True(review.Policy.Trusted); Assert.False(review.Policy.Fixture);
-        Assert.False(fixture.Original.HasExplicitUnknown);
     }
 
     [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
@@ -770,6 +776,151 @@ public sealed class ProvisionedGitBindingTests
         Assert.False(fixture.Original.HasExplicitUnknown);
     }
 
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Private_administration_survives_common_maintenance_then_reconciles_for_common_only_publication()
+    {
+        const string protectedPolicy = """
+            {"Fixture":false,"Advisory":false,"AllowedFamilies":[{"Author":"gpt","Reviewer":"claude"}],"AllowedScopes":["source"],"AllowExactReuse":false,"Budget":{"MaximumRounds":2,"MaximumDuration":"00:00:30","MaximumTokens":4096,"MaximumCost":1.0},"ExemptionApprovers":[]}
+            """;
+        using var fixture = await Fixture.CreateAsync(forceCheckoutConversion: true, protectedPolicy: protectedPolicy, privateAdministration: true);
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        Assert.True(binding.HasPrivateAdministration); Assert.False(binding.HasReconciledObjects);
+        Assert.False(Path.GetFullPath(binding.GitDirectory).StartsWith(Path.Combine(binding.CommonDirectory, "worktrees") + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase));
+        var baseHead = Assert.IsType<string>(binding.FrozenBaseCommit);
+        var baseAnchor = Assert.IsType<string>(binding.BaseAnchorRef);
+        var candidateRef = Assert.IsType<string>(binding.CandidateRef);
+        Assert.Equal(baseHead, await fixture.GitAt(fixture.Repository, "rev-parse", baseAnchor + "^{commit}"));
+        using var lease = fixture.Manager.AcquireWriter(fixture.Worker, "owned", "private-administration-writer");
+        await binding.EnablePrivateObjectWritesAsync(fixture.Original.Token);
+        var commonBefore = ObjectBodies(binding.CommonObjectsPath);
+        File.WriteAllText(Path.Combine(fixture.Worker, "subject.txt"), "private administration candidate\n");
+        File.WriteAllText(Path.Combine(fixture.Worker, ".forge", "protected-policy.json"), "{}");
+        var actual = fixture.OpenOverlayGit(binding, "-c", "user.name=PrivateAdministrationFixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "commit", "-q", "-am", "private candidate");
+        binding.AttachPrivateObjectWriter(actual);
+        using var output = new MemoryStream();
+        var copy = actual.Output.CopyToAsync(output, 16384, fixture.Original.Token); actual.AttachOriginalOutputConsumer(copy);
+        var candidate = "";
+        try
+        {
+            await copy.WaitAsync(fixture.Original.Remaining, fixture.Original.Token);
+            candidate = await fixture.GitAt(fixture.Worker, "rev-parse", "HEAD");
+            Assert.NotEqual(baseHead, candidate); Assert.Equal(commonBefore, ObjectBodies(binding.CommonObjectsPath));
+            var privateIndex = File.ReadAllBytes(binding.IndexPath);
+            var listing = (await fixture.GitAt(fixture.Repository, "worktree", "list", "--porcelain")).Replace('\\', '/');
+            Assert.DoesNotContain(fixture.Worker.Replace('\\', '/'), listing, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(candidate, listing, StringComparison.Ordinal);
+            await fixture.GitAtExpectingExit(fixture.Repository, 128, "cat-file", "-e", candidate + "^{commit}");
+            // Remove incidental retention before maintenance, leaving the actual
+            // run-owned base anchor. The private HEAD/index is not registered.
+            await fixture.GitAt(fixture.Repository, "update-ref", "-d", "refs/heads/main", baseHead);
+            await fixture.GitAt(fixture.Repository, "reflog", "expire", "--expire=now", "--expire-unreachable=now", "--all");
+            await fixture.GitAt(fixture.Repository, "read-tree", "--empty");
+            await fixture.GitAt(fixture.Repository, "gc", "--prune=now");
+            await fixture.GitAt(fixture.Repository, "fsck", "--full", "--strict", "--no-reflogs", "--no-dangling");
+            Assert.Equal(baseHead, await fixture.GitAt(fixture.Repository, "rev-parse", baseAnchor + "^{commit}"));
+            Assert.Equal(privateIndex, File.ReadAllBytes(binding.IndexPath));
+            await fixture.GitAtExpectingExit(fixture.Repository, 128, "cat-file", "-e", candidate + "^{commit}");
+        }
+        finally
+        {
+            var closed = await actual.RetireAsync(false).WaitAsync(fixture.Original.Remaining, fixture.Original.Token);
+            Assert.True(closed.KnownClosed); Assert.Equal(0, closed.ExitCode); Assert.False(actual.HasUnknownIo);
+        }
+        await binding.ValidatePrivateObjectsAfterRetirementAsync(fixture.Original.Token);
+        var reviewRefusal = await Assert.ThrowsAsync<ReviewPreflightException>(() =>
+            AssertProductionReview(fixture, binding, actual, baseHead, candidate, protectedPolicy));
+        Assert.Equal("Private administration requires parent object reconciliation before forward review.", reviewRefusal.Message);
+        // Destructive maintenance above is complete BEFORE import. This does not
+        // claim arbitrary external prune-now is safe during normal Git writes.
+        await binding.ReconcilePrivateObjectsAfterRetirementAsync(fixture.Original.Token);
+        Assert.True(binding.HasReconciledObjects); Assert.Equal(binding.CommonObjectsPath, binding.ReadObjectsPath);
+        Assert.Equal(candidate, await fixture.GitAt(fixture.Repository, "rev-parse", candidateRef + "^{commit}"));
+        await fixture.GitAt(fixture.Repository, "cat-file", "-e", candidate + "^{commit}");
+        await fixture.GitAt(fixture.Repository, "merge-base", "--is-ancestor", baseHead, candidate);
+        await fixture.GitAt(fixture.Repository, "fsck", "--full", "--strict", "--no-reflogs", "--no-dangling");
+        var observed = await fixture.Manager.ObserveAsync(fixture.Worker, fixture.Original.Token);
+        Assert.True(observed.IsClean); Assert.Equal(candidate, observed.HeadCommit);
+        await AssertProductionReview(fixture, binding, actual, baseHead, candidate, protectedPolicy);
+        // This destination is a fresh local bare fixture, never an external remote.
+        await fixture.GitAt(fixture.Foreign, "init", "--bare", "-q");
+        await fixture.GitAt(fixture.Repository, "-c", "protocol.file.allow=always", "push", fixture.Foreign, candidateRef + ":refs/heads/fixture-candidate");
+        Assert.Equal(candidate, await fixture.GitAt(fixture.Foreign, "rev-parse", "refs/heads/fixture-candidate"));
+        await fixture.GitAt(fixture.Foreign, "cat-file", "-e", candidate + "^{commit}");
+        Assert.NotEmpty(Directory.GetFiles(binding.ObjectsPath, "*", SearchOption.AllDirectories));
+        Assert.True(File.Exists(binding.IndexPath)); Assert.False(fixture.Original.HasExplicitUnknown);
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Private_administration_refuses_reconciliation_before_original_writer_retirement()
+    {
+        using var fixture = await Fixture.CreateAsync(privateAdministration: true);
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        var candidateRef = Assert.IsType<string>(binding.CandidateRef);
+        await binding.EnablePrivateObjectWritesAsync(fixture.Original.Token);
+        var actual = fixture.OpenOverlayGit(binding, "--version"); binding.AttachPrivateObjectWriter(actual);
+        try
+        {
+            Assert.Null(actual.OriginalRetirementTask);
+            await Assert.ThrowsAsync<WorktreeBoundaryException>(() => binding.ReconcilePrivateObjectsAfterRetirementAsync(fixture.Original.Token));
+            Assert.False(binding.HasReconciledObjects);
+            await fixture.GitAtExpectingExit(fixture.Repository, 1, "show-ref", "--verify", "--quiet", candidateRef);
+        }
+        finally { await DrainAndRetire(actual, fixture.Original); }
+        await binding.ValidatePrivateObjectsAfterRetirementAsync(fixture.Original.Token);
+        await binding.ReconcilePrivateObjectsAfterRetirementAsync(fixture.Original.Token);
+        Assert.True(binding.HasReconciledObjects); Assert.False(fixture.Original.HasExplicitUnknown);
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Private_administration_refuses_foreign_original_without_import_or_candidate_ref()
+    {
+        using var fixture = await Fixture.CreateAsync(privateAdministration: true);
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        var candidateRef = Assert.IsType<string>(binding.CandidateRef);
+        using var foreign = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var before = fixture.Manager.ActualOwnedGitInvocations;
+        Assert.Throws<WorktreeBoundaryException>(() => binding.RequireOriginal(foreign, fixture.Parent, "owned"));
+        Assert.Equal(before, fixture.Manager.ActualOwnedGitInvocations); Assert.False(binding.HasReconciledObjects);
+        await fixture.GitAtExpectingExit(fixture.Repository, 1, "show-ref", "--verify", "--quiet", candidateRef);
+        Assert.True(Directory.Exists(binding.GitDirectory)); Assert.False(fixture.Original.HasExplicitUnknown);
+    }
+
+    [Theory(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Private_administration_refuses_changed_inventory_or_existing_candidate_without_adoption(bool candidateCollision)
+    {
+        using var fixture = await Fixture.CreateAsync(privateAdministration: true);
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        var candidateRef = Assert.IsType<string>(binding.CandidateRef);
+        var baseHead = Assert.IsType<string>(binding.FrozenBaseCommit);
+        await binding.EnablePrivateObjectWritesAsync(fixture.Original.Token);
+        File.WriteAllText(Path.Combine(fixture.Worker, "subject.txt"), "unaccepted private candidate\n");
+        var actual = fixture.OpenOverlayGit(binding, "-c", "user.name=PrivateAdministrationFixture", "-c", "user.email=fixture@example.invalid",
+            "-c", "commit.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false", "commit", "-q", "-am", "unaccepted candidate");
+        binding.AttachPrivateObjectWriter(actual); await DrainAndRetire(actual, fixture.Original);
+        await binding.ValidatePrivateObjectsAfterRetirementAsync(fixture.Original.Token);
+        var candidateRefPath = Path.Combine(binding.CommonDirectory, candidateRef.Replace('/', Path.DirectorySeparatorChar));
+        byte[]? collisionBytes = null;
+        if (candidateCollision)
+        {
+            await fixture.GitAt(fixture.Repository, "update-ref", candidateRef, baseHead, new string('0', baseHead.Length));
+            collisionBytes = File.ReadAllBytes(candidateRefPath);
+        }
+        else Directory.CreateDirectory(Path.Combine(binding.ObjectsPath, "pack"));
+        await Assert.ThrowsAsync<WorktreeBoundaryException>(() => binding.ReconcilePrivateObjectsAfterRetirementAsync(fixture.Original.Token));
+        Assert.False(binding.HasReconciledObjects); Assert.Equal(binding.ObjectsPath, binding.ReadObjectsPath);
+        if (candidateCollision)
+            Assert.Equal(collisionBytes, File.ReadAllBytes(candidateRefPath));
+        else
+        {
+            Assert.True(Directory.Exists(Path.Combine(binding.ObjectsPath, "pack")));
+            Assert.False(File.Exists(candidateRefPath));
+        }
+        Assert.True(File.Exists(binding.IndexPath));
+    }
+
     static string[] ObjectBodies(string root) => Directory.GetFiles(root, "*", SearchOption.AllDirectories)
         .Select(path => Path.GetRelativePath(root, path) + ":" + Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(File.ReadAllBytes(path))))
         .OrderBy(value => value, StringComparer.Ordinal).ToArray();
@@ -918,7 +1069,7 @@ public sealed class ProvisionedGitBindingTests
         internal readonly string GitImage = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
             .Where(Path.IsPathFullyQualified).Select(path => Path.Combine(path, "git.exe")).First(File.Exists);
         internal WorktreeManager Manager = null!, InitialManager = null!;
-        internal static async Task<Fixture> CreateAsync(bool forceCheckoutConversion = false, string? protectedPolicy = null)
+        internal static async Task<Fixture> CreateAsync(bool forceCheckoutConversion = false, string? protectedPolicy = null, bool privateAdministration = false)
         {
             var value = new Fixture();
             try
@@ -941,6 +1092,7 @@ public sealed class ProvisionedGitBindingTests
                     await value.Git("config", "--local", "core.eol", "crlf");
                 }
                 value.InitialManager = new WorktreeManager(value.GitImage, value.Executor, value.Original);
+                if (privateAdministration) value.InitialManager.SelectPrivateAdministrationForConfinedWorker();
                 value.Manager = value.InitialManager.WithParentAdmission(value.Parent, "owned");
                 await value.Manager.PrepareAsync(value.Repository, value.Worker, head, TestContext.Current.CancellationToken);
                 var observed = await value.Manager.ObserveAsync(value.Worker, TestContext.Current.CancellationToken);
@@ -969,7 +1121,8 @@ public sealed class ProvisionedGitBindingTests
             { EnvironmentIsComplete = true }, Original);
         }
         async Task<string> Git(params string[] arguments) => await GitAt(Repository, arguments);
-        internal async Task<string> GitAt(string directory, params string[] arguments)
+        internal Task<string> GitAt(string directory, params string[] arguments) => GitAtExpectingExit(directory, 0, arguments);
+        internal async Task<string> GitAtExpectingExit(string directory, int expectedExit, params string[] arguments)
         {
             var environment = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
                 .Where(row => !((string)row.Key).StartsWith("GIT_", StringComparison.OrdinalIgnoreCase))
@@ -979,7 +1132,7 @@ public sealed class ProvisionedGitBindingTests
             var capture = await Parent.EnterAsync("owned", () => Executor.ExecuteBoundedCaptureAsync(new(GitImage,
                 ["-c", "core.hooksPath=NUL", "-c", "core.fsmonitor=false", "-c", "commit.gpgSign=false", .. arguments], directory, environment)
             { EnvironmentIsComplete = true }, TimeSpan.FromSeconds(15), 1048576, Original.Token, new OwnedWorkPhaseBudget(Original)));
-            Assert.Equal(0, capture.Command.ExitCode); Assert.True(capture.Command.OwnedProcessQuiescent);
+            Assert.Equal(expectedExit, capture.Command.ExitCode); Assert.True(capture.Command.OwnedProcessQuiescent);
             Assert.True(capture.RootExitObserved); Assert.True(capture.StandardOutputDrainCompleted); Assert.True(capture.StandardErrorDrainCompleted);
             Assert.True(capture.Command.LifecycleDiagnostics?.OwnedTree is { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 });
             return Encoding.UTF8.GetString(capture.StandardOutputBytes).Trim();

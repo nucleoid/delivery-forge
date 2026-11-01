@@ -35,6 +35,7 @@ public sealed partial class WorktreeManager
         {
             await Task.Yield();
             RequireConfinedConformanceConfiguration(); Check(); token.ThrowIfCancellationRequested();
+            if (HasPrivateAdministration) await VerifyBaseAnchorAsync(token).ConfigureAwait(false);
             if (CommonObjectsPath.IndexOfAny([Path.PathSeparator, '"', '\r', '\n', '\0']) >= 0)
                 throw new WorktreeBoundaryException("Common object path cannot encode another alternate.");
             if (Path.Exists(Path.Combine(CommonObjectsPath, "info", "alternates")) ||
@@ -237,6 +238,7 @@ public sealed partial class WorktreeManager
             }
             if (privateInventory is null) throw new WorktreeBoundaryException("Private Git objects have not passed original post-retirement validation.");
             privateInventory.Verify(() => Phase(cleanup));
+            if (HasReconciledObjects) CheckSameHead(reconciledHead!, cleanup);
         }
 
         byte[] ReadPrivateObject(string path, int maximum) => ReadPrivateObject(path, maximum, false);
@@ -311,6 +313,25 @@ internal sealed class LooseGitObjectInventory
     LooseGitObjectInventory(string root, Dictionary<string, Epoch> epochs) { this.root = root; this.epochs = epochs; }
     internal bool IsBaseDuplicate(string oid) => baseDuplicates.Contains(oid);
     internal string[] BaseDuplicateIds() => baseDuplicates.ToArray();
+    internal string[] NewObjectIds(Action check)
+    {
+        Verify(check);
+        return epochs.Where(row => !row.Value.Directory)
+            .Select(row => Path.GetRelativePath(root, row.Key).Replace("/", "", StringComparison.Ordinal).Replace("\\", "", StringComparison.Ordinal))
+            .Where(oid => !baseDuplicates.Contains(oid)).Order(StringComparer.Ordinal).ToArray();
+    }
+
+    internal byte[] ReadForImport(string oid, int maximum, Action check, Func<string, int, byte[]> read)
+    {
+        if (!IsOid(oid) || baseDuplicates.Contains(oid)) throw new WorktreeBoundaryException("Only an original validated new object may be imported.");
+        var path = Path.Combine(root, oid[..2], oid[2..]);
+        if (!epochs.TryGetValue(path, out var epoch) || epoch.Directory)
+            throw new WorktreeBoundaryException("Import object is absent from the retained private inventory.");
+        check(); epoch.Verify(path);
+        var bytes = read(path, maximum);
+        epoch.Verify(path); check();
+        return bytes;
+    }
     internal static bool IsOid(string text) => text.Length is 40 or 64 && text.All(char.IsAsciiHexDigitLower);
     static bool Hex(string text) => text.All(char.IsAsciiHexDigitLower);
 

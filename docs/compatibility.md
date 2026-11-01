@@ -144,10 +144,32 @@ its existing known-close boundary. Retained UNKNOWN work remains retained. Resto
 a mutually compatible Tool, birth-gate closure and scope configuration together;
 do not flip the profile beneath a live original. Do not resume a private-object
 worktree using an older common-only reader, delete its private objects, or use
-markers as authority. Preserve failed work and evidence. Stock-Git maintenance
-and accepted-candidate private-object transport remain separate unresolved
-production requirements; rollback does not repair them. No service, login,
+markers as authority. Preserve failed work and evidence. Rollback does not import
+private candidates or repair failed transport. No service, login,
 authentication or resource-limit change is implied by this procedure.
+
+Before a confined worker starts, its original parent anchors the exact base with
+a fresh ref and moves the newly provisioned administration outside both COMMON's
+worktree registry and the working tree. COMMON maintenance therefore sees the
+anchored base, without reading an index or HEAD whose objects exist only in the
+private namespace. Metadata, the old registry's absence and the base anchor are
+checked against the retained original binding; existing directories or refs are
+never adopted.
+
+Only after actual writer retirement and successful canonical private-object
+validation may that same parent reconcile new loose objects into COMMON. The
+bounded copy uses fresh files and no-overwrite moves, proves commit type,
+ancestry and connectivity through COMMON alone, then compare-and-creates a fresh
+candidate ref and checks its value. Forward observation and review then use
+COMMON alone. Private source objects, administration, base and candidate refs
+remain retained; cleanup cannot import, retry or adopt a partial attempt.
+
+The short import-to-candidate-ref interval follows ordinary Git's concurrency
+contract: external destructive `gc --prune=now` must not overlap it. Forge's
+parent admission serializes its own effects, not arbitrary external Git. This
+does not claim safety against concurrent destructive maintenance during import.
+Maintenance acceptance must exercise the separate live/private phase and then
+serialize import. Actual Linux installed acceptance remains required.
 
 Private-object initialization captures the complete common object-ID inventory
 with `git cat-file --batch-all-objects --batch-check=%(objectname) --unordered`,
@@ -161,6 +183,16 @@ per file and 128 MiB of encoded/private canonical and compared COMMON canonical
 bytes; these do not enlarge the base-OID capture allowance. Type-query output
 (up to 64 bytes per query), stderr capture and filesystem-operation overhead are
 separately bounded by their existing capture/profile limits, not this accumulator.
+
+Reconciliation performs an additional bounded read/canonical-comparison pass
+under the same 4,096-entry, 16-MiB-file and 128-MiB combined-byte profile. It can
+write at most that pass's encoded bytes (at most 128 MiB) to COMMON; validated
+base duplicates are omitted. COMMON collision comparison consumes this pass's
+remaining allowance. All additional metadata, object reads/writes and native
+proof calls must fit the unchanged cumulative Tool/kernel limits and original
+WORK interval; the profile is no new I/O allowance. Selected-run accounting must
+include this pass before dispatch. No packs, fallback import or automatic
+reconciliation replay is supported.
 
 The complete bounded private inventory admits at most 32 distinct base-object
 comparisons before the first COMMON query. Each comparison uses two native

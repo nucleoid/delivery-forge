@@ -80,6 +80,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         if (acceptedProfile.Capabilities is null || acceptedProfile.Capabilities.Count is < 1 or > 6 || acceptedProfile.Capabilities.Any(row => row is null) || string.IsNullOrWhiteSpace(selection.Version) || selection.Version.Length > 256) throw new ToolUsageException("Finite complete actual native version/profile required BEFORE capability snapshot.");
         if (acceptedProfile.AdapterId != "codex.cli" || acceptedProfile.AdapterVersion != selection.Version || acceptedProfile.Capabilities.Any(x => (x.Capability is AgentCapability.Pause or AgentCapability.Resume) && x.Status == AgentCapabilityStatus.Supported)) throw new ToolUsageException("Stable app-server has interrupt, not same-turn pause/resume; exact accepted Codex version required.");
         this.selection = selection; this.actualGit = actualGit; Profile = acceptedProfile with { Capabilities = Array.AsReadOnly(acceptedProfile.Capabilities.ToArray()) };
+        if (UsesLinuxWorkspaceWrite) actualGit.SelectPrivateAdministrationForConfinedWorker();
     }
     internal static int RequireLeafCounterPhase(int previous, string phase) => (previous, phase) switch
     {
@@ -526,7 +527,12 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             if (pump is not null) await pump.WaitAsync(original.Remaining, token).ConfigureAwait(false); if (pumpFailure is not null) throw new IOException("Actual app-server protocol failed; no successful completion.", pumpFailure);
             usage?.RequireFinal(); if (usage is not null) await usage.JoinAsync(usageWatch).ConfigureAwait(false);
             runtimeTrust?.Check(original); trustedImage?.Check(token); CloseTrustedImage(true, false);
-            if (privateGit is not null) await Keep(privateGit.ValidatePrivateObjectsAfterRetirementAsync(token)).WaitAsync(original.Remaining, token).ConfigureAwait(false);
+            if (privateGit is not null)
+            {
+                await Keep(privateGit.ValidatePrivateObjectsAfterRetirementAsync(token)).WaitAsync(original.Remaining, token).ConfigureAwait(false);
+                if (privateGit.HasPrivateAdministration)
+                    await Keep(privateGit.ReconcilePrivateObjectsAfterRetirementAsync(token)).WaitAsync(original.Remaining, token).ConfigureAwait(false);
+            }
             var snapshotTask = actualGit.ObserveAsync(request!.Worktree, token); var snapshot = await Keep(snapshotTask).WaitAsync(original.Remaining, token).ConfigureAwait(false); original.Check();
             original.Check(); var artifact = Path.Combine(request.ResultDirectory, "codex-app-server-events.json"); JsonElement[] rows; lock (trace) rows = trace.ToArray(); var raw = conformanceTrustRoute ? JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualCodexAppServerTrace-v1", Host = new StandaloneHostSelection(selection.Executable, selection.Bytes, selection.Sha256, selection.Version), Version = selection.Version, TrustRouteConformanceOnly = conformanceTrustRoute, ConformanceDangerFullAccess = conformanceDangerFullAccess, actual.RunId, actual.RequestIdentity, ThreadId = threadId, TurnId = turnId, Events = rows, ReportedUsage = usage?.Evidence(), Retirement = retired, PumpFailure = pumpFailure?.GetType().FullName, RuntimeCertified = false }, BoundedFiles.Json) : JsonSerializer.SerializeToUtf8Bytes(new { Kind = "ActualCodexAppServerTrace-v1", TrustRouteConformanceOnly = conformanceTrustRoute, ConformanceDangerFullAccess = conformanceDangerFullAccess, actual.RunId, actual.RequestIdentity, ThreadId = threadId, TurnId = turnId, Events = rows, ReportedUsage = usage?.Evidence(), Retirement = retired, PumpFailure = pumpFailure?.GetType().FullName, RuntimeCertified = false }, BoundedFiles.Json); BoundedFiles.WriteNew(artifact, raw, original);
             usage?.RequireFinal();

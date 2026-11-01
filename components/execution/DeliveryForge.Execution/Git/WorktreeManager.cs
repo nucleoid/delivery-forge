@@ -54,8 +54,10 @@ public sealed partial class WorktreeManager
         _gitExecutable = source._gitExecutable; _originalExecutor = source._originalExecutor; _originalBudget = source._originalBudget;
         actualOwnedGitInvocations = source.actualOwnedGitInvocations; _effectAdmission = admission; _effectRunId = runId;
         ownedGit = source.ownedGit;
+        privateAdministrations = source.privateAdministrations;
+        lock (actualOwnedGitInvocations) privateAdministrationSelected = source.privateAdministrationSelected;
     }
-    sealed class InvocationCounter { internal long Value; }
+    sealed class InvocationCounter { internal long Value; internal bool ProvisioningStarted; }
     InvocationCounter actualOwnedGitInvocations = new();
     public long ActualOwnedGitInvocations => Interlocked.Read(ref actualOwnedGitInvocations.Value);
     // Read-only same-original stopped-checkpoint path; never provisioning,
@@ -113,6 +115,7 @@ public sealed partial class WorktreeManager
 
     public async Task PrepareAsync(string parentCheckout, string destination, string baseCommit, CancellationToken cancellationToken = default)
     {
+        lock (actualOwnedGitInvocations) actualOwnedGitInvocations.ProvisioningStarted = true;
         ValidateDestination(parentCheckout, destination);
         if (Directory.Exists(destination) && Directory.EnumerateFileSystemEntries(destination).Any())
             throw new WorktreeBoundaryException("Worker destination must not contain existing files.");
@@ -124,6 +127,9 @@ public sealed partial class WorktreeManager
             common = (await GitAsync(parentCheckout, cancellationToken, "rev-parse", "--path-format=absolute", "--git-common-dir").ConfigureAwait(false)).Trim();
             RejectSymlinkAncestors(common);
         }
+        var privateAdministration = privateAdministrationSelected
+            ? await ReservePrivateAdministrationAsync(parentCheckout, destination, baseCommit, common, cancellationToken).ConfigureAwait(false)
+            : null;
         // Disable implicit line-ending conversion for this disposable checkout.
         // No global/repository configuration or strict review comparison changes.
         await GitAsync(parentCheckout, cancellationToken, "-c", "core.autocrlf=false", "-c", "core.eol=lf",
@@ -134,7 +140,9 @@ public sealed partial class WorktreeManager
             var paths = registered.Split('\0').Where(value => value.StartsWith("worktree ", StringComparison.Ordinal)).Select(value => value[9..]).ToArray();
             if (paths.Any(path => !Path.IsPathFullyQualified(path)) || paths.Count(path => IsSameDirectory(path, destination)) != 1)
                 throw new WorktreeBoundaryException("Actual parent did not uniquely register the provisioned destination.");
-            _ = CaptureProvisionedBinding(destination, common);
+            if (privateAdministration is not null) RelocatePrivateAdministration(privateAdministration);
+            var binding = CaptureProvisionedBinding(destination, common, privateAdministration);
+            if (privateAdministration is not null) await binding.VerifyBaseAnchorAsync(cancellationToken).ConfigureAwait(false);
         }
         var actual = (await GitAsync(destination, cancellationToken, "rev-parse", "HEAD").ConfigureAwait(false)).Trim();
         if (actual != baseCommit) throw new WorktreeBoundaryException("Provisioned worktree does not match the frozen base commit.");
@@ -142,6 +150,7 @@ public sealed partial class WorktreeManager
 
     public WriterLease AcquireWriter(string worktree, string runId, string writerToken)
     {
+        lock (actualOwnedGitInvocations) actualOwnedGitInvocations.ProvisioningStarted = true;
         if (_effectAdmission is null)
         {
             if (_originalBudget is not null)
@@ -428,8 +437,8 @@ public sealed partial class WorktreeManager
             start.ArgumentList.Add("--git-dir=" + binding.GitDirectory);
             start.ArgumentList.Add("--work-tree=" + binding.Worktree);
             start.Environment["GIT_COMMON_DIR"] = binding.CommonDirectory;
-            start.Environment["GIT_OBJECT_DIRECTORY"] = binding.ObjectsPath;
-            if (binding.HasPrivateObjects) start.Environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = binding.CommonObjectsPath;
+            start.Environment["GIT_OBJECT_DIRECTORY"] = binding.ReadObjectsPath;
+            if (binding.HasPrivateObjects && !binding.HasReconciledObjects) start.Environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = binding.CommonObjectsPath;
             start.Environment["GIT_INDEX_FILE"] = binding.IndexPath;
         }
         start.ArgumentList.Add("-c"); start.ArgumentList.Add("core.hooksPath=" + disabledHooks);

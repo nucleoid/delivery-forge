@@ -257,7 +257,12 @@ internal sealed class InstalledReviewHost : IDisposable
         }
         void CheckProvisioned()
         {
-            try { provisioned.Check(); }
+            try
+            {
+                provisioned.Check();
+                if (provisioned.HasPrivateAdministration && !provisioned.HasReconciledObjects)
+                    throw new WorktreeBoundaryException("Private administration requires parent object reconciliation before forward review.");
+            }
             catch (Exception error) { original.RecordFirstCaught("review-source-provisioned-path", error); throw; }
         }
         // Marker tokens come only from these closed code-owned enums, never source/exception values.
@@ -309,8 +314,8 @@ internal sealed class InstalledReviewHost : IDisposable
             environment["GIT_NO_REPLACE_OBJECTS"] = "1"; environment["GIT_NO_LAZY_FETCH"] = "1";
             environment["GIT_GRAFT_FILE"] = nul;
             environment["GIT_COMMON_DIR"] = provisioned.CommonDirectory;
-            environment["GIT_OBJECT_DIRECTORY"] = provisioned.ObjectsPath;
-            environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = provisioned.HasPrivateObjects ? provisioned.CommonObjectsPath : "";
+            environment["GIT_OBJECT_DIRECTORY"] = provisioned.ReadObjectsPath;
+            environment["GIT_ALTERNATE_OBJECT_DIRECTORIES"] = provisioned.HasPrivateObjects && !provisioned.HasReconciledObjects ? provisioned.CommonObjectsPath : "";
             environment["GIT_INDEX_FILE"] = provisioned.IndexPath;
             environment["LC_ALL"] = "C"; environment["LANG"] = "C";
             var disabledFilters = filters.SelectMany(name => new[] { "process=", "smudge=", "clean=", "required=false" }

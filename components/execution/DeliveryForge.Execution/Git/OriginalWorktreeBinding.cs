@@ -19,6 +19,7 @@ public sealed partial class WorktreeManager
         readonly IOwnedDuplexBudget original;
         readonly ICoordinatedSynchronousEffectAdmission parent;
         readonly byte[] markerBytes, gitdirBytes, commonBytes;
+        readonly PrivateAdministrationProvisioning? privateAdministration;
         WriterLease? writer;
         bool confinedConformanceConfiguration;
         internal bool Uncertain { get; private set; }
@@ -26,19 +27,23 @@ public sealed partial class WorktreeManager
         internal string Worktree { get; }
         internal string GitDirectory { get; }
         internal string CommonDirectory { get; }
+        internal bool HasPrivateAdministration => privateAdministration is not null;
+        internal string? BaseAnchorRef => privateAdministration?.BaseAnchorRef;
+        internal string? FrozenBaseCommit => privateAdministration?.FrozenBaseCommit;
         internal string IndexPath => Path.Combine(GitDirectory, "index");
         internal string CommonObjectsPath => Path.Combine(CommonDirectory, "objects");
         internal string ObjectsPath => HasPrivateObjects ? Path.Combine(GitDirectory, "objects") : CommonObjectsPath;
         internal string WriterPath => Path.Combine(GitDirectory, "delivery-forge-writer.lock");
 
         internal OwnedGitBinding(WorktreeManager manager, string worktree, string expectedCommon,
-            string gitDirectory, byte[] marker, byte[] gitdir, byte[] common)
+            string gitDirectory, byte[] marker, byte[] gitdir, byte[] common, PrivateAdministrationProvisioning? privateAdministration = null)
         {
             this.manager = manager; original = manager._originalBudget!;
             parent = (ICoordinatedSynchronousEffectAdmission)manager._effectAdmission!;
             RunId = manager._effectRunId!; Worktree = worktree;
             CommonDirectory = expectedCommon; GitDirectory = gitDirectory;
             markerBytes = marker; gitdirBytes = gitdir; commonBytes = common;
+            this.privateAdministration = privateAdministration;
         }
         internal void RequireOriginal(IOwnedDuplexBudget owner, ICoordinatedEffectAdmission admission, string runId)
         {
@@ -133,6 +138,7 @@ public sealed partial class WorktreeManager
                 !Read(Path.Combine(GitDirectory, "commondir"), cleanup).AsSpan().SequenceEqual(commonBytes))
                 throw new WorktreeBoundaryException("Original provisioned Git metadata association changed.");
             RejectSymlinkAncestors(GitDirectory); RejectSymlinkAncestors(CommonDirectory);
+            VerifyPrivateAdministrationMetadata(cleanup);
             if (writer is not null && !(cleanup && writer.FirstCloseReturned) &&
                 writer.ObserveCurrentNamespaceIdentity().Outcome != WriterNamespaceIdentityOutcome.Match)
                 throw new WorktreeBoundaryException("Original provisioned writer namespace changed or is unknown.");
@@ -261,7 +267,7 @@ public sealed partial class WorktreeManager
         return binding;
     }
 
-    OwnedGitBinding CaptureProvisionedBinding(string worktree, string common)
+    OwnedGitBinding CaptureProvisionedBinding(string worktree, string common, PrivateAdministrationProvisioning? privateAdministration = null)
     {
         if (_originalBudget is null || _effectAdmission is not ICoordinatedSynchronousEffectAdmission parent || _effectRunId is null)
             throw new WorktreeBoundaryException("Provisioned binding requires the actual original synchronous parent.");
@@ -274,12 +280,16 @@ public sealed partial class WorktreeManager
             var marker = candidate.Read(Path.Combine(root, ".git")); var link = OwnedGitBinding.Text(marker);
             if (!link.StartsWith("gitdir: ", StringComparison.Ordinal)) throw new WorktreeBoundaryException("Provisioned linked-worktree marker required.");
             var admin = CanonicalPath(Path.GetFullPath(link[8..], root));
-            if (!IsWithin(admin, Path.Combine(common, "worktrees"))) throw new WorktreeBoundaryException("Provisioned worker admin is outside the original parent common directory.");
+            if (privateAdministration is null)
+            {
+                if (!IsWithin(admin, Path.Combine(common, "worktrees"))) throw new WorktreeBoundaryException("Provisioned worker admin is outside the original parent common directory.");
+            }
+            else RequirePrivateAdministrationCapture(privateAdministration, root, common, admin);
             var gitdir = candidate.Read(Path.Combine(admin, "gitdir")); var commonBytes = candidate.Read(Path.Combine(admin, "commondir"));
             if (!string.Equals(Path.GetFullPath(OwnedGitBinding.Text(gitdir), admin), Path.Combine(root, ".git"), PathComparison()) ||
                 !string.Equals(CanonicalPath(Path.GetFullPath(OwnedGitBinding.Text(commonBytes), admin)), common, PathComparison()))
                 throw new WorktreeBoundaryException("Provisioned metadata does not join the original parent and destination.");
-            var binding = new OwnedGitBinding(this, root, common, admin, marker, gitdir, commonBytes);
+            var binding = new OwnedGitBinding(this, root, common, admin, marker, gitdir, commonBytes, privateAdministration);
             if (!ownedGit.TryAdd(root, binding)) throw new WorktreeBoundaryException("Original worktree provisioning cannot replay.");
             return binding;
         });

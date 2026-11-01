@@ -64,8 +64,8 @@ public sealed partial class ProductionReviewSourceOwner
     internal string SourceRoot { get; }
     internal string WorkerGitDirectory { get; }
     internal string CommonGitDirectory { get; }
-    internal string WorkerObjectsDirectory => provisionedBinding?.ObjectsPath ?? Path.Combine(CommonGitDirectory, "objects");
-    internal string WorkerAlternateObjectsDirectory => provisionedBinding is { HasPrivateObjects: true } binding ? binding.CommonObjectsPath : "";
+    internal string WorkerObjectsDirectory => provisionedBinding?.ReadObjectsPath ?? Path.Combine(CommonGitDirectory, "objects");
+    internal string WorkerAlternateObjectsDirectory => provisionedBinding is { HasPrivateObjects: true, HasReconciledObjects: false } binding ? binding.CommonObjectsPath : "";
     HashSet<string>? copiedBaseDuplicateIds;
     internal void RequireValidatedPrivateObjects()
     {
@@ -74,6 +74,7 @@ public sealed partial class ProductionReviewSourceOwner
     internal string[] ObjectCopyRoots()
     {
         Check(); RequireValidatedPrivateObjects();
+        if (provisionedBinding is { HasReconciledObjects: true } reconciled) return [reconciled.CommonObjectsPath];
         if (provisionedBinding is { HasPrivateObjects: true } binding)
         {
             copiedBaseDuplicateIds = new(binding.CaptureValidatedBaseDuplicateIds(), StringComparer.Ordinal);
@@ -103,6 +104,8 @@ public sealed partial class ProductionReviewSourceOwner
     {
         original.CheckWork();
         parent.CheckCurrent(RunId);
+        if (provisionedBinding is { HasPrivateAdministration: true, HasReconciledObjects: false })
+            throw new ReviewPreflightException("Private administration requires parent object reconciliation before forward review.");
         if (Uncertain || !nativeCompletedAndQuiet()) throw new ReviewPreflightException("Original completed native worker is no longer quiet.", residualProcessUncertain: Uncertain);
     }
     void VerifyImage()
