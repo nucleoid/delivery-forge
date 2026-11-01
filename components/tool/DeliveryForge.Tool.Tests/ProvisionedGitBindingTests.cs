@@ -1196,6 +1196,41 @@ public sealed class ProvisionedGitBindingTests
     }
 
     [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
+    public async Task Old_registration_junction_to_original_private_administration_refuses_and_preserves_metadata()
+    {
+        using var fixture = await Fixture.CreateAsync(privateAdministration: true);
+        var binding = fixture.Manager.RequireOriginalBinding(fixture.Worker);
+        var privateBefore = ObjectBodies(binding.GitDirectory);
+        var commonBefore = ObjectBodies(binding.CommonObjectsPath);
+        var marker = File.ReadAllBytes(Path.Combine(fixture.Worker, ".git"));
+        var reused = Path.Combine(binding.CommonDirectory, "worktrees", Path.GetFileName(fixture.Worker));
+        Assert.False(Path.Exists(reused));
+        var command = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+        var capture = await fixture.Parent.EnterAsync("owned", () => fixture.Executor.ExecuteBoundedCaptureAsync(
+            new(command, ["/d", "/c", "mklink", "/J", reused, binding.GitDirectory], fixture.Root,
+                fixture.VersionInvocation().Environment)
+            { EnvironmentIsComplete = true }, TimeSpan.FromSeconds(10), 4096, fixture.Original.Token,
+            new OwnedWorkPhaseBudget(fixture.Original)));
+        Assert.Equal(0, capture.Command.ExitCode); Assert.True(capture.Command.OwnedProcessQuiescent);
+        Assert.True(capture.RootExitObserved); Assert.True(capture.StandardOutputDrainCompleted); Assert.True(capture.StandardErrorDrainCompleted);
+        Assert.True(capture.Command.LifecycleDiagnostics?.OwnedTree is { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 });
+        Assert.True((File.GetAttributes(reused) & FileAttributes.ReparsePoint) != 0);
+        var target = Assert.IsAssignableFrom<FileSystemInfo>(Directory.ResolveLinkTarget(reused, returnFinalTarget: true));
+        Assert.True(string.Equals(Path.GetFullPath(binding.GitDirectory), Path.GetFullPath(target.FullName), StringComparison.OrdinalIgnoreCase));
+        var before = fixture.Manager.ActualOwnedGitInvocations;
+        var error = Assert.Throws<WorktreeBoundaryException>(() => binding.Check());
+        Assert.Equal("Private admin directory cannot be a reparse point or symbolic link.", error.Message);
+        Assert.Equal(before, fixture.Manager.ActualOwnedGitInvocations);
+        Assert.Equal(privateBefore, ObjectBodies(binding.GitDirectory));
+        Assert.Equal(commonBefore, ObjectBodies(binding.CommonObjectsPath));
+        Assert.Equal(marker, File.ReadAllBytes(Path.Combine(fixture.Worker, ".git")));
+        Assert.True((File.GetAttributes(reused) & FileAttributes.ReparsePoint) != 0);
+        Assert.False(fixture.Original.HasExplicitUnknown);
+        // Retain the actual alias and original administration; never recurse
+        // through or remove either after the negative observation.
+    }
+
+    [Fact(Timeout = 120000, SkipUnless = nameof(Windows), Skip = "Linux native Git requires its separately selected owned scope.")]
     public async Task Retained_prebirth_anchor_effects_refuse_unstarted_clearance_including_a_fresh_manager()
     {
         using var fixture = await Fixture.CreateAsync(privateAdministration: true, prepare: false);

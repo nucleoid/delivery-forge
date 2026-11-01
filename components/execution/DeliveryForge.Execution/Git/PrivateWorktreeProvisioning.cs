@@ -323,7 +323,9 @@ public sealed partial class WorktreeManager
             catch (FileNotFoundException) { Phase(cleanup); return true; }
             catch (DirectoryNotFoundException) { Phase(cleanup); return true; }
             Phase(cleanup);
-            return (attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != FileAttributes.Directory;
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+                throw new WorktreeBoundaryException("Private admin directory cannot be a reparse point or symbolic link.");
+            return (attributes & FileAttributes.Directory) == 0;
         }
 
         internal (ulong Volume, ulong Low, ulong High) ReadPrivateDirectoryIdentity(string path, bool cleanup = false, bool foreignSlot = false)
@@ -369,6 +371,8 @@ public sealed partial class WorktreeManager
                 }
                 else if ((attributes.Attributes & 0x410) != 0x10)
                 {
+                    if ((attributes.Attributes & 0x400) != 0)
+                        throw new WorktreeBoundaryException("Private admin directory cannot be a reparse point or symbolic link.");
                     if (foreignSlot) result = default((ulong, ulong, ulong));
                     else throw new WorktreeBoundaryException("Original private admin directory is not plain.");
                 }

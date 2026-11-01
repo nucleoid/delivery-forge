@@ -155,21 +155,31 @@ anchored base, without reading an index or HEAD whose objects exist only in the
 private namespace. Metadata, the original administration's native identity and
 the base anchor are checked against the retained binding. Another worktree may
 reuse the old registry name with a different identity; it is never adopted as
-this run's administration. Selection is shared by the original manager and its
-parent views, and confined birth refuses an unselected retained binding.
+this run's administration. A symlink or reparse entry at that name refuses,
+because it could alias the original private administration. An unreadable or
+delete-pending foreign entry can also conservatively refuse; Windows access
+denied is not interpreted as absence. Selection is shared by the original
+manager and its parent views, and confined birth refuses an unselected retained
+binding.
 
 Before relocation, a bounded sibling `<private-admin>.provisioning.json` records
 the run, worker, COMMON, registered/private paths, frozen base, anchor and original
-marker/commondir bytes as file-flushed DATA. It grants no adoption or replay
+marker/commondir bytes as file-flushed DATA. The journal has a 4,096-byte limit;
+long or heavily escaped paths may exceed it after the base anchor exists. That
+refusal retains the anchor and requires the partial-provisioning procedure below.
+The journal grants no adoption or replay
 authority. File flush does not guarantee that a newly created directory entry
 survives power loss on Linux; no crash-durable journal or atomic routing rewrite
 is claimed. The registered
 `commondir` is made absolute and the worker marker is redirected to the fresh
 private destination before the one directory move. A failed rewrite or move
 therefore cannot leave the worker pointing at a freed registry name later reused
-by another run. Linux relocation uses `renameat2(RENAME_NOREPLACE)` and refuses
-if unsupported or if the destination appeared; Windows retains its no-overwrite
-directory move. Unstarted cleanup refuses retained or observed provisioning
+by another run. Linux relocation uses `renameat2(RENAME_NOREPLACE)`. Its symbol,
+filesystem support and destination collision are checked by the actual move,
+after the journal and routing rewrites. An unsupported operation or appeared
+destination therefore retains a partial, UNKNOWN attempt requiring the procedure
+below; there is no fallback move or automatic replay. Windows retains its
+no-overwrite directory move. Unstarted cleanup refuses retained or observed provisioning
 effects, including the deterministic ref directory and fresh-process discovery;
 registry absence alone is insufficient. Its read-only ref absence query also
 works for an unselected repository using another ref backend.
