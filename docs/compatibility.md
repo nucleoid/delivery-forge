@@ -195,6 +195,12 @@ older reader nor a new owner may resume, delete or adopt the partial attempt.
 
 Only after actual writer retirement and successful canonical private-object
 validation may that same parent reconcile reachable loose objects into COMMON.
+This reconciliation profile first requires a recognized stable Git version of
+at least 2.43.0 using the same owned executable and environment. Older or
+unrecognized versions refuse before candidate objects enter COMMON; an existing
+base anchor and the original attempt remain retained. This conservative floor
+binds the inspected strict body checks, rather than assuming older `hash-object`
+parsers provide them. It does not change Git globally or the unselected route.
 An actual private-overlay traversal enumerates the candidate closure outside the
 anchored base, with at most 4,096 unique object IDs. Every delta object requires
 a retained validated private copy; an unprotected COMMON-only delta dependency
@@ -211,10 +217,14 @@ checks of attributes/modules referenced by those new objects can still refuse
 within the unchanged native limits.
 
 At most 32 existing COMMON loose collisions are compared canonically and read
-by actual Git before promotion. The copy uses fresh files and no-overwrite
+by actual Git before promotion. The existing bounded reader conservatively
+refuses a hard-linked COMMON collision; this profile does not support every
+local-clone object layout. The copy uses fresh files and no-overwrite
 moves. All promoted/existing encodings must read back byte-for-byte as their
-retained preflight encodings; existing encodings also passed the actual Git body
-comparison. COMMON-only commit type, ancestry and targeted delta connectivity
+retained preflight encodings. Actual Git must return the expected canonical body,
+but it may read a packed copy of a colliding object. That query does not prove
+that Git consumed the loose encoding; the loose bytes have Forge's canonical
+validation and exact readback. COMMON-only commit type, ancestry and targeted delta connectivity
 are proved, then a fresh candidate ref is created and its value and delta are
 checked again. This avoids a strict scan of unrelated historical COMMON objects.
 Forward observation and review then use

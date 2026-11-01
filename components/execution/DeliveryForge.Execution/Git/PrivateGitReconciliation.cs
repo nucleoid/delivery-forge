@@ -63,6 +63,18 @@ public sealed partial class WorktreeManager
             // The admission factory must return before nested native admission.
             await Task.Yield();
             CheckReconciliation(token); RequireValidatedPrivateObjects();
+            // Older Git only parsed these bodies in hash-object. This finite
+            // profile requires the strict fsck_buffer implementation inspected
+            // in Git 2.43, before any candidate object enters COMMON.
+            var reportedVersion = (await CommonGitAsync(token, "--version").ConfigureAwait(false)).Trim();
+            var release = reportedVersion.Length <= 128 && reportedVersion.StartsWith("git version ", StringComparison.Ordinal)
+                ? reportedVersion[12..].Split('.') : [];
+            if (release.Length < 3 ||
+                !int.TryParse(release[0], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var major) ||
+                !int.TryParse(release[1], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out var minor) ||
+                !int.TryParse(release[2], System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out _) ||
+                major < 2 || major == 2 && minor < 43)
+                throw new WorktreeBoundaryException("Private candidate reconciliation requires Git 2.43.0 or newer with a recognized stable version.");
             await VerifyBaseAnchorAsync(token).ConfigureAwait(false);
             var head = Read(Path.Combine(GitDirectory, "HEAD"));
             var candidate = Text(head);
