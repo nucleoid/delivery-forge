@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Evidence;
 using DeliveryForge.Tool.Claude;
@@ -77,6 +78,20 @@ public sealed class ClaudeReviewerObservationNativeTests
         finally
         {
             if (capture is not null)
+            {
+                // Private version-only TRX evidence. Never export exception
+                // messages/Data, stdout, environment or any auth-status capture.
+                var nativeFailure = capture.Command.LifecycleDiagnostics?.NativeFailure;
+                const string cause = @"[A-Za-z0-9]{1,64}\(hr=[0-9a-f]{8}(?:,errno=-?[0-9]{1,11})?\)";
+                var typedNativeFailure = false;
+                if (nativeFailure is { Length: <= 1024 } && nativeFailure.All(char.IsAscii))
+                    try
+                    {
+                        typedNativeFailure = Regex.IsMatch(nativeFailure, @"\AActual scoped capture failed; typed original causes: (?:" + cause +
+                            @"(?: \| " + cause + @"){0,7})?(?: \| additional causes omitted)?\z",
+                            RegexOptions.CultureInvariant | RegexOptions.NonBacktracking, TimeSpan.FromMilliseconds(100));
+                    }
+                    catch (RegexMatchTimeoutException) { /* Diagnostic text stays omitted; preserve original settlement. */ }
                 TestContext.Current.TestOutputHelper!.WriteLine(JsonSerializer.Serialize(new
                 {
                     Operation = "version",
@@ -91,9 +106,15 @@ public sealed class ClaudeReviewerObservationNativeTests
                     KnownClosed = knownClosed,
                     VersionMatches = versionMatches,
                     ReviewerObservation = failureFacts,
+                    NativeFailure = typedNativeFailure ? nativeFailure : null,
+                    OwnedTree = capture.Command.LifecycleDiagnostics?.OwnedTree,
+                    StandardErrorBytes = capture.StandardErrorBytes.Length,
+                    StandardErrorBase64 = capture.StandardErrorBytes.Length <= 65536
+                        ? Convert.ToBase64String(capture.StandardErrorBytes) : null,
                     ProductionAuthority = false,
                     AuthOrModelDispatched = false
                 }));
+            }
             if (entered && !knownClosed) original.RetainUnknown();
         }
         // The fresh neutral namespace and actual owner evidence are preserved.
