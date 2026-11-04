@@ -52,9 +52,10 @@ internal static class ClaudeIndependentReviewData
     // The owner profile uses one complete, immutable OS-only child snapshot.
     // Do not inherit PATH, shell/runtime injection, provider/model/auth, proxy or
     // other CLI behaviour variables. Ordinary strict invocation is unchanged.
+    // Linux's systemd-run wrapper must reach the same user bus as its parent.
     static readonly string[] PinnedOsNames = OperatingSystem.IsWindows()
         ? ["SystemRoot", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "ALLUSERSPROFILE"]
-        : ["HOME", "TMPDIR", "TMP", "TEMP"];
+        : ["HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "TMPDIR", "TMP", "TEMP"];
     static readonly string[] RequiredPinnedOsNames = OperatingSystem.IsWindows()
         ? ["SystemRoot", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP"] : ["HOME"];
     const string EnvironmentRefusal = "Selected reviewer settings require the same complete bounded OS-only process environment.";
