@@ -83,8 +83,9 @@ public sealed class ClaudeReviewerObservationNativeTests
             if (capture is not null)
             {
                 // Opt-in private version-only TRX. Raw stderr may echo ambient
-                // values; keep this evidence private. No stdout/auth capture or
-                // exception messages/Data are exported directly.
+                // values; keep the entire TRX private, including xUnit failure
+                // text. This structured record omits stdout/auth capture and
+                // exception messages/Data; failure text may contain messages.
                 var nativeFailure = capture.Command.LifecycleDiagnostics?.NativeFailure;
                 const string cause = @"[A-Za-z0-9]{1,64}\(hr=[0-9a-f]{8}(?:,errno=-?[0-9]{1,11})?\)";
                 var typedNativeFailure = false;

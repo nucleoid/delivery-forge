@@ -10,13 +10,23 @@ namespace DeliveryForge.Tool.Tests;
 // credentials, CLI, model, provider or capability acceptance is inspected.
 public sealed class ClaudeReviewerUserSettingsTests
 {
+    static readonly string SyntheticRuntime = OperatingSystem.IsLinux() ? IndependentLinuxRuntimeDirectory() : "/run/user/1000";
+    static string IndependentLinuxRuntimeDirectory()
+    {
+        // Kernel status lists real, effective, saved and filesystem UIDs.
+        // Keep the expectation independent of the production libc import.
+        var fields = File.ReadLines("/proc/self/status").Single(line => line.StartsWith("Uid:", StringComparison.Ordinal))
+            .Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(5, fields.Length);
+        return "/run/user/" + uint.Parse(fields[2], System.Globalization.CultureInfo.InvariantCulture)
+            .ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
     static string SyntheticOsValue(string name)
     {
-        var runtime = OperatingSystem.IsLinux() ? ClaudeIndependentReviewData.LinuxUserRuntimeDirectory() : "/run/user/1000";
         return name switch
         {
-            "XDG_RUNTIME_DIR" => runtime,
-            "DBUS_SESSION_BUS_ADDRESS" => "unix:path=" + runtime + "/bus",
+            "XDG_RUNTIME_DIR" => SyntheticRuntime,
+            "DBUS_SESSION_BUS_ADDRESS" => "unix:path=" + SyntheticRuntime + "/bus",
             _ => "synthetic-os-value"
         };
     }
@@ -295,6 +305,42 @@ public sealed class ClaudeReviewerUserSettingsTests
         var failure = Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(selected,
             key => key == name ? missing ? null : "secret-sentinel-drift" : SyntheticOsValue(key)));
         Assert.DoesNotContain("secret-sentinel", failure.ToString());
+    }
+    [Fact]
+    public void Linux_bus_runtime_uses_the_actual_effective_kernel_uid()
+    {
+        if (!OperatingSystem.IsLinux()) Assert.Skip("Actual Linux effective UID only.");
+        Assert.Equal(IndependentLinuxRuntimeDirectory(), ClaudeIndependentReviewData.LinuxUserRuntimeDirectory());
+    }
+    [Theory]
+    [InlineData("exec")]
+    [InlineData("tcp")]
+    [InlineData("wrong-user")]
+    [InlineData("missing-runtime")]
+    public void Linux_actual_environment_capture_refuses_unsafe_bus_inputs(string fault)
+    {
+        if (!OperatingSystem.IsLinux()) Assert.Skip("Actual Linux environment capture branch only.");
+        string? Read(string name) => (fault, name) switch
+        {
+            ("exec", "DBUS_SESSION_BUS_ADDRESS") => "unixexec:path=/secret-sentinel",
+            ("tcp", "DBUS_SESSION_BUS_ADDRESS") => "tcp:host=secret-sentinel",
+            ("wrong-user", "XDG_RUNTIME_DIR") => "/run/user/" +
+                (ulong.Parse(SyntheticRuntime[10..], System.Globalization.CultureInfo.InvariantCulture) + 1).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ("missing-runtime", "XDG_RUNTIME_DIR") => null,
+            _ => SyntheticOsValue(name)
+        };
+        var failure = Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(Read));
+        Assert.DoesNotContain("secret-sentinel", failure.ToString()); Assert.Null(failure.InnerException);
+    }
+    [Fact]
+    public void Linux_actual_environment_capture_keeps_absent_bus_address_and_refuses_its_later_appearance()
+    {
+        if (!OperatingSystem.IsLinux()) Assert.Skip("Actual Linux environment capture branch only.");
+        string? Read(string name) => name == "DBUS_SESSION_BUS_ADDRESS" ? null : SyntheticOsValue(name);
+        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(Read);
+        Assert.False(selected.ContainsKey("DBUS_SESSION_BUS_ADDRESS"));
+        ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(selected, Read);
+        Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(selected, SyntheticOsValue));
     }
     [Theory]
     [InlineData("model")]

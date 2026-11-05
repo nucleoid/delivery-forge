@@ -102,9 +102,10 @@ internal static class ClaudeIndependentReviewData
     {
         // Refuse remote/exec/multiple transports and mismatched directories.
         // An absent address uses the standard bus below the required directory.
-        if (!selected.TryGetValue("XDG_RUNTIME_DIR", out var runtime) || runtime != runtimeDirectory ||
-            selected.TryGetValue("DBUS_SESSION_BUS_ADDRESS", out var address) && address != "unix:path=" + runtimeDirectory + "/bus")
-            throw new ToolUsageException(EnvironmentRefusal);
+        if (!selected.TryGetValue("XDG_RUNTIME_DIR", out var runtime) || runtime != runtimeDirectory)
+            throw new ToolUsageException("Selected reviewer Linux runtime directory must match the current effective user.");
+        if (selected.TryGetValue("DBUS_SESSION_BUS_ADDRESS", out var address) && address != "unix:path=" + runtimeDirectory + "/bus")
+            throw new ToolUsageException("Selected reviewer Linux bus address must be the standard local user socket.");
     }
     internal static CommandInvocation PinnedSettingsInvocation(string image, IReadOnlyList<string> arguments,
         string workingDirectory, IReadOnlyDictionary<string, string> selected)
