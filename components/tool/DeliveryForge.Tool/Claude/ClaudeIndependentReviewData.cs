@@ -70,17 +70,25 @@ internal static class ClaudeIndependentReviewData
         selected.Add("DOTNET_PROCESSOR_COUNT", "2"); selected.Add("DOTNET_GCHeapHardLimit", "0x100000000");
         selected.Add("DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER", "1"); selected.Add("MSBUILDDISABLENODEREUSE", "1");
         selected.Add("CLAUDE_CODE_SDK_READS_SESSION_STATE", "1"); selected.Add("DISABLE_COMPACT", "1");
+        if (OperatingSystem.IsLinux())
+        {
+            // The framework-dependent birth gate needs this already loaded
+            // runtime, never an ambient apphost-root override.
+            var root = LinuxLoadedRuntimeRoot();
+            selected.Add("DOTNET_ROOT", root); selected.Add("DOTNET_ROOT_X64", root);
+        }
         RequirePinnedSettingsReviewEnvironment(selected);
         return new System.Collections.ObjectModel.ReadOnlyDictionary<string, string>(selected);
     }
     internal static void RequirePinnedSettingsReviewEnvironment(IReadOnlyDictionary<string, string>? environment)
     {
-        if (environment is null || environment.Count > PinnedOsNames.Length + 6) throw new ToolUsageException(EnvironmentRefusal);
+        if (environment is null || environment.Count > PinnedOsNames.Length + 6 + (OperatingSystem.IsLinux() ? 2 : 0)) throw new ToolUsageException(EnvironmentRefusal);
         var selected = new Dictionary<string, string>(StringComparer.Ordinal); var total = 0;
         foreach (var row in environment)
         {
             if (row.Key is null || row.Value is null || row.Value.Length is < 1 or > 4096 || row.Value.Any(char.IsControl) ||
-                row.Key is not ("DOTNET_PROCESSOR_COUNT" or "DOTNET_GCHeapHardLimit" or "DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER" or "MSBUILDDISABLENODEREUSE" or "CLAUDE_CODE_SDK_READS_SESSION_STATE" or "DISABLE_COMPACT") && !PinnedOsNames.Contains(row.Key, StringComparer.Ordinal) ||
+                row.Key is not ("DOTNET_PROCESSOR_COUNT" or "DOTNET_GCHeapHardLimit" or "DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER" or "MSBUILDDISABLENODEREUSE" or "CLAUDE_CODE_SDK_READS_SESSION_STATE" or "DISABLE_COMPACT") && !PinnedOsNames.Contains(row.Key, StringComparer.Ordinal) &&
+                !(OperatingSystem.IsLinux() && row.Key is ("DOTNET_ROOT" or "DOTNET_ROOT_X64")) ||
                 !selected.TryAdd(row.Key, row.Value) || total > 16384 - row.Key.Length - row.Value.Length)
                 throw new ToolUsageException(EnvironmentRefusal);
             total += row.Key.Length + row.Value.Length;
@@ -93,7 +101,25 @@ internal static class ClaudeIndependentReviewData
             !selected.TryGetValue("CLAUDE_CODE_SDK_READS_SESSION_STATE", out var session) || session != "1" ||
             !selected.TryGetValue("DISABLE_COMPACT", out var compact) || compact != "1")
             throw new ToolUsageException(EnvironmentRefusal);
-        if (OperatingSystem.IsLinux()) RequireLinuxUserBusEnvironment(selected, LinuxUserRuntimeDirectory());
+        if (OperatingSystem.IsLinux())
+        {
+            RequireLinuxUserBusEnvironment(selected, LinuxUserRuntimeDirectory());
+            var root = LinuxLoadedRuntimeRoot();
+            if (!selected.TryGetValue("DOTNET_ROOT", out var generic) || generic != root ||
+                !selected.TryGetValue("DOTNET_ROOT_X64", out var x64) || x64 != root)
+                throw new ToolUsageException(EnvironmentRefusal);
+        }
+    }
+    static string LinuxLoadedRuntimeRoot()
+    {
+        var path = RuntimeEnvironment.GetRuntimeDirectory();
+        if (!Path.IsPathFullyQualified(path) || path.Length > 4096)
+            throw new ToolUsageException(EnvironmentRefusal);
+        var version = new DirectoryInfo(Path.GetFullPath(path));
+        var framework = version.Parent; var shared = framework?.Parent; var root = shared?.Parent;
+        if (version.Name.Length is < 1 or > 256 || framework?.Name != "Microsoft.NETCore.App" || shared?.Name != "shared" || root is null)
+            throw new ToolUsageException(EnvironmentRefusal);
+        return Path.TrimEndingDirectorySeparator(root.FullName);
     }
     [DllImport("libc", EntryPoint = "geteuid", CallingConvention = CallingConvention.Cdecl)]
     static extern uint GetEffectiveUserId();

@@ -455,6 +455,63 @@ public sealed class ClaudeReviewerUserSettingsTests
     }
 
     [Theory]
+    [InlineData("version")]
+    [InlineData("auth")]
+    [InlineData("review")]
+    public void Linux_reviewer_child_uses_loaded_runtime_roots_and_ignores_ambient_roots(string purpose)
+    {
+        if (!OperatingSystem.IsLinux()) Assert.Skip("Actual Linux loaded runtime only.");
+        // Derive the expectation from the loaded core assembly, independently
+        // of production RuntimeEnvironment.GetRuntimeDirectory.
+        var version = new FileInfo(typeof(object).Assembly.Location).Directory!;
+        Assert.Equal("Microsoft.NETCore.App", version.Parent!.Name);
+        Assert.Equal("shared", version.Parent.Parent!.Name);
+        var expected = Path.TrimEndingDirectorySeparator(version.Parent.Parent.Parent!.FullName);
+        var rootReads = 0;
+        string? Read(string name)
+        {
+            if (name is "DOTNET_ROOT" or "DOTNET_ROOT_X64") { rootReads++; return "/secret-sentinel-runtime"; }
+            return SyntheticOsValue(name);
+        }
+        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(Read);
+        ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(selected, Read);
+        var arguments = purpose == "review" ? ClaudeIndependentReviewData.RestrictedReviewArguments(5)
+            : ClaudeIndependentReviewData.RestrictedObservationArguments(purpose == "auth" ? ["auth", "status"] : ["--version"]);
+        var invocation = ClaudeIndependentReviewData.PinnedSettingsInvocation("fixture-image", arguments, "fixture-cwd", selected);
+        var child = new ProcessStartInfo(); child.Environment["DOTNET_ROOT"] = "/secret-sentinel-runtime";
+        child.Environment["DOTNET_ROOT_X64"] = "/secret-sentinel-runtime";
+        CommandEnvironment.Complete(child, invocation);
+        Assert.Equal(0, rootReads);
+        Assert.Equal(expected, selected["DOTNET_ROOT"]); Assert.Equal(expected, selected["DOTNET_ROOT_X64"]);
+        Assert.Equal(expected, child.Environment["DOTNET_ROOT"]); Assert.Equal(expected, child.Environment["DOTNET_ROOT_X64"]);
+        Assert.Equal(selected.Count, child.Environment.Count);
+        Assert.False(invocation.InheritEnvironment); Assert.True(invocation.EnvironmentIsComplete);
+    }
+    [Theory]
+    [InlineData("DOTNET_ROOT", true)]
+    [InlineData("DOTNET_ROOT", false)]
+    [InlineData("DOTNET_ROOT_X64", true)]
+    [InlineData("DOTNET_ROOT_X64", false)]
+    public void Linux_reviewer_child_refuses_missing_or_changed_loaded_runtime_roots(string name, bool missing)
+    {
+        if (!OperatingSystem.IsLinux()) Assert.Skip("Actual Linux loaded runtime only.");
+        var selected = new Dictionary<string, string>(
+            ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(SyntheticOsValue), StringComparer.Ordinal);
+        if (missing) selected.Remove(name); else selected[name] = "/secret-sentinel-runtime";
+        var error = Assert.Throws<ToolUsageException>(() =>
+            ClaudeIndependentReviewData.PinnedSettingsInvocation("fixture-image", ["--version"], "fixture-cwd", selected));
+        Assert.DoesNotContain("secret-sentinel", error.ToString()); Assert.Null(error.InnerException);
+    }
+    [Fact]
+    public void Windows_reviewer_child_still_excludes_runtime_root_overrides()
+    {
+        if (!OperatingSystem.IsWindows()) Assert.Skip("Unchanged Windows environment branch only.");
+        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(SyntheticOsValue);
+        Assert.False(selected.ContainsKey("DOTNET_ROOT")); Assert.False(selected.ContainsKey("DOTNET_ROOT_X64"));
+        var changed = new Dictionary<string, string>(selected, StringComparer.Ordinal) { ["DOTNET_ROOT"] = "secret-sentinel-runtime" };
+        Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsReviewEnvironment(changed));
+    }
+    [Theory]
     [InlineData("DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER", true)]
     [InlineData("DOTNET_CLI_DO_NOT_USE_MSBUILD_SERVER", false)]
     [InlineData("MSBUILDDISABLENODEREUSE", true)]
