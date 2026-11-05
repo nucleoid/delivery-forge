@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using DeliveryForge.Contracts.Serialization;
 using DeliveryForge.Review;
@@ -52,7 +53,9 @@ internal static class ClaudeIndependentReviewData
     // The owner profile uses one complete, immutable OS-only child snapshot.
     // Do not inherit PATH, shell/runtime injection, provider/model/auth, proxy or
     // other CLI behaviour variables. Ordinary strict invocation is unchanged.
-    // Linux's systemd-run wrapper must reach the same user bus as its parent.
+    // Linux's wrapper needs the current user's standard runtime directory/bus.
+    // These values also reach the CLI under the selected same-user trust profile;
+    // they do not create a boundary against that user's existing bus access.
     static readonly string[] PinnedOsNames = OperatingSystem.IsWindows()
         ? ["SystemRoot", "WINDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "TEMP", "TMP", "ProgramFiles", "ProgramFiles(x86)", "ProgramData", "ALLUSERSPROFILE"]
         : ["HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "TMPDIR", "TMP", "TEMP"];
@@ -89,6 +92,18 @@ internal static class ClaudeIndependentReviewData
             !selected.TryGetValue("MSBUILDDISABLENODEREUSE", out var reuse) || reuse != "1" ||
             !selected.TryGetValue("CLAUDE_CODE_SDK_READS_SESSION_STATE", out var session) || session != "1" ||
             !selected.TryGetValue("DISABLE_COMPACT", out var compact) || compact != "1")
+            throw new ToolUsageException(EnvironmentRefusal);
+        if (OperatingSystem.IsLinux()) RequireLinuxUserBusEnvironment(selected, LinuxUserRuntimeDirectory());
+    }
+    [DllImport("libc", EntryPoint = "geteuid", CallingConvention = CallingConvention.Cdecl)]
+    static extern uint GetEffectiveUserId();
+    internal static string LinuxUserRuntimeDirectory() => "/run/user/" + GetEffectiveUserId().ToString(CultureInfo.InvariantCulture);
+    internal static void RequireLinuxUserBusEnvironment(IReadOnlyDictionary<string, string> selected, string runtimeDirectory)
+    {
+        // Refuse remote/exec/multiple transports and mismatched directories.
+        // An absent address uses the standard bus below the required directory.
+        if (!selected.TryGetValue("XDG_RUNTIME_DIR", out var runtime) || runtime != runtimeDirectory ||
+            selected.TryGetValue("DBUS_SESSION_BUS_ADDRESS", out var address) && address != "unix:path=" + runtimeDirectory + "/bus")
             throw new ToolUsageException(EnvironmentRefusal);
     }
     internal static CommandInvocation PinnedSettingsInvocation(string image, IReadOnlyList<string> arguments,

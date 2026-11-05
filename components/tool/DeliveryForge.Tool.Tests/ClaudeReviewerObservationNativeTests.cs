@@ -58,6 +58,7 @@ public sealed class ClaudeReviewerObservationNativeTests
         {
             cwd.Check(); BoundedFiles.VerifyNativeImage(image, original, original.Token);
             BoundedFiles.ReserveExactLinuxImageReads(image, original);
+            ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(environment, Environment.GetEnvironmentVariable);
             entered = true;
             capture = await new ProcessCommandExecutor(scope, original).ExecuteBoundedCaptureAsync(invocation,
                 original.Remaining, 65536, original.Token, new OwnedWorkPhaseBudget(original), scope,
@@ -77,10 +78,13 @@ public sealed class ClaudeReviewerObservationNativeTests
         }
         finally
         {
+            // Preserve unsettled ownership even if private diagnostics fail.
+            if (entered && !knownClosed) original.RetainUnknown();
             if (capture is not null)
             {
-                // Private version-only TRX evidence. Never export exception
-                // messages/Data, stdout, environment or any auth-status capture.
+                // Opt-in private version-only TRX. Raw stderr may echo ambient
+                // values; keep this evidence private. No stdout/auth capture or
+                // exception messages/Data are exported directly.
                 var nativeFailure = capture.Command.LifecycleDiagnostics?.NativeFailure;
                 const string cause = @"[A-Za-z0-9]{1,64}\(hr=[0-9a-f]{8}(?:,errno=-?[0-9]{1,11})?\)";
                 var typedNativeFailure = false;
@@ -107,15 +111,16 @@ public sealed class ClaudeReviewerObservationNativeTests
                     VersionMatches = versionMatches,
                     ReviewerObservation = failureFacts,
                     NativeFailure = typedNativeFailure ? nativeFailure : null,
+                    NativeFailureOmitted = nativeFailure is not null && !typedNativeFailure,
                     OwnedTree = capture.Command.LifecycleDiagnostics?.OwnedTree,
                     StandardErrorBytes = capture.StandardErrorBytes.Length,
+                    StandardErrorSha256 = Convert.ToHexStringLower(SHA256.HashData(capture.StandardErrorBytes)),
                     StandardErrorBase64 = capture.StandardErrorBytes.Length <= 65536
                         ? Convert.ToBase64String(capture.StandardErrorBytes) : null,
                     ProductionAuthority = false,
                     AuthOrModelDispatched = false
                 }));
             }
-            if (entered && !knownClosed) original.RetainUnknown();
         }
         // The fresh neutral namespace and actual owner evidence are preserved.
     }

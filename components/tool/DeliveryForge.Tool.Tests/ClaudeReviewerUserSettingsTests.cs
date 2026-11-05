@@ -10,6 +10,16 @@ namespace DeliveryForge.Tool.Tests;
 // credentials, CLI, model, provider or capability acceptance is inspected.
 public sealed class ClaudeReviewerUserSettingsTests
 {
+    static string SyntheticOsValue(string name)
+    {
+        var runtime = OperatingSystem.IsLinux() ? ClaudeIndependentReviewData.LinuxUserRuntimeDirectory() : "/run/user/1000";
+        return name switch
+        {
+            "XDG_RUNTIME_DIR" => runtime,
+            "DBUS_SESSION_BUS_ADDRESS" => "unix:path=" + runtime + "/bus",
+            _ => "synthetic-os-value"
+        };
+    }
     static byte[] Utf8(string value) => Encoding.UTF8.GetBytes(value);
     static string DirectoryRoot()
     {
@@ -222,7 +232,7 @@ public sealed class ClaudeReviewerUserSettingsTests
     public void Pinned_profile_actual_child_environment_refuses_missing_or_tampered_restrictions(string mutation)
     {
         var environment = new Dictionary<string, string>(
-            ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(_ => "synthetic-os-value"), StringComparer.Ordinal);
+            ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(SyntheticOsValue), StringComparer.Ordinal);
         ClaudeIndependentReviewData.RequirePinnedSettingsReviewEnvironment(environment);
         switch (mutation)
         {
@@ -240,6 +250,51 @@ public sealed class ClaudeReviewerUserSettingsTests
     public void Pinned_profile_review_cannot_omit_the_actual_environment()
     {
         Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsReviewEnvironment(null));
+    }
+    [Theory]
+    [InlineData("/run/user/1000", "unix:path=/run/user/1000/bus", true)]
+    [InlineData("/run/user/1000", null, true)]
+    [InlineData(null, null, false)]
+    [InlineData(null, "unix:path=/run/user/1000/bus", false)]
+    [InlineData("", "unix:path=/run/user/1000/bus", false)]
+    [InlineData("run/user/1000", "unix:path=/run/user/1000/bus", false)]
+    [InlineData("/run/user/1001", "unix:path=/run/user/1001/bus", false)]
+    [InlineData("/tmp/runtime", "unix:path=/tmp/runtime/bus", false)]
+    [InlineData("/run/user/1000", "", false)]
+    [InlineData("/run/user/1000", "unixexec:path=/secret-sentinel", false)]
+    [InlineData("/run/user/1000", "tcp:host=secret-sentinel", false)]
+    [InlineData("/run/user/1000", "x-machine-unix:machine=secret-sentinel", false)]
+    [InlineData("/run/user/1000", "unix:path=/run/user/1001/bus", false)]
+    [InlineData("/run/user/1000", "unix:path=/run/user/1000/bus;unixexec:path=/secret-sentinel", false)]
+    public void Linux_user_bus_selector_refuses_nonstandard_or_ambiguous_endpoints(string? runtime, string? address, bool accepted)
+    {
+        var selected = new Dictionary<string, string>();
+        if (runtime is not null) selected.Add("XDG_RUNTIME_DIR", runtime);
+        if (address is not null) selected.Add("DBUS_SESSION_BUS_ADDRESS", address);
+        if (accepted) ClaudeIndependentReviewData.RequireLinuxUserBusEnvironment(selected, "/run/user/1000");
+        else
+        {
+            var failure = Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequireLinuxUserBusEnvironment(selected, "/run/user/1000"));
+            Assert.DoesNotContain("secret-sentinel", failure.ToString()); Assert.Null(failure.InnerException);
+        }
+    }
+    [Theory]
+    [InlineData("XDG_RUNTIME_DIR", true)]
+    [InlineData("XDG_RUNTIME_DIR", false)]
+    [InlineData("DBUS_SESSION_BUS_ADDRESS", true)]
+    [InlineData("DBUS_SESSION_BUS_ADDRESS", false)]
+    public void Linux_bus_capture_is_complete_and_refuses_each_prebirth_drift(string name, bool missing)
+    {
+        if (!OperatingSystem.IsLinux()) Assert.Skip("Actual Linux environment capture branch only.");
+        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(SyntheticOsValue);
+        ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(selected, SyntheticOsValue);
+        var invocation = ClaudeIndependentReviewData.PinnedSettingsInvocation("fixture-image", ["--version"], "fixture-cwd", selected);
+        var child = new ProcessStartInfo(); CommandEnvironment.Complete(child, invocation);
+        Assert.Equal(SyntheticOsValue("XDG_RUNTIME_DIR"), child.Environment["XDG_RUNTIME_DIR"]);
+        Assert.Equal(SyntheticOsValue("DBUS_SESSION_BUS_ADDRESS"), child.Environment["DBUS_SESSION_BUS_ADDRESS"]);
+        var failure = Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(selected,
+            key => key == name ? missing ? null : "secret-sentinel-drift" : SyntheticOsValue(key)));
+        Assert.DoesNotContain("secret-sentinel", failure.ToString());
     }
     [Theory]
     [InlineData("model")]
@@ -285,7 +340,7 @@ public sealed class ClaudeReviewerUserSettingsTests
     [InlineData("review")]
     public void Owner_observations_and_review_use_complete_actual_child_block_without_ambient_injection(string purpose)
     {
-        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(_ => "synthetic-os-value");
+        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(SyntheticOsValue);
         var arguments = purpose == "review" ? ClaudeIndependentReviewData.RestrictedReviewArguments(5)
             : ClaudeIndependentReviewData.RestrictedObservationArguments(purpose == "auth" ? ["auth", "status"] : ["--version"]);
         var invocation = ClaudeIndependentReviewData.PinnedSettingsInvocation("fixture-image", arguments, "fixture-cwd", selected);
@@ -313,7 +368,7 @@ public sealed class ClaudeReviewerUserSettingsTests
     [InlineData("replacement")]
     public void Owner_actual_invocation_refuses_inheritance_flags_and_rebuilt_environment(string fault)
     {
-        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(_ => "synthetic-os-value");
+        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(SyntheticOsValue);
         var actual = ClaudeIndependentReviewData.PinnedSettingsInvocation("fixture-image", ["--version"], "fixture-cwd", selected);
         actual = fault switch
         {
@@ -326,8 +381,8 @@ public sealed class ClaudeReviewerUserSettingsTests
     [Fact]
     public void Captured_owner_OS_values_cannot_drift_between_observations_and_review_birth()
     {
-        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(_ => "synthetic-os-value");
-        ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(selected, _ => "synthetic-os-value");
+        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(SyntheticOsValue);
+        ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(selected, SyntheticOsValue);
         var error = Assert.Throws<ToolUsageException>(() => ClaudeIndependentReviewData.RequirePinnedSettingsEnvironmentCurrent(selected, _ => "secret-sentinel-drift"));
         Assert.DoesNotContain("secret-sentinel", error.ToString());
     }
@@ -338,7 +393,7 @@ public sealed class ClaudeReviewerUserSettingsTests
     [InlineData("review")]
     public void Owner_child_environment_carries_both_strict_Linux_server_flags(string purpose)
     {
-        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(_ => "synthetic-os-value");
+        var selected = ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(SyntheticOsValue);
         var arguments = purpose == "review" ? ClaudeIndependentReviewData.RestrictedReviewArguments(5)
             : ClaudeIndependentReviewData.RestrictedObservationArguments(purpose == "auth" ? ["auth", "status"] : ["--version"]);
         var invocation = ClaudeIndependentReviewData.PinnedSettingsInvocation("fixture-image", arguments, "fixture-cwd", selected);
@@ -361,7 +416,7 @@ public sealed class ClaudeReviewerUserSettingsTests
     public void Owner_child_environment_refuses_missing_or_changed_strict_Linux_server_flags(string name, bool missing)
     {
         var selected = new Dictionary<string, string>(
-            ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(_ => "synthetic-os-value"), StringComparer.Ordinal);
+            ClaudeIndependentReviewData.CapturePinnedSettingsEnvironment(SyntheticOsValue), StringComparer.Ordinal);
         if (missing) selected.Remove(name); else selected[name] = "0";
         var error = Assert.Throws<ToolUsageException>(() =>
             ClaudeIndependentReviewData.PinnedSettingsInvocation("fixture-image", ["--version"], "fixture-cwd", selected));
