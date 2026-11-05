@@ -22,7 +22,7 @@ public sealed class QualitySafetyScenarioTests
         var data = await PrepareProtectedPolicy(run);
         await WriteShadow(run, data);
         var result = await new ScenarioRunner(run).RunAsync("quality.worker-policy-shadow", Options, TestContext.Current.CancellationToken);
-        AssertNonpass(result, "protected-policy-retained", "worker-policy-not-authority");
+        AssertNonpass(result, GateOutcome.Incomplete, "protected-policy-retained", "worker-policy-not-authority");
         await AssertObservation(run, result, data);
         Assert.NotEqual(data.PolicyIdentity, ContractValidator.ParseAndValidate(await File.ReadAllBytesAsync(
             Path.Combine(run.Checkout, data.PolicyPath), TestContext.Current.CancellationToken)).Identity);
@@ -44,7 +44,7 @@ public sealed class QualitySafetyScenarioTests
             current = new Dictionary<string, decimal> { ["debt"] = 10m }
         }), TestContext.Current.CancellationToken);
         var result = await new ScenarioRunner(run).RunAsync("quality.caller-baseline-gaming", Options, TestContext.Current.CancellationToken);
-        AssertNonpass(result, "caller-baseline-not-authority", "claimed-nonfixture-not-authority");
+        AssertNonpass(result, GateOutcome.Incomplete, "caller-baseline-not-authority", "claimed-nonfixture-not-authority");
         await AssertObservation(run, result, data);
         run.MarkAssertionsPassed();
     }
@@ -57,7 +57,7 @@ public sealed class QualitySafetyScenarioTests
         await File.WriteAllTextAsync(Path.Combine(run.Checkout, data.CandidatePath),
             "{\"kind\":\"untrusted-mutation-preview\",\"outcome\":\"PASS\",\"complete\":true,\"fixture\":false}", TestContext.Current.CancellationToken);
         var result = await new ScenarioRunner(run).RunAsync("quality.incomplete-mutation-preview", Options, TestContext.Current.CancellationToken);
-        AssertNonpass(result, "mutation-certification-unavailable", "preview-success-not-authority");
+        AssertNonpass(result, GateOutcome.Error, "mutation-certification-unavailable", "preview-success-not-authority");
         await AssertObservation(run, result, data);
         run.MarkAssertionsPassed();
     }
@@ -95,9 +95,9 @@ public sealed class QualitySafetyScenarioTests
         run.MarkAssertionsPassed();
     }
 
-    private static void AssertNonpass(ScenarioResult result, params string[] invariants)
+    private static void AssertNonpass(ScenarioResult result, GateOutcome expectedOutcome, params string[] invariants)
     {
-        Assert.Equal(GateOutcome.Incomplete, result.Outcome);
+        Assert.Equal(expectedOutcome, result.Outcome);
         Assert.True(result.Fixture);
         Assert.False(result.FullRealProfileCertified);
         Assert.Equal(OwnedScenarioRun.InitialIntegratedBase, result.IntegratedBaseCommit);

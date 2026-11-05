@@ -8,6 +8,13 @@ var mode = args[0]; var directory = args[1]; var nonce = args[2];
 for (DirectoryInfo? ancestor = new(directory); ancestor is not null; ancestor = ancestor.Parent)
     if ((ancestor.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("Helper path is redirected.");
 var started = Stopwatch.GetTimestamp();
+if (mode == "invalid-utf8")
+{
+    using var output = Console.OpenStandardOutput();
+    output.WriteByte(255); output.Flush();
+    Environment.ExitCode = 1;
+    return;
+}
 if (mode == "child")
 {
     Console.Out.WriteLine("actual-child-stdout:" + nonce); Console.Out.Flush();

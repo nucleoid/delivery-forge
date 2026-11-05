@@ -11,7 +11,7 @@ public sealed partial class GitRepositoryContextReader
     private sealed record ImportGitObservation(Task[] Tasks, IReadOnlyList<Exception> Errors);
     private static readonly ConcurrentDictionary<Process, ImportGitObservation> RetainedImportGit = new();
     private readonly ConcurrentDictionary<Process, byte> _importOriginals = new();
-    internal bool HasUnsettledImportProcess => !_importOriginals.IsEmpty;
+    internal bool HasUnsettledImportProcess => _ownedGitUnknown || !_importOriginals.IsEmpty;
     private async Task<GitResult> RunImportProcess(ProcessStartInfo startInfo, CancellationToken caller, bool allowFailure)
     {
         caller.ThrowIfCancellationRequested();

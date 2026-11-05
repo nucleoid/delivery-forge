@@ -9,7 +9,7 @@ namespace DeliveryForge.Evidence;
 
 // Private birth-bound ownership only. No PID adoption, public handles or uncontained fallback.
 // Synchronous kernel calls have OS limits; async polling does not certify hard host containment.
-internal sealed class WindowsCommandLifetime : IDisposable
+internal sealed partial class WindowsCommandLifetime : IDisposable
 {
     private const uint Signalled = 0, WaitTimeout = 258;
     private readonly KernelHandle _job;
@@ -17,6 +17,8 @@ internal sealed class WindowsCommandLifetime : IDisposable
     private KernelHandle? _thread;
     private SafeFileHandle? _outRead, _outWrite, _errRead, _errWrite, _inRead, _inWrite;
     private StreamReader? _stdout, _stderr;
+    private FileStream? _duplexInput;
+    private bool _creationReturned, _creationSucceeded;
     private StreamWriter? _stdin;
     private bool _assigned;
     private bool _resumed;
@@ -146,10 +148,11 @@ internal sealed class WindowsCommandLifetime : IDisposable
     }
 
     internal static async Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
-        CommandInvocation invocation, TimeSpan entireBudget, int maximumBytesPerStream, CancellationToken caller)
+        CommandInvocation invocation, TimeSpan entireBudget, int maximumBytesPerStream, CancellationToken caller, IOwnedDuplexBudget? enclosing = null)
     {
         var began = DateTimeOffset.UtcNow; var started = Stopwatch.GetTimestamp();
         var workBudget = BoundedCaptureStream.WorkBudget(entireBudget);
+        long? cleanupStarted = null;
         var stdout = new BoundedCaptureStream(maximumBytesPerStream); var stderr = new BoundedCaptureStream(maximumBytesPerStream);
         WindowsCommandLifetime? owner = null; Task? input = null, output = null, error = null;
         var timedOut = false; var cancelled = false; var known = true; var rootExited = false;
@@ -160,9 +163,11 @@ internal sealed class WindowsCommandLifetime : IDisposable
         string? startupFailureStage = null;
         var retention = new BoundedCaptureRetention();
         retention.Add(stdout); retention.Add(stderr);
+        var restrictive = new RestrictiveCaptureBudget(started, entireBudget, workBudget, enclosing, retention);
         try
         {
-            owner = new();
+            if (!restrictive.WorkAvailable) throw new StartupStoppedException(caller.IsCancellationRequested || enclosing?.Token.IsCancellationRequested == true);
+            owner = new(); owner._boundedBudget = restrictive;
             retention.Add(owner); // BEFORE Start and every original native resource/task.
             owner._captureRetention = retention; owner._captureStdout = stdout; owner._captureStderr = stderr;
             owner.Start(invocation, started, workBudget, caller);
@@ -171,38 +176,41 @@ internal sealed class WindowsCommandLifetime : IDisposable
             {
                 if (caller.IsCancellationRequested) { cancelled = true; break; }
                 if (stdout.Exceeded || stderr.Exceeded) break;
-                if (!BoundedCaptureStream.Within(started, workBudget)) { timedOut = true; break; }
+                if (!restrictive.WorkAvailable) { timedOut = true; break; }
                 if (!owner.Observe(out rootExited, out active, out failure)) { known = false; break; }
                 if (input.IsFaulted || output.IsFaulted || error.IsFaulted)
                 { known = false; failure = "Owned stdin write or byte drain failed."; break; }
-                if (rootExited && active == 0 && BoundedCaptureStream.Eof(output) && BoundedCaptureStream.Eof(error)) break;
+                if (rootExited && active == 0 && input.Status == TaskStatus.RanToCompletion && BoundedCaptureStream.Eof(output) && BoundedCaptureStream.Eof(error)) break;
                 await Task.Delay(5).ConfigureAwait(false);
             }
         }
         catch (StartupStoppedException stopped) { cancelled = stopped.Cancelled; timedOut = stopped.TimedOut; startupFailureStage = owner?._stage; failure = stopped.Message; retention.Add(stopped); }
-        catch (Exception exception) when (exception is Win32Exception or IOException or ArgumentException or InvalidOperationException)
+        catch (Exception exception) when (exception is Win32Exception or IOException or ArgumentException or InvalidOperationException or TaskSchedulerException)
         { known = false; failure = Bounded(exception); startupFailureStage = owner?._stage ?? "create-job"; retention.Add(exception); }
+        if (cancelled || timedOut || stdout.Exceeded || stderr.Exceeded || !known || failure is not null || !rootExited || active != 0)
+            restrictive.BeginFailureCleanup(); // synchronous actual parent latch BEFORE terminate/first disposition.
+        if (owner is not null) { restrictive.BeginCleanup(); cleanupStarted = restrictive.CleanupStarted; }
         input = owner?._inputTask; output = owner?._captureOutputTask; error = owner?._captureErrorTask;
         {
             if (owner?._process is not null)
             {
-                if (!rootExited || active != 0 || !known)
+                if ((!rootExited || active != 0 || !known) && restrictive.CleanupAvailable)
                 {
                     killAttempted = true;
                     killSucceeded = owner._assigned ? TerminateJobObject(owner._job, unchecked((uint)-1)) : TerminateProcess(owner._process, unchecked((uint)-1));
-                    if (!killSucceeded) { var native = Native("terminate-owned-byte-capture"); retention.Add(native); killType = native.GetType().FullName; failure ??= Bounded(native); }
+                    if (!killSucceeded) { var native = Native("terminate-owned-byte-capture"); retention.Add(native); restrictive.BeginFailureCleanup(); killType = native.GetType().FullName; failure ??= Bounded(native); }
                 }
                 // Wait on the SAME birth-bound handle; no scheduler polling or appended tail.
                 // This diagnostic is the actual remainder at cleanup admission, not a new grant.
                 cleanupWaitMilliseconds = (int)Math.Clamp(Math.Floor(
-                    (entireBudget - Stopwatch.GetElapsedTime(started)).TotalMilliseconds), 0, int.MaxValue);
+                    restrictive.CleanupRemaining.TotalMilliseconds), 0, int.MaxValue);
                 if (!rootExited && cleanupWaitMilliseconds > 0)
                 {
                     var waited = WaitForSingleObject(owner._process, (uint)cleanupWaitMilliseconds);
                     if (waited is not (Signalled or WaitTimeout))
                     {
                         var native = Native("wait-original-byte-capture-root");
-                        retention.Add(native); known = false; failure ??= Bounded(native);
+                        retention.Add(native); restrictive.BeginFailureCleanup(); known = false; failure ??= Bounded(native);
                     }
                 }
                 // Each original reader is independently observed under the SAME shrinking
@@ -210,7 +218,7 @@ internal sealed class WindowsCommandLifetime : IDisposable
                 foreach (var drain in new[] { input, output, error })
                 {
                     if (drain is null) continue;
-                    var remaining = entireBudget - Stopwatch.GetElapsedTime(started);
+                    var remaining = restrictive.CleanupRemaining;
                     if (remaining <= TimeSpan.Zero) continue;
                     try
                     {
@@ -219,42 +227,53 @@ internal sealed class WindowsCommandLifetime : IDisposable
                         await originalWait.ConfigureAwait(false);
                     }
                     catch (Exception drainFailure)
-                    { retention.Add(drainFailure); known = false; failure ??= Bounded(drainFailure); }
+                    { retention.Add(drainFailure); restrictive.BeginFailureCleanup(); known = false; failure ??= Bounded(drainFailure); }
                 }
                 // Root signal and pipe EOF do not substitute for current Job emptiness.
                 // Descendant accounting may settle later, still only inside the original total.
-                while (known && BoundedCaptureStream.Within(started, entireBudget))
+                while (known && restrictive.CleanupAvailable)
                 {
                     if (!owner.Observe(out rootExited, out active, out var observationFailure))
-                    { known = false; failure ??= observationFailure; break; }
+                    { known = false; failure ??= observationFailure; restrictive.BeginFailureCleanup(); break; }
                     if (!rootExited || active == 0) break;
-                    var remaining = entireBudget - Stopwatch.GetElapsedTime(started);
+                    var remaining = restrictive.CleanupRemaining;
                     if (remaining <= TimeSpan.Zero) break;
                     await Task.Delay(remaining < TimeSpan.FromMilliseconds(5) ? remaining : TimeSpan.FromMilliseconds(5)).ConfigureAwait(false);
                 }
-                var finalKnown = owner.Observe(out rootExited, out active, out var finalFailure);
-                known &= finalKnown; failure ??= finalFailure;
+                string? finalFailure = null;
+                var finalKnown = restrictive.CleanupAvailable && owner.Observe(out rootExited, out active, out finalFailure);
+                known &= finalKnown; failure ??= finalFailure; if (!finalKnown) restrictive.BeginFailureCleanup();
             }
             int? exit = null;
-            if (rootExited && owner?._process is not null)
+            if (rootExited && owner?._process is not null && restrictive.CleanupAvailable)
             {
                 if (GetExitCodeProcess(owner._process, out var code)) exit = unchecked((int)code);
-                else { known = false; failure ??= "Original exit-code observation failed: " + Marshal.GetLastWin32Error(); }
+                else { known = false; failure ??= "Original exit-code observation failed: " + Marshal.GetLastWin32Error(); restrictive.BeginFailureCleanup(); }
             }
             var outputStatus = output?.Status; var errorStatus = error?.Status;
             var outEof = outputStatus == TaskStatus.RanToCompletion; var errEof = errorStatus == TaskStatus.RanToCompletion;
             var settled = known && rootExited && active == 0;
             var inputComplete = input?.Status == TaskStatus.RanToCompletion;
-            var quiescent = settled && inputComplete && outEof && errEof && (!killAttempted || killSucceeded) &&
-                BoundedCaptureStream.Within(started, entireBudget);
+            // A stopped Start may have constructed the actual writer/endpoints,
+            // but not resumed a child or born its input Task. Null alone is not
+            // closure: only SAME known first disposition below can settle it.
+            var inputWasNotStarted = owner is { _resumed: false, _inputTask: null } && input is null;
+            var nativeSettled = settled && outEof && errEof && (!killAttempted || killSucceeded) &&
+                restrictive.CleanupAvailable;
+            var quiescent = nativeSettled && inputComplete;
             // Never-created handles can be disposed without claiming helper exit/EOF.
-            var mayDispose = owner is not null && ((!owner._creationAttempted && output is null && error is null) || quiescent);
+            var creationRefused = owner is { _creationReturned: true, _creationSucceeded: false, _process: null };
+            var mayDispose = owner is not null && (((!owner._creationAttempted || creationRefused) && output is null && error is null) ||
+                nativeSettled && (inputComplete || inputWasNotStarted));
+            var dispositionKnown = owner is null;
             if (mayDispose)
             {
-                var disposalKnown = owner!.DisposeBoundedKnown(started, entireBudget, retention);
-                if (disposalKnown) retention.ReleaseKnown();
-                else { quiescent = false; failure ??= "Original bounded resource disposition was not timely and complete."; }
+                dispositionKnown = owner!.DisposeBoundedKnown(started, entireBudget, retention, restrictive);
+                if (dispositionKnown && nativeSettled && inputWasNotStarted) quiescent = true;
+                if (!dispositionKnown) { quiescent = false; failure ??= "Original bounded resource disposition was not timely and complete."; }
             }
+            if (dispositionKnown) retention.ReleaseKnown();
+            else if (enclosing is IOwnedBudgetUnknownRetention actual) actual.PreserveUnknown();
             var outBytes = stdout.Snapshot(); var errBytes = stderr.Snapshot();
             var command = new CommandResult(exit, Encoding.UTF8.GetString(outBytes), Encoding.UTF8.GetString(errBytes), timedOut,
                 cancelled, began, DateTimeOffset.UtcNow, quiescent)
@@ -267,8 +286,8 @@ internal sealed class WindowsCommandLifetime : IDisposable
                     OwnedTree = new(owner is { _assigned: true, _resumed: true }, settled, active > int.MaxValue ? -1 : (int)active),
                     NativeFailure = failure,
                     Startup = new(
-                        owner?._process is not null ? CommandStartupState.Established : owner?._creationAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
-                        owner?._process is not null ? CommandStartupState.Established : owner?._creationAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
+                        creationRefused ? CommandStartupState.Refused : owner?._process is not null ? CommandStartupState.Established : owner?._creationAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
+                        creationRefused ? CommandStartupState.NotAttempted : owner?._process is not null ? CommandStartupState.Established : owner?._creationAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
                         owner?._assigned == true ? CommandStartupState.Established : owner?._assignmentAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
                         owner?._resumed == true ? CommandStartupState.Established : owner?._resumeAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
                         owner is { _stdout: not null, _stderr: not null } ? CommandStartupState.Established : owner?._readerEndpointsAttempted == true ? CommandStartupState.AttemptedUnknown : CommandStartupState.NotAttempted,
@@ -279,23 +298,39 @@ internal sealed class WindowsCommandLifetime : IDisposable
                         failure is null ? null : CommandStartupObservation.Clip(failure, 2048))
                 }
             };
-            var completed = new BoundedCommandCaptureResult(command, outBytes, errBytes, stdout.Exceeded || stderr.Exceeded, rootExited, outEof, errEof);
+            var completed = new BoundedCommandCaptureResult(command, outBytes, errBytes, stdout.Exceeded || stderr.Exceeded, rootExited, outEof, errEof,
+                new(started, cleanupStarted, Stopwatch.Frequency));
             // Includes snapshot/decoding/startup DATA and result byte copies under the SAME clock.
-            return BoundedCaptureStream.Within(started, entireBudget) ? completed : completed.RefuseLateCompletion();
+            return restrictive.CleanupAvailable ? completed : completed.RefuseLateCompletion();
         }
     }
 
-    private void Start(CommandInvocation invocation, long originalStarted, TimeSpan originalTimeout, CancellationToken caller)
+    private RestrictiveCaptureBudget? _boundedBudget;
+
+    private void Start(CommandInvocation invocation, long originalStarted, TimeSpan originalTimeout, CancellationToken caller, bool keepInput = false)
     {
         _stage = "configure-job";
+        CheckRestrictiveStartup(originalStarted, originalTimeout, caller);
         var limits = new ExtendedLimits { BasicLimitInformation = new() { LimitFlags = 0x2000 } };
         if (!SetInformationJobObject(_job, 9, ref limits, (uint)Marshal.SizeOf<ExtendedLimits>())) throw Native(_stage);
+        CheckRestrictiveStartup(originalStarted, originalTimeout, caller);
+        if (keepInput)
+        {
+            if (IntPtr.Size != 8 || !GetProcessAffinityMask(GetCurrentProcess(), out var allowed, out _)) throw Native("duplex-parent-affinity");
+            nuint mask = 0; for (var bit = 0; bit < 64 && System.Numerics.BitOperations.PopCount((ulong)mask) < 2; bit++) { var value = (nuint)1 << bit; if ((allowed & value) != 0) mask |= value; }
+            if (System.Numerics.BitOperations.PopCount((ulong)mask) != 2) throw new IOException("Two actual available CPU bits required.");
+            limits.BasicLimitInformation.LimitFlags |= 0x10 | 0x100; limits.BasicLimitInformation.Affinity = mask; var runtimeMemory = 4294967296UL; limits.ProcessMemoryLimit = checked((nuint)runtimeMemory);
+            if (!SetInformationJobObject(_job, 9, ref limits, (uint)Marshal.SizeOf<ExtendedLimits>())) throw Native("duplex-resource-limits");
+        }
         _stage = "create-owned-pipes";
         (_outRead, _outWrite) = Pipe(parentReads: true);
+        CheckRestrictiveStartup(originalStarted, originalTimeout, caller);
         (_errRead, _errWrite) = Pipe(parentReads: true);
+        CheckRestrictiveStartup(originalStarted, originalTimeout, caller);
         (_inRead, _inWrite) = Pipe(parentReads: false);
+        CheckRestrictiveStartup(originalStarted, originalTimeout, caller);
         _stage = "prepare-command";
-        var executable = ResolveExecutable(invocation.FileName);
+        var executable = CommandExecutableResolver.ResolveWindows(invocation.FileName);
         var commandLine = new StringBuilder(Quote(executable, force: true));
         foreach (var argument in invocation.Arguments)
         {
@@ -303,7 +338,7 @@ internal sealed class WindowsCommandLifetime : IDisposable
             if (commandLine.Length >= 32767) throw new ArgumentException("Windows command line exceeds32766 characters.");
         }
         if (commandLine.Length >= 32767) throw new ArgumentException("Windows command line exceeds32766 characters.");
-        var environment = EnvironmentBlock(invocation.Environment, invocation.InheritEnvironment);
+        var environment = EnvironmentBlock(invocation.Environment, invocation.EnvironmentIsComplete, invocation.InheritEnvironment);
         var directory = Path.GetFullPath(invocation.WorkingDirectory);
         using (var attributes = new InheritedHandles(_inRead, _outWrite, _errWrite))
         {
@@ -322,8 +357,10 @@ internal sealed class WindowsCommandLifetime : IDisposable
             _stage = "create-suspended";
             CheckStartupBudget(originalStarted, originalTimeout, caller);
             _creationAttempted = true;
-            if (!CreateProcessW(executable, commandLine, IntPtr.Zero, IntPtr.Zero, true,
-                0x00000004 | 0x08000000 | 0x00000400 | 0x00080000, environment, directory, ref startup, out var processInfo)) throw Native(_stage);
+            var created = CreateProcessW(executable, commandLine, IntPtr.Zero, IntPtr.Zero, true,
+                0x00000004 | 0x08000000 | 0x00000400 | 0x00080000, environment, directory, ref startup, out var processInfo);
+            _creationReturned = true; _creationSucceeded = created;
+            if (!created) throw Native(_stage);
             _process = new(processInfo.Process); _thread = new(processInfo.Thread);
             _stage = "assign-before-resume";
             _assignmentAttempted = true;
@@ -333,34 +370,52 @@ internal sealed class WindowsCommandLifetime : IDisposable
         // Close every extra child-side endpoint in this parent before execution/EOF observation.
         _outWrite.Dispose(); _outWrite = null; _errWrite.Dispose(); _errWrite = null;
         _inRead.Dispose(); _inRead = null;
+        if (keepInput) _duplexInput = new FileStream(_inWrite, FileAccess.Write, 4096, false);
+        else _stdin = new(new FileStream(_inWrite, FileAccess.Write, 4096, false), new UTF8Encoding(false));
         _readerEndpointsAttempted = true;
         _stdout = new(new FileStream(_outRead, FileAccess.Read, 4096, false), Console.OutputEncoding, true);
         _stderr = new(new FileStream(_errRead, FileAccess.Read, 4096, false), Console.OutputEncoding, true);
-        _stdin = new(new FileStream(_inWrite, FileAccess.Write, 4096, false), new UTF8Encoding(false));
         if (_captureRetention is not null)
         {
             _stage = "enroll-original-byte-drains";
-            _captureOutputTask = BoundedCaptureStream.Observe(_captureStdout!.DrainAsync(_stdout.BaseStream));
+            // Enroll each exact task before starting its blocking original
+            // reader. Async-over-sync pipe reads otherwise use the same pool
+            // as the bounded owner's monitor continuation.
+            _captureOutputTask = new Task(() => _captureStdout!.DrainSynchronously(_stdout.BaseStream),
+                CancellationToken.None, TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach);
             _captureRetention.Add(_captureOutputTask);
-            _captureErrorTask = BoundedCaptureStream.Observe(_captureStderr!.DrainAsync(_stderr.BaseStream));
+            _ = BoundedCaptureStream.Observe(_captureOutputTask);
+            _captureOutputTask.Start(TaskScheduler.Default);
+            _captureErrorTask = new Task(() => _captureStderr!.DrainSynchronously(_stderr.BaseStream),
+                CancellationToken.None, TaskCreationOptions.LongRunning | TaskCreationOptions.DenyChildAttach);
             _captureRetention.Add(_captureErrorTask);
+            _ = BoundedCaptureStream.Observe(_captureErrorTask);
+            _captureErrorTask.Start(TaskScheduler.Default);
         }
         _stage = "resume-owned-root";
         CheckStartupBudget(originalStarted, originalTimeout, caller);
         _resumeAttempted = true;
         if (ResumeThread(_thread) == uint.MaxValue) throw Native(_stage);
         _resumed = true; _thread.Dispose(); _thread = null;
-        _stage = "write-original-stdin";
-        _inputTask = BoundedCaptureStream.Observe(
-            ProcessCommandExecutor.WriteStandardInputAsync(_stdin, invocation.StandardInput));
-        _captureRetention?.Add(_stdin);
-        _captureRetention?.Add(_inputTask);
+        if (!keepInput)
+        {
+            _stage = "write-original-stdin";
+            _captureRetention?.Add(_stdin!);
+            _inputTask = BoundedCaptureStream.Observe(
+                ProcessCommandExecutor.WriteStandardInputAsync(_stdin!, invocation.StandardInput));
+            _captureRetention?.Add(_inputTask);
+        }
     }
 
-    private static void CheckStartupBudget(long originalStarted, TimeSpan originalTimeout, CancellationToken caller)
+    private void CheckRestrictiveStartup(long originalStarted, TimeSpan originalTimeout, CancellationToken caller)
+    {
+        if (_boundedBudget is not null) CheckStartupBudget(originalStarted, originalTimeout, caller);
+    }
+
+    private void CheckStartupBudget(long originalStarted, TimeSpan originalTimeout, CancellationToken caller)
     {
         var cancelled = caller.IsCancellationRequested;
-        if (cancelled || Stopwatch.GetElapsedTime(originalStarted) >= originalTimeout)
+        if (cancelled || _boundedBudget?.WorkAvailable == false || Stopwatch.GetElapsedTime(originalStarted) >= originalTimeout)
             throw new StartupStoppedException(cancelled);
     }
     private sealed class StartupStoppedException(bool cancelled)
@@ -402,18 +457,6 @@ internal sealed class WindowsCommandLifetime : IDisposable
         { var failure = Native("noninheritable-parent-pipe"); read.Dispose(); write.Dispose(); throw failure; }
         return (read, write);
     }
-    private static string ResolveExecutable(string name)
-    {
-        if (string.IsNullOrWhiteSpace(name) || name.Contains('\0')) throw new ArgumentException("Invalid executable name.");
-        name = name.Trim();
-        if (name.Length >= 2 && name[0] == '"' && name[^1] == '"') name = name[1..^1];
-        if (Path.IsPathFullyQualified(name) || name.Contains(Path.DirectorySeparatorChar) || name.Contains(Path.AltDirectorySeparatorChar))
-            return Path.GetFullPath(name);
-        var buffer = new StringBuilder(32768);
-        var length = SearchPathW(null, name, ".exe", (uint)buffer.Capacity, buffer, IntPtr.Zero);
-        if (length == 0 || length >= buffer.Capacity) throw Native("resolve-executable");
-        return buffer.ToString();
-    }
     private static string Quote(string value, bool force = false)
     {
         if (value.Contains('\0')) throw new ArgumentException("NUL is not a Windows argument.");
@@ -428,14 +471,17 @@ internal sealed class WindowsCommandLifetime : IDisposable
         }
         return result.Append('\\', slashes * 2).Append('"').ToString();
     }
-    private static string EnvironmentBlock(
-        IReadOnlyDictionary<string, string>? additions,
-        bool inheritEnvironment)
+    private static string EnvironmentBlock(IReadOnlyDictionary<string, string>? additions, bool complete = false, bool inheritEnvironment = true)
     {
         var values = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (inheritEnvironment)
-            foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables())
-                values[(string)entry.Key] = (string)entry.Value!;
+        if (complete)
+        {
+            var selected = new ProcessStartInfo();
+            CommandEnvironment.Complete(selected, new("", Array.Empty<string>(), "", additions) { EnvironmentIsComplete = true });
+            foreach (var row in selected.Environment) values.Add(row.Key, row.Value!);
+        }
+        else if (inheritEnvironment)
+            foreach (DictionaryEntry entry in Environment.GetEnvironmentVariables()) values[(string)entry.Key] = (string)entry.Value!;
         foreach (var entry in additions ?? new Dictionary<string, string>())
         {
             if (entry.Key.Length == 0 || entry.Key.Contains('=') || entry.Key.Contains('\0') || entry.Value.Contains('\0'))
@@ -463,11 +509,11 @@ internal sealed class WindowsCommandLifetime : IDisposable
     public void Dispose()
     {
         _job.Dispose(); // kill-on-close targets this private job only; disposal is NOT settlement proof.
-        _thread?.Dispose(); _process?.Dispose(); _stdin?.Dispose(); _stdout?.Dispose(); _stderr?.Dispose();
+        _thread?.Dispose(); _process?.Dispose(); _stdin?.Dispose(); _stdout?.Dispose(); _stderr?.Dispose(); _duplexInput?.Dispose();
         _outRead?.Dispose(); _outWrite?.Dispose(); _errRead?.Dispose(); _errWrite?.Dispose(); _inRead?.Dispose(); _inWrite?.Dispose();
     }
 
-    private bool DisposeBoundedKnown(long started, TimeSpan budget, BoundedCaptureRetention retention)
+    private bool DisposeBoundedKnown(long started, TimeSpan budget, BoundedCaptureRetention retention, RestrictiveCaptureBudget? restrictive = null)
     {
         var known = true;
         // This path is entered ONLY after no Create attempt, or observed root+Job0+EACH EOF.
@@ -475,18 +521,24 @@ internal sealed class WindowsCommandLifetime : IDisposable
             _outRead, _outWrite, _errRead, _errWrite, _inRead, _inWrite })
         {
             if (resource is null) continue;
-            if (!BoundedCaptureStream.Within(started, budget)) { known = false; continue; }
-            try { resource.Dispose(); }
-            catch (Exception failure) { retention.Add(failure); known = false; }
+            if (!BoundedCaptureStream.Within(started, budget) || restrictive?.CleanupAvailable == false) { known = false; continue; }
+            try
+            {
+                var wasInvalid = resource is KernelHandle original && original.IsInvalid;
+                resource.Dispose();
+                if (resource is KernelHandle handle && !wasInvalid && (!handle.NativeCloseEntered || !handle.NativeCloseReturned || !handle.NativeClosed)) throw new IOException("Actual original CloseHandle did not return successful first disposition.");
+            }
+            catch (Exception failure) { retention.Add(failure); restrictive?.BeginFailureCleanup(); known = false; }
         }
-        return known && BoundedCaptureStream.Within(started, budget);
+        return known && BoundedCaptureStream.Within(started, budget) && restrictive?.CleanupAvailable != false;
     }
 
     private sealed class KernelHandle : SafeHandleZeroOrMinusOneIsInvalid
     {
         public KernelHandle() : base(true) { }
         public KernelHandle(IntPtr value) : base(true) => SetHandle(value);
-        protected override bool ReleaseHandle() => CloseHandle(handle);
+        internal bool NativeCloseEntered, NativeCloseReturned, NativeClosed;
+        protected override bool ReleaseHandle() { NativeCloseEntered = true; var actual = CloseHandle(handle); NativeCloseReturned = true; NativeClosed = actual; return actual; }
     }
     private sealed class InheritedHandles : IDisposable
     {
@@ -558,5 +610,4 @@ internal sealed class WindowsCommandLifetime : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)][return: MarshalAs(UnmanagedType.Bool)] private static extern bool UpdateProcThreadAttribute(IntPtr list, uint flags, nuint attribute, IntPtr value, nuint size, IntPtr previous, IntPtr returnedSize);
     [DllImport("kernel32.dll")] private static extern void DeleteProcThreadAttributeList(IntPtr list);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)][return: MarshalAs(UnmanagedType.Bool)] private static extern bool CreateProcessW(string executable, StringBuilder commandLine, IntPtr processAttributes, IntPtr threadAttributes, [MarshalAs(UnmanagedType.Bool)] bool inheritHandles, uint flags, [MarshalAs(UnmanagedType.LPWStr)] string environment, string directory, ref StartupInfoEx startup, out ProcessInformation information);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern uint SearchPathW(string? path, string name, string? extension, uint length, StringBuilder result, IntPtr filePart);
 }

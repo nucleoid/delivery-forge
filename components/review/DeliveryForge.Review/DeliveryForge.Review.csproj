@@ -10,5 +10,6 @@
   <ItemGroup>
     <InternalsVisibleTo Include="DeliveryForge.Review.Tests" />
     <InternalsVisibleTo Include="DeliveryForge.Execution" />
+    <InternalsVisibleTo Include="DeliveryForge.Execution.Tests" />
   </ItemGroup>
 </Project>

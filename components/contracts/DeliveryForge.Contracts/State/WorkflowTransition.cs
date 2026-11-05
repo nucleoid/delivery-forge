@@ -378,6 +378,17 @@ public static class WorkflowTransition
             throw new InvalidWorkflowTransitionException("Receipt does not match the current head commit and tree identity.");
         }
 
+        // v1 remains unchanged: a marked local-only fake receipt is valid DATA,
+        // but can never establish either production publication transition.
+        if (expectedKind == "publication-receipt")
+        {
+            if (!root.TryGetProperty("remoteRef", out var reference) || reference.ValueKind != JsonValueKind.String ||
+                string.IsNullOrWhiteSpace(reference.GetString()))
+                throw new InvalidWorkflowTransitionException("Publication receipt requires a nonempty remote reference.");
+            if (reference.GetString()!.StartsWith("local-ref:", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidWorkflowTransitionException("Local-only publication DATA cannot authorize a publication transition.");
+        }
+
         if (outcome is not null &&
             (!root.TryGetProperty("outcome", out var actualOutcome) ||
              !string.Equals(actualOutcome.GetString(), outcome, StringComparison.Ordinal)))

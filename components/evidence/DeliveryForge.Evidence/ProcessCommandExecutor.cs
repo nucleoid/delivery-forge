@@ -10,6 +10,17 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
     private readonly Func<Task, TimeSpan, Task> _waitForDrain;
     private readonly TimeSpan _waitTimeout;
     private readonly bool _creationOwnedWindows;
+    private readonly LinuxScopeSelection? _selectedLinuxScope;
+    private readonly IOwnedDuplexBudget? _selectedLinuxOriginal;
+
+    /// <summary>Explicit trusted Linux profile and the actual parent owner are
+    /// retained in this composition, never reconstructed from result DATA.</summary>
+    public ProcessCommandExecutor(LinuxScopeSelection linuxScope, IOwnedDuplexBudget actualOriginal) : this()
+    {
+        ArgumentNullException.ThrowIfNull(linuxScope); ArgumentNullException.ThrowIfNull(actualOriginal);
+        if (!OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Linux owner selection on another platform.");
+        actualOriginal.CheckWork(); _selectedLinuxScope = linuxScope; _selectedLinuxOriginal = actualOriginal;
+    }
     internal bool SupportsCreationOwnedBoundedCapture => _creationOwnedWindows;
 
     public ProcessCommandExecutor()
@@ -43,17 +54,100 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         int maximumBytesPerStream,
         CancellationToken cancellationToken)
     {
+        return ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, null);
+    }
+
+    /// <summary>Optional restrictive same-origin budget; the ordinary four-argument API is unchanged.</summary>
+    public Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+        CommandInvocation invocation, TimeSpan entireBudget, int maximumBytesPerStream,
+        CancellationToken cancellationToken, IOwnedDuplexBudget? enclosing)
+    {
+        if (_selectedLinuxScope is not null)
+        {
+            RequireSelectedLinuxCaptureOwner(_selectedLinuxScope, _selectedLinuxOriginal, enclosing, _selectedLinuxScope);
+            return ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing ?? _selectedLinuxOriginal, _selectedLinuxScope);
+        }
         if (!_creationOwnedWindows)
             throw new InvalidOperationException("Injected executor delegates cannot establish creation-owned byte capture.");
         if (entireBudget <= TimeSpan.Zero || entireBudget > TimeSpan.FromHours(1))
             throw new ArgumentOutOfRangeException(nameof(entireBudget));
         if (maximumBytesPerStream <= 0 || maximumBytesPerStream > 128 * 1024 * 1024)
             throw new ArgumentOutOfRangeException(nameof(maximumBytesPerStream));
+        if (enclosing is not null && (enclosing.OriginalStarted <= 0 || enclosing.OriginalStarted > Stopwatch.GetTimestamp() ||
+            enclosing.WholeLimit <= TimeSpan.Zero || enclosing.WholeLimit > TimeSpan.FromMinutes(20) ||
+            enclosing.WorkLimit <= TimeSpan.Zero || enclosing.WorkLimit > TimeSpan.FromSeconds(1100) || enclosing.WorkLimit >= enclosing.WholeLimit))
+            throw new ArgumentOutOfRangeException(nameof(enclosing), "Only a finite restrictive enclosing original is supported.");
         if (OperatingSystem.IsWindows())
-            return WindowsCommandLifetime.ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken);
+            return WindowsCommandLifetime.ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing);
         if (OperatingSystem.IsLinux())
+        {
+            RequireUnscopedLinuxCaptureHasNoEnclosingOwner(enclosing);
             return BoundedProcessCapture.ExecuteAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken);
+        }
         throw new PlatformNotSupportedException("Creation-owned bounded capture supports Windows and Linux only.");
+    }
+
+    /// <summary>Explicit Linux scope profile; selection DATA cannot issue ownership.
+    /// The same original owner creates, binds and retires the real kernel scope.</summary>
+    public Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+        CommandInvocation invocation, TimeSpan entireBudget, int maximumBytesPerStream,
+        CancellationToken cancellationToken, IOwnedDuplexBudget? enclosing, LinuxScopeSelection? linuxScope)
+        => ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing, linuxScope, null);
+
+    // Exact-image DATA selects extra physical checks on the SAME original scope.
+    // It cannot issue protected reviewer/host admission or an execution lease.
+    public Task<BoundedCommandCaptureResult> ExecuteBoundedCaptureAsync(
+        CommandInvocation invocation, TimeSpan entireBudget, int maximumBytesPerStream,
+        CancellationToken cancellationToken, IOwnedDuplexBudget? enclosing, LinuxScopeSelection? linuxScope, LinuxScopeImage? exactNativeImage)
+    {
+        if (exactNativeImage is not null && linuxScope is null) throw new PlatformNotSupportedException("Exact image requires the original selected Linux scope.");
+        if (linuxScope is null)
+            return ExecuteBoundedCaptureAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing);
+        RequireSelectedLinuxCaptureOwner(_selectedLinuxScope, _selectedLinuxOriginal, enclosing, linuxScope);
+        if (!_creationOwnedWindows || !OperatingSystem.IsLinux())
+            throw new PlatformNotSupportedException("Explicit Linux scope requires the original production Linux owner.");
+        ArgumentNullException.ThrowIfNull(enclosing);
+        if (entireBudget <= TimeSpan.Zero || entireBudget > TimeSpan.FromMinutes(15))
+            throw new ArgumentOutOfRangeException(nameof(entireBudget));
+        if (maximumBytesPerStream <= 0 || maximumBytesPerStream > 16 * 1024 * 1024)
+            throw new ArgumentOutOfRangeException(nameof(maximumBytesPerStream));
+        if (enclosing.OriginalStarted <= 0 || enclosing.OriginalStarted > Stopwatch.GetTimestamp() ||
+            enclosing.WholeLimit <= TimeSpan.Zero || enclosing.WholeLimit > TimeSpan.FromSeconds(1200) ||
+            enclosing.WorkLimit <= TimeSpan.Zero || enclosing.WorkLimit > TimeSpan.FromSeconds(1100) || enclosing.WorkLimit >= enclosing.WholeLimit)
+            throw new ArgumentOutOfRangeException(nameof(enclosing));
+        enclosing.CheckWork();
+        return ScopedBoundedCapture.ExecuteAsync(invocation, entireBudget, maximumBytesPerStream, cancellationToken, enclosing, linuxScope, exactNativeImage);
+    }
+
+    // Admission only: positively match this configured original owner without
+    // starting a capture or accepting public selection DATA as native authority.
+    public void RequireSelectedLinuxCaptureOwner(IOwnedDuplexBudget actualOriginal, LinuxScopeSelection requestedScope)
+    {
+        ArgumentNullException.ThrowIfNull(actualOriginal); ArgumentNullException.ThrowIfNull(requestedScope);
+        actualOriginal.CheckWork();
+        if (!OperatingSystem.IsLinux() || !_creationOwnedWindows || _selectedLinuxScope is null || _selectedLinuxOriginal is null)
+            throw new PlatformNotSupportedException("Actual configured production Linux capture owner required before preparation.");
+        RequireSelectedLinuxCaptureOwner(_selectedLinuxScope, _selectedLinuxOriginal, actualOriginal, requestedScope);
+        actualOriginal.CheckWork();
+    }
+
+    // These restrictive guards are shared by the actual pre-birth paths. They
+    // cannot issue a scope, native owner or authority from selection DATA.
+    internal static void RequireSelectedLinuxCaptureOwner(LinuxScopeSelection? selectedScope,
+        IOwnedDuplexBudget? selectedOriginal, IOwnedDuplexBudget? enclosing, LinuxScopeSelection requestedScope)
+    {
+        if (selectedScope is null) return;
+        if (!ReferenceEquals(requestedScope, selectedScope))
+            throw new InvalidOperationException("Configured Linux scope cannot be replaced by a foreign selection.");
+        var actualRoot = enclosing is OwnedWorkPhaseBudget phase ? phase.Parent : enclosing;
+        if (actualRoot is OwnedCleanupPhaseBudget cleanup) actualRoot = cleanup.Parent;
+        if (enclosing is not null && !ReferenceEquals(actualRoot, selectedOriginal))
+            throw new InvalidOperationException("Configured owner cannot be replaced by a foreign enclosing budget.");
+    }
+    internal static void RequireUnscopedLinuxCaptureHasNoEnclosingOwner(IOwnedDuplexBudget? enclosing)
+    {
+        if (enclosing is not null)
+            throw new PlatformNotSupportedException("An actual enclosing Linux owner requires its explicit creation-owned containing scope before process birth; legacy observation cannot adopt that owner.");
     }
 
     public async Task<CommandResult> ExecuteAsync(
@@ -61,9 +155,12 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         TimeSpan timeout,
         CancellationToken cancellationToken)
     {
+        if (_selectedLinuxScope is not null)
+            return (await ExecuteBoundedCaptureAsync(invocation, timeout, 8 * 1024 * 1024, cancellationToken,
+                _selectedLinuxOriginal, _selectedLinuxScope).ConfigureAwait(false)).ProjectOrdinaryCommand();
         if (_creationOwnedWindows && (OperatingSystem.IsWindows() || OperatingSystem.IsLinux()))
             return (await ExecuteBoundedCaptureAsync(
-                invocation, timeout, 64 * 1024 * 1024, cancellationToken).ConfigureAwait(false)).Command;
+                invocation, timeout, 64 * 1024 * 1024, cancellationToken).ConfigureAwait(false)).ProjectOrdinaryCommand();
         var startInfo = new ProcessStartInfo
         {
             FileName = invocation.FileName,
@@ -74,8 +171,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             UseShellExecute = false,
             CreateNoWindow = true
         };
-        if (!invocation.InheritEnvironment)
-            startInfo.Environment.Clear();
+        CommandEnvironment.Complete(startInfo, invocation);
         foreach (var argument in invocation.Arguments)
             startInfo.ArgumentList.Add(argument);
         foreach (var pair in invocation.Environment ?? new Dictionary<string, string>())
@@ -95,7 +191,8 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
                 null, string.Empty, $"Process start failed: {exception.Message}",
                 false, false, startedAt, DateTimeOffset.UtcNow);
         }
-        var inputTask = WriteStandardInputAsync(process.StandardInput, invocation.StandardInput);
+        var originalInput = process.StandardInput;
+        var inputTask = BoundedCaptureStream.Observe(WriteStandardInputAsync(originalInput, invocation.StandardInput));
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
 
@@ -133,9 +230,11 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         string stdout;
         string stderr;
         var drainCompleted = true;
+        Exception? drainFailure = null;
+        var drains = Task.WhenAll(stdoutTask, stderrTask, inputTask);
         try
         {
-            await _waitForDrain(Task.WhenAll(stdoutTask, stderrTask, inputTask), _waitTimeout).ConfigureAwait(false);
+            await _waitForDrain(drains, _waitTimeout).ConfigureAwait(false);
             stdout = await stdoutTask.ConfigureAwait(false);
             stderr = await stderrTask.ConfigureAwait(false);
         }
@@ -144,6 +243,14 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
             drainCompleted = false;
             stdout = "<stdout drain timed out>";
             stderr = "<stderr drain timed out>";
+        }
+        catch (Exception failure) when (IsDrainIoFailure(failure))
+        {
+            drainFailure = failure; drainCompleted = false;
+            stdout = stdoutTask.Status == TaskStatus.RanToCompletion ? stdoutTask.Result : "<stdout drain failed>";
+            stderr = stderrTask.Status == TaskStatus.RanToCompletion ? stderrTask.Result : "<stderr drain failed>";
+            // This injected/unsupported-platform compatibility path returns its
+            // failure diagnostics without claiming a retained creation-owned graph.
         }
         var processExited = ObserveHasExited(process);
         return new CommandResult(
@@ -161,22 +268,37 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
                 killExceptionDetailTruncated, exitWaitCompleted, processExited, drainCompleted,
                 (int)Math.Clamp(_waitTimeout.TotalMilliseconds, 0, int.MaxValue),
                 ObserveStream(stdoutTask), ObserveStream(stderrTask))
+            {
+                NativeFailure = drainFailure is null ? null : BoundedExceptionDetail(drainFailure).Detail
+            }
         };
     }
 
     internal static async Task WriteStandardInputAsync(StreamWriter writer, string? input)
     {
+        Exception? primary = null;
         try
         {
             if (input is not null)
                 await writer.WriteAsync(input.AsMemory(), CancellationToken.None).ConfigureAwait(false);
             await writer.FlushAsync(CancellationToken.None).ConfigureAwait(false);
         }
-        finally
+        catch (Exception failure) { primary = failure; }
+        try { writer.Close(); }
+        catch (Exception firstClose)
         {
-            writer.Close();
+            if (primary is not null)
+                throw new AggregateException("Actual stdin write/flush and first writer close both failed.", primary, firstClose);
+            throw;
         }
+        if (primary is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(primary).Throw();
     }
+
+    // Only actual stream I/O/first-close failures are projected. Cancellation,
+    // owner expiry and unrelated failures keep their original throwing semantics.
+    private static bool IsDrainIoFailure(Exception failure) =>
+        failure is IOException or InvalidOperationException or System.ComponentModel.Win32Exception ||
+        failure is AggregateException aggregate && aggregate.InnerExceptions.All(IsDrainIoFailure);
 
     private bool TryKillTree(Process process, out bool attempted, out string? exceptionType,
         out string? exceptionDetail, out bool detailTruncated)
@@ -220,7 +342,7 @@ public sealed class ProcessCommandExecutor : ICommandExecutor
         {
             if (++count > 8 || builder.Length >= limit) { truncated = true; break; }
             var type = current.GetType().FullName ?? current.GetType().Name;
-            var message = current is AggregateException ? "aggregate kill failure" : current.Message;
+            var message = current is AggregateException ? "aggregate command failure" : current.Message;
             var text = type + ": " + message +
                 (current is System.ComponentModel.Win32Exception native ? " (Win32=" + native.NativeErrorCode + ")" : "") + "\n";
             var length = Math.Min(limit - builder.Length, text.Length);

@@ -95,6 +95,9 @@ public sealed record CoordinationResource
     private static readonly Regex IssueKey = new(
         "^github:[a-z0-9](?:[a-z0-9-]{0,38})/[a-z0-9_.-]{1,100}:issue:[1-9][0-9]*$",
         RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+    private static readonly Regex ParentKey = new(
+        "^github:[a-z0-9](?:[a-z0-9-]{0,38})/[a-z0-9_.-]{1,100}:(?:repository-write|(?:branch|workspace)-sha256:[a-f0-9]{64})$",
+        RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
     private static readonly Regex ScopeKey = new(
         "^[a-z0-9](?:[a-z0-9._-]{0,127})$",
         RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
@@ -119,18 +122,37 @@ public sealed record CoordinationResource
             $"github:{owner.ToLowerInvariant()}/{repository.ToLowerInvariant()}:issue:{issueNumber.ToString(CultureInfo.InvariantCulture)}");
     }
 
+    public static CoordinationResource GitHubRepositoryWrite(string scope, string owner, string repository) =>
+        ParentResource(scope, owner, repository, "repository-write");
+    public static CoordinationResource GitHubBranch(string scope, string owner, string repository, string canonicalBranch) =>
+        ParentResource(scope, owner, repository, "branch-sha256:" + ParentDigest(canonicalBranch));
+    public static CoordinationResource GitHubWorkspace(string scope, string owner, string repository, string canonicalWorkspace) =>
+        ParentResource(scope, owner, repository, "workspace-sha256:" + ParentDigest(canonicalWorkspace));
+    private static CoordinationResource ParentResource(string scope, string owner, string repository, string suffix)
+    {
+        // Reuse the exact established owner/repository canonical grammar, including prohibited dot repositories.
+        var issue = GitHubIssue(scope, owner, repository, 1);
+        return new(scope, issue.ResourceKey[..issue.ResourceKey.LastIndexOf(":issue:", StringComparison.Ordinal)] + ":" + suffix);
+    }
+    private static string ParentDigest(string canonical)
+    {
+        if (string.IsNullOrWhiteSpace(canonical) || canonical.Length > 4096 || canonical != canonical.Trim() || canonical.Any(char.IsControl))
+            throw new ArgumentException("Exact bounded canonical parent branch/workspace required.");
+        return Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(new UTF8Encoding(false, true).GetBytes(canonical)));
+    }
+
     public static CoordinationResource SchemaMigrations(string scope) => new(scope, "schema-migrations");
 
     private static string ValidateResource(string value)
     {
         var slash = value?.IndexOf('/', StringComparison.Ordinal) ?? -1;
-        var issueMarker = value?.IndexOf(":issue:", StringComparison.Ordinal) ?? -1;
+        var issueMarker = value?.IndexOf(':', slash >= 0 ? slash : 0) ?? -1;
         var prohibitedDotRepository = slash >= 0 && issueMarker > slash &&
             value![(slash + 1)..issueMarker] is "." or "..";
         if (string.IsNullOrEmpty(value) || !string.Equals(value, value.Trim(), StringComparison.Ordinal) ||
             value.Any(char.IsControl) || Encoding.UTF8.GetByteCount(value) > 512 ||
-            (value != "schema-migrations" && (!IssueKey.IsMatch(value) || prohibitedDotRepository)))
-            throw new ArgumentException("Resource key must be a canonical GitHub issue key or schema-migrations.", nameof(value));
+            (value != "schema-migrations" && ((!IssueKey.IsMatch(value) && !ParentKey.IsMatch(value)) || prohibitedDotRepository)))
+            throw new ArgumentException("Resource key must be a canonical GitHub issue/parent key or schema-migrations.", nameof(value));
         return value;
     }
 }

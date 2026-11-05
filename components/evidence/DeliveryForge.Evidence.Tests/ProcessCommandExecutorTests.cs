@@ -7,6 +7,107 @@ namespace DeliveryForge.Evidence.Tests;
 
 public sealed class ProcessCommandExecutorTests
 {
+    [Theory(Timeout = 30000)]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Actual_Windows_capture_suppresses_ambient_environment_and_keeps_explicit_marker(bool complete)
+    {
+        if (!OperatingSystem.IsWindows()) Assert.Skip("Actual Windows creation-owned environment block; Linux inheritance is separate.");
+        // Read only a known ambient variable's presence, never its value in
+        // diagnostics, and never mutate the test process environment.
+        Assert.False(string.IsNullOrEmpty(Environment.GetEnvironmentVariable("PATH")));
+        var executable = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+        Assert.True(Path.IsPathFullyQualified(executable) && File.Exists(executable));
+        var marker = "forge-explicit-environment-" + Guid.NewGuid().ToString("N");
+        var environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["FORGE_CAPTURE_FIXTURE_MARKER"] = marker
+        };
+        var invocation = new CommandInvocation(executable,
+            ["/d", "/c", "if defined PATH (echo ambient-leak) else (echo %FORGE_CAPTURE_FIXTURE_MARKER%)"],
+            Path.GetTempPath(), environment, InheritEnvironment: false)
+        {
+            EnvironmentIsComplete = complete
+        };
+        var capture = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(invocation,
+            TimeSpan.FromSeconds(10), 4096, TestContext.Current.CancellationToken);
+        TestContext.Current.TestOutputHelper!.WriteLine(System.Text.Json.JsonSerializer.Serialize(new
+        {
+            Complete = complete,
+            capture.Command,
+            capture.RootExitObserved,
+            capture.StandardOutputDrainCompleted,
+            capture.StandardErrorDrainCompleted,
+            capture.CaptureBoundExceeded,
+            capture.Timing
+        }));
+        Assert.Equal(0, capture.Command.ExitCode);
+        Assert.Equal(marker, capture.Command.StandardOutput.Trim());
+        Assert.Equal("", capture.Command.StandardError);
+        Assert.False(capture.Command.TimedOut);
+        Assert.False(capture.Command.Cancelled);
+        Assert.False(capture.CaptureBoundExceeded);
+        Assert.True(capture.RootExitObserved && capture.StandardOutputDrainCompleted && capture.StandardErrorDrainCompleted);
+        Assert.True(capture.Command.OwnedProcessQuiescent);
+        Assert.True(capture.Command.LifecycleDiagnostics?.OwnedTree is { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 });
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public async Task Actual_stdin_writer_retains_write_and_first_close_failures_independently(bool failWrite, bool failClose)
+    {
+        var writeFailure = failWrite ? new IOException("Actual in-memory byte write failed.") : null;
+        var closeFailure = failClose ? new IOException("Actual in-memory first close failed.") : null;
+        var stream = new FirstWriteAndCloseStream(writeFailure, closeFailure);
+        var writer = new StreamWriter(stream, new UTF8Encoding(false), 128, leaveOpen: false);
+        var input = new string('x', 4096);
+        var failure = await Record.ExceptionAsync(() => ProcessCommandExecutor.WriteStandardInputAsync(writer, input));
+        Assert.True(stream.WriteCalls > 0);
+        Assert.Equal(1, stream.CloseCalls);
+        if (failWrite && failClose)
+        {
+            var aggregate = Assert.IsType<AggregateException>(failure);
+            Assert.Equal(2, aggregate.InnerExceptions.Count);
+            Assert.Same(writeFailure, aggregate.InnerExceptions[0]);
+            Assert.Same(closeFailure, aggregate.InnerExceptions[1]);
+        }
+        else if (failWrite) Assert.Same(writeFailure, failure);
+        else if (failClose) Assert.Same(closeFailure, failure);
+        else
+        {
+            Assert.Null(failure);
+            Assert.Equal(Encoding.UTF8.GetBytes(input), stream.ToArray());
+        }
+    }
+
+    // Real StreamWriter buffering/flush/Dispose over a real in-memory stream;
+    // the two independent actual I/O failures are exact exception instances.
+    sealed class FirstWriteAndCloseStream(IOException? writeFailure, IOException? closeFailure) : MemoryStream
+    {
+        bool writeFailed;
+        internal int WriteCalls, CloseCalls;
+        void BeforeWrite()
+        {
+            WriteCalls++;
+            if (!writeFailed && writeFailure is not null) { writeFailed = true; throw writeFailure; }
+        }
+        public override void Write(byte[] buffer, int offset, int count) { BeforeWrite(); base.Write(buffer, offset, count); }
+        public override void Write(ReadOnlySpan<byte> buffer) { BeforeWrite(); base.Write(buffer); }
+        public override Task WriteAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
+        { BeforeWrite(); return base.WriteAsync(buffer, offset, count, cancellationToken); }
+        public override ValueTask WriteAsync(ReadOnlyMemory<byte> buffer, CancellationToken cancellationToken = default)
+        { BeforeWrite(); return base.WriteAsync(buffer, cancellationToken); }
+        protected override void Dispose(bool disposing)
+        {
+            if (!disposing) { base.Dispose(disposing); return; }
+            CloseCalls++; base.Dispose(disposing);
+            if (closeFailure is not null) throw closeFailure;
+        }
+    }
+
     [Fact]
     public async Task Creation_owned_capture_writes_bounded_standard_input()
     {
@@ -24,31 +125,54 @@ public sealed class ProcessCommandExecutorTests
         Assert.True(result.Command.OwnedProcessQuiescent);
     }
 
-    [Fact]
-    public async Task Linux_timeout_kills_exited_roots_remaining_process_group_children()
+    [Fact(Timeout = 15000)]
+    public async Task Legacy_Linux_exited_root_with_inherited_pipes_does_not_prove_quiescence()
     {
         if (!OperatingSystem.IsLinux())
             return;
-        using var temp = new TempDirectory();
-        var childPath = Path.Combine(temp.Path, "child.pid");
-        var script = Path.Combine(temp.Path, "descendant.sh");
-        await File.WriteAllTextAsync(
-            script,
-            $"sleep 30 &\nprintf '%s' \"$!\" > '{childPath.Replace("'", "'\\''", StringComparison.Ordinal)}'\nexit 0\n",
+        var root = Path.Combine(Path.GetTempPath(), "forge-legacy-inherited-pipes-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        var childExiting = Path.Combine(root, "descendant-exiting");
+        var script = Path.Combine(root, "descendant.sh");
+        // Small cooperative fixture self-exits; no PID/group adoption or kill
+        // after its original root exits, and no removal of retained evidence.
+        await File.WriteAllTextAsync(script,
+            "(sleep 3; printf 'exiting' > '" + childExiting.Replace("'", "'\\''", StringComparison.Ordinal) + "') &\nexit 0\n",
             TestContext.Current.CancellationToken);
-
-        var result = await new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
-            new CommandInvocation("/bin/sh", [script], temp.Path),
+        var actual = new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
+            new CommandInvocation("/bin/sh", [script], root),
             TimeSpan.FromSeconds(2), 1024, TestContext.Current.CancellationToken);
-
-        Assert.True(result.Command.TimedOut);
-        Assert.True(result.Command.OwnedProcessQuiescent);
-        Assert.True(result.Command.LifecycleDiagnostics?.KillAttempted);
-        Assert.True(result.Command.LifecycleDiagnostics?.KillSucceeded);
-        var childPid = int.Parse(await File.ReadAllTextAsync(childPath, TestContext.Current.CancellationToken));
-        Assert.True(SpinWait.SpinUntil(
-            () => !Directory.Exists($"/proc/{childPid}"), TimeSpan.FromSeconds(2)),
-            $"Owned descendant {childPid} survived process-group cleanup.");
+        var result = await actual;
+        File.WriteAllBytes(Path.Combine(root, "actual-stdout.bin"), result.StandardOutputBytes);
+        File.WriteAllBytes(Path.Combine(root, "actual-stderr.bin"), result.StandardErrorBytes);
+        var observation = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            result.Command,
+            result.RootExitObserved,
+            result.StandardOutputDrainCompleted,
+            result.StandardErrorDrainCompleted,
+            result.CaptureBoundExceeded,
+            result.Timing
+        });
+        File.WriteAllText(Path.Combine(root, "capture.json"), observation);
+        TestContext.Current.TestOutputHelper!.WriteLine("Retained legacy Linux capture (not containing-scope proof): " + root + " " + observation);
+        try
+        {
+            Assert.True(actual.IsCompletedSuccessfully);
+            Assert.True(result.Command.TimedOut);
+            Assert.True(result.RootExitObserved);
+            Assert.False(result.Command.OwnedProcessQuiescent);
+            Assert.False(result.Command.LifecycleDiagnostics?.KillAttempted);
+        }
+        finally
+        {
+            // This marker is cooperative fixture progress only; it never
+            // changes the returned UNKNOWN owner/EOF observations above.
+            var began = Stopwatch.GetTimestamp();
+            while (!File.Exists(childExiting) && Stopwatch.GetElapsedTime(began) < TimeSpan.FromSeconds(4))
+                await Task.Delay(10, TestContext.Current.CancellationToken);
+        }
+        Assert.True(File.Exists(childExiting));
     }
 
     [Fact]
@@ -88,6 +212,51 @@ public sealed class ProcessCommandExecutorTests
         Assert.True(capture.StandardErrorDrainCompleted);
         Assert.Equal(standardError ? 0 : quota, capture.StandardOutputBytes.Length);
         Assert.Equal(standardError ? quota : 0, capture.StandardErrorBytes.Length);
+
+        // This is the same projection used by ordinary Windows, legacy Linux
+        // and selected Linux ExecuteAsync. Physical bounded-capture DATA stays
+        // intact, but a truncated prefix cannot become an ordinary success.
+        var ordinary = capture.ProjectOrdinaryCommand();
+        Assert.False(ordinary.OwnedProcessQuiescent);
+        Assert.Equal(capture.Command.ExitCode, ordinary.ExitCode);
+        Assert.Equal(capture.Command.StandardOutput, ordinary.StandardOutput);
+        Assert.Equal(capture.Command.StandardError, ordinary.StandardError);
+        Assert.Equal(capture.Command.TimedOut, ordinary.TimedOut);
+        Assert.Equal(capture.Command.Cancelled, ordinary.Cancelled);
+        Assert.Contains("byte capture limit", ordinary.LifecycleDiagnostics!.NativeFailure);
+        Assert.Equal(capture.Command.LifecycleDiagnostics!.OwnedTree, ordinary.LifecycleDiagnostics.OwnedTree);
+        Assert.True(capture.Command.OwnedProcessQuiescent);
+    }
+
+    [Fact(Timeout = 30000)]
+    public async Task Actual_fallback_broken_stdin_preserves_exit_raw_streams_and_refuses_settlement()
+    {
+        if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux())
+            Assert.Skip("Actual Windows/Linux fallback pipe behavior.");
+        var invocation = OperatingSystem.IsWindows()
+            ? new CommandInvocation(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"),
+                ["/d", "/c", "echo stdout-before-exit&echo stderr-before-exit 1>&2&exit /b 0"], Path.GetTempPath(),
+                StandardInput: new string('x', 4 * 1024 * 1024))
+            : new CommandInvocation("/bin/sh", ["-c", "exec 0<&-; printf 'stdout-before-exit\n'; printf 'stderr-before-exit\n' >&2; exit 0"],
+                Path.GetTempPath(), StandardInput: new string('x', 4 * 1024 * 1024));
+        // This existing injected constructor selects the actual legacy fallback;
+        // the child closes stdin itself. No injected I/O failure or fake exit.
+        var executor = new ProcessCommandExecutor(process => process.Kill(entireProcessTree: true), process => process.HasExited);
+        var actual = await executor.ExecuteAsync(invocation, TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
+        TestContext.Current.TestOutputHelper!.WriteLine(System.Text.Json.JsonSerializer.Serialize(actual));
+        Assert.Equal(0, actual.ExitCode);
+        Assert.False(actual.TimedOut);
+        Assert.False(actual.Cancelled);
+        Assert.False(actual.OwnedProcessQuiescent);
+        Assert.Contains("stdout-before-exit", actual.StandardOutput);
+        Assert.Contains("stderr-before-exit", actual.StandardError);
+        var diagnostics = Assert.IsType<CommandLifecycleDiagnostics>(actual.LifecycleDiagnostics);
+        Assert.True(diagnostics.RootExited);
+        Assert.False(diagnostics.DrainWaitCompleted);
+        Assert.False(diagnostics.KillAttempted);
+        Assert.Contains("IOException", diagnostics.NativeFailure);
+        Assert.Equal(actual.StandardOutput, diagnostics.StandardOutput.CompletedText);
+        Assert.Equal(actual.StandardError, diagnostics.StandardError.CompletedText);
     }
 
     [Fact]
@@ -243,7 +412,23 @@ public sealed class ProcessCommandExecutorTests
         Assert.Same(killedProcess, observedProcess);
         Assert.False(result.Execution.OwnedProcessQuiescent);
         Assert.Equal(GateOutcome.Incomplete, result.Outcome);
-        Assert.Contains("identity could not be read after evaluation", result.Reason, StringComparison.OrdinalIgnoreCase);
+        var diagnostic = Assert.IsType<CommandLifecycleDiagnostics>(result.Execution.LifecycleDiagnostics);
+        Assert.True(diagnostic.KillAttempted);
+        Assert.False(diagnostic.KillSucceeded);
+        Assert.Equal(typeof(AggregateException).FullName, diagnostic.KillExceptionType);
+        Assert.Contains("simulated descendant kill failure", diagnostic.KillExceptionDetail!, StringComparison.Ordinal);
+        Assert.False(diagnostic.KillExceptionDetailTruncated);
+        Assert.True(diagnostic.RootExited);
+        Assert.True(diagnostic.ExitWaitCompleted);
+        Assert.Equal(250, diagnostic.CleanupWaitMilliseconds);
+        // The real timeout does not force the later fixed-identity read to miss
+        // the gate endpoint. Either branch must stay INCOMPLETE, while the
+        // actual injected partial-kill failure remains independently retained.
+        Assert.Contains(result.Reason, new[]
+        {
+            "Repository identity could not be read after evaluation.",
+            "Owned tool process did not become quiescent after interruption."
+        });
     }
 
     [Fact]
@@ -292,24 +477,29 @@ public sealed class ProcessCommandExecutorTests
         using var temp = new TempDirectory();
         var request = LongRunningRequest(temp.Path);
         Task? drainTask = null;
+        var drainReturn = new Stopwatch();
+        TimeSpan? requestedDrainTimeout = null;
         var executor = new ProcessCommandExecutor(
             killTree: process => process.Kill(entireProcessTree: false),
             hasExited: process => process.HasExited,
-            waitForDrain: (task, _) =>
+            waitForDrain: (task, timeout) =>
             {
                 drainTask = task;
+                requestedDrainTimeout = timeout;
+                drainReturn.Start();
                 throw new TimeoutException("simulated pipe drain hang");
             },
             waitTimeout: TimeSpan.FromMilliseconds(250));
-        var stopwatch = Stopwatch.StartNew();
 
         try
         {
             var result = await executor.ExecuteAsync(
-                request.Invocation, request.Timeout, TestContext.Current.CancellationToken);
+                request.Invocation, request.Timeout, TestContext.Current.CancellationToken)
+                .WaitAsync(TimeSpan.FromSeconds(10), TestContext.Current.CancellationToken);
 
-            stopwatch.Stop();
-            Assert.True(stopwatch.Elapsed < TimeSpan.FromSeconds(2), $"Execution took {stopwatch.Elapsed}.");
+            drainReturn.Stop();
+            Assert.Equal(TimeSpan.FromMilliseconds(250), requestedDrainTimeout);
+            Assert.True(drainReturn.Elapsed < TimeSpan.FromSeconds(2), $"Returning after the injected drain timeout took {drainReturn.Elapsed}.");
             Assert.True(result.TimedOut);
             Assert.False(result.OwnedProcessQuiescent);
             Assert.Equal("<stdout drain timed out>", result.StandardOutput);

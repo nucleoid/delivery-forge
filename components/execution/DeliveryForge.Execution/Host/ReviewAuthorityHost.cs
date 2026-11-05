@@ -39,14 +39,14 @@ public sealed record ReviewAcceptanceContext(
     string ProtectedBaseCommit,
     string ProtectedObjectViewIdentity = "");
 
-public sealed class ReviewAuthorityHost
+public sealed partial class ReviewAuthorityHost
 {
     private readonly ReviewAuthorityRealm _realm;
     private readonly string _rootIdentity;
     private readonly DateTimeOffset? _testNow;
     private readonly ProductionReviewAuthorityConfiguration? _production;
     private ReviewAuthorityRootContext? _rootContext; // Assigned once by construction or the private unpublished bootstrap.
-    private readonly object _issuer = new();
+    private readonly object _issuer;
     private readonly ConcurrentDictionary<string, byte> _revokedCapabilities = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, IssuedReviewerCapability> _capabilities = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, RegisteredReviewRequest> _requests = new(StringComparer.Ordinal);
@@ -57,13 +57,15 @@ public sealed class ReviewAuthorityHost
         string rootIdentity,
         DateTimeOffset? testNow,
         ProductionReviewAuthorityConfiguration? production,
-        ReviewAuthorityRootContext? rootContext)
+        ReviewAuthorityRootContext? rootContext,
+        object? issuer = null)
     {
         _realm = realm;
         _rootIdentity = rootIdentity;
         _testNow = testNow;
         _production = production;
         _rootContext = rootContext;
+        _issuer = issuer ?? new object();
         Authority = new ReviewAcceptanceAuthority(Accepts);
     }
 

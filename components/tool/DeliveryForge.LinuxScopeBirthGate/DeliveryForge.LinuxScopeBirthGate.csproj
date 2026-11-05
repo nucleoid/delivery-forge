@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>linux-x64</RuntimeIdentifier><SelfContained>false</SelfContained>
+    <ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><UseAppHost>true</UseAppHost>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors><DebugType>portable</DebugType>
+    <UseSharedCompilation>false</UseSharedCompilation><Deterministic>true</Deterministic>
+    <PathMap>$(MSBuildProjectDirectory)=/_/DeliveryForge.LinuxScopeBirthGate</PathMap>
+  </PropertyGroup>
+  <Target Name="GetLinuxBirthGateOutput" Returns="@(_ForgeBirthGateOutput)">
+    <ItemGroup>
+      <_ForgeBirthGateOutput Include="$(TargetDir)$(TargetName);$(TargetPath);$(ProjectDepsFilePath);$(ProjectRuntimeConfigFilePath);$(TargetDir)$(TargetName).pdb" />
+    </ItemGroup>
+    <Error Condition="'@(_ForgeBirthGateOutput-&gt;Count())' != '5'" Text="The compiled Linux birth gate requires its exact five-file output closure." />
+    <Error Condition="!Exists('%(_ForgeBirthGateOutput.Identity)')" Text="A complete Linux birth-gate build output is missing." />
+  </Target>
+</Project>

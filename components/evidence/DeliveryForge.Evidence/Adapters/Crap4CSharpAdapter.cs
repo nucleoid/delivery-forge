@@ -9,7 +9,7 @@ public sealed class Crap4CSharpAdapter
         JsonDocument document;
         try
         {
-            document = JsonDocument.Parse(report.ToArray());
+            document = ProducerJson.Read(report);
         }
         catch (JsonException exception)
         {
@@ -161,6 +161,58 @@ public sealed class Crap4CSharpAdapter
         }
     }
 
+    internal static NormalizedEvidence NormalizeCurrent(ReadOnlySpan<byte> report, ToolCapability capability, int actualExit)
+    {
+        var result = new Crap4CSharpAdapter().Normalize(report, capability);
+        if (result.Outcome == GateOutcome.Error) return result;
+        using var document = ProducerJson.Read(report);
+        var root = document.RootElement;
+        var run = root.GetProperty("run");
+        if (run.GetProperty("exitCode").GetInt32() != actualExit)
+            return NormalizedEvidence.Error("Crap process and current JSON exits disagree.", capability.Fixture);
+        var evaluation = root.GetProperty("evaluation");
+        if (evaluation.GetProperty("invocationMode").GetString() != "check")
+            return NormalizedEvidence.Error("Historical replay/syntax analysis cannot satisfy a current check.", capability.Fixture);
+        if (run.TryGetProperty("testOutcomes", out var actualTests))
+        {
+            if (actualTests.ValueKind != JsonValueKind.Array || actualTests.GetArrayLength() > 10000 ||
+                actualTests.EnumerateArray().Any(o => o.ValueKind != JsonValueKind.Object ||
+                    !TryString(o, "status", out _) || !o.TryGetProperty("exitCode", out var code) ||
+                    code.ValueKind != JsonValueKind.Null && (code.ValueKind != JsonValueKind.Number || !code.TryGetInt32(out _))))
+                return NormalizedEvidence.Error("Crap actual test outcomes are malformed.", capability.Fixture);
+        }        // Exact upstream contract: a completed failing test remains primary even if a later
+        // required context/analysis timed out. Null exit is an interrupted launch, never FAIL.
+        if (actualExit == 1 && run.TryGetProperty("testOutcomes", out var outcomes) && outcomes.EnumerateArray().Any(o =>
+            o.GetProperty("status").GetString() == "failed" && o.GetProperty("exitCode").ValueKind == JsonValueKind.Number &&
+            o.GetProperty("exitCode").TryGetInt32(out var exit) && exit != 0))
+            return new(GateOutcome.Fail, "Crap required tests completed with a nonzero exit.", capability.Fixture,
+                false, [.. capability.Limitations ?? [], "Any later interruption remains retained in the original report."]);
+        if (actualExit == 1)
+        {
+            var reasons = evaluation.GetProperty("checks").EnumerateArray()
+                .Where(c => c.GetProperty("status").GetString() != "pass")
+                .Select(c => c.GetProperty("reason").GetString()!).ToArray();
+            // Exact completed upstream delivery-forge-reason-map-v1. Passing trust checks
+            // are context and cannot turn absent evidence into an invocation error.
+            if (reasons.Any(r => r.StartsWith("policy.", StringComparison.Ordinal) || r.StartsWith("arguments.", StringComparison.Ordinal)))
+                return NormalizedEvidence.Error("Crap rejected invocation/configuration: " + string.Join(",", reasons), capability.Fixture);
+            if (reasons.Length > 0 && reasons.All(r => r.StartsWith("coverage.", StringComparison.Ordinal) ||
+                r.StartsWith("provenance.", StringComparison.Ordinal) || r.StartsWith("compiler.", StringComparison.Ordinal) ||
+                r.StartsWith("context.", StringComparison.Ordinal) || r.Contains("unsupported", StringComparison.Ordinal) ||
+                r is "run.cancelled" or "run.timedOut" or "tests.incomplete"))
+                return NormalizedEvidence.Incomplete("Crap required evidence incomplete: " + string.Join(",", reasons), capability.Fixture);
+            return NormalizedEvidence.Error("Unclassified Crap exit1; original reasons retained.", capability.Fixture);
+        }
+        // Provenance is optional in the pinned result schema. Its absence is
+        // valid partial evidence, never an exception or current-workspace proof.
+        if (!evaluation.TryGetProperty("provenance", out var provenance) ||
+            provenance.ValueKind != JsonValueKind.Object ||
+            !TryString(provenance, "status", out var status) || status != "verified" ||
+            !TryString(provenance, "basis", out var basis) || basis != "currentWorkspaceMatch" ||
+            !TryBool(provenance, "postflightVerified", out var postflight) || !postflight)
+            return NormalizedEvidence.Incomplete("Crap lacks complete verified current-workspace evidence.", capability.Fixture);
+        return result with { Fixture = capability.Fixture, Limitations = capability.Limitations ?? [] };
+    }
     private static bool TryString(JsonElement element, string property, out string value)
     {
         value = string.Empty;

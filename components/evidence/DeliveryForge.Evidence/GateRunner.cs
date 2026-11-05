@@ -77,41 +77,72 @@ public sealed class GateRunner
         var pluginBinding = DeterministicEvaluationPluginRegistry.Bind(
             request, plugin,
             request.Plugin?.Enabled == false ? EvaluationPluginStatus.Disabled : EvaluationPluginStatus.Selected);
-        Directory.CreateDirectory(request.OutputDirectory);
-        var claimRoot = _hostOwnedClaimRoot ?? request.OutputDirectory;
-        Directory.CreateDirectory(claimRoot);
-        var claimScope = _hostOwnedClaimRoot is null
-            ? SafeSegment(request.GateId)
-            : Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
-                _trustedWorkingDirectory + "\0" + _trustedProtectedBaseCommit + "\0" + request.GateId)));
-        var claimPath = Path.Combine(claimRoot, claimScope + ".claim");
+        if (request.InstalledInvocation is not null &&
+            (!_usesBuiltInExecutionRegistry || request.Plugin is not null || _hostOwnedClaimRoot is not null))
+            throw new ArgumentException("Installed invocation requires its original trusted built-in compatibility path.");
         var gateDirectoryPrefix = Path.Combine(request.OutputDirectory, SafeSegment(request.GateId));
-        // Every execution owns a fresh immutable attempt directory. A killed process may leave
-        // that directory incomplete, but can never reserve the canonical gate name forever.
-        var gateDirectory = gateDirectoryPrefix + ".attempt-" + Guid.NewGuid().ToString("N");
-        GateClaimAcquisition claim;
-        try
+        string gateDirectory;
+        GateClaimLease? retainedClaim = null;
+        if (request.InstalledInvocation is { } installedClaim)
         {
-            claim = GateClaimLease.Acquire(claimPath);
+            // Preserve the installed owner's admitted CreateNew claim and complete-file lifetime.
+            // Public claim recovery cannot inherit the original owner's cleanup authority.
+            installedClaim.EnsureDirectory(request.OutputDirectory);
+            gateDirectory = gateDirectoryPrefix;
+            var preexisted = Directory.Exists(gateDirectory);
+            try { installedClaim.Claim(gateDirectoryPrefix + ".claim"); }
+            catch (IOException exception)
+            {
+                throw new EvidenceWriteException($"Gate claim already exists or cannot be created: {exception.Message}");
+            }
+            if (preexisted)
+                return await PersistWithoutExecutionAsync(
+                    request, gateDirectory + ".claim-error-" + Guid.NewGuid().ToString("N"),
+                    request.ExpectedRepository, request.ExpectedRepository,
+                    NormalizedEvidence.Error("Gate artifact directory existed before the atomic claim."),
+                    pluginBinding, CancellationToken.None).ConfigureAwait(false);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or EvidenceWriteException)
+        else
         {
-            claim = new(null, $"Gate claim could not be established: {exception.Message}", null);
+            Directory.CreateDirectory(request.OutputDirectory);
+            var claimRoot = _hostOwnedClaimRoot ?? request.OutputDirectory;
+            Directory.CreateDirectory(claimRoot);
+            var claimScope = _hostOwnedClaimRoot is null
+                ? SafeSegment(request.GateId)
+                : Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
+                    _trustedWorkingDirectory + "\0" + _trustedProtectedBaseCommit + "\0" + request.GateId)));
+            var claimPath = Path.Combine(claimRoot, claimScope + ".claim");
+            // Every execution owns a fresh immutable attempt directory. A killed process may leave
+            // that directory incomplete, but can never reserve the canonical gate name forever.
+            gateDirectory = gateDirectoryPrefix + ".attempt-" + Guid.NewGuid().ToString("N");
+            GateClaimAcquisition claim;
+            try
+            {
+                claim = GateClaimLease.Acquire(claimPath);
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or EvidenceWriteException)
+            {
+                claim = new(null, $"Gate claim could not be established: {exception.Message}", null);
+            }
+            if (claim.Lease is null)
+                return await PersistWithoutExecutionAsync(
+                    request, gateDirectoryPrefix + ".claim-incomplete-" + Guid.NewGuid().ToString("N"),
+                    request.ExpectedRepository, request.ExpectedRepository,
+                    NormalizedEvidence.Incomplete(claim.UnavailableReason ?? "Gate claim is unavailable."),
+                    pluginBinding, CancellationToken.None).ConfigureAwait(false);
+            if (claim.InterruptedClaimPath is not null)
+            {
+                await using var interruptedLease = claim.Lease;
+                return await PersistWithoutExecutionAsync(
+                    request, gateDirectoryPrefix + ".interrupted-" + Guid.NewGuid().ToString("N"),
+                    request.ExpectedRepository, request.ExpectedRepository,
+                    NormalizedEvidence.Incomplete(
+                        "Recovered a stale gate claim from an interrupted owner; retry is permitted after this durable receipt."),
+                    pluginBinding, CancellationToken.None).ConfigureAwait(false);
+            }
+            retainedClaim = claim.Lease;
         }
-        if (claim.Lease is null)
-            return await PersistWithoutExecutionAsync(
-                request, gateDirectoryPrefix + ".claim-incomplete-" + Guid.NewGuid().ToString("N"),
-                request.ExpectedRepository, request.ExpectedRepository,
-                NormalizedEvidence.Incomplete(claim.UnavailableReason ?? "Gate claim is unavailable."),
-                pluginBinding, CancellationToken.None).ConfigureAwait(false);
-        await using var claimLease = claim.Lease;
-        if (claim.InterruptedClaimPath is not null)
-            return await PersistWithoutExecutionAsync(
-                request, gateDirectoryPrefix + ".interrupted-" + Guid.NewGuid().ToString("N"),
-                request.ExpectedRepository, request.ExpectedRepository,
-                NormalizedEvidence.Incomplete(
-                    "Recovered a stale gate claim from an interrupted owner; retry is permitted after this durable receipt."),
-                pluginBinding, CancellationToken.None).ConfigureAwait(false);
+        await using var claimLease = retainedClaim;
         if (plugin is not Adapters.AntiSlopEvaluationPlugin && pluginBinding.Enabled &&
             ValidateCapabilityBinding(request, plugin) is { } nonScopeCapabilityFailure)
             return await PersistWithoutExecutionAsync(
@@ -235,7 +266,8 @@ public sealed class GateRunner
                 request, gateDirectory, before, before, pluginValidation, pluginBinding,
                 CancellationToken.None).ConfigureAwait(false);
 
-        Directory.CreateDirectory(gateDirectory);
+        if (request.InstalledInvocation is { } installedDirectory) installedDirectory.EnsureDirectory(gateDirectory);
+        else Directory.CreateDirectory(gateDirectory);
         EvaluationPluginSnapshot evidenceSnapshot;
         try
         {
@@ -310,28 +342,30 @@ public sealed class GateRunner
                     .ConfigureAwait(false);
             }
         }
-        catch (OperationCanceledException)
+        // The installed executor retains its exact captures and primary failures.
+        // Only public compatibility execution may synthesize a fallback result.
+        catch (OperationCanceledException) when (request.InstalledInvocation is null)
         {
             var now = DateTimeOffset.UtcNow;
             execution = new CommandResult(
                 null, string.Empty, "Command execution was cancelled.", false, true, now, now,
                 OwnedProcessQuiescent: false);
         }
-        catch (Exception exception)
+        catch (Exception exception) when (request.InstalledInvocation is null)
         {
             var now = DateTimeOffset.UtcNow;
             execution = new CommandResult(
                 null, string.Empty, $"Command execution failed: {exception.Message}", false, false, now, now,
                 OwnedProcessQuiescent: false);
         }
-        var artifactHashes = await WriteArtifactsAsync(gateDirectory, execution, CancellationToken.None).ConfigureAwait(false);
+        var artifactHashes = await WriteArtifactsAsync(gateDirectory, execution, CancellationToken.None, request.InstalledInvocation).ConfigureAwait(false);
         string? artifactBindingError = null;
         try
         {
             plugin.AppendBoundArtifacts(
                 request, evidenceSnapshot, gateDirectory, artifactHashes);
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or EvidenceWriteException or AggregateException)
         {
             artifactBindingError = exception.Message;
         }
@@ -397,9 +431,9 @@ public sealed class GateRunner
                   !request.Policy.RequiredGates.Contains(request.GateId, StringComparer.Ordinal) ||
                   request.Capability.Fixture ||
                   !HasTrustedLegacyV1Authority(request, plugin) ||
-                  !normalized.ProductionCapable))
+                  (!normalized.ProductionCapable && !normalized.ProducerVerified)))
             normalized = NormalizedEvidence.Incomplete(
-                "Tool PASS is advisory because the protected policy, required built-in legacy-v1 gate binding, non-fixture capability, or production-capable evidence is absent.");
+                "Tool PASS is advisory because protected built-in legacy-v1 policy/gate authority or current certified producer evidence is absent.", fixture: normalized.Fixture);
         else if (normalized.Outcome == GateOutcome.NotApplicable &&
                  (string.IsNullOrWhiteSpace(normalized.NotApplicableRationale) ||
                   !request.Policy.AllowedNotApplicable.Contains(request.GateId) ||
@@ -460,10 +494,16 @@ public sealed class GateRunner
         EvaluationPluginReceiptMetadata plugin,
         CancellationToken cancellationToken)
     {
+        // Installed stdout/stderr and receipts require the exact retained main result.
+        // A preexecution refusal has no such result. Preserve its typed original
+        // reason for the provider's existing same-original failure capture instead
+        // of fabricating an execution or creating an empty refusal directory.
+        if (request.InstalledInvocation is not null)
+            throw new EvidenceWriteException($"Installed gate '{request.GateId}' refused with {normalized.Outcome}: {normalized.Reason}");
         Directory.CreateDirectory(gateDirectory);
         var now = DateTimeOffset.UtcNow;
         var execution = new CommandResult(null, string.Empty, string.Empty, false, false, now, now);
-        var hashes = await WriteArtifactsAsync(gateDirectory, execution, cancellationToken).ConfigureAwait(false);
+        var hashes = await WriteArtifactsAsync(gateDirectory, execution, cancellationToken, request.InstalledInvocation).ConfigureAwait(false);
         gateDirectory = PublishAttemptDirectory(gateDirectory, out var publicationFailure);
         if (publicationFailure is not null && normalized.Outcome is GateOutcome.Pass or GateOutcome.NotApplicable)
             normalized = NormalizedEvidence.Incomplete(publicationFailure);
@@ -505,6 +545,7 @@ public sealed class GateRunner
         var provisional = BuildFutureV2Receipt(
             request, before, execution, persistedArtifactHashes, normalized, sourceChanged, limitations, plugin);
 
+        request.InstalledInvocation?.CheckEndpoint();
         var legacy = new GateReceiptContract(
             "1.0.0", provisional.Kind, provisional.Identity, provisional.GateId,
             provisional.PolicyIdentity, provisional.BaseCommit, provisional.HeadCommit,
@@ -515,18 +556,21 @@ public sealed class GateRunner
         var provisionalBytes = SerializeReceipt(legacy);
         legacy = legacy with { Identity = CanonicalJson.ComputeIdentity(provisionalBytes) };
         var receiptBytes = SerializeReceipt(legacy);
-        var receiptPath = await new AppendOnlyContractStore(Path.Combine(gateDirectory, "receipts"))
-            .WriteImmutableAsync(receiptBytes, cancellationToken).ConfigureAwait(false);
+        var receiptPath = request.InstalledInvocation is { } installedReceipt
+            ? installedReceipt.WriteReceipt(gateDirectory, receiptBytes)
+            : await new AppendOnlyContractStore(Path.Combine(gateDirectory, "receipts"))
+                .WriteImmutableAsync(receiptBytes, cancellationToken).ConfigureAwait(false);
 
         var auditInvocation = plugin.Id == "dmmulroy.anti-slop"
             ? request.Invocation with { WorkingDirectory = "<host-owned-frozen-inputs>" }
             : request.Invocation;
-        return new GateRunResult(
+        GateRunResult Result() => new GateRunResult(
             normalized.Outcome, normalized.Reason, normalized.Fixture, normalized.ProductionCapable,
             limitations, sourceChanged, auditInvocation, execution, before, after,
             request.Policy.PolicyIdentity, request.Capability.ExecutableIdentity ?? "unavailable", plugin.ConfigurationIdentity, request.Scope,
             persistedArtifactHashes, receiptPath, normalized.NotApplicableRationale)
         { Plugin = plugin, TrustedReceiptProvenance = null };
+        return request.InstalledInvocation is { } installedResult ? installedResult.Consume(Result) : Result();
     }
 
     internal static AuthoritativeGateReceiptContract BuildFutureV2Receipt(
@@ -679,8 +723,9 @@ public sealed class GateRunner
     private static async Task<Dictionary<string, string>> WriteArtifactsAsync(
         string directory,
         CommandResult result,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken, InstalledToolInvocation? installed = null)
     {
+        if (installed is not null) return installed.WriteExecutionArtifacts(directory, result);
         var artifacts = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var (name, content) in new[] { ("stdout.txt", result.StandardOutput), ("stderr.txt", result.StandardError) })
         {
@@ -792,12 +837,12 @@ public sealed class GateRunner
 
         try
         {
-            var identity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(File.ReadAllBytes(expected)))}";
+            var identity = $"sha256:{Convert.ToHexStringLower(SHA256.HashData(request.InstalledInvocation?.ReadCapability(expected) ?? File.ReadAllBytes(expected)))}";
             return string.Equals(identity, request.Capability.ExecutableIdentity, StringComparison.Ordinal)
                 ? null
                 : NormalizedEvidence.Error("The detected executable bytes do not match the bound capability identity.");
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or EvidenceWriteException or AggregateException)
         {
             return NormalizedEvidence.Incomplete(
                 "The bound capability executable cannot be read on this host; tool evidence is incomplete.");

@@ -8,6 +8,8 @@
     <Project Path="components/execution/DeliveryForge.Execution.Tests/DeliveryForge.Execution.Tests.csproj" />
     <Project Path="components/evidence/DeliveryForge.Evidence/DeliveryForge.Evidence.csproj" />
     <Project Path="components/evidence/DeliveryForge.Evidence.Tests/DeliveryForge.Evidence.Tests.csproj" />
+    <Project Path="components/evidence/DeliveryForge.Evidence.CensusFixture/DeliveryForge.Evidence.CensusFixture.csproj" />
+    <Project Path="components/evidence/DeliveryForge.Evidence.AsyncFixture/DeliveryForge.Evidence.AsyncFixture.csproj" />
     <Project Path="components/planning/DeliveryForge.Planning/DeliveryForge.Planning.csproj" />
     <Project Path="components/planning/DeliveryForge.Planning.Tests/DeliveryForge.Planning.Tests.csproj" />
     <Project Path="components/planning/DeliveryForge.Planning.ImportGitHelper/DeliveryForge.Planning.ImportGitHelper.csproj" />
@@ -18,5 +20,9 @@
     <Project Path="components/publication/DeliveryForge.Publication.Tests/DeliveryForge.Publication.Tests.csproj" />
     <Project Path="components/scheduling/DeliveryForge.Scheduling/DeliveryForge.Scheduling.csproj" />
     <Project Path="components/scheduling/DeliveryForge.Scheduling.Tests/DeliveryForge.Scheduling.Tests.csproj" />
+    <Project Path="components/tool/DeliveryForge.Tool/DeliveryForge.Tool.csproj" />
+    <Project Path="components/tool/DeliveryForge.Tool.Tests/DeliveryForge.Tool.Tests.csproj" />
+    <Project Path="components/tool/DeliveryForge.Tool.DuplexFixture/DeliveryForge.Tool.DuplexFixture.csproj" />
+    <Project Path="components/tool/DeliveryForge.LinuxScopeBirthGate/DeliveryForge.LinuxScopeBirthGate.csproj" />
   </Folder>
 </Solution>

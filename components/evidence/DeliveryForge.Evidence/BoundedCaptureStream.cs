@@ -17,12 +17,31 @@ internal sealed class BoundedCaptureStream(int maximumBytes)
         {
             var count = await stream.ReadAsync(buffer.AsMemory()).ConfigureAwait(false);
             if (count == 0) return;
-            lock (_sync)
-            {
-                var take = Math.Min(count, maximumBytes - (int)_prefix.Length);
-                _prefix.Write(buffer, 0, take);
-                if (take != count) Volatile.Write(ref _exceeded, 1);
-            }
+            AppendPrefix(buffer.AsSpan(0, count));
+        }
+    }
+
+    // Windows anonymous pipes are synchronous handles. Their two original
+    // readers run on retained dedicated tasks so blocking ReadFile calls do
+    // not occupy the shared workers needed by the owner's deadline monitor.
+    internal void DrainSynchronously(Stream stream)
+    {
+        var buffer = new byte[4096];
+        while (true)
+        {
+            var count = stream.Read(buffer, 0, buffer.Length);
+            if (count == 0) return;
+            AppendPrefix(buffer.AsSpan(0, count));
+        }
+    }
+
+    private void AppendPrefix(ReadOnlySpan<byte> bytes)
+    {
+        lock (_sync)
+        {
+            var take = Math.Min(bytes.Length, maximumBytes - (int)_prefix.Length);
+            _prefix.Write(bytes[..take]);
+            if (take != bytes.Length) Volatile.Write(ref _exceeded, 1);
         }
     }
 

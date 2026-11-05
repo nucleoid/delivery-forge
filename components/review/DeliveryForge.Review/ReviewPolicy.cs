@@ -286,6 +286,18 @@ public sealed class ProtectedReviewPolicyResolver(ProtectedReviewSourceContext s
             var executor = new ProcessCommandExecutor();
             async Task<byte[]> Git(IReadOnlyList<string> args)
             {
+                if (view.SourceRealm == ReviewAuthorityRealm.Production)
+                {
+                    if (view.OwnedGit is null)
+                        throw new ReviewPolicyException("Production protected policy requires original owned Git.");
+                    _ = Remaining();
+                    using var ownedBound = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                    ownedBound.CancelAfter(Remaining());
+                    var owned = await view.OwnedGit(git, args, ownedBound.Token).ConfigureAwait(false);
+                    _ = Remaining();
+                    if (owned.ExitCode != 0) throw new ReviewPolicyException("Owned protected-policy Git failed.");
+                    return owned.StandardOutput;
+                }
                 var prefix = new[] { "--no-replace-objects", $"--git-dir={git}", $"--work-tree={view.SourceRoot}",
                     "-c", "core.fsmonitor=false", "-c", $"core.hooksPath={(OperatingSystem.IsWindows() ? "NUL" : "/dev/null")}" };
                 var nullDevice = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";

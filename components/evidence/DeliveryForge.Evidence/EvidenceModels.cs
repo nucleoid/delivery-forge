@@ -27,6 +27,9 @@ public sealed record NormalizedEvidence(
     IReadOnlyList<string> Limitations,
     string? NotApplicableRationale = null)
 {
+    // Set only by a retained current installed execution; this is distinct from production authority.
+    internal bool ProducerVerified { get; init; }
+
     public static NormalizedEvidence Pass(string reason, bool fixture = false) =>
         new(GateOutcome.Pass, reason, fixture, false, ["Tool outcome is not production authority."], null);
 
@@ -108,7 +111,12 @@ public sealed record CommandInvocation(
     string WorkingDirectory,
     IReadOnlyDictionary<string, string>? Environment = null,
     bool InheritEnvironment = true,
-    string? StandardInput = null);
+    string? StandardInput = null)
+{
+    // Explicit finite complete environment snapshot from the actual containing owner.
+    // Complete=true overrides inheritance; DATA alone grants no effect authority.
+    public bool EnvironmentIsComplete { get; init; }
+}
 
 public sealed record CommandResult(
     int? ExitCode,
@@ -149,7 +157,10 @@ public sealed record GateRequest(
     string Scope,
     TimeSpan Timeout,
     string OutputDirectory,
-    EvaluationPluginSelection? Plugin = null);
+    EvaluationPluginSelection? Plugin = null)
+{
+    internal InstalledToolInvocation? InstalledInvocation { get; init; }
+}
 
 public sealed record GateRunResult(
     GateOutcome Outcome,

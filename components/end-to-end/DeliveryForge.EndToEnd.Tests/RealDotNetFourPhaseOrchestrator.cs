@@ -36,6 +36,7 @@ internal static class RealDotNetFourPhaseOrchestrator
         using var entireRun = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, budget.WallToken);
         cancellationToken = entireRun.Token;
         var runtime = new OwnedRealDotNetRuntime(artifacts, budget, cancellationToken);
+        Exception? primary = null;
         artifacts.RetainArtifacts("Actual .NET intended FAIL/advisory/missing-coverage/warm evidence and runtime retained.");
         var phases = new Dictionary<RealDotNetFixturePhase, RealDotNetPhaseSnapshot>();
         try
@@ -125,8 +126,14 @@ internal static class RealDotNetFourPhaseOrchestrator
                 var gate = await new GateRunner(runtime, reader, repo, protectedBase).RunAsync(new(gateId, policy, detection.Capability,
                     EvidenceAdapterKind.DotNet, OwnedRealDotNetRuntime.Hash(configBytes), before, invocation,
                     "issue11-real-dotnet-fixture", runtime.CommandBudget(TimeSpan.FromSeconds(budget.Profile.GateSeconds)), phaseRoot), cancellationToken);
-                if (gate.Execution.TimedOut || gate.Execution.Cancelled || !gate.Execution.OwnedProcessQuiescent)
-                    throw new InvalidOperationException("Actual gate command timed out/cancelled/uncertain; intended evidence not established.");
+                if (gate.Execution.TimedOut || gate.Execution.Cancelled || !gate.Execution.OwnedProcessQuiescent || runtime.DiagnosticFailure is not null)
+                {
+                    var details = OwnedRealDotNetRuntime.DescribeActualResult(gate.Execution);
+                    var failure = new InvalidOperationException("Actual gate did not establish intended evidence. " + details);
+                    if (runtime.DiagnosticFailure is { } diagnostic)
+                        throw new AggregateException("Actual returned child outcome and independent diagnostic failure. " + details, failure, diagnostic);
+                    throw failure;
+                }
                 var immutableDll = Path.Combine(phaseRoot, "actual-Subject.dll");
                 await OwnedRealDotNetRuntime.WriteNewAsync(immutableDll, await File.ReadAllBytesAsync(dll, cancellationToken), cancellationToken);
                 var coverageAfter = Directory.EnumerateFiles(repo, "coverage.*.xml", SearchOption.AllDirectories).ToArray();
@@ -178,20 +185,31 @@ internal static class RealDotNetFourPhaseOrchestrator
             }
             return new ReadOnlyDictionary<RealDotNetFixturePhase, RealDotNetPhaseSnapshot>(phases);
         }
+        catch (Exception error) { primary = error; throw; }
         finally
         {
             artifacts.RetainArtifacts("Owned actual-tool runtime retained: " + runtime.Root);
-            using var cleanup = new CancellationTokenSource(TimeSpan.FromSeconds(Math.Max(0.001, Math.Min(60, budget.Remaining.TotalSeconds))));
-            await artifacts.WriteNewJsonAsync("actual-dotnet-retained-runtime.json", new
+            await runtime.WriteDiagnosticAsync("actual-dotnet-retained-runtime.json", new
             {
                 fixture = true,
                 productionCertified = false,
                 runtime.Root,
                 runtime.AllCommandsQuiescent,
+                runtime.LastActualInvocation,
+                runtime.LastActualResult,
+                diagnosticFailureType = runtime.DiagnosticFailure?.GetType().FullName,
+                diagnosticFailure = runtime.DiagnosticFailure?.Message,
+                runtime.DiagnosticWritesUnsettled,
                 elapsedSeconds = budget.Elapsed.TotalSeconds,
                 retained = true,
                 limitation = "No recursive runtime cleanup is authorized by gate outcomes or file/hash evidence alone."
-            }, cleanup.Token);
+            });
+            if (runtime.DiagnosticFailure is { } diagnostic)
+            {
+                if (primary is not null) primary.Data["IndependentDiagnosticFailure"] = diagnostic;
+                else throw new InvalidOperationException("Actual runtime diagnostic persistence failed; no scenario acceptance. " +
+                    (runtime.LastActualResult is { } actual ? OwnedRealDotNetRuntime.DescribeActualResult(actual) : "No returned native result exists."), diagnostic);
+            }
         }
     }
     private static async Task CommitAsync(OwnedRealDotNetRuntime runtime, string message, CancellationToken token)

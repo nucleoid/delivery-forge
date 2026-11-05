@@ -295,6 +295,10 @@ internal static class Mutate4CSharpReportV2
         }
     }
 
+    // Reuse complete accounting for a known continuable capture, without relaxing
+    // the normal report reducer or treating capture DATA as conclusive authority.
+    internal static void RequireCompleteSuiteAccounting(JsonElement root) => ValidateConclusiveSuites(root, Array(root, "suites"));
+
     private static void ValidateConclusiveSuites(JsonElement root, JsonElement[] suites)
     {
         Require(suites.Length > 0, "Conclusive report has no suites.");

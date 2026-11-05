@@ -54,8 +54,21 @@ internal static class PlanImportFilesystem
         if (!Path.IsPathFullyQualified(path)) throw new PlanningException("Import requires absolute source paths.");
         for (FileSystemInfo? entry = Directory.Exists(path) ? new DirectoryInfo(path) : new FileInfo(path); entry is not null;
             entry = entry is DirectoryInfo directory ? directory.Parent : ((FileInfo)entry).Directory)
-            if (entry.LinkTarget is not null || entry.Exists && (entry.Attributes & FileAttributes.ReparsePoint) != 0)
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                // Windows reports attributes of the reparse entry itself, even
+                // when its target is missing. Do not gate this check on Exists.
+                // An absent ordinary entry has -1 attributes; later required
+                // opens still reject it. Avoid a redundant LinkTarget open for
+                // every plain ancestor on every whole-view verification.
+                var attributes = entry.Attributes;
+                if (attributes != (FileAttributes)(-1) && (attributes & FileAttributes.ReparsePoint) != 0)
+                    throw new PlanningException("Import source path is redirected.");
+            }
+            else if (entry.LinkTarget is not null || entry.Exists && (entry.Attributes & FileAttributes.ReparsePoint) != 0)
                 throw new PlanningException("Import source path is redirected.");
+        }
     }
     private static SafeFileHandle Open(string path, bool directory)
     {

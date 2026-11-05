@@ -13,6 +13,7 @@ public sealed class ContinuumCoordinationAdapter
     private readonly ICoordinationCheckpointStore _checkpoints;
     private readonly TimeSpan _rollbackTimeout;
     private readonly TimeSpan _maximumClockUncertainty;
+    private readonly Func<bool>? _productionCurrent;
     private readonly string _adapterId = Guid.NewGuid().ToString("D");
     private readonly object _ledgerGate = new();
     private readonly Dictionary<DispatchAuthority, Lifecycle> _authorities = new(ReferenceEqualityComparer.Instance);
@@ -29,7 +30,7 @@ public sealed class ContinuumCoordinationAdapter
         QuiescenceSourceBinding quiescenceBinding,
         ICoordinationCheckpointStore checkpoints,
         TimeSpan rollbackTimeout,
-        TimeSpan maximumClockUncertainty)
+        TimeSpan maximumClockUncertainty, Func<bool>? productionCurrent = null)
     {
         _transport = transport;
         Capabilities = capabilities;
@@ -39,6 +40,7 @@ public sealed class ContinuumCoordinationAdapter
         _checkpoints = checkpoints;
         _rollbackTimeout = rollbackTimeout;
         _maximumClockUncertainty = maximumClockUncertainty;
+        _productionCurrent = productionCurrent;
     }
 
     public CoordinationCapabilities Capabilities { get; }
@@ -49,9 +51,38 @@ public sealed class ContinuumCoordinationAdapter
     {
         ArgumentNullException.ThrowIfNull(transport);
         return Task.FromException<ContinuumCoordinationAdapter>(new CoordinationUnavailableException(
-            "Production coordination is INCOMPLETE until nucleoid/continuum#7 is implemented, deployed, configured, authenticated, versioned, and host-attested."));
+            "Production coordination is INCOMPLETE without a configured concrete authenticated transport and trusted current deployment, quiescence, clock and checkpoint host bindings."));
     }
 
+    /// <summary>Constructs the production reducer only from a real authenticated transport and
+    /// independently supplied trusted parent-host bindings. No fixture defaults or receipt imports.</summary>
+    public static async Task<ContinuumCoordinationAdapter> CreateProductionAsync(
+        ContinuumMcpTransport transport,
+        ProductionCoordinationDependencies dependencies,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(transport);
+        ArgumentNullException.ThrowIfNull(dependencies);
+        ArgumentNullException.ThrowIfNull(dependencies.Quiescence);
+        ArgumentNullException.ThrowIfNull(dependencies.Clock);
+        ArgumentNullException.ThrowIfNull(dependencies.Checkpoints);
+        if (dependencies.OperationTimeout <= TimeSpan.Zero || dependencies.OperationTimeout >= DefaultTtl ||
+            dependencies.MaximumClockUncertainty < TimeSpan.Zero || dependencies.MaximumClockUncertainty >= DefaultTtl)
+            throw new CoordinationUnavailableException("Production coordination requires finite call and clock-uncertainty bounds.");
+        var binding = dependencies.Quiescence.Binding;
+        ValidateQuiescenceBinding(binding, dependencies.Clock);
+        if (binding.MaximumObservationLatency >= DefaultTtl || binding.FreshnessLimit >= DefaultTtl)
+            throw new CoordinationUnavailableException("Production quiescence observations must fit the lease lifetime.");
+        var capabilities = await InvokeBoundedStaticAsync(
+            () => transport.DetectCapabilitiesAsync(cancellationToken), dependencies.OperationTimeout).ConfigureAwait(false);
+        var reason = ValidateCapabilities(capabilities, requireFixture: false);
+        if (reason is not null || !transport.ProductionCurrent)
+            throw new CoordinationUnavailableException(reason ?? "Production transport readiness is no longer current.");
+        cancellationToken.ThrowIfCancellationRequested();
+        return new ContinuumCoordinationAdapter(transport, capabilities!, dependencies.Clock,
+            dependencies.Quiescence, binding, dependencies.Checkpoints, dependencies.OperationTimeout,
+            dependencies.MaximumClockUncertainty, () => transport.ProductionCurrent);
+    }
     internal static async Task<ContinuumCoordinationAdapter> CreateForContractTestsAsync(
         ICoordinationTransport transport,
         IOwnedRunQuiescenceSource quiescence,
@@ -98,7 +129,8 @@ public sealed class ContinuumCoordinationAdapter
                 authority.LifecycleId != lifecycle.Id || lifecycle.Phase != CoordinationLifecyclePhase.Held ||
                 !CanBeHeld(lifecycle)) return false;
 
-            if (lifecycle.Entries.Values.Any(entry => _clock.Elapsed >= entry.Evidence.SafeDeadline))
+            if ((_productionCurrent is not null && !_productionCurrent()) ||
+                lifecycle.Entries.Values.Any(entry => _clock.Elapsed >= entry.Evidence.SafeDeadline))
             {
                 lifecycle.CleanupAuthority = authority;
                 lifecycle.Authority = null;

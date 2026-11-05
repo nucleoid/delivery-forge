@@ -9,7 +9,9 @@ namespace DeliveryForge.EndToEnd.Tests;
 public sealed class ProtectedPolicyCaptureFailureTests
 {
     [Theory(Timeout = 120_000)]
-    [InlineData("settled-timeout")]
+    // Separate original invocations: one-second refusal DATA is never cleanup acceptance.
+    [InlineData("one-second-timeout")]
+    [InlineData("entered-timeout")]
     [InlineData("entered-cancellation")]
     [InlineData("settled-quota")]
     [InlineData("unobserved-launch")]
@@ -32,7 +34,7 @@ public sealed class ProtectedPolicyCaptureFailureTests
             nonce,
             mode,
             helper,
-            originalCaptureSeconds = scenario == "settled-timeout" ? 1 : 5,
+            originalCaptureSeconds = scenario == "one-second-timeout" ? 1 : 5,
             quotaBytesEach = 1024,
             helperSelfSeconds = 8,
             noGitFactsFromHelper = true
@@ -46,8 +48,8 @@ public sealed class ProtectedPolicyCaptureFailureTests
         using var caller = CancellationTokenSource.CreateLinkedTokenSource(wall.Token);
         var cwd = scenario == "unobserved-launch" ? Path.Combine(run.Checkout, "absent-owned-cwd-" + nonce) : run.Checkout;
         var operation = new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(new(helper, [], cwd),
-            TimeSpan.FromSeconds(scenario == "settled-timeout" ? 1 : 5), 1024, caller.Token);
-        if (scenario == "entered-cancellation")
+            TimeSpan.FromSeconds(scenario == "one-second-timeout" ? 1 : 5), 1024, caller.Token);
+        if (scenario is "entered-cancellation" or "entered-timeout")
         {
             var enteredPath = Path.Combine(run.Checkout, ".git", "helper-entered-" + nonce);
             using var entryBound = CancellationTokenSource.CreateLinkedTokenSource(wall.Token); entryBound.CancelAfter(TimeSpan.FromSeconds(5));
@@ -62,9 +64,10 @@ public sealed class ProtectedPolicyCaptureFailureTests
                 if (await Task.WhenAny(operation, entry) == operation)
                 {
                     var early = await operation;
-                    throw new InvalidOperationException("Actual capture ended before cancellation entry: " + early.Command.StandardError);
+                    throw new InvalidOperationException("Actual capture ended before required helper entry: " + early.Command.StandardError);
                 }
-                await entry; caller.Cancel();
+                await entry;
+                if (scenario == "entered-cancellation") caller.Cancel();
             }
             catch
             {
@@ -93,7 +96,7 @@ public sealed class ProtectedPolicyCaptureFailureTests
             stderrSha256 = Hash(actual.StandardErrorBytes),
             limitation = "Actual data only; unproved closure is not a claim that a live orphan exists."
         }, wall.Token);
-        if (scenario != "unobserved-launch")
+        if (scenario is not ("unobserved-launch" or "one-second-timeout"))
         {
             var diagnosticBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(new
             {
@@ -108,7 +111,39 @@ public sealed class ProtectedPolicyCaptureFailureTests
             Assert.True(actual.RootExitObserved);
             Assert.True(actual.StandardOutputDrainCompleted); Assert.True(actual.StandardErrorDrainCompleted);
         }
-        if (scenario == "settled-timeout") { Assert.True(actual.Command.TimedOut); Assert.False(actual.Command.Cancelled); }
+        if (scenario is "one-second-timeout" or "entered-timeout")
+        {
+            Assert.True(actual.Command.TimedOut); Assert.False(actual.Command.Cancelled);
+            Assert.False(actual.CaptureBoundExceeded);
+            var lifecycle = Assert.IsType<CommandLifecycleDiagnostics>(actual.Command.LifecycleDiagnostics);
+            var startup = Assert.IsType<CommandStartupObservation>(lifecycle.Startup);
+            Assert.Equal(lifecycle.RootExited, actual.RootExitObserved);
+            Assert.Equal(lifecycle.StandardOutput.CompletedSuccessfully, actual.StandardOutputDrainCompleted);
+            Assert.Equal(lifecycle.StandardError.CompletedSuccessfully, actual.StandardErrorDrainCompleted);
+            if (scenario == "one-second-timeout")
+            {
+                // Synchronous operations or scheduling can outlast this original. Preserve the
+                // actual uncertainty; neither elapsed DATA nor LastStage locates the crossing.
+                Assert.InRange(startup.OriginalTotalSeconds, double.Epsilon, 1d);
+                Assert.InRange(startup.OriginalWorkSeconds, 0d, startup.OriginalTotalSeconds);
+            }
+            else
+            {
+                // This independent five-second invocation requires real helper entry and
+                // timely physical settlement; UNKNOWN is an assertion failure here.
+                Assert.Equal(nonce, await File.ReadAllTextAsync(Path.Combine(run.Checkout, ".git", "helper-entered-" + nonce), wall.Token));
+                Assert.True(lifecycle.KillAttempted); Assert.True(lifecycle.KillSucceeded);
+                Assert.True(lifecycle.ExitWaitCompleted); Assert.True(lifecycle.DrainWaitCompleted);
+                if (OperatingSystem.IsWindows())
+                {
+                    var tree = Assert.IsType<CommandOwnedTreeObservation>(lifecycle.OwnedTree);
+                    Assert.True(tree.CreationOwned); Assert.True(tree.SettlementObserved);
+                    Assert.Equal(0, tree.ActiveProcesses);
+                }
+                Assert.InRange(startup.OriginalTotalSeconds, double.Epsilon, 5d);
+                Assert.True(startup.OriginalElapsedSeconds < startup.OriginalTotalSeconds);
+            }
+        }
         if (scenario == "entered-cancellation") { Assert.True(actual.Command.Cancelled); Assert.False(actual.Command.TimedOut); }
         if (scenario == "settled-quota") { Assert.True(actual.CaptureBoundExceeded); Assert.False(actual.Command.TimedOut); Assert.False(actual.Command.Cancelled); }
         if (scenario == "unobserved-launch")
@@ -116,9 +151,10 @@ public sealed class ProtectedPolicyCaptureFailureTests
             Assert.False(actual.Command.OwnedProcessQuiescent); Assert.False(actual.RootExitObserved);
             Assert.Null(actual.Command.ExitCode); Assert.False(actual.Command.TimedOut); Assert.False(actual.Command.Cancelled);
         }
-        // The source setup/capture controls above must pass before the missing public mapping is RED.
+        // The one-second row validates refusal DATA only; the entered five-second row
+        // additionally requires actual cleanup. Every row preserves the original typed mapping.
         var failure = ProtectedPolicyReadFailure.Create(actual, caller.Token, "Protected policy capture refusal.");
-        if (scenario == "settled-timeout") Assert.IsType<TimeoutException>(failure);
+        if (scenario is "one-second-timeout" or "entered-timeout") Assert.IsType<TimeoutException>(failure);
         else if (scenario == "entered-cancellation") Assert.IsType<OperationCanceledException>(failure);
         else Assert.IsType<ReviewPolicyException>(failure);
         var diagnostic = Assert.IsType<ProtectedPolicyCaptureDiagnosticException>(failure.InnerException);

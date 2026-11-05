@@ -1,7 +1,7 @@
 namespace DeliveryForge.Evidence;
 
 /// <summary>Point-in-time DATA only. No process handle, membership, control or settlement authority.</summary>
-public enum CommandStartupState { NotObserved, NotApplicable, NotAttempted, AttemptedUnknown, Established }
+public enum CommandStartupState { NotObserved, NotApplicable, NotAttempted, AttemptedUnknown, Established, Refused }
 
 /// <summary>Immutable, bounded original creator sequencing DATA; absence is not known closure.</summary>
 public sealed record CommandStartupObservation

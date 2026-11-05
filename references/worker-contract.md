@@ -90,3 +90,12 @@ controller, closing the interval in which process launch succeeded but durable r
 Cleanup additionally requires fresh clean boundary/artifact/ownership/process facts and
 separate parent authorization. Ambiguous worktrees, user files, unsupported controls, or unknown
 activity are preserved, never force-removed.
+
+Requested normal transport retirement keeps the original work phase only when
+the root is freshly known exited zero and its owned group still has descendants.
+After the unchanged two-second grace, that same group can be terminated under
+the unchanged work endpoint; complete group, I/O, EOF and first-disposition
+proof still precedes current Git verification. Explicit Stop, unknown/nonzero or
+still-live roots, expiry and actual I/O/disposition failure enter terminal cleanup.
+Linux observation carries the current cleanup mode separately from the once-only
+stop latch; a later failure cannot restore work or repeat the stop effect.

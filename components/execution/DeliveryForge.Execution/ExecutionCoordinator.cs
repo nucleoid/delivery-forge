@@ -1,3 +1,4 @@
+using DeliveryForge.Coordination;
 using System.Collections.Concurrent;
 using DeliveryForge.Contracts.Models;
 using DeliveryForge.Contracts.State;
@@ -22,14 +23,170 @@ public sealed record AgentResumeRecord(string RequestIdentity, AgentControlResul
 public sealed class ExecutionCoordinator : IDisposable
 {
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> FlowLocks = new(StringComparer.Ordinal);
-    private readonly RunStore _store;
-    private readonly WorktreeManager _worktrees;
+    private RunStore forwardStore;
+    private readonly AsyncLocal<RunStore?> cleanupStore = new();
+    private RunStore _store => cleanupStore.Value ?? forwardStore;
+    private WorktreeManager _worktrees;
+    private DeliveryForge.Evidence.IOwnedDuplexBudget? original;
+    private string? originalRun;
+    internal RunStore BindOriginalScheduling(DeliveryForge.Evidence.IOwnedDuplexBudget owner, ICoordinatedSynchronousEffectAdmission parent, string runId, WorktreeManager admittedWorktrees)
+    {
+        lock (_writers)
+        {
+            ThrowIfDisposed();
+            if (original is not null || !ReferenceEquals(parent, _coordinationAdmission) || !_writers.IsEmpty || !_pendingControls.IsEmpty) throw new WorkerEnvelopeException("Scheduling binds the same idle original coordinator once.");
+            owner.CheckWork(); parent.CheckCurrent(runId);
+            forwardStore = _store.WithOriginalAdmission(owner, parent, runId); _worktrees = admittedWorktrees; original = owner; originalRun = runId;
+            return _store;
+        }
+    }
     private readonly ProcessControl _processes;
     private readonly IAgentControlPort _agentControl;
     private readonly IExecutionFactSource _factSource;
     private readonly ConcurrentDictionary<string, WriterLease> _writers = new(StringComparer.Ordinal);
+    private static readonly List<(ExecutionCoordinator Owner, WriterLease Lease)> UnsettledWriterDispositions = [];
     private readonly ConcurrentDictionary<Task, string> _pendingControls = new();
     private bool _disposed;
+    private ICoordinatedEffectAdmission? _coordinationAdmission;
+    public void BindCoordinationAdmission(ICoordinatedEffectAdmission admission)
+    {
+        ArgumentNullException.ThrowIfNull(admission);
+        lock (_writers)
+        {
+            ThrowIfDisposed();
+            if (_coordinationAdmission is not null || !_writers.IsEmpty || !_pendingControls.IsEmpty)
+                throw new WorkerEnvelopeException("Coordination must bind the original idle coordinator exactly once.");
+            _coordinationAdmission = admission;
+        }
+    }
+    // Actual same-owner objects only. This does not adopt registrations or quiescence from stored JSON.
+    public bool ObserveOriginalProcessesSettled(string runId) => !_disposed && !HasPendingControlOperations(runId) &&
+        _processes.GetOwnedIdentities(runId).Count == 0;
+
+    internal WorktreeManager.OwnedGitBinding RequireOriginalWorktreeBinding(string runId, DeliveryForge.Evidence.IOwnedDuplexBudget sameOriginal)
+    {
+        ThrowIfDisposed();
+        if (!ReferenceEquals(original, sameOriginal) || originalRun != runId || _coordinationAdmission is null ||
+            !_writers.TryGetValue(runId, out var writer) || writer.ObserveCurrentNamespaceIdentity().Outcome != WriterNamespaceIdentityOutcome.Match)
+            throw new WorktreeBoundaryException("No current actual original writer/provisioning binding.");
+        var binding = _worktrees.RequireOriginalBinding(runId, sameOriginal, _coordinationAdmission);
+        if (!binding.OwnsWriter(writer)) throw new WorktreeBoundaryException("Provisioning does not retain this exact original writer.");
+        return binding;
+    }
+
+    internal Task ReleaseCompletedWriterAsync(string runId, AgentCompletionReceipt actualCompletion, Func<bool> originalQuiet, CancellationToken token) =>
+        RunExclusiveAsync(runId, async () =>
+        {
+            await ReleaseCompletedWriterCoreAsync(runId, actualCompletion, originalQuiet, token).ConfigureAwait(false);
+            return true;
+        }, token);
+    async Task ReleaseCompletedWriterCoreAsync(string runId, AgentCompletionReceipt actualCompletion, Func<bool> originalQuiet, CancellationToken token)
+    {
+        if (original is null || runId != originalRun || _coordinationAdmission is not ICoordinatedSynchronousEffectAdmission parent) throw new WorkerEnvelopeException("No actual scheduled owner.");
+        original.CheckWork(); parent.CheckCurrent(runId);
+        if (!originalQuiet() || !ObserveOriginalProcessesSettled(runId)) throw new WorkerEnvelopeException("Original completion is not settled.");
+        var recovered = await _store.RecoverAsync(runId, token).ConfigureAwait(false);
+        var completed = recovered.Records.LastOrDefault(record => record.Kind == "worker-completed") ?? throw new WorkerEnvelopeException("Actual completed worker record absent.");
+        if (!System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(_store.ReadPayload<AgentCompletionReceipt>(completed)).AsSpan().SequenceEqual(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(actualCompletion))) throw new WorkerEnvelopeException("Completed original receipt differs.");
+        var prepared = GetPrepared(recovered); EnsureWriterOwnership(prepared.Request);
+        parent.EnterSynchronous(runId, () =>
+        {
+            original.CheckWork();
+            if (!originalQuiet() || !ObserveOriginalProcessesSettled(runId) || !_writers.TryGetValue(runId, out var writer)) throw new WorkerEnvelopeException("Original writer/closure changed.");
+            if (writer.ObserveCurrentNamespaceIdentity().Outcome != WriterNamespaceIdentityOutcome.Match) throw new WorkerEnvelopeException("Original writer namespace is no longer current.");
+            DisposeOriginalWriter(runId, writer);
+            if (!((ICollection<KeyValuePair<string, WriterLease>>)_writers).Remove(new(runId, writer))) throw new WorkerEnvelopeException("Actual writer identity changed during disposition.");
+            original.CheckWork();
+            return true;
+        });
+        original.CheckWork(); parent.CheckCurrent(runId);
+    }
+    // Cleanup-only for this actual completed worker after its separate evidence
+    // capture failed. Saved history alone cannot supply the original binding,
+    // exact live writer or the caller's current native-settlement observation.
+    internal Task ReleaseCompletedWriterAfterFailureAsync(string runId, AgentCompletionReceipt actualCompletion, Func<bool> actualClosed) =>
+        RunExclusiveAsync(runId, async () =>
+        {
+            if (original is null || originalRun != runId)
+                throw new WorkerEnvelopeException("Same original completed cleanup owner required.");
+            _ = original.CleanupRemaining;
+            if (!actualClosed() || !ObserveOriginalProcessesSettled(runId)) throw new WorkerEnvelopeException("Actual completed worker is not known closed.");
+            var recovered = await _store.RecoverAsync(runId, CancellationToken.None).ConfigureAwait(false);
+            var record = recovered.Records.LastOrDefault(row => row.Kind == "worker-completed")
+                ?? throw new WorkerEnvelopeException("Actual original completed record absent.");
+            if (!System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(_store.ReadPayload<AgentCompletionReceipt>(record)).AsSpan().SequenceEqual(System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(actualCompletion)))
+                throw new WorkerEnvelopeException("Completed cleanup receipt differs from this original.");
+            EnsureWriterOwnership(GetPrepared(recovered).Request);
+            _ = original.CleanupRemaining;
+            if (!actualClosed() || !ObserveOriginalProcessesSettled(runId) || !_writers.TryGetValue(runId, out var writer) ||
+                writer.ObserveCurrentNamespaceIdentity().Outcome != WriterNamespaceIdentityOutcome.Match)
+                throw new WorkerEnvelopeException("Actual completed writer/closure changed before first disposition.");
+            DisposeOriginalWriter(runId, writer);
+            if (!((ICollection<KeyValuePair<string, WriterLease>>)_writers).Remove(new(runId, writer)))
+                throw new WorkerEnvelopeException("Actual completed cleanup writer identity changed.");
+            _ = original.CleanupRemaining; return true;
+        }, CancellationToken.None, cleanup: true);
+
+    internal Task ReleaseStoppedWriterAsync(string runId, Func<bool> actualStopped) =>
+        RunExclusiveAsync(runId, async () =>
+        {
+            await ReleaseStoppedWriterCoreAsync(runId, actualStopped).ConfigureAwait(false);
+            return true;
+        }, CancellationToken.None, cleanup: true);
+    async Task ReleaseStoppedWriterCoreAsync(string runId, Func<bool> actualStopped)
+    {
+        if (original is null || originalRun != runId || !actualStopped() || !ObserveOriginalProcessesSettled(runId)) throw new WorkerEnvelopeException("Same original stopped observation required.");
+        _ = original.CleanupRemaining;
+        var recovered = await forwardStore.WithOriginalCleanup().RecoverAsync(runId).ConfigureAwait(false);
+        var stopped = recovered.Records.LastOrDefault(record => record.Kind == "stopped") ?? throw new WorkerEnvelopeException("Actual stopped record absent.");
+        if (!_store.ReadPayload<QuiescenceRecord>(stopped).Quiescent) throw new WorkerEnvelopeException("Actual stopped record is not quiescent.");
+        EnsureWriterOwnership(GetPrepared(recovered).Request);
+        _ = original.CleanupRemaining;
+        if (!actualStopped() || !ObserveOriginalProcessesSettled(runId) || !_writers.TryGetValue(runId, out var writer)) throw new WorkerEnvelopeException("Stopped writer/closure changed.");
+        if (writer.ObserveCurrentNamespaceIdentity().Outcome != WriterNamespaceIdentityOutcome.Match) throw new WorkerEnvelopeException("Stopped writer namespace is no longer current.");
+        DisposeOriginalWriter(runId, writer);
+        if (!((ICollection<KeyValuePair<string, WriterLease>>)_writers).Remove(new(runId, writer))) throw new WorkerEnvelopeException("Actual stopped writer identity changed.");
+        _ = original.CleanupRemaining;
+    }
+
+    internal void DisposeOriginalWriter(string runId, WriterLease writer)
+    {
+        // A retained unknown first close cannot be retried or re-notified by
+        // a later disposition attempt on this exact coordinator/lease pair.
+        lock (UnsettledWriterDispositions)
+            if (UnsettledWriterDispositions.Any(row => ReferenceEquals(row.Owner, this) && ReferenceEquals(row.Lease, writer)))
+                throw new WorktreeBoundaryException("Actual writer first disposition remains retained; no retry authority.");
+        try
+        {
+            writer.Dispose();
+            // Dispose is sticky even when the first close threw. A repeated
+            // no-op cannot turn that exact unreturned close into settlement.
+            if (!writer.FirstCloseReturned)
+                throw new WorktreeBoundaryException("Actual writer first disposition has not returned; retain its original owner.");
+        }
+        catch (Exception failure)
+        {
+            // The lease's first attempt is sticky. Keep the actual owner even if
+            // the coordinator is disposed; never retry an unknown first close.
+            bool firstRetained;
+            lock (UnsettledWriterDispositions)
+            {
+                firstRetained = !UnsettledWriterDispositions.Any(row => ReferenceEquals(row.Owner, this) && ReferenceEquals(row.Lease, writer));
+                if (firstRetained) UnsettledWriterDispositions.Add((this, writer));
+            }
+            var failures = new List<Exception> { failure };
+            if (firstRetained)
+            {
+                try { if (original is DeliveryForge.Evidence.IOwnedBudgetUnknownRetention retained) retained.PreserveUnknown(); }
+                catch (Exception observation) { failures.Add(observation); }
+                try { _coordinationAdmission?.RetainUncertain(runId, "Actual writer first disposition did not return."); }
+                catch (Exception observation) { failures.Add(observation); }
+            }
+            if (failures.Count > 1) throw new AggregateException("Writer first disposition and independent uncertainty observations failed.", failures);
+            throw;
+        }
+    }
+
 
     public ExecutionCoordinator(
         RunStore store,
@@ -38,7 +195,7 @@ public sealed class ExecutionCoordinator : IDisposable
         IAgentControlPort? agentControl = null,
         IExecutionFactSource? factSource = null)
     {
-        _store = store;
+        forwardStore = store;
         _worktrees = worktrees;
         _processes = processes;
         _agentControl = agentControl ?? new UnsupportedAgentControlPort();
@@ -74,9 +231,10 @@ public sealed class ExecutionCoordinator : IDisposable
                 throw new WorktreeBoundaryException("A writer is already registered for this run in this coordinator.");
             return (request, record);
         }
-        catch
+        catch (Exception primary)
         {
-            writer.Abandon();
+            try { _worktrees.RetireFailedPreparationWriter(writer); }
+            catch (Exception close) { throw new AggregateException("Worker preparation and original writer first disposition failed.", primary, close); }
             throw;
         }
     }
@@ -138,11 +296,14 @@ public sealed class ExecutionCoordinator : IDisposable
     private async Task<OwnedProcess> StartTaskProcessCoreAsync(
         string runId, ProcessLaunch launch, CancellationToken cancellationToken)
     {
+        if (_coordinationAdmission is not null && !_processes.OwnsDescendantGroups)
+            throw new WorkerEnvelopeException("Coordinated auxiliary process birth is unsupported: the actual controller owns roots, not descendant groups.");
         ThrowIfDisposed();
         var recovery = await _store.RecoverAsync(runId, cancellationToken).ConfigureAwait(false);
         EnsureState(recovery, WorkflowState.Executing, "start a task process");
         EnsureWriterOwnership(GetPrepared(recovery).Request);
-        var owned = _processes.StartOwned(launch, runId);
+        var owned = _coordinationAdmission is null ? _processes.StartOwned(launch, runId) :
+            await _coordinationAdmission.EnterAsync(runId, () => Task.FromResult(_processes.StartOwned(launch, runId))).ConfigureAwait(false);
         try
         {
             await _store.AppendAsync(runId, "process-registered",
@@ -176,7 +337,7 @@ public sealed class ExecutionCoordinator : IDisposable
     public Task<QuiescenceResult> StopAsync(
         string runId, TimeSpan deadline, CancellationToken cancellationToken = default) =>
         RunExclusiveAsync(runId,
-            () => QuiesceAndRecordAsync(runId, WorkflowState.Stopped, "stopped", deadline, cancellationToken), cancellationToken);
+            () => QuiesceAndRecordAsync(runId, WorkflowState.Stopped, "stopped", deadline, cancellationToken), cancellationToken, cleanup: true);
 
     public Task<ResumeResult> ResumeAsync(string runId, CancellationToken cancellationToken = default) =>
         ResumeAsync(runId, TimeSpan.FromSeconds(30), cancellationToken);
@@ -197,7 +358,7 @@ public sealed class ExecutionCoordinator : IDisposable
     }
 
     public Task<QuiescenceResult> ReconcileStopAsync(string runId, TimeSpan deadline, CancellationToken cancellationToken = default) =>
-        RunExclusiveAsync(runId, () => QuiesceAndRecordAsync(runId, WorkflowState.Stopped, "stopped", deadline, cancellationToken, reconcileTerminal: true), cancellationToken);
+        RunExclusiveAsync(runId, () => QuiesceAndRecordAsync(runId, WorkflowState.Stopped, "stopped", deadline, cancellationToken, reconcileTerminal: true), cancellationToken, cleanup: true);
 
     // This cold cleanup entry cannot turn an active or unknown journal into terminal authority.
     public Task<QuiescenceResult> ReconcileTerminalStopAsync(string runId, TimeSpan deadline, CancellationToken cancellationToken = default) =>
@@ -417,9 +578,12 @@ public sealed class ExecutionCoordinator : IDisposable
         }
         else try
             {
-                var worktree = await _worktrees.ObserveAsync(prepared.Request.Worktree, cancellationToken).ConfigureAwait(false);
-                await _worktrees.EnsureDescendsFromAsync(prepared.Request.Worktree, prepared.Request.BaseCommit,
-                    worktree.HeadCommit, cancellationToken).ConfigureAwait(false);
+                var worktree = await (requestedState == WorkflowState.Stopped
+                    ? _worktrees.ObserveOwnedCleanupAsync(prepared.Request.Worktree, cancellationToken)
+                    : _worktrees.ObserveAsync(prepared.Request.Worktree, cancellationToken)).ConfigureAwait(false);
+                if (requestedState == WorkflowState.Stopped)
+                    await _worktrees.EnsureDescendsFromOwnedCleanupAsync(prepared.Request.Worktree, prepared.Request.BaseCommit, worktree.HeadCommit, cancellationToken).ConfigureAwait(false);
+                else await _worktrees.EnsureDescendsFromAsync(prepared.Request.Worktree, prepared.Request.BaseCommit, worktree.HeadCommit, cancellationToken).ConfigureAwait(false);
                 var facts = await ObserveOwnedFactsAsync(prepared.Request, worktree, true, cancellationToken).ConfigureAwait(false);
                 limitations.Add("External dependency, lease, and authorization-revocation facts belong to later adapters and are not claimed by the issue #5 core.");
                 checkpoint = new AgentCheckpoint(prepared.Request.RequestIdentity, worktree.HeadCommit, worktree.TreeId,
@@ -497,6 +661,12 @@ public sealed class ExecutionCoordinator : IDisposable
 
     private bool TryEnsureWriterOwnership(AgentRequest request)
     {
+        if (original is not null)
+        {
+            var binding = _worktrees.RequireOriginalBinding(request.Worktree, cleanup: cleanupStore.Value is not null);
+            return binding.RunId == request.RunId && _writers.TryGetValue(request.RunId, out var originalWriter) &&
+                binding.OwnsWriter(originalWriter) && originalWriter.WriterToken == request.WriterToken && originalWriter.ObserveCurrentNamespaceIdentity().Outcome == WriterNamespaceIdentityOutcome.Match;
+        }
         if (_writers.TryGetValue(request.RunId, out var current))
             return current.WriterToken == request.WriterToken;
         try
@@ -604,13 +774,29 @@ public sealed class ExecutionCoordinator : IDisposable
         return authorization;
     }
 
-    private static async Task<T> RunExclusiveAsync<T>(
-        string runId, Func<Task<T>> action, CancellationToken cancellationToken)
+    private async Task<T> RunExclusiveAsync<T>(
+        string runId, Func<Task<T>> action, CancellationToken cancellationToken, bool cleanup = false)
     {
+        if (original is not null && runId != originalRun) throw new WorkerEnvelopeException("Original scheduler cannot adopt another run.");
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cleanup ? default : original?.Token ?? default);
+        if (original is not null)
+        {
+            if (!cleanup) original.CheckWork();
+            var remaining = cleanup ? original.CleanupRemaining : original.WorkLimit - System.Diagnostics.Stopwatch.GetElapsedTime(original.OriginalStarted);
+            if (remaining <= TimeSpan.Zero) throw new TimeoutException("Original coordinator deadline expired before flow-lock admission.");
+            linked.CancelAfter(remaining);
+        }
         var flowLock = FlowLocks.GetOrAdd(runId, _ => new SemaphoreSlim(1, 1));
-        await flowLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try { return await action().ConfigureAwait(false); }
-        finally { flowLock.Release(); }
+        await flowLock.WaitAsync(linked.Token).ConfigureAwait(false);
+        var prior = cleanupStore.Value;
+        try
+        {
+            if (original is not null && cleanup) cleanupStore.Value = forwardStore.WithOriginalCleanup(); else original?.CheckWork();
+            var value = await action().ConfigureAwait(false);
+            if (original is not null && cleanup) _ = original.CleanupRemaining; else original?.CheckWork();
+            return value;
+        }
+        finally { cleanupStore.Value = prior; flowLock.Release(); }
     }
 
     public void Dispose()
