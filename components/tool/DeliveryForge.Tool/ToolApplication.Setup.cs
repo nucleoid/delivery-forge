@@ -62,19 +62,24 @@ public sealed partial class ToolApplication
                     var narrowed = await Observe("ActualSetupPlanSelection",
                         () => PlanSetupSelection.SelectAsync(profile.TemplatePin, planSelection, executor, life), life).ConfigureAwait(false);
                     selected = AutomaticSetup.RebaseSelected(narrowed.Configuration, narrowed.Root, state, life)
-                        with { ProfileRegistration = profile.Registration };
+                        with
+                    { ProfileRegistration = profile.Registration };
                 }
                 else selected = AutomaticSetup.Rebase(template with { MaximumCeiling = requestedCeiling }, state, life)
-                    with { ProfileRegistration = profile.Registration };
+                    with
+                { ProfileRegistration = profile.Registration };
                 life.Check();
                 return new("COMPLETE", "SETUP_PREPARED", "Registered repository template discovered and fresh paths prepared. Explicit plan selection is reconciled when supplied; host restrictions remain selected DATA, and no runtime capability or plan authorization was issued.", selected);
             }
             if (planSelection is not null || requested > DeliveryForge.Contracts.Models.AuthorizationCeiling.Plan)
                 return ToolResult.Incomplete("SETUP_EXECUTION_PROFILE_REQUIRED", "No independently selected repository execution profile is registered; ordinary paths do not require an owner decision.", new
                 {
-                    Repository = repository, RepositoryRoot = repo, RequestedCeiling = requestedCeiling,
+                    Repository = repository,
+                    RepositoryRoot = repo,
+                    RequestedCeiling = requestedCeiling,
                     RegistrationPath = RepositorySetupProfiles.Location(repository, repo, state),
-                    MissingPrerequisites = new[] { "INDEPENDENT_REPOSITORY_PROFILE_REGISTRATION_REQUIRED" }, RuntimeCertified = false
+                    MissingPrerequisites = new[] { "INDEPENDENT_REPOSITORY_PROFILE_REGISTRATION_REQUIRED" },
+                    RuntimeCertified = false
                 });
             var git = ResolveSetupGit(command.Get("git"));
             var reference = command.Get("reference");

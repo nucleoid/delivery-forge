@@ -212,8 +212,12 @@ public sealed class RepositorySetupProfileTests
             BoundedFiles.WriteNew(selectedRoot, bytes, original);
             var configuration = TrustedConfiguration.Load(setup.ConfigurationPath, original) with
             {
-                MaximumCeiling = "implement", ExpectedBundleIdentity = "selected-bundle-data", ExpectedContractIdentity = "selected-contract-data",
-                ExpectedWorkItem = "owner/example#8", ExpectedPlanCeiling = "plan", StandaloneRoot = new(selectedRoot, bytes.LongLength, BoundedFiles.Sha(bytes))
+                MaximumCeiling = "implement",
+                ExpectedBundleIdentity = "selected-bundle-data",
+                ExpectedContractIdentity = "selected-contract-data",
+                ExpectedWorkItem = "owner/example#8",
+                ExpectedPlanCeiling = "plan",
+                StandaloneRoot = new(selectedRoot, bytes.LongLength, BoundedFiles.Sha(bytes))
             };
             var template = Path.Combine(root, "owner-selected-template.json");
             BoundedFiles.WriteNew(template, JsonSerializer.SerializeToUtf8Bytes(configuration, BoundedFiles.Json), original);

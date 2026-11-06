@@ -106,8 +106,12 @@ public sealed class PlanSetupSelectionTests
                 "-c", "user.name=SelectionFixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false" }.Concat(args).ToArray();
             var capture = await executor.ExecuteAsync(new(git, argv, repo, new Dictionary<string, string>
             {
-                ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_GLOBAL"] = "NUL", ["GIT_CONFIG_SYSTEM"] = "NUL",
-                ["GIT_NO_REPLACE_OBJECTS"] = "1", ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_OPTIONAL_LOCKS"] = "0"
+                ["GIT_CONFIG_NOSYSTEM"] = "1",
+                ["GIT_CONFIG_GLOBAL"] = "NUL",
+                ["GIT_CONFIG_SYSTEM"] = "NUL",
+                ["GIT_NO_REPLACE_OBJECTS"] = "1",
+                ["GIT_TERMINAL_PROMPT"] = "0",
+                ["GIT_OPTIONAL_LOCKS"] = "0"
             }), original.Remaining, original.Token);
             Assert.True(capture.OwnedProcessQuiescent && capture.ExitCode == 0 && !capture.TimedOut && !capture.Cancelled, capture.StandardError);
         }
