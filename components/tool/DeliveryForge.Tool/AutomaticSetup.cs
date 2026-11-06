@@ -114,6 +114,35 @@ public static class AutomaticSetup
         // input. Validate the old topology before allocating another one;
         // rebasing must not quietly repair an invalid input selection.
         StandaloneEntrypoint.SeparateSelection(template, configurationPath, root);
+        // Rebase carries these trusted input selections unchanged. Refuse an
+        // old template whose worker/results/store could supply any of them.
+        // CheckpointRoot is a regenerated output, not a carried input.
+        var inputs = new List<string> { configurationPath, selected.Path, template.GitExecutable, root.InstalledHostAdmission.Path };
+        if (root.LinuxScopeProfile is { } scope) inputs.Add(scope.Path);
+        if (template.PolicyFile is { } policy) inputs.Add(policy);
+        if (template.Coordination is { } coordination)
+        {
+            inputs.Add(coordination.PrivateKeyPath);
+            inputs.Add(coordination.DeploymentEvidence.Path);
+        }
+        if (template.InstalledQuality is { } quality)
+        {
+            inputs.Add(quality.ArtifactRoot);
+            foreach (var gate in quality.Gates) inputs.Add(gate.Profile.Path);
+            if (quality.Registry is { } registry)
+            {
+                inputs.Add(registry.ArtifactRoot);
+                inputs.Add(registry.OwnerApproval.Path);
+            }
+        }
+        if (template.InstalledReview is { } review)
+        {
+            inputs.Add(review.ArtifactRoot);
+            inputs.Add(review.GitImage.Path);
+            if (review.IndependentReviewer is { } reviewer) inputs.Add(reviewer.Image.Path);
+        }
+        foreach (var output in new[] { root.WorkerPaths.Worktree, root.WorkerPaths.ResultDirectory, root.StoreRoot })
+            foreach (var input in inputs) BoundedFiles.Separate(output, input);
         return root;
     }
 
@@ -144,6 +173,10 @@ public static class AutomaticSetup
         var worker = prior?.WorkerPaths is { } previousWorker
             ? previousWorker with { Worktree = Path.Combine(run, "worktree"), ResultDirectory = Path.Combine(run, "results") }
             : new LocalWorkerPaths(Path.Combine(run, "worktree"), Path.Combine(run, "results"), [], []);
+        // Validate the intended Windows flat worker path before creating the
+        // control anchor, then validate its anchored physical form below.
+        if (OperatingSystem.IsWindows()) worker = worker with
+        { Worktree = BoundedFiles.Plain(Path.Combine(state, "worktrees", runId, "worktree"), true) };
         var selection = new StandaloneRootSelection("DeliveryForgeStandaloneRoot-v1", Path.Combine(run, "store"), worker,
             prior?.InstalledHostAdmission ?? Pin(unadmittedPath, unadmitted), prior?.LinuxScopeProfile);
         var rootBytes = Encode(selection);
@@ -162,7 +195,7 @@ public static class AutomaticSetup
         // Refuse an explicitly overlong root before attempting its deeper
         // control anchor; validate the actual physical spelling again below.
         if (OperatingSystem.IsWindows() && TrustedConfiguration.Ceiling(template.MaximumCeiling) >= DeliveryForge.Contracts.Models.AuthorizationCeiling.Implement)
-            RequireWindowsGitMetadataPath(Path.Combine(state, "worktrees", runId, "worktree"));
+            RequireWindowsGitMetadataPath(worker.Worktree);
         Directory.CreateDirectory(control);
         original.Check();
         _ = BoundedFiles.Plain(control, true);
@@ -179,8 +212,9 @@ public static class AutomaticSetup
             unadmittedPath = Path.Combine(control, "host-unadmitted.json");
             // Keep Windows Git's administrative path below its native fixed
             // bound without truncating repository keys or the fresh run UUID.
-            // State now exists through the same newly created control anchor.
-            var physicalState = BoundedFiles.Plain(DeliveryForge.Execution.Git.WorktreeManager.WindowsFinalPath(state), true);
+            // Derive state from this resolved child, never independently from
+            // an ancestor that may belong to a different packaged-app view.
+            var physicalState = PhysicalStateFromRun(run, key, runId);
             var worktree = BoundedFiles.Plain(Path.Combine(physicalState, "worktrees", runId, "worktree"), true);
             if (Directory.Exists(worktree) || File.Exists(worktree))
                 throw new IOException("New setup worktree already exists; no previous worktree is adopted.");
@@ -222,6 +256,19 @@ public static class AutomaticSetup
         BoundedFiles.WriteNew(rootPath, rootBytes, original);
         BoundedFiles.WriteNew(configurationPath, configurationBytes, original);
         return new(configurationPath, Pin(configurationPath, configurationBytes), rootPin, key, runId, run, selection);
+    }
+
+    internal static string PhysicalStateFromRun(string resolvedRun, string repositoryKey, string runId)
+    {
+        var current = Path.TrimEndingDirectorySeparator(BoundedFiles.Plain(resolvedRun, true));
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        foreach (var expected in new[] { runId, "runs", repositoryKey, "repos" })
+        {
+            if (!string.Equals(Path.GetFileName(current), expected, comparison))
+                throw new ToolUsageException("Resolved fresh run does not preserve its selected repos/key/runs/run identity.");
+            current = Path.GetDirectoryName(current) ?? throw new ToolUsageException("Resolved fresh run has no complete state ancestor.");
+        }
+        return BoundedFiles.Plain(current, true);
     }
 
     // The selected Git for Windows profile refuses $GIT_DIR beyond220 UTF-8

@@ -32,7 +32,7 @@ public sealed class AutomaticSetupTests
         Assert.Equal(physical, result.RunDirectory);
         Assert.Equal(Path.Combine(physical, "control", "configuration.json"), result.ConfigurationPath);
         Assert.Equal(Path.Combine(physical, "control", "root.json"), result.Root.Path);
-        var physicalState = DeliveryForge.Execution.Git.WorktreeManager.WindowsFinalPath(fixture.State);
+        var physicalState = AutomaticSetup.PhysicalStateFromRun(physical, result.RepositoryKey, result.RunId);
         Assert.Equal(Path.Combine(physicalState, "worktrees", result.RunId, "worktree"), result.Selection.WorkerPaths.Worktree);
         Assert.Equal(Path.Combine(physical, "results"), result.Selection.WorkerPaths.ResultDirectory);
         Assert.Equal(Path.Combine(physical, "store"), result.Selection.StoreRoot);
@@ -74,6 +74,107 @@ public sealed class AutomaticSetupTests
         Assert.Equal(220, System.Text.Encoding.UTF8.GetByteCount(Path.Combine(unicodeBoundary, ".git")));
         AutomaticSetup.RequireWindowsGitMetadataPath(unicodeBoundary);
         Assert.Throws<ToolUsageException>(() => AutomaticSetup.RequireWindowsGitMetadataPath(unicodeBoundary + "a"));
+    }
+
+    [Fact]
+    public void Fresh_run_suffix_selects_its_own_state_and_refuses_an_unexpected_namespace()
+    {
+        var fixture = Fixture.Create();
+        Directory.CreateDirectory(fixture.State);
+        var retained = Path.Combine(fixture.State, "existing-logical-state.DATA");
+        File.WriteAllText(retained, "preserved existing state");
+        var actualState = Path.Combine(fixture.Root, "redirected-child-state");
+        var key = new string('a', 64); var runId = "run-" + Guid.NewGuid().ToString("N");
+        var actualRun = Directory.CreateDirectory(Path.Combine(actualState, "repos", key, "runs", runId)).FullName;
+        Assert.Equal(actualState, AutomaticSetup.PhysicalStateFromRun(actualRun, key, runId));
+        Assert.NotEqual(fixture.State, AutomaticSetup.PhysicalStateFromRun(actualRun, key, runId));
+        Assert.Throws<ToolUsageException>(() => AutomaticSetup.PhysicalStateFromRun(actualRun, key, "run-other"));
+        Assert.Throws<ToolUsageException>(() => AutomaticSetup.PhysicalStateFromRun(actualRun, new string('b', 64), runId));
+        var wrong = Directory.CreateDirectory(Path.Combine(actualState, "other", key, "runs", runId)).FullName;
+        Assert.Throws<ToolUsageException>(() => AutomaticSetup.PhysicalStateFromRun(wrong, key, runId));
+        Assert.Equal("preserved existing state", File.ReadAllText(retained));
+    }
+
+    [Fact(Skip = "Windows flat path is selected before side effects.", SkipUnless = nameof(IsWindows))]
+    public void Windows_prospective_flat_worktree_overlap_refuses_before_creating_the_control_anchor()
+    {
+        var fixture = Fixture.Create(); using var original = Lifetime();
+        var first = AutomaticSetup.PreparePlan("owner/example", fixture.Repository, "refs/heads/main", fixture.Git, fixture.State, original);
+        var nextState = Path.Combine(fixture.Root, "flat-overlap-state");
+        var template = TrustedConfiguration.Load(first.ConfigurationPath, original) with
+        {
+            MaximumCeiling = "implement",
+            InstalledReview = new("review.json", "evidence.json", "sha256:" + new string('a', 64),
+                new(fixture.Git, 1, new string('a', 64)), "git version 2.0", Path.Combine(nextState, "worktrees"))
+        };
+        Assert.Throws<ToolUsageException>(() => AutomaticSetup.Rebase(template, nextState, original));
+        Assert.False(Directory.Exists(nextState));
+        Assert.Equal(first.Root, TrustedConfiguration.Load(first.ConfigurationPath, original).StandaloneRoot);
+    }
+
+    [Theory]
+    [InlineData("policy", "worktree")]
+    [InlineData("git", "results")]
+    [InlineData("coordination-key", "store")]
+    [InlineData("coordination-evidence", "worktree")]
+    [InlineData("reviewer-image", "store")]
+    [InlineData("quality-profile", "store")]
+    [InlineData("admission", "store")]
+    [InlineData("root", "store")]
+    public void Ordinary_template_cannot_inherit_trusted_inputs_from_old_output_namespaces(string role, string output)
+    {
+        var fixture = Fixture.Create(); using var original = Lifetime();
+        var first = AutomaticSetup.PreparePlan("owner/example", fixture.Repository, "refs/heads/main", fixture.Git, fixture.State, original);
+        var originalRoot = File.ReadAllBytes(first.Root.Path);
+        var template = TrustedConfiguration.Load(first.ConfigurationPath, original);
+        var oldOutput = output switch { "worktree" => first.Selection.WorkerPaths.Worktree,
+            "results" => first.Selection.WorkerPaths.ResultDirectory, _ => first.Selection.StoreRoot };
+        Directory.CreateDirectory(oldOutput);
+        var input = Path.Combine(oldOutput, "selected-input.DATA");
+        File.WriteAllText(input, "preserved old output content");
+        if (role == "policy") template = template with { PolicyFile = input };
+        if (role == "git") template = template with { GitExecutable = input };
+        if (role.StartsWith("coordination-", StringComparison.Ordinal)) template = template with
+        {
+            Coordination = new(new Uri("https://fixture.invalid"), "fixture", "principal",
+                role == "coordination-key" ? input : Path.Combine(fixture.Root, "unread-key"), Path.Combine(fixture.Root, "unused-checkpoints"),
+                new(role == "coordination-evidence" ? input : Path.Combine(fixture.Root, "unread-deployment"), 1, new string('a', 64)))
+        };
+        if (role == "reviewer-image") template = template with
+        {
+            InstalledReview = new("review.json", "evidence.json", "sha256:" + new string('a', 64),
+                new(fixture.Git, 1, new string('a', 64)), "git version 2.0", Path.Combine(fixture.Root, "unused-review"),
+                IndependentReviewer: new(new(input, 1, new string('a', 64)), "unexecuted-reviewer", 30))
+        };
+        if (role == "quality-profile") template = template with
+        {
+            InstalledQuality = new("quality/evidence.json", "sha256:" + new string('a', 64), Path.Combine(fixture.Root, "unused-quality"),
+            [
+                new("mutation", "mutate4csharp", new(input, 1, new string('a', 64)), "base", null, 30),
+                new("crap", "crap4csharp", new(Path.Combine(fixture.Root, "unread-crap"), 1, new string('a', 64)), "base", "tests/fixture.csproj", 30)
+            ])
+        };
+        if (role is "admission" or "root")
+        {
+            if (role == "root")
+            {
+                File.WriteAllBytes(input, originalRoot);
+                template = template with { StandaloneRoot = new(input, originalRoot.LongLength, BoundedFiles.Sha(originalRoot)) };
+            }
+            else
+            {
+                var bytes = File.ReadAllBytes(first.Selection.InstalledHostAdmission.Path); File.WriteAllBytes(input, bytes);
+                var selection = first.Selection with { InstalledHostAdmission = new(input, bytes.LongLength, BoundedFiles.Sha(bytes)) };
+                var rootBytes = JsonSerializer.SerializeToUtf8Bytes(selection, BoundedFiles.Json);
+                var path = Path.Combine(fixture.Root, "candidate-root.json"); File.WriteAllBytes(path, rootBytes);
+                template = template with { StandaloneRoot = new(path, rootBytes.LongLength, BoundedFiles.Sha(rootBytes)) };
+            }
+        }
+        var retainedInput = File.ReadAllBytes(input); var nextState = Path.Combine(fixture.Root, "refused-next-state");
+        Assert.Throws<ToolUsageException>(() => AutomaticSetup.Rebase(template, nextState, original));
+        Assert.False(Directory.Exists(nextState));
+        Assert.Equal(retainedInput, File.ReadAllBytes(input));
+        Assert.Equal(originalRoot, File.ReadAllBytes(first.Root.Path));
     }
 
     [Fact]
