@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $null = New-Item -ItemType Directory -Path $TestRoot -Force
 $results = [Collections.Generic.List[object]]::new()
 $originals = @{}
-foreach ($name in @('Find-ForgeCommand', 'Invoke-ForgeProcess', 'Read-ForgeInstallation', 'Get-ForgeBootstrapReport', 'Invoke-ForgeBootstrapInstall', 'Write-ForgeBootstrapReport', 'Get-ForgeSkillStatus', 'Get-ForgeSkillDestination')) { $originals[$name] = (Get-Item ('Function:' + $name)).ScriptBlock }
+foreach ($name in @('Find-ForgeCommand', 'Invoke-ForgeProcess', 'Read-ForgeInstallation', 'Get-ForgeBootstrapReport', 'Invoke-ForgeBootstrapInstall', 'Write-ForgeBootstrapReport', 'Get-ForgeSkillStatus', 'Get-ForgeSkillDestination', 'Save-ForgeUnknown')) { $originals[$name] = (Get-Item ('Function:' + $name)).ScriptBlock }
 function Assert($Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 function Mock([string]$Name, [scriptblock]$Body) { Set-Item ('Function:script:' + $Name) $Body }
 function Test([string]$Name, [scriptblock]$Body) {
@@ -243,6 +243,121 @@ exit $script:ForgeCommandExitCode
             Assert ($observed51.Cpu -eq '2' -and $observed51.Heap -eq '0x100000000') 'Windows PowerShell hop bypassed resource-aware launcher.'
             Assert ($ps51.Stderr -match 'RESTORED=9' -and @(Get-Content -LiteralPath $count).Count -eq 1) 'Windows PowerShell command replayed or caller environment changed.'
         } finally { $env:FORGE_BOOTSTRAP_FIXTURE_COUNT=$before }
+    }
+    Test 'Real generated facade preserves Unicode dates common options and zero argv from PS7 PS51 and OEM input' {
+        $fixtureRoot=Join-Path $TestRoot 'generated facade actual'
+        $null=New-Item -ItemType Directory -Path (Join-Path $fixtureRoot 'bin'),(Join-Path $fixtureRoot 'bootstrap')
+        $actualBootstrap=Join-Path (Split-Path -Parent $PSScriptRoot) 'bootstrap-delivery-forge.ps1'
+        $selectedBootstrap=Join-Path $fixtureRoot 'bootstrap/selected.ps1'
+        $footer=@'
+function Get-ForgeBootstrapReport { [pscustomobject]@{Checks=@();AutomatableActions=@();ExitCode=0} }
+function Read-ForgeInstallation { Get-Content -LiteralPath $env:DF_FIXTURE_RECORD -Raw|ConvertFrom-Json }
+function Find-ForgeCommand {param($Name) if($Name -eq 'pwsh'){$env:DF_FIXTURE_PWSH}else{throw 'Unexpected prerequisite probe in selected fixture.'}}
+function Invoke-ForgeBootstrapInstall {throw 'An entered failed command must not be repaired or replayed.'}
+'@
+        [IO.File]::WriteAllText($selectedBootstrap,[IO.File]::ReadAllText($actualBootstrap)+"`r`n"+$footer)
+        $tool=Join-Path $fixtureRoot 'inert tool.ps1'
+        [IO.File]::WriteAllText($tool,@'
+[IO.File]::AppendAllText($env:DF_FIXTURE_COUNTER,"entered`n")
+[Console]::Write((@{Values=@($args);Count=$args.Count;Cpu=$env:DOTNET_PROCESSOR_COUNT;Heap=$env:DOTNET_GCHeapHardLimit}|ConvertTo-Json -Compress))
+exit 17
+'@)
+        $hostPath=(Get-Process -Id $PID).Path
+        $record=@{NativeStartReceiptSupported=$true;BootstrapScript=$selectedBootstrap;BootstrapScriptSha256=(Get-FileHash -LiteralPath $selectedBootstrap).Hash.ToLowerInvariant();DotNetHost=$hostPath;ToolAssembly=$tool;NativeLauncher=(Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'scripts/delivery-forge.ps1')}
+        $recordPath=Join-Path $fixtureRoot 'installation.json'
+        $record|ConvertTo-Json -Depth 6|Set-Content -LiteralPath $recordPath -Encoding utf8NoBOM
+        $facade=Join-Path $fixtureRoot 'bin/delivery-forge.ps1'
+        [IO.File]::WriteAllText($facade,(Get-ForgeLauncherContent))
+        $counter=Join-Path $fixtureRoot 'entries.txt'
+        $environment=@{DF_FIXTURE_RECORD=$recordPath;DF_FIXTURE_PWSH=$hostPath;DF_FIXTURE_COUNTER=$counter;DOTNET_PROCESSOR_COUNT='9'}
+        $unicode='path-'+[char]0x65E5+[char]0x672C+'-'+[char]::ConvertFromUtf32(0x1F680)
+        $values=@($unicode,'2026-01-15T10:00:00Z','2026-01-15T10:00:00+13:00','','trailing slash','--body','-Verbose','-Debug','-ErrorAction','SilentlyContinue','-?','-f','-ForgeArguments','--')
+        foreach($origin in @($hostPath,(Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'))){
+            $result=Invoke-ForgeProcess $origin (@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$facade)+$values) -Environment $environment -TimeoutSeconds 30
+            Assert ($result.ExitCode -eq 17) 'Generated facade lost actual failed-command exit.'
+            $seen=$result.Stdout|ConvertFrom-Json
+            Assert ($seen.Count -eq $values.Count -and ($seen.Values|ConvertTo-Json -Compress) -ceq ($values|ConvertTo-Json -Compress)) 'Generated facade changed Unicode/date/option/empty argv.'
+            Assert ($seen.Cpu -eq '2' -and $seen.Heap -eq '0x100000000') 'Generated facade bypassed selected native resource settings.'
+        }
+        $oem=Join-Path $fixtureRoot 'oem caller.ps1'
+        [IO.File]::WriteAllText($oem,@'
+param([string]$SelectedFacade,[string]$Wire)
+[Console]::InputEncoding=[Text.Encoding]::GetEncoding(437)
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+$encoded=$Wire|ConvertFrom-Json
+$decoded=@(foreach($item in $encoded.Values64){[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($item))})
+& $SelectedFacade @decoded
+exit $LASTEXITCODE
+'@)
+        $wire=@{Values64=@($values|ForEach-Object{[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_))})}|ConvertTo-Json -Compress
+        $result=Invoke-ForgeProcess $hostPath @('-NoProfile','-NonInteractive','-File',$oem,$facade,$wire) -Environment $environment -TimeoutSeconds 30
+        Assert ($result.ExitCode -eq 17) 'OEM-origin command exit changed.'
+        $seen=$result.Stdout|ConvertFrom-Json
+        Assert (($seen.Values|ConvertTo-Json -Compress) -ceq ($values|ConvertTo-Json -Compress)) 'OEM input encoding changed actual argv.'
+        $empty=Invoke-ForgeProcess $hostPath @('-NoProfile','-NonInteractive','-File',$facade) -Environment $environment -TimeoutSeconds 30
+        Assert ($empty.ExitCode -eq 17) 'No-argument command did not enter exactly once.'
+        $seen=$empty.Stdout|ConvertFrom-Json
+        Assert ($seen.Count -eq 0) 'Generated facade manufactured an empty argument for no argv.'
+        Assert (@(Get-Content -LiteralPath $counter).Count -eq 4) 'One generated-facade invocation entered more than once.'
+        $receipts=@(Get-ChildItem -LiteralPath (Join-Path $fixtureRoot 'bootstrap') -Recurse -Filter 'native-start.json' -File)
+        Assert ($receipts.Count -eq 4) 'Native PID/start receipts were not retained for each actual entry.'
+        foreach($receiptFile in $receipts){
+            $receipt=Get-Content -LiteralPath $receiptFile.FullName -Raw|ConvertFrom-Json
+            Assert ($receipt.Kind -eq 'DeliveryForgeNativeStart-v1' -and $receipt.NativePid -gt 0 -and $receipt.LauncherPid -gt 0 -and [DateTimeOffset]::Parse($receipt.NativeStartUtc) -le [DateTimeOffset]::UtcNow) 'Actual native PID/start receipt is incomplete.'
+        }
+        Assert (-not(Test-Path -LiteralPath (Join-Path $fixtureRoot 'bootstrap.lock'))) 'Known failed command retained an UNKNOWN lock.'
+    }
+    Test 'Actual native deadline records PID and attempts termination while retaining UNKNOWN125' {
+        $case=Join-Path $TestRoot 'actual native deadline';$null=New-Item -ItemType Directory -Path $case
+        $tool=Join-Path $case 'bounded sleeper.ps1'
+        [IO.File]::WriteAllText($tool,'Start-Sleep -Seconds 15; exit 0')
+        $receiptPath=Join-Path $case 'native-start.json'
+        $hostPath=(Get-Process -Id $PID).Path
+        $native=Join-Path (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)) 'scripts/delivery-forge.ps1'
+        $result=Invoke-ForgeProcess $hostPath @('-NoProfile','-NonInteractive','-File',$native,'-DotNetHost',$hostPath,'-ToolAssembly',$tool,'-MaximumSeconds','1','-NativeStartReceipt',$receiptPath) -TimeoutSeconds 15
+        Assert ($result.ExitCode -eq 125 -and $result.Stderr -match 'DFCLI_LAUNCHER_UNKNOWN' -and $result.Stderr -match 'killAttempted=True') 'Deadline did not preserve UNKNOWN and termination evidence.'
+        $receipt=Get-Content -LiteralPath $receiptPath -Raw|ConvertFrom-Json
+        Assert ($receipt.NativePid -gt 0 -and $receipt.NativeStartUtc) 'Deadline lacks the actual entered PID/start.'
+        $sameProcessAlive=$true
+        for($i=0;$i -lt 10 -and $sameProcessAlive;$i++){
+            $observed=Get-Process -Id $receipt.NativePid -ErrorAction SilentlyContinue
+            $sameProcessAlive=$observed -and $observed.StartTime.ToUniversalTime().ToString('o') -eq $receipt.NativeStartUtc
+            if($sameProcessAlive){Start-Sleep -Milliseconds 100}
+        }
+        Assert (-not $sameProcessAlive) 'This actual single-process fixture survived best-effort termination.'
+        # This finite fixture proves its observed root exited; it does not turn
+        # arbitrary process-tree UNKNOWN outcomes into a closure certificate.
+    }
+    Test 'Invalid UTF16 surrogate is refused before original native entry' {
+        $state=Join-Path $TestRoot 'invalid-surrogate-state';$null=New-Item -ItemType Directory -Path $state
+        $script:InvalidEntries=0
+        Mock Get-ForgeBootstrapReport {[pscustomobject]@{Checks=@();AutomatableActions=@();ExitCode=0}}
+        Mock Read-ForgeInstallation {[pscustomobject]@{DotNetHost=(Get-Process -Id $PID).Path;ToolAssembly=$PSCommandPath;NativeLauncher=(Join-Path (Split-Path -Parent $PSScriptRoot) 'delivery-forge.ps1')}}
+        Mock Find-ForgeCommand {(Get-Process -Id $PID).Path}
+        Mock Invoke-ForgeProcess {$script:InvalidEntries++;throw 'Invalid scalar must not enter a native process.'}
+        try { Invoke-ForgeCommand $state @([string][char]0xD800) } catch { Assert ($_.Exception.ToString() -match 'EncoderFallback|Unable to translate') 'A different error hid invalid UTF16 refusal.' }
+        Assert ($script:InvalidEntries -eq 0 -and $script:ForgeCommandExitCode -eq 1) 'Invalid surrogate was silently replaced or entered.'
+        Assert (-not(Test-Path -LiteralPath (Join-Path $state 'bootstrap.lock'))) 'Known pre-entry validation refusal retained a lock.'
+    }
+    Test 'Failed UNKNOWN persistence keeps exit125 and the pre-entry replay barrier' {
+        $state=Join-Path $TestRoot 'unknown-save-failure';$null=New-Item -ItemType Directory -Path $state
+        $script:UnknownEntries=0
+        Mock Get-ForgeBootstrapReport {[pscustomobject]@{Checks=@();AutomatableActions=@();ExitCode=0}}
+        Mock Read-ForgeInstallation {[pscustomobject]@{DotNetHost=(Get-Process -Id $PID).Path;ToolAssembly=$PSCommandPath;NativeLauncher=(Join-Path (Split-Path -Parent $PSScriptRoot) 'delivery-forge.ps1')}}
+        Mock Find-ForgeCommand {(Get-Process -Id $PID).Path}
+        Mock Invoke-ForgeProcess {$script:UnknownEntries++;[pscustomobject]@{ExitCode=125;Stdout='';Stderr=''}}
+        Mock Save-ForgeUnknown {throw 'Injected unavailable disk for UNKNOWN receipt.'}
+        Invoke-ForgeCommand $state @('implement')
+        Assert ($script:ForgeCommandExitCode -eq 125 -and $script:UnknownEntries -eq 1) 'Failed UNKNOWN save replaced status125 or replayed command.'
+        Assert (Test-Path -LiteralPath (Join-Path $state 'bootstrap.lock')) 'No persistent pre-entry replay barrier remains.'
+        # Model the next fresh caller; the on-disk barrier must work independently
+        # of the previous caller's in-memory sticky flag and failed receipt write.
+        $script:ForgeBootstrapUnsettled=$false
+        Set-Item Function:script:Get-ForgeBootstrapReport $originals['Get-ForgeBootstrapReport']
+        Mock Find-ForgeCommand {throw 'Retained lock must refuse before command discovery.'}
+        Mock Write-ForgeBootstrapReport {}
+        Invoke-ForgeCommand $state @('implement')
+        Assert ($script:ForgeCommandExitCode -eq 2 -and $script:UnknownEntries -eq 1) 'A new caller replayed after failed UNKNOWN persistence.'
     }
     Test 'Native quoting handles empty values, spaces, embedded quotes and trailing slashes' {
         Assert ((ConvertTo-ForgeNativeArgument '') -eq '""') 'Empty argument lost.'

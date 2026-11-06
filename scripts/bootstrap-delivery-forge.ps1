@@ -55,6 +55,16 @@ function Assert-ForgeWithin([string]$Parent, [string]$Child) {
     if (-not [IO.Path]::GetFullPath($Child).StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'An installation path escaped its selected parent.' }
 }
 
+function ConvertTo-ForgeWireString([AllowEmptyString()][string]$Value) {
+    # ASCII-only private wire value; strict UTF8 refuses lone surrogates.
+    $utf8 = New-Object Text.UTF8Encoding($false, $true)
+    [Convert]::ToBase64String($utf8.GetBytes($Value))
+}
+
+function Write-ForgeDiagnostic([string]$Message) {
+    try { [Console]::Error.WriteLine($Message) } catch { }
+}
+
 function ConvertTo-ForgeNativeArgument([AllowEmptyString()][string]$Value) {
     # CommandLineToArgvW quoting. No cmd.exe or interpolated shell command.
     if ($Value -match '[\r\n\x00]') { throw 'Native arguments cannot contain control characters.' }
@@ -144,14 +154,24 @@ function Invoke-ForgeProcess {
         [Diagnostics.Stopwatch]$Clock, [int]$MaximumSeconds = 1200, [switch]$ForwardOutput, [string]$StandardInput)
     $timeout = [Math]::Min($TimeoutSeconds, (Get-ForgeRemainingSeconds $Clock $MaximumSeconds 5))
     if ($timeout -lt 1) { throw 'The original bootstrap/command deadline expired before native entry.' }
+    # Validate every process path/argument before native entry. The Windows
+    # process API carries Unicode directly; only internal stdin needs encoding.
+    $executable64 = ConvertTo-ForgeWireString $Executable
+    if ($WorkingDirectory) { $null = ConvertTo-ForgeWireString $WorkingDirectory }
+    $argument64 = @()
+    foreach ($argument in $Arguments) {
+        if ($null -eq $argument) { throw 'Null is not a native argument; use an explicit empty string.' }
+        $argument64 += ConvertTo-ForgeWireString $argument
+    }
     $info = New-Object Diagnostics.ProcessStartInfo
     $info.FileName = $Executable; $inputText = $StandardInput
     if ([IO.Path]::GetExtension($Executable) -in @('.ps1', '.cmd', '.bat')) {
         $shell = Find-ForgeCommand 'pwsh'
         if (-not $shell) { $shell = "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" }
-        $inputText = @{ Executable = $Executable; Arguments = @($Arguments) } | ConvertTo-Json -Depth 5 -Compress
+        $inputText = @{ Executable64 = $executable64; Arguments64 = @($argument64) } | ConvertTo-Json -Depth 5 -Compress
+        $null = ConvertTo-ForgeWireString $shell
         $info.FileName = $shell
-        $Arguments = @('-NoProfile', '-NonInteractive', '-Command', '$r=[Console]::In.ReadToEnd()|ConvertFrom-Json;$a=@($r.Arguments);& $r.Executable @a;if($null -eq $LASTEXITCODE){exit 125}else{exit $LASTEXITCODE}')
+        $Arguments = @('-NoProfile', '-NonInteractive', '-Command', '$r=[Console]::In.ReadToEnd()|ConvertFrom-Json;$u=New-Object Text.UTF8Encoding($false,$true);$e=$u.GetString([Convert]::FromBase64String($r.Executable64));$a=@($r.Arguments64|ForEach-Object{$u.GetString([Convert]::FromBase64String($_))});& $e @a;if($null -eq $LASTEXITCODE){exit 125}else{exit $LASTEXITCODE}')
     }
     $info.Arguments = (@($Arguments | ForEach-Object { ConvertTo-ForgeNativeArgument $_ }) -join ' ')
     $info.UseShellExecute = $false; $info.CreateNoWindow = $true
@@ -159,9 +179,10 @@ function Invoke-ForgeProcess {
     if ($WorkingDirectory) { $info.WorkingDirectory = $WorkingDirectory }
     foreach ($key in $Environment.Keys) { $info.EnvironmentVariables[$key] = [string]$Environment[$key] }
     $process = New-Object Diagnostics.Process; $process.StartInfo = $info
-    $stdout = $null; $stderr = $null; $started = $false; $settled = $false
+    $stdout = $null; $stderr = $null; $started = $false; $settled = $false; $nativePid = $null; $nativeStart = 'unobserved'
     try {
         if (-not $process.Start()) { throw 'Native command did not start.' }; $started = $true
+        $nativePid = $process.Id; $nativeStart = $process.StartTime.ToUniversalTime().ToString('o')
         if ($ForwardOutput) {
             $stdout = $process.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())
             $stderr = $process.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
@@ -181,7 +202,8 @@ function Invoke-ForgeProcess {
     } catch {
         if ($started -and -not $settled) {
             $script:ForgeBootstrapUnsettled = $true
-            if (-not $ForwardOutput) { try { if (-not $process.HasExited) { if ($PSVersionTable.PSVersion.Major -ge 7) { $process.Kill($true) } else { $process.Kill() } } } catch { } }
+            try { if (-not $process.HasExited) { if ($PSVersionTable.PSVersion.Major -ge 7) { $process.Kill($true) } else { $process.Kill() } } } catch { }
+            Write-ForgeDiagnostic ("FORGE_BOOTSTRAP_UNKNOWN_PROCESS: pid={0}; startUtc={1}; kill was best-effort and does not prove tree closure." -f $nativePid, $nativeStart)
             throw 'FORGE_BOOTSTRAP_UNKNOWN: native process/output completion is unverified; preserve evidence and do not retry automatically.'
         }
         throw
@@ -234,6 +256,13 @@ function Read-ForgeInstallationSelection([string]$Root) {
     } catch { $null }
 }
 
+function Test-ForgeNativeStartReceiptParameter([string]$Path) {
+    $tokens = $null; $errors = $null
+    $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
+    if ($errors.Count -gt 0) { throw 'Pinned native launcher has parse errors.' }
+    @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'NativeStartReceipt' }).Count -eq 1
+}
+
 function Read-ForgeInstallation([string]$Root) {
     try {
         $record = Read-ForgeInstallationSelection $Root
@@ -244,6 +273,8 @@ function Read-ForgeInstallation([string]$Root) {
             $hashField = $field + 'Sha256'
             if ((Get-FileHash -LiteralPath $selected -Algorithm SHA256).Hash.ToLowerInvariant() -ne $record.$hashField) { return $null }
         }
+        if ($null -ne $record.NativeStartReceiptSupported -and $record.NativeStartReceiptSupported -isnot [bool]) { return $null }
+        if ($record.NativeStartReceiptSupported -eq $true -and -not (Test-ForgeNativeStartReceiptParameter $record.NativeLauncher)) { return $null }
         Assert-ForgeWithin $Root $record.ToolAssembly
         $null = Assert-ForgePlainPath $record.ToolAssembly
         if (-not (Test-Path -LiteralPath $record.ToolAssembly -PathType Leaf)) { return $null }
@@ -454,8 +485,7 @@ function Install-ForgeSkill([string]$SelectedSource, [string]$Destination, [stri
 function Get-ForgeLauncherContent {
     @'
 #requires -Version 5.1
-[CmdletBinding()]
-param([Parameter(ValueFromRemainingArguments = $true)][string[]]$ForgeArguments)
+[string[]]$forwarded = @($args)
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $recordPath = Join-Path $root 'installation.json'
@@ -467,13 +497,20 @@ $cursor = $bootstrap
 while ($cursor) { if (Test-Path -LiteralPath $cursor) { if ((Get-Item -LiteralPath $cursor -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Bootstrap selection is redirected.' } }; $cursor = [IO.Path]::GetDirectoryName($cursor) }
 if ((Get-FileHash -LiteralPath $bootstrap -Algorithm SHA256).Hash.ToLowerInvariant() -ne $record.BootstrapScriptSha256) { throw 'Bootstrap selection hash differs.' }
 . $bootstrap
-Invoke-ForgeCommand $root $ForgeArguments
+Invoke-ForgeCommand $root -Arguments $forwarded
 exit $script:ForgeCommandExitCode
 '@
 }
 
 function Invoke-ForgeCommand([string]$Root, [string[]]$Arguments, [int]$MaximumSeconds = 1200) {
     $script:ForgeCommandExitCode = 1; $clock = [Diagnostics.Stopwatch]::StartNew()
+    $commandLock = $null; $knownSettled = $false
+    if ($null -eq $Arguments) { $Arguments = [string[]]@() }
+    $argument64 = @()
+    foreach ($argument in $Arguments) {
+        if ($null -eq $argument) { throw 'Null is not a command argument; use an explicit empty string.' }
+        $argument64 += ConvertTo-ForgeWireString $argument
+    }
     $required = @(Get-ForgeRequiredAuthentication $Arguments)
     try {
         $diagnostic = $Arguments.Count -eq 1 -and $Arguments[0] -in @('--help', '--version')
@@ -488,16 +525,47 @@ function Invoke-ForgeCommand([string]$Root, [string[]]$Arguments, [int]$MaximumS
         $installation = Read-ForgeInstallation $Root
         if (-not $installation) { throw 'Installation readback failed; original command was not started.' }
         $pwsh = Find-ForgeCommand 'pwsh'; if (-not $pwsh) { throw 'The selected PowerShell7 launcher host is missing.' }
+        $null = ConvertTo-ForgeWireString $Root
+        $attempt = Join-Path $Root ('bootstrap/command-' + [guid]::NewGuid().ToString('N'))
+        Assert-ForgeWithin $Root $attempt; $null = Assert-ForgePlainPath $attempt -Directory
+        $null = New-Item -ItemType Directory -Path $attempt
+        $receipt = Join-Path $attempt 'native-start.json'
+        $payload = @{ NativeLauncher64 = (ConvertTo-ForgeWireString $installation.NativeLauncher); DotNetHost64 = (ConvertTo-ForgeWireString $installation.DotNetHost); ToolAssembly64 = (ConvertTo-ForgeWireString $installation.ToolAssembly); NativeStartReceipt64 = (ConvertTo-ForgeWireString $receipt); NativeStartReceiptSupported = ($installation.NativeStartReceiptSupported -eq $true); Arguments64 = @($argument64) }
+        $lockPath = Join-Path $Root 'bootstrap.lock'; $null = Assert-ForgePlainPath $lockPath
+        $commandLock = [IO.File]::Open($lockPath, 'CreateNew', 'ReadWrite', 'None')
+        # The durable lock is born and flushed BEFORE any original CLI can start.
+        $containing = Get-Process -Id $PID
+        $lockData = @{ Kind = 'DeliveryForgeCommandOriginal-v1'; ContainingPid = $PID; ContainingStartUtc = $containing.StartTime.ToUniversalTime().ToString('o'); AttemptDirectory = $attempt; NativeStartReceipt = $receipt } | ConvertTo-Json -Depth 5 -Compress
+        $lockBytes = (New-Object Text.UTF8Encoding $false).GetBytes($lockData)
+        $commandLock.Write($lockBytes, 0, $lockBytes.Length); $commandLock.Flush($true)
+        # Recheck the selected immutable payload while holding its install lock.
+        $rechecked = Read-ForgeInstallation $Root
+        if (-not $rechecked -or $rechecked.ToolSha256 -ne $installation.ToolSha256 -or $rechecked.NativeLauncherSha256 -ne $installation.NativeLauncherSha256) { throw 'Selected installation changed before original entry.' }
         $remaining = Get-ForgeRemainingSeconds $clock $MaximumSeconds 6
         if ($remaining -lt 1) { throw 'Original invocation deadline expired before command entry.' }
-        $payload = @{ NativeLauncher = $installation.NativeLauncher; DotNetHost = $installation.DotNetHost; ToolAssembly = $installation.ToolAssembly; MaximumSeconds = $remaining; Arguments = @($Arguments) } | ConvertTo-Json -Depth 5 -Compress
-        $fixed = '$r=[Console]::In.ReadToEnd()|ConvertFrom-Json; & $r.NativeLauncher -DotNetHost $r.DotNetHost -ToolAssembly $r.ToolAssembly -MaximumSeconds $r.MaximumSeconds -ForgeArguments @($r.Arguments); if($null -eq $LASTEXITCODE){exit 125}else{exit $LASTEXITCODE}'
-        $result = Invoke-ForgeProcess $pwsh @('-NoProfile', '-NonInteractive', '-Command', $fixed) -TimeoutSeconds ($remaining + 1) -StandardInput $payload -ForwardOutput -Clock $clock -MaximumSeconds $MaximumSeconds
+        $payload.MaximumSeconds = $remaining
+        $wire = $payload | ConvertTo-Json -Depth 5 -Compress
+        $fixed = '$r=[Console]::In.ReadToEnd()|ConvertFrom-Json;$u=New-Object Text.UTF8Encoding($false,$true);$l=$u.GetString([Convert]::FromBase64String($r.NativeLauncher64));$h=$u.GetString([Convert]::FromBase64String($r.DotNetHost64));$t=$u.GetString([Convert]::FromBase64String($r.ToolAssembly64));$p=$u.GetString([Convert]::FromBase64String($r.NativeStartReceipt64));$a=@($r.Arguments64|ForEach-Object{$u.GetString([Convert]::FromBase64String($_))});$o=@{DotNetHost=$h;ToolAssembly=$t;MaximumSeconds=$r.MaximumSeconds;ForgeArguments=$a};if($r.NativeStartReceiptSupported -eq $true){$o.NativeStartReceipt=$p};& $l @o;if($null -eq $LASTEXITCODE){exit 125}else{exit $LASTEXITCODE}'
+        $result = Invoke-ForgeProcess $pwsh @('-NoProfile', '-NonInteractive', '-Command', $fixed) -TimeoutSeconds ($remaining + 1) -StandardInput $wire -ForwardOutput -Clock $clock -MaximumSeconds $MaximumSeconds
         $script:ForgeCommandExitCode = [int]$result.ExitCode
-        if ($result.ExitCode -eq 125) { Save-ForgeUnknown $Root }
+        $knownSettled = $result.ExitCode -ne 125
+        if (-not $knownSettled) {
+            $script:ForgeCommandExitCode = 125; $script:ForgeBootstrapUnsettled = $true
+            try { Save-ForgeUnknown $Root } catch { Write-ForgeDiagnostic 'FORGE_BOOTSTRAP_UNKNOWN_LOCK_UPDATE_FAILED: exit125 retained; the pre-entry lock and native-start receipt must be preserved.' }
+        }
     } catch {
-        if ($script:ForgeBootstrapUnsettled) { Save-ForgeUnknown $Root; $script:ForgeCommandExitCode = 125 }
-        [Console]::Error.WriteLine($_.Exception.Message)
+        if ($script:ForgeBootstrapUnsettled) {
+            $script:ForgeCommandExitCode = 125
+            try { Save-ForgeUnknown $Root } catch { Write-ForgeDiagnostic 'FORGE_BOOTSTRAP_UNKNOWN_LOCK_UPDATE_FAILED: exit125 retained; do not retry.' }
+        } else { $knownSettled = $true } # No original entry occurred on this failure.
+        Write-ForgeDiagnostic $_.Exception.Message
+    } finally {
+        if ($commandLock) {
+            try { $commandLock.Dispose() } catch { Write-ForgeDiagnostic 'Command lock close failed; preserve the selected lock.'; $knownSettled = $false }
+            if ($knownSettled -and -not $script:ForgeBootstrapUnsettled) {
+                try { [IO.File]::Delete((Join-Path $Root 'bootstrap.lock')) } catch { Write-ForgeDiagnostic 'Settled command lock could not be removed; inspect it before retrying.' }
+            }
+        }
     }
 }
 
@@ -673,6 +741,7 @@ function Invoke-ForgeBootstrapInstall {
             Write-ForgeImmutableBytes $nativeLauncher $launcherBytes
             $installation.NativeLauncher = $nativeLauncher; $installation.NativeLauncherBytes = $launcherBytes.Length
             $installation.NativeLauncherSha256 = (Get-FileHash -LiteralPath $nativeLauncher -Algorithm SHA256).Hash.ToLowerInvariant()
+            $installation.NativeStartReceiptSupported = Test-ForgeNativeStartReceiptParameter $nativeLauncher
         }
         $bootstrapBytes = [IO.File]::ReadAllBytes($PSCommandPath)
         $bootstrapHash = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()

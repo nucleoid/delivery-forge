@@ -52,14 +52,19 @@ installed privately, with Microsoft's installer, under
 graph from nuget.org, builds the Linux gate payload and Windows CLI, packs the
 tool, installs only from that newly prepared local feed, and runs real help/version
 startup checks. Build servers are disabled, SDK process count is two, the managed
-heap ceiling is four GiB, and the bootstrap's work ceiling is twenty minutes.
+heap ceiling is four GiB. Bootstrap uses one original twenty-minute deadline
+for prerequisite probes, repair and command reporting.
 The process-count and heap settings are .NET process settings, not OS CPU/RAM
 enforcement or certification of an agent execution runtime. The exact
 resource-aware launcher asset from the selected package is materialized unchanged
 and hashed as the installation's `NativeLauncher`. The shared bootstrap logic is
 retained as its immutable versioned `BootstrapScript`.
-The native launcher receives only the remaining original command allowance; its exit, both
-output streams and UNKNOWN handling remain the command boundary.
+The native launcher receives only the remaining original command allowance and
+observes native exit and both output streams. These reporting deadlines do not
+create an OS job or establish a hard process-tree lifetime bound. An independently
+admitted execution owner must still enforce its actual execution limits. On
+uncertain native/output completion the wrapper attempts best-effort tree
+termination and retains UNKNOWN; a kill attempt does not prove closure.
 
 The default layout is:
 
@@ -70,6 +75,7 @@ The default layout is:
   installations\<commit>-<nonce>\        isolated CLI payload
   sdk\<exact-version>\                   private SDK, when required
   bootstrap\attempt-<nonce>\             source, build/install logs and reports
+  bootstrap\command-<nonce>\native-start.json  native PID/start observations
 
 %USERPROFILE%\.agents\skills\delivery-forge\   fresh Codex skill
 %USERPROFILE%\.claude\skills\delivery-forge\   Claude Code skill
@@ -106,7 +112,7 @@ Invoke the installed launcher, rather than the SDK-generated raw shim:
 
 Before starting the actual CLI, the launcher checks prerequisites. If installable
 dependencies are missing, it runs bootstrap once and rechecks the installation
-within the original twenty-minute command allowance. It then invokes the pinned
+within the original twenty-minute invocation deadline. It then invokes the pinned
 resource-aware launcher for the original CLI command once. It never repeats an implementation,
 publication or other already-entered command after a failure. Authentication-only
 failures do not trigger reinstalling. Runtime admission, Continuum, policy and plan
@@ -144,8 +150,15 @@ existing unmanaged or edited skill (including additional untracked files) is
 preserved and reported as a conflict; no automatic overwrite is attempted. Failed
 CLI prefixes and source/build evidence remain in their attempt directories. A
 second invocation uses a fresh attempt rather than adopting a partial prefix.
-An unresolved native process/IO disposition keeps `bootstrap.lock`; an agent must
-not delete that lock or retry blindly. Inspect and reconcile that attempt first.
+Before the original CLI can start, bootstrap creates and flushes `bootstrap.lock`
+as a replay barrier. It records the containing PID/start time and points to the
+unique command attempt's `native-start.json`; after native birth that receipt
+records the launcher and actual native PID/start times, without argv or account
+data. UNKNOWN retains the lock, available receipt and diagnostics for an operator.
+A failed receipt or diagnostic update does not authorize replay. Do not delete the
+lock or infer closure from a PID alone: inspect the exact PID/start observations
+and reconcile process/output state first. Best-effort termination remains UNKNOWN
+until independently resolved.
 
 An agent's normal workflow is: run `Check -Json`, run `Install -Json` when there
 are automatable actions, explain only the remaining human actions, and use the
@@ -164,10 +177,12 @@ pwsh -NoProfile -File .\scripts\tests\bootstrap-delivery-forge.Tests.ps1
 These exercise reports, authentication-routing decisions, preservation, filesystem
 behavior, one-time automatic repair and actual native argument transport. Public
 CI runs the source-owned controls on Windows and retains their JSON results.
-Their fixture or simulated-install results do not prove real installation. An
-actual warm-machine check/install and a fresh Windows laptop/VM installation are
-separate acceptance scopes; neither manufactures host conformance or repository
-execution authority. The bootstrap
+Their fixture or simulated-install results do not prove real installation. Real
+restore/build/package/private-install, idempotence and help/version results are
+accepted only for their observed subscopes; they do not turn a failed whole
+attempt or unfinished repair-then-command check into PASS. A warm-machine run and
+a clean Windows laptop/VM installation are separate acceptance scopes. Neither
+manufactures host conformance or repository execution authority. The bootstrap
 does not provision a Linux guest, enable WSL/Hyper-V, install a Continuum service,
 or claim macOS/Linux installer support.
 
