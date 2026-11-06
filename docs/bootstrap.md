@@ -14,7 +14,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-delivery
 Install all automatable prerequisites, the CLI and both skills:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-delivery-forge.ps1 -Mode Install -SourceRoot .
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-delivery-forge.ps1 -Mode Install -SourceRoot (Get-Location).Path
 ```
 
 An agent can use `-Json` with either mode. The report includes every missing or
