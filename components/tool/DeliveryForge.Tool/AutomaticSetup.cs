@@ -71,10 +71,14 @@ public static class AutomaticSetup
             OperatingSystem.IsWindows() && narrowed.Distinct(StringComparer.OrdinalIgnoreCase).Count() != narrowed.Length ||
             narrowed.Any(path => !trusted.Any(prefix => Within(path, prefix)) || excluded.Any(prefix => Within(path, prefix) || Within(prefix, path))))
             throw new ToolUsageException("Selected plan setup cannot widen the registered worker scope or overlap its exclusions.");
-        var unchanged = selectedRoot with { WorkerPaths = selectedRoot.WorkerPaths with
+        var unchanged = selectedRoot with
         {
-            AllowedPaths = prior.WorkerPaths.AllowedPaths, Exclusions = prior.WorkerPaths.Exclusions
-        } };
+            WorkerPaths = selectedRoot.WorkerPaths with
+            {
+                AllowedPaths = prior.WorkerPaths.AllowedPaths,
+                Exclusions = prior.WorkerPaths.Exclusions
+            }
+        };
         if (!JsonSerializer.SerializeToUtf8Bytes(unchanged, BoundedFiles.Json).AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(prior, BoundedFiles.Json)))
             throw new ToolUsageException("Selected plan setup cannot replace other registered root selections.");
         original.Check();
