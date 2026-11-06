@@ -127,6 +127,26 @@ public sealed class SetupCommandTests
         Assert.Empty(application.RetainedExternalCalls);
     }
 
+    public static bool IsWindows => OperatingSystem.IsWindows();
+    [Fact(Skip = "Automatic branch discovery uses the Windows selected owner.", SkipUnless = nameof(IsWindows))]
+    public async Task Real_branch_discovery_preserves_the_containing_work_phase()
+    {
+        var fixture = Fixture.Create();
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(120), TestContext.Current.CancellationToken);
+        var git = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator).Where(Path.IsPathFullyQualified)
+            .Select(path => Path.Combine(path, "git.exe")).First(File.Exists);
+        var executor = new DeliveryForge.Evidence.ProcessCommandExecutor();
+        var initialized = await executor.ExecuteAsync(new(git, ["init", "-q", "-b", "selected-feature"], fixture.Repository), TimeSpan.FromSeconds(15), original.Token);
+        Assert.True(initialized.ExitCode == 0 && initialized.OwnedProcessQuiescent);
+        var application = new ToolApplication(actualOriginal: original);
+        var result = await application.ExecuteAsync(CommandLine.Parse(["setup", "--repo", fixture.Repository, "--repository", "owner/example", "--git", git, "--state-root", fixture.State]), original.Token);
+        original.Check();
+        Assert.Equal("SETUP_PREPARED", result.Code);
+        var selected = Assert.IsType<AutomaticSetupResult>(result.Data);
+        Assert.Equal("refs/heads/selected-feature", TrustedConfiguration.Load(selected.ConfigurationPath, original).MutableReference);
+        Assert.Single(application.RetainedExternalCalls);
+    }
+
     static ToolLifetime Lifetime() => new(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
     sealed record Fixture(string Root, string Repository, string Git, string State)
     {

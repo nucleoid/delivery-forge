@@ -33,9 +33,14 @@ public sealed partial class ToolApplication
                 // owner. Linux requires an independently selected scope template.
                 if (!OperatingSystem.IsWindows()) return ToolResult.Incomplete("SETUP_REFERENCE_REQUIRED",
                     "Select the current exact branch for pure setup, or reuse the installed Linux scope template; no unscoped Git process was launched.");
+                var environment = Environment.GetEnvironmentVariables().Cast<System.Collections.DictionaryEntry>()
+                    .Where(row => row.Key is string key && !key.StartsWith("GIT_", StringComparison.OrdinalIgnoreCase))
+                    .ToDictionary(row => (string)row.Key, row => (string)row.Value!, StringComparer.OrdinalIgnoreCase);
+                environment["GIT_CONFIG_NOSYSTEM"] = "1"; environment["GIT_CONFIG_GLOBAL"] = "NUL";
+                environment["GIT_TERMINAL_PROMPT"] = "0"; environment["GIT_OPTIONAL_LOCKS"] = "0";
                 var capture = await Observe("ActualSetupBranch", () => new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
-                    new(git, ["--no-optional-locks", "-C", repo, "symbolic-ref", "--quiet", "HEAD"], repo),
-                    life.Remaining < TimeSpan.FromSeconds(30) ? life.Remaining : TimeSpan.FromSeconds(30), 8192, life.Token, life), life).ConfigureAwait(false);
+                    new(git, ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", "-C", repo, "symbolic-ref", "--quiet", "HEAD"], repo, environment) { EnvironmentIsComplete = true },
+                    life.Remaining < TimeSpan.FromSeconds(30) ? life.Remaining : TimeSpan.FromSeconds(30), 8192, life.Token, new OwnedWorkPhaseBudget(life)), life).ConfigureAwait(false);
                 if (!capture.RootExitObserved || !capture.StandardOutputDrainCompleted || !capture.StandardErrorDrainCompleted || !capture.Command.OwnedProcessQuiescent)
                 { life.RetainUnknown(); throw new IOException("Actual setup Git process or I/O remains unresolved."); }
                 if (capture.Command.ExitCode != 0 || capture.CaptureBoundExceeded || capture.Command.TimedOut || capture.Command.Cancelled)
