@@ -112,7 +112,8 @@ public sealed class HostInstructionTests
             id,
             result = new
             {
-                config = body.RootElement.Clone(), origins,
+                config = body.RootElement.Clone(),
+                origins,
                 layers = new[] { new { config = new { }, name = new { type = "user", file = "selected-owner-config-DATA" }, version = "1" } }
             }
         });
