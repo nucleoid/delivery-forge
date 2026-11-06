@@ -16,6 +16,12 @@ param(
     [ValidateRange(30, 1200)][int]$MaximumSeconds = 1200
 )
 
+# A native process launched from PowerShell7 can inherit its module ordering.
+# Select the current Windows engine's utility module for this session only.
+if ($PSVersionTable.PSVersion.Major -eq 5) {
+    Import-Module -Name (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force -ErrorAction Stop
+}
+
 function Get-ForgeDefaultStateRoot {
     if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { throw 'This bootstrap currently supports native Windows only.' }
     # The folder API can return an AppContainer redirect when called by an agent.
@@ -486,6 +492,7 @@ function Get-ForgeLauncherContent {
     @'
 #requires -Version 5.1
 [string[]]$forwarded = @($args)
+if ($PSVersionTable.PSVersion.Major -eq 5) { Import-Module -Name (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force -ErrorAction Stop }
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $recordPath = Join-Path $root 'installation.json'
