@@ -82,9 +82,15 @@ public sealed class AutomaticSetupTests
             Path.Combine(fixture.Root, "unread-private-key-data"), Path.Combine(fixture.Root, "old-checkpoints"), scope);
         var template = TrustedConfiguration.Load(first.ConfigurationPath, original) with
         {
-            MaximumCeiling = "implement", OperationSeconds = 600, AdapterVersion = "selected-version-data",
-            ExpectedBundleIdentity = "bundle-data", ExpectedContractIdentity = "contract-data", ExpectedWorkItem = "owner/example#8",
-            ExpectedPlanCeiling = "plan", PolicyFile = Path.Combine(fixture.Root, "policy-data"), Coordination = coordination,
+            MaximumCeiling = "implement",
+            OperationSeconds = 600,
+            AdapterVersion = "selected-version-data",
+            ExpectedBundleIdentity = "bundle-data",
+            ExpectedContractIdentity = "contract-data",
+            ExpectedWorkItem = "owner/example#8",
+            ExpectedPlanCeiling = "plan",
+            PolicyFile = Path.Combine(fixture.Root, "policy-data"),
+            Coordination = coordination,
             StandaloneRoot = new(rootPath, rootBytes.LongLength, BoundedFiles.Sha(rootBytes))
         };
         var result = AutomaticSetup.Rebase(template, fixture.State, original);

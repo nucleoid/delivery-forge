@@ -48,8 +48,12 @@ public sealed class PlanSupersessionTests
                     .Concat(arguments).ToArray();
                 var actual = await executor.ExecuteAsync(new(git, argv, Repository, new Dictionary<string, string>
                 {
-                    ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_GLOBAL"] = nullPath, ["GIT_CONFIG_SYSTEM"] = nullPath,
-                    ["GIT_NO_REPLACE_OBJECTS"] = "1", ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_OPTIONAL_LOCKS"] = "0"
+                    ["GIT_CONFIG_NOSYSTEM"] = "1",
+                    ["GIT_CONFIG_GLOBAL"] = nullPath,
+                    ["GIT_CONFIG_SYSTEM"] = nullPath,
+                    ["GIT_NO_REPLACE_OBJECTS"] = "1",
+                    ["GIT_TERMINAL_PROMPT"] = "0",
+                    ["GIT_OPTIONAL_LOCKS"] = "0"
                 }), original.Remaining, original.Token);
                 Assert.True(actual.OwnedProcessQuiescent && actual.ExitCode == 0 && !actual.TimedOut && !actual.Cancelled, actual.StandardError);
                 original.Check();
@@ -64,8 +68,13 @@ public sealed class PlanSupersessionTests
             var previous = PlanFreezer.Freeze(new(request, context, evidence, Intent.ChangeMap, Intent.Dependencies, Intent.Gates,
                 Intent.Rollout, Intent.Unknowns, IntakePlanner.Assess(request, evidence)), "planning-revision", DateTimeOffset.UtcNow);
             File.WriteAllBytes(Previous, previous.CanonicalBytes);
-            Configuration = Configuration with { ExpectedBundleIdentity = previous.Identity, ExpectedContractIdentity = previous.ContractIdentity,
-                ExpectedWorkItem = "#8", ExpectedPlanCeiling = "plan" };
+            Configuration = Configuration with
+            {
+                ExpectedBundleIdentity = previous.Identity,
+                ExpectedContractIdentity = previous.ContractIdentity,
+                ExpectedWorkItem = "#8",
+                ExpectedPlanCeiling = "plan"
+            };
             Save(); return previous;
         }
     }

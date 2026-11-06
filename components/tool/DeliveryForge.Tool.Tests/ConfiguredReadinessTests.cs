@@ -101,8 +101,11 @@ public sealed class ConfiguredReadinessTests
     {
         var fixture = new Fixture(); fixture.Configuration = fixture.Configuration with
         {
-            MaximumCeiling = "implement", ExpectedBundleIdentity = "selected-bundle", ExpectedContractIdentity = "selected-contract",
-            ExpectedWorkItem = "selected/repository#8", ExpectedPlanCeiling = "plan"
+            MaximumCeiling = "implement",
+            ExpectedBundleIdentity = "selected-bundle",
+            ExpectedContractIdentity = "selected-contract",
+            ExpectedWorkItem = "selected/repository#8",
+            ExpectedPlanCeiling = "plan"
         }; fixture.Save();
         var data = Assert.IsType<ConfiguredReadinessReport>((await fixture.Inspect()).Data);
         Assert.DoesNotContain("IMPLEMENT_AUTHORIZATION_REQUIRED", data.Implement.MissingPrerequisites);
@@ -126,9 +129,12 @@ public sealed class ConfiguredReadinessTests
             case "changed-root": File.AppendAllText(fixture.RootPath, " "); break;
             case "malformed-admission":
                 var selected = Fixture.Write(fixture.AdmissionPath, new { NotKind = true });
-                fixture.Configuration = fixture.Configuration with { StandaloneRoot = Fixture.Write(fixture.RootPath,
+                fixture.Configuration = fixture.Configuration with
+                {
+                    StandaloneRoot = Fixture.Write(fixture.RootPath,
                     new StandaloneRootSelection("DeliveryForgeStandaloneRoot-v1", Path.Combine(fixture.Root, "store"),
-                        new(Path.Combine(fixture.Root, "work"), Path.Combine(fixture.Root, "results"), ["change.cs"], []), selected)) };
+                        new(Path.Combine(fixture.Root, "work"), Path.Combine(fixture.Root, "results"), ["change.cs"], []), selected))
+                };
                 fixture.Save(); break;
         }
         var error = await Record.ExceptionAsync(() => fixture.Inspect(application));

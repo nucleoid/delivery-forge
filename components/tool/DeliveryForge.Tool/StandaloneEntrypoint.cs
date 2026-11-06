@@ -107,8 +107,8 @@ internal sealed class StandaloneEntrypoint
                     var application = new ToolApplication(actualOriginal: original, actualConfigurationPin: configPin);
                     actualReferences.Add(application);
                     var actual = application.ExecuteAsync(command, original.Token); actualReferences.Add(actual);
-                try { result = await actual.WaitAsync(original.Remaining).ConfigureAwait(false); }
-                finally { if (!actual.IsCompleted) original.RetainUnknown(); }
+                    try { result = await actual.WaitAsync(original.Remaining).ConfigureAwait(false); }
+                    finally { if (!actual.IsCompleted) original.RetainUnknown(); }
                 }
                 else if (command.Mode == ToolMode.Resume && !command.Has("dry-run")) result = ToolResult.Incomplete("ORIGINAL_OWNER_REQUIRED", "A fresh standalone process has no retained same-original native owner; saved run DATA cannot create one. Use dry-run only to inspect immutable history.");
                 else if (config.ProductionBatch is not null)
