@@ -39,7 +39,15 @@ public sealed class ReviewCompletionEvidenceTests
         Assert.Equal(changed.Hex, Assert.Single(rows.EnumerateArray()).GetProperty("Hex").GetString());
         Assert.Equal(small.GetRawText(), large.GetRawText());
         Assert.DoesNotContain("a-000.txt", large.GetRawText(), StringComparison.Ordinal);
-        Assert.InRange(Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(large, BoundedFiles.Json)), 1, 10000);
+        // Match the production outer JSON-string measurement, including quote
+        // escaping, for this evidence-bearing prompt fragment. This does not
+        // claim that every complete plan and patch fits the production profile.
+        var prompt = "<plan>" + JsonSerializer.Serialize(new { OwnerCompletionEvidence = large }, BoundedFiles.Json) + "</plan>";
+        var outerBytes = Encoding.UTF8.GetByteCount(JsonSerializer.Serialize(prompt));
+        Assert.True(outerBytes > Encoding.UTF8.GetByteCount(prompt));
+        Assert.InRange(outerBytes, 1, 60000);
+        Assert.False(large.GetProperty("SourceBytes").TryGetProperty("NonDeletedChangedPaths", out _));
+        Assert.True(large.GetProperty("SourceBytes").TryGetProperty("ObservationView", out _));
     }
     [Fact]
     public void Global_hex_budget_is_applied_only_to_changed_rows_without_losing_digest_or_encoding_facts()
@@ -80,6 +88,18 @@ public sealed class ReviewCompletionEvidenceTests
         Assert.Equal(new[] { "a.txt", "z.txt" }, ReviewCompletionEvidence.ParseChangedPaths("z.txt\0a.txt\0"));
         var deletedOnly = ReviewCompletionEvidence.ParseChangedPaths(""); Assert.Empty(deletedOnly);
         Assert.Empty(Project(Snapshot(Fact("unchanged.txt")), deletedOnly).GetProperty("SourceBytes").GetProperty("Files").EnumerateArray());
+    }
+    [Fact]
+    public void Embedded_controls_are_preserved_by_NUL_parsing_for_the_exact_census_join()
+    {
+        foreach (var control in new[] { (char)9, (char)127, (char)133 })
+        {
+            var path = "src/file" + control + ".txt";
+            var paths = ReviewCompletionEvidence.ParseChangedPaths(path + (char)0);
+            Assert.Equal(path, Assert.Single(paths));
+            var row = Assert.Single(Project(Snapshot(Fact(path)), paths).GetProperty("SourceBytes").GetProperty("Files").EnumerateArray());
+            Assert.Equal(path, row.GetProperty("RelativePath").GetString());
+        }
     }
     [Fact]
     public void Actual_serializer_preserves_status_merge_parents_and_raw_to_canonical_policy_mapping()
