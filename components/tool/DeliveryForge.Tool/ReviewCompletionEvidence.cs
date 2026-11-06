@@ -53,8 +53,13 @@ internal static class ReviewCompletionEvidence
         return JsonSerializer.SerializeToElement(new
         {
             Qualification = "Same containing owner observations, not an installed quality gate result or a new authority.",
-            completion.RunId, completion.RequestIdentity, completion.RuntimeRunIdentity, completion.RuntimeTaskIdentity,
-            BaseCommit = baseCommit, completion.HeadCommit, completion.TreeId,
+            completion.RunId,
+            completion.RequestIdentity,
+            completion.RuntimeRunIdentity,
+            completion.RuntimeTaskIdentity,
+            BaseCommit = baseCommit,
+            completion.HeadCommit,
+            completion.TreeId,
             FinalWorkerStatus = new { CommandSummary = new[] { "git", "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching" }, StandardOutput = statusOutput, Phase = "CompletedWorkerBeforeQuality", ObservationView = "Original worker metadata with the containing owner's fixed Git environment and flags." },
             CommitAncestry = new { CommandSummary = new[] { "git", "rev-list", "--parents", baseCommit + ".." + completion.HeadCommit }, StandardOutput = ancestryOutput, ObservationView = "Original worker metadata with replace/graft sources disabled; not the controlled object view.", ControlledViewQualification = "The caller completed same-source GitPatchIdentity, which separately requires base ancestry in its controlled view. Parent rows are actual bounded output; no single-commit result is assumed." },
             SourceBytes = new { snapshot.HeadCommit, snapshot.TreeId, snapshot.SourceFingerprint, NonDeletedChangedPaths = changedPaths, Files = files, Selection = "Only exact current paths observed by bounded base-to-head diff; deleted files are represented by the complete patch only.", ChangedPathCommandSummary = new[] { "git" }.Concat(ChangedPathArguments(baseCommit, completion.HeadCommit)).ToArray(), PerFileHexMaximumBytes = 128, PresentationHexMaximumBytes = 4096, Qualification = "Byte facts come from the completed full archive-to-physical-source census. Mode/blob identity come from the controlled tree; on Windows mode is not independently observed. The fingerprint describes that census, not a standalone acceptance capability. Hex omissions are explicit; encoding and line-ending facts remain available without hex." },
