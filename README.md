@@ -27,6 +27,21 @@ Delivery Forge separates five authorization modes:
 
 The normal intake is a minimal interview. Delivery Forge asks one plain conversational question—with a recommendation—only when a genuine intent, risk, or product decision belongs to the user. Engineering questions are resolved from repository evidence when possible. A deep interview is available by explicit opt-in.
 
+## Install on Windows
+
+Run the one-shot bootstrap from a selected checkout:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-delivery-forge.ps1 -Mode Install
+```
+
+It installs missing prerequisites, the CLI and Codex/Claude skills, while leaving
+browser sign-ins to you. Use `-Mode Check -Json` for the complete prerequisite
+report. The installed launcher repairs missing installable dependencies once
+before entering your command; it never replays an entered command. Existing
+customized skills and unresolved attempts are preserved. See [Windows bootstrap
+and first use](docs/bootstrap.md) for sign-in actions, supported paths and limits.
+
 ## Start with a GitHub issue plan
 
 With the skill and helper installed, open the target repository in the agent and
@@ -93,4 +108,4 @@ MIT. See [LICENSE](LICENSE).
 
 ### First-use defaults
 
-The skill selects ordinary working directories automatically. The helper's `setup` command prepares fresh isolated paths and pinned configuration, and Windows plan-only first use can prepare them directly. Existing execution templates retain their policies and limits. The lower-level revision route can preserve and link an original plan under an independently selected implementation configuration; automatic owner-profile onboarding is still missing. See [automatic setup and diagnostic boundaries](references/automatic-setup.md) for Linux scope requirements and actual runtime prerequisites.
+The skill selects ordinary working directories automatically. The helper's `setup` command prepares fresh isolated paths and pinned configuration, and Windows plan-only first use can prepare them directly. Existing execution templates retain their policies and limits. The revision route preserves and links an original plan under an independently selected implementation profile. Bootstrap installs software; genuine runtime conformance, live coordination and repository policy remain separate execution prerequisites. See [automatic setup and diagnostic boundaries](references/automatic-setup.md) for Linux scope requirements and actual runtime prerequisites.

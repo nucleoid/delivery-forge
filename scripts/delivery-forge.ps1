@@ -4,10 +4,12 @@
 param(
     [Parameter(Mandatory)][string]$DotNetHost,
     [Parameter(Mandatory)][string]$ToolAssembly,
+    [ValidateRange(1,1200)][int]$MaximumSeconds = 1200,
     [Parameter(ValueFromRemainingArguments=$true)][string[]]$ForgeArguments
 )
 $ErrorActionPreference='Stop'
 $clock=[Diagnostics.Stopwatch]::StartNew()
+$maximumMilliseconds=[long]$MaximumSeconds*1000
 foreach($selected in @($DotNetHost,$ToolAssembly)) {
     if(-not [IO.Path]::IsPathFullyQualified($selected) -or -not [IO.File]::Exists($selected)) { throw 'Select the existing absolute installed runtime and tool assembly.' }
 }
@@ -38,10 +40,10 @@ try {
     $stderr=$process.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
     $unresolved=$false
     while(-not $process.WaitForExit(100)) {
-        if($stdout.IsFaulted -or $stderr.IsFaulted -or $clock.ElapsedMilliseconds -ge 1200000) { $unresolved=$true; break }
+        if($stdout.IsFaulted -or $stderr.IsFaulted -or $clock.ElapsedMilliseconds -ge $maximumMilliseconds) { $unresolved=$true; break }
     }
     if(-not $unresolved) {
-        $drainMilliseconds=[int][Math]::Max(0,[Math]::Min(60000,1200000-$clock.ElapsedMilliseconds))
+        $drainMilliseconds=[int][Math]::Max(0,[Math]::Min(60000,$maximumMilliseconds-$clock.ElapsedMilliseconds))
         try { $unresolved=-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout,$stderr),$drainMilliseconds) }
         catch { $unresolved=$true }
     }
