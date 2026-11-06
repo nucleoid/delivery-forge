@@ -138,6 +138,29 @@ internal static class PlanSetupSelection
         var normalized = value.Replace('\\', '/');
         if (normalized.Split('/').Any(part => part is "" or "." or ".."))
             throw new ToolUsageException("Traversal or ambiguous repository path refused.");
+        RefuseWindowsAliases(normalized);
         return normalized;
+    }
+
+    // Setup compares repository scope as DATA, without resolving or opening its
+    // selected files. Refuse Win32 spellings whose namespace meaning can differ
+    // from those component comparisons; Linux retains its literal names.
+    internal static void RefuseWindowsAliases(string normalized)
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        foreach (var part in normalized.Split('/'))
+        {
+            var stem = part.Split('.')[0].TrimEnd(' ');
+            var numberedDevice = stem.Length == 4 &&
+                (stem.StartsWith("COM", StringComparison.OrdinalIgnoreCase) || stem.StartsWith("LPT", StringComparison.OrdinalIgnoreCase)) &&
+                (stem[3] is >= '1' and <= '9' or '\u00b9' or '\u00b2' or '\u00b3');
+            var shortName = Enumerable.Range(0, Math.Max(0, part.Length - 1))
+                .Any(index => part[index] == '~' && char.IsAsciiDigit(part[index + 1]));
+            if (part.EndsWith('.') || part.EndsWith(' ') || shortName || numberedDevice ||
+                stem.Equals("CON", StringComparison.OrdinalIgnoreCase) || stem.Equals("PRN", StringComparison.OrdinalIgnoreCase) ||
+                stem.Equals("AUX", StringComparison.OrdinalIgnoreCase) || stem.Equals("NUL", StringComparison.OrdinalIgnoreCase) ||
+                stem.Equals("CONIN$", StringComparison.OrdinalIgnoreCase) || stem.Equals("CONOUT$", StringComparison.OrdinalIgnoreCase))
+                throw new ToolUsageException("Ambiguous Windows alias or reserved-device repository component refused.");
+        }
     }
 }

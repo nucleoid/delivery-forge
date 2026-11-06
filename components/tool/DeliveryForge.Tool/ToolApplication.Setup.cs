@@ -47,8 +47,9 @@ public sealed partial class ToolApplication
                 if (planSelection is not null)
                 {
                     ProcessCommandExecutor executor;
-                    if (actualExecutor is not null) executor = actualExecutor;
-                    else if (OperatingSystem.IsLinux())
+                    // Registered Linux selection owns this reconciliation even
+                    // when a trusted embedding supplied another executor.
+                    if (OperatingSystem.IsLinux())
                     {
                         var root = AutomaticSetup.ReadOrdinaryTemplateRoot(template, profile.TemplatePin.Path, life);
                         var scopePin = root.LinuxScopeProfile ?? throw new ToolUsageException("Exact Linux ordinary scope required before plan reconciliation.");
@@ -58,7 +59,7 @@ public sealed partial class ToolApplication
                             ?? throw new ToolUsageException("Selected Linux ordinary scope is null.");
                         executor = new(StandaloneOwnerComposition.OrdinaryLinuxScope(scope), life);
                     }
-                    else executor = new();
+                    else executor = actualExecutor ?? new();
                     var narrowed = await Observe("ActualSetupPlanSelection",
                         () => PlanSetupSelection.SelectAsync(profile.TemplatePin, planSelection, executor, life), life).ConfigureAwait(false);
                     selected = AutomaticSetup.RebaseSelected(narrowed.Configuration, narrowed.Root, state, life)

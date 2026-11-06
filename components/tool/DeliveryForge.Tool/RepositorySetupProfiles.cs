@@ -41,10 +41,20 @@ internal static class RepositorySetupProfiles
         foreach (var source in new[] { template.RepositoryRoot, root.WorkerPaths.Worktree, root.WorkerPaths.ResultDirectory, root.StoreRoot })
             BoundedFiles.Separate(source, registrationPath);
         BoundedFiles.Separate(templatePath, registrationPath);
+        BoundedFiles.Separate(template.StandaloneRoot!.Path, registrationPath);
+        BoundedFiles.Separate(template.GitExecutable, registrationPath);
+        if (template.PolicyFile is { } policy) BoundedFiles.Separate(policy, registrationPath);
+        if (template.Coordination is { } coordination)
+            foreach (var path in new[] { coordination.PrivateKeyPath, coordination.CheckpointRoot, coordination.DeploymentEvidence.Path })
+                BoundedFiles.Separate(path, registrationPath);
         BoundedFiles.Separate(root.InstalledHostAdmission.Path, registrationPath);
         if (root.LinuxScopeProfile is { } scope) BoundedFiles.Separate(scope.Path, registrationPath);
         if (template.InstalledQuality is { } quality) BoundedFiles.Separate(quality.ArtifactRoot, registrationPath);
-        if (template.InstalledReview is { } review) BoundedFiles.Separate(review.ArtifactRoot, registrationPath);
+        if (template.InstalledReview is { } review)
+        {
+            BoundedFiles.Separate(review.ArtifactRoot, registrationPath);
+            BoundedFiles.Separate(review.GitImage.Path, registrationPath);
+        }
     }
 
     internal static RepositorySetupProfileResult Register(string templatePath, string repository, string repositoryRoot, string stateRoot, ToolLifetime original)

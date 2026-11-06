@@ -103,6 +103,31 @@ public sealed class PlanSetupSelectionTests
             Assert.Equal(new[] { "Library/A.cs", "Library/a.cs" }, PlanSetupSelection.ConstrainPaths(["Library/A.cs", "Library/a.cs"], owner));
     }
 
+    [Theory]
+    [InlineData("src/secret./control.txt")]
+    [InlineData("src/secret /control.txt")]
+    [InlineData("src/SECRE~1/control.txt")]
+    [InlineData("src/CON.txt")]
+    [InlineData("src/LPT9.log")]
+    [InlineData("src/aux/control.txt")]
+    [InlineData("src/COM\u00b9.log")]
+    [InlineData("src/CONIN$/control.txt")]
+    public void Windows_aliases_cannot_bypass_owner_denies_or_enter_either_scope_list(string alias)
+    {
+        var owner = Paths(["src"], ["src/secret"]);
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Throws<ToolUsageException>(() => PlanSetupSelection.ConstrainPaths([alias], owner));
+            Assert.Throws<ToolUsageException>(() => PlanSetupSelection.ConstrainPaths([alias + "/child.txt"], Paths([alias], [])));
+            Assert.Throws<ToolUsageException>(() => PlanSetupSelection.ConstrainExclusions([alias], [alias]));
+        }
+        else
+        {
+            Assert.Equal(new[] { alias }, PlanSetupSelection.ConstrainPaths([alias], owner));
+            Assert.Equal(new[] { alias }, PlanSetupSelection.ConstrainExclusions([alias], [alias]));
+        }
+    }
+
     [Fact]
     public async Task Requested_ceiling_and_template_pin_refuse_before_bundle_or_Git_access()
     {
@@ -199,7 +224,7 @@ public sealed class PlanSetupSelectionTests
         Assert.Equal(oldCeiling, result.Configuration.ExpectedPlanCeiling); Assert.Equal("implement", result.Configuration.MaximumCeiling);
         Assert.Equal(new[] { path }, result.Root.WorkerPaths.AllowedPaths); Assert.Equal(frozenExclusions, result.Root.WorkerPaths.Exclusions);
         Assert.Equal(admission, result.Root.InstalledHostAdmission); Assert.False(result.RuntimeCertified); Assert.False(result.ExecutionAuthorityIssued);
-        if (scenario == "execute-implement")
+        if (scenario is "execute-implement" or "revise-plan")
         {
             // Exercise the real scheduler's exact frozen exclusion gate. The
             // old owner-only list fails; the adopted complete plan list passes.
@@ -214,9 +239,19 @@ public sealed class PlanSetupSelectionTests
                 selectionRoot.WorkerPaths.Worktree, selectionRoot.WorkerPaths.ResultDirectory, "scope-only-token",
                 result.Root.WorkerPaths.AllowedPaths, result.Root.WorkerPaths.Exclusions, "codex.cli", "unexecuted-scope-data",
                 [AgentCapability.Launch, AgentCapability.CompletionEvidence], "implement");
-            Assert.Throws<SchedulingException>(() => LocalSingleScheduler.Create(plan,
-                worker with { Exclusions = selectionRoot.WorkerPaths.Exclusions }, demand, budget, store, coordinator, worktrees, reader));
-            Assert.NotNull(LocalSingleScheduler.Create(plan, worker, demand, budget, store, coordinator, worktrees, reader));
+            if (scenario == "revise-plan")
+            {
+                // Successful Revise DATA keeps the old frozen plan-only mode
+                // and ceiling. It cannot authorize scheduling that old plan.
+                Assert.Throws<SchedulingException>(() => LocalSingleScheduler.Create(plan,
+                    worker with { AuthorizationCeiling = oldCeiling }, demand, budget, store, coordinator, worktrees, reader));
+            }
+            else
+            {
+                Assert.Throws<SchedulingException>(() => LocalSingleScheduler.Create(plan,
+                    worker with { Exclusions = selectionRoot.WorkerPaths.Exclusions }, demand, budget, store, coordinator, worktrees, reader));
+                Assert.NotNull(LocalSingleScheduler.Create(plan, worker, demand, budget, store, coordinator, worktrees, reader));
+            }
             Assert.False(Directory.Exists(store.RootPath));
             Assert.False(Directory.Exists(worker.Worktree));
             Assert.False(Directory.Exists(worker.ResultDirectory));

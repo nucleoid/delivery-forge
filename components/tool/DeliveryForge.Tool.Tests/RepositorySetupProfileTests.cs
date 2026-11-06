@@ -1,10 +1,120 @@
 using System.Text.Json;
+using DeliveryForge.Evidence;
 using DeliveryForge.Tool;
 
 namespace DeliveryForge.Tool.Tests;
 
 public sealed class RepositorySetupProfileTests
 {
+    public static bool IsLinux => OperatingSystem.IsLinux();
+
+    [Fact]
+    public void Profile_key_casefolds_repository_identity_and_canonicalizes_supported_Windows_checkout_aliases()
+    {
+        var fixture = Fixture.Create();
+        var key = AutomaticSetup.RepositoryKey("owner/example", fixture.Repository);
+        Assert.Equal(key, AutomaticSetup.RepositoryKey("OWNER/EXAMPLE", fixture.Repository));
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Equal(key, AutomaticSetup.RepositoryKey("owner/example", @"\\?\" + fixture.Repository));
+            Assert.Throws<ToolUsageException>(() => AutomaticSetup.RepositoryKey("owner/example", @"\\server\share\checkout"));
+        }
+        Assert.False(Directory.Exists(fixture.State));
+    }
+
+    [Theory]
+    [InlineData("owner/example\n")]
+    [InlineData("owner/example.git")]
+    [InlineData("owner/example.GIT")]
+    public void Profile_key_refuses_noncanonical_repository_identity_without_creating_state(string identity)
+    {
+        var fixture = Fixture.Create();
+        Assert.Throws<ToolUsageException>(() => AutomaticSetup.RepositoryKey(identity, fixture.Repository));
+        Assert.False(Directory.Exists(fixture.State));
+    }
+
+    [Fact]
+    public async Task Identity_alias_cannot_turn_a_present_pin_drifted_registration_into_absence()
+    {
+        var fixture = Fixture.Create(); using var original = Lifetime();
+        var application = new ToolApplication(actualOriginal: original);
+        var registered = await application.ExecuteAsync(CommandLine.Parse(fixture.RegisterArguments()), original.Token);
+        var receipt = Assert.IsType<RepositorySetupProfileResult>(registered.Data);
+        var before = File.ReadAllBytes(receipt.Registration.Path);
+        File.AppendAllText(fixture.Template, " ");
+        Assert.Throws<ToolUsageException>(() => RepositorySetupProfiles.Read("OWNER/EXAMPLE", fixture.Repository, fixture.State, original));
+        Assert.Equal(before, File.ReadAllBytes(receipt.Registration.Path));
+        Assert.Empty(application.RetainedExternalCalls);
+    }
+
+    [Theory]
+    [InlineData("policy")]
+    [InlineData("git")]
+    [InlineData("root")]
+    [InlineData("coordination-key")]
+    [InlineData("coordination-checkpoints")]
+    [InlineData("coordination-evidence")]
+    [InlineData("review-git")]
+    public void Registration_refuses_overlap_with_actual_selected_input_paths_without_overwriting_them(string input)
+    {
+        var fixture = Fixture.Create(); using var original = Lifetime();
+        var config = TrustedConfiguration.Load(fixture.Template, original);
+        var registrationPath = RepositorySetupProfiles.Location("owner/example", fixture.Repository, fixture.State);
+        if (input == "policy") config = config with { PolicyFile = registrationPath };
+        if (input == "git") config = config with { GitExecutable = registrationPath };
+        if (input == "root")
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(registrationPath)!);
+            File.Copy(config.StandaloneRoot!.Path, registrationPath);
+            config = config with { StandaloneRoot = config.StandaloneRoot! with { Path = registrationPath } };
+        }
+        if (input.StartsWith("coordination-", StringComparison.Ordinal))
+            config = config with { Coordination = new(new Uri("https://fixture.invalid"), "fixture", "fixture-principal",
+                input == "coordination-key" ? registrationPath : Path.Combine(fixture.Root, "unread-key"),
+                input == "coordination-checkpoints" ? registrationPath : Path.Combine(fixture.Root, "unused-checkpoints"),
+                new(input == "coordination-evidence" ? registrationPath : Path.Combine(fixture.Root, "unread-deployment"), 1, new string('a', 64))) };
+        if (input == "review-git")
+            config = config with { InstalledReview = new("review.json", "evidence.json", "sha256:" + new string('a', 64),
+                new(registrationPath, 1, new string('a', 64)), "git version 2.0", Path.Combine(fixture.Root, "unused-review-artifacts")) };
+        File.WriteAllBytes(fixture.Template, JsonSerializer.SerializeToUtf8Bytes(config, BoundedFiles.Json));
+        var before = File.Exists(registrationPath) ? File.ReadAllBytes(registrationPath) : null;
+        var failure = Assert.Throws<ToolUsageException>(() => RepositorySetupProfiles.Register(fixture.Template,
+            "owner/example", fixture.Repository, fixture.State, original));
+        Assert.Contains("overlap", failure.Message);
+        if (before is null) Assert.False(Directory.Exists(fixture.State));
+        else Assert.Equal(before, File.ReadAllBytes(registrationPath));
+    }
+
+    [Fact]
+    public async Task Explicit_null_plan_selection_is_refused_before_profile_lookup_or_state_creation()
+    {
+        var fixture = Fixture.Create(); using var original = Lifetime();
+        var selection = Path.Combine(fixture.Root, "null-selection.json"); File.WriteAllText(selection, "null");
+        var application = new ToolApplication(actualOriginal: original);
+        await Assert.ThrowsAsync<IOException>(() => application.ExecuteAsync(CommandLine.Parse(fixture.Arguments()
+            .Concat(new[] { "--plan-selection", selection }).ToArray()), original.Token));
+        Assert.False(Directory.Exists(fixture.State)); Assert.Empty(application.RetainedExternalCalls);
+    }
+
+    [Fact(Skip = "Linux selected-scope refusal; no native dispatch required.", SkipUnless = nameof(IsLinux))]
+    public async Task Registered_Linux_plan_selection_cannot_use_injected_executor_to_skip_missing_scope()
+    {
+        var fixture = Fixture.Create(); using var original = Lifetime();
+        var application = new ToolApplication(actualExecutor: new ProcessCommandExecutor(), actualOriginal: original);
+        await application.ExecuteAsync(CommandLine.Parse(fixture.RegisterArguments()), original.Token);
+        var before = Directory.GetFiles(fixture.State, "*", SearchOption.AllDirectories);
+        var unread = Path.Combine(fixture.Root, "unread-bundle.json");
+        var selection = Path.Combine(fixture.Root, "parent-selection.json");
+        File.WriteAllBytes(selection, JsonSerializer.SerializeToUtf8Bytes(new ParentPlanSetupSelection(
+            new(unread, 1, new string('a', 64)), "selected-bundle", "selected-contract", "#8", "plan", PlanSetupPurpose.Revise, "implement"), BoundedFiles.Json));
+        var failure = await Assert.ThrowsAsync<ToolUsageException>(() => application.ExecuteAsync(CommandLine.Parse(fixture.Arguments()
+            .Concat(new[] { "--plan-selection", selection }).ToArray()), original.Token));
+        Assert.Contains("Linux ordinary scope", failure.Message);
+        Assert.False(File.Exists(unread));
+        Assert.Equal(before, Directory.GetFiles(fixture.State, "*", SearchOption.AllDirectories));
+        Assert.Empty(application.RetainedExternalCalls);
+    }
+
     [Fact]
     public async Task Explicit_registration_then_known_location_discovery_preserves_scope_and_allocates_fresh_paths()
     {
@@ -197,6 +307,37 @@ public sealed class RepositorySetupProfileTests
         // A directory selector spanning an excluded descendant is refused on
         // either platform, even when that directory was independently allowed.
         Assert.Throws<ToolUsageException>(() => AutomaticSetup.RebaseSelected(config, root, fixture.State, original));
+    }
+
+    [Theory]
+    [InlineData("src/secret./control.txt")]
+    [InlineData("src/secret /control.txt")]
+    [InlineData("src/SECRE~1/control.txt")]
+    [InlineData("src/CON.txt")]
+    [InlineData("src/LPT9.log")]
+    [InlineData("src/aux/control.txt")]
+    [InlineData("src/COM\u00b9.log")]
+    [InlineData("src/CONIN$/control.txt")]
+    public void Parent_selected_alias_scope_refuses_before_allocating_state_on_Windows(string alias)
+    {
+        var fixture = Fixture.Create(["src"], ["src/secret"]);
+        using var original = Lifetime();
+        var config = TrustedConfiguration.Load(fixture.Template, original);
+        var root = AutomaticSetup.ReadOrdinaryTemplateRoot(config, fixture.Template, original);
+        var before = File.ReadAllBytes(config.StandaloneRoot!.Path);
+        var selected = root with { WorkerPaths = root.WorkerPaths with { AllowedPaths = [alias] } };
+        if (OperatingSystem.IsWindows())
+        {
+            Assert.Throws<ToolUsageException>(() => AutomaticSetup.RebaseSelected(config, selected, fixture.State, original));
+            Assert.False(Directory.Exists(fixture.State));
+        }
+        else
+        {
+            var prepared = AutomaticSetup.RebaseSelected(config, selected, fixture.State, original);
+            Assert.Equal(new[] { alias }, prepared.Selection.WorkerPaths.AllowedPaths);
+            Assert.False(Directory.Exists(prepared.Selection.WorkerPaths.Worktree));
+        }
+        Assert.Equal(before, File.ReadAllBytes(config.StandaloneRoot.Path));
     }
 
     [Theory]

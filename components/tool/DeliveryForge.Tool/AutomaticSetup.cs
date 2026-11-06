@@ -93,6 +93,7 @@ public static class AutomaticSetup
         if (normalized.Any(character => char.IsControl(character) || character is ':' or '*' or '?' or '[' or ']' or '<' or '>' or '\"' or '|') ||
             normalized.Split('/').Any(part => part is "" or "." or ".."))
             throw new ToolUsageException("Profile path prefixes cannot contain traversal, globs or absolute/ambiguous components.");
+        PlanSetupSelection.RefuseWindowsAliases(normalized);
         return normalized;
     }
 
@@ -121,7 +122,8 @@ public static class AutomaticSetup
     {
         original.Check();
         if (string.IsNullOrWhiteSpace(template.Repository) || template.Repository.Length > 256 ||
-            !System.Text.RegularExpressions.Regex.IsMatch(template.Repository, "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant) ||
+            !System.Text.RegularExpressions.Regex.IsMatch(template.Repository, @"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z", System.Text.RegularExpressions.RegexOptions.CultureInvariant) ||
+            template.Repository.EndsWith(".git", StringComparison.OrdinalIgnoreCase) ||
             template.Repository.Split('/').Any(part => part is "." or "..") ||
             string.IsNullOrWhiteSpace(template.MutableReference) || !template.MutableReference.StartsWith("refs/heads/", StringComparison.Ordinal))
             throw new ToolUsageException("Setup requires the resolved repository identity and exact branch reference.");
@@ -160,6 +162,32 @@ public static class AutomaticSetup
         Directory.CreateDirectory(control);
         original.Check();
         _ = BoundedFiles.Plain(control, true);
+        if (OperatingSystem.IsWindows())
+        {
+            // Packaged Windows may virtualize only the newly created child,
+            // even when its existing LocalAppData ancestor resolves unchanged.
+            // Retain this same fresh anchor; select its actual physical spelling
+            // before emitting any root/configuration pins or checkpoint paths.
+            run = BoundedFiles.Plain(DeliveryForge.Execution.Git.WorktreeManager.WindowsFinalPath(run), true);
+            control = BoundedFiles.Plain(Path.Combine(run, "control"), true);
+            configurationPath = Path.Combine(control, "configuration.json");
+            rootPath = Path.Combine(control, "root.json");
+            unadmittedPath = Path.Combine(control, "host-unadmitted.json");
+            worker = worker with { Worktree = Path.Combine(run, "worktree"), ResultDirectory = Path.Combine(run, "results") };
+            selection = selection with
+            {
+                StoreRoot = Path.Combine(run, "store"), WorkerPaths = worker,
+                InstalledHostAdmission = prior?.InstalledHostAdmission ?? Pin(unadmittedPath, unadmitted)
+            };
+            rootBytes = Encode(selection); rootPin = Pin(rootPath, rootBytes);
+            if (coordination is not null) coordination = coordination with { CheckpointRoot = Path.Combine(run, "checkpoints") };
+            configuration = configuration with { StandaloneRoot = rootPin, Coordination = coordination };
+            configurationBytes = Encode(configuration);
+            // Recheck actual topology before any DATA file/checkpoint creation.
+            BoundedFiles.Separate(repository, run);
+            StandaloneEntrypoint.SeparateSelection(configuration, configurationPath, selection);
+            original.Check();
+        }
         if (coordination is not null)
         {
             // The existing parent requires a prepared empty checkpoint
@@ -185,12 +213,26 @@ public static class AutomaticSetup
     internal static string RepositoryKey(string repositoryIdentity, string repositoryRoot)
     {
         if (string.IsNullOrWhiteSpace(repositoryIdentity) || repositoryIdentity.Length > 256 ||
-            !System.Text.RegularExpressions.Regex.IsMatch(repositoryIdentity, "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant) ||
+            !System.Text.RegularExpressions.Regex.IsMatch(repositoryIdentity, @"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+\z", System.Text.RegularExpressions.RegexOptions.CultureInvariant) ||
+            repositoryIdentity.EndsWith(".git", StringComparison.OrdinalIgnoreCase) ||
             repositoryIdentity.Split('/').Any(part => part is "." or ".."))
             throw new ToolUsageException("Setup requires the resolved repository identity.");
+        // GitHub identity case and supported local checkout aliases must select
+        // one registration key. Keep old experimental keys/attempts untouched.
+        if (OperatingSystem.IsWindows() && repositoryRoot.StartsWith(@"\\", StringComparison.Ordinal) &&
+            !repositoryRoot.StartsWith(@"\\?\", StringComparison.Ordinal))
+            throw new ToolUsageException("Automatic repository profiles require a local Windows drive checkout; UNC paths are unsupported.");
         var repository = Path.TrimEndingDirectorySeparator(BoundedFiles.Plain(repositoryRoot, true));
+        if (!Directory.Exists(repository)) throw new ToolUsageException("Repository key requires an existing checkout directory.");
+        if (OperatingSystem.IsWindows())
+        {
+            repository = Path.TrimEndingDirectorySeparator(BoundedFiles.Plain(
+                DeliveryForge.Execution.Git.WorktreeManager.WindowsFinalPath(repository), true));
+            if (repository.StartsWith(@"\\", StringComparison.Ordinal))
+                throw new ToolUsageException("Automatic repository profiles require a local Windows drive checkout; UNC paths are unsupported.");
+        }
         var pathIdentity = OperatingSystem.IsWindows() ? repository.ToUpperInvariant() : repository;
-        return BoundedFiles.Sha(Encoding.UTF8.GetBytes(repositoryIdentity + "\n" + pathIdentity));
+        return BoundedFiles.Sha(Encoding.UTF8.GetBytes(repositoryIdentity.ToUpperInvariant() + "\n" + pathIdentity));
     }
 
     static byte[] Encode<T>(T value)

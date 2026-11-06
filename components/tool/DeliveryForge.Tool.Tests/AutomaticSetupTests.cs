@@ -6,6 +6,47 @@ namespace DeliveryForge.Tool.Tests;
 public sealed class AutomaticSetupTests
 {
     public static bool IsLinux => OperatingSystem.IsLinux();
+    public static bool IsWindows => OperatingSystem.IsWindows();
+    [Theory(Skip = "Actual Windows final-path identity required.", SkipUnless = nameof(IsWindows))]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Windows_fresh_run_pins_use_the_actual_created_anchor_for_new_and_existing_state(bool existingState)
+    {
+        var fixture = Fixture.Create();
+        var preserved = Path.Combine(fixture.State, "retained-before-setup.DATA");
+        if (existingState)
+        {
+            Directory.CreateDirectory(fixture.State);
+            File.WriteAllText(preserved, "preserved state evidence");
+        }
+        var full = Path.GetFullPath(fixture.State);
+        var alias = full.StartsWith(@"\\", StringComparison.Ordinal)
+            ? @"\\?\UNC\" + full[2..] : @"\\?\" + full;
+        using var original = Lifetime();
+        var result = AutomaticSetup.PreparePlan("owner/example", fixture.Repository, "refs/heads/main", fixture.Git, alias, original);
+        var physical = DeliveryForge.Execution.Git.WorktreeManager.WindowsFinalPath(result.RunDirectory);
+        // A real alternate Windows namespace spelling requires no junction,
+        // short-name setting or privilege. Before this fix the emitted run/pins
+        // retain that spelling even after Git reports the physical directory.
+        Assert.NotEqual(Path.Combine(alias, "repos", result.RepositoryKey, "runs", result.RunId), physical);
+        Assert.Equal(physical, result.RunDirectory);
+        Assert.Equal(Path.Combine(physical, "control", "configuration.json"), result.ConfigurationPath);
+        Assert.Equal(Path.Combine(physical, "control", "root.json"), result.Root.Path);
+        Assert.Equal(Path.Combine(physical, "worktree"), result.Selection.WorkerPaths.Worktree);
+        Assert.Equal(Path.Combine(physical, "results"), result.Selection.WorkerPaths.ResultDirectory);
+        Assert.Equal(Path.Combine(physical, "store"), result.Selection.StoreRoot);
+        Assert.Equal(Path.Combine(physical, "control", "host-unadmitted.json"), result.Selection.InstalledHostAdmission.Path);
+        Assert.Equal(result.Configuration.Sha256, BoundedFiles.Sha(File.ReadAllBytes(result.ConfigurationPath)));
+        Assert.Equal(result.Root.Sha256, BoundedFiles.Sha(File.ReadAllBytes(result.Root.Path)));
+        var configuration = TrustedConfiguration.Load(result.ConfigurationPath, original);
+        Assert.Equal(result.Root, configuration.StandaloneRoot);
+        Assert.False(Directory.Exists(result.Selection.WorkerPaths.Worktree));
+        Assert.False(Directory.Exists(result.Selection.WorkerPaths.ResultDirectory));
+        Assert.False(Directory.Exists(result.Selection.StoreRoot));
+        Assert.False(Directory.Exists(Path.Combine(physical, "checkpoints")));
+        if (existingState) Assert.Equal("preserved state evidence", File.ReadAllText(preserved));
+    }
+
     [Fact]
     public void First_use_materializes_plan_only_configuration_without_creating_worker_paths()
     {
