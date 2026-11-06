@@ -78,7 +78,7 @@ public sealed partial class ToolApplication
     internal static bool TryGitHubRepository(string remote, out string repository)
     {
         repository = string.Empty;
-        if (string.IsNullOrEmpty(remote) || remote.Length > 8192 || remote.Any(char.IsControl)) return false;
+        if (string.IsNullOrEmpty(remote) || remote.Length > 8192 || remote.Any(char.IsControl) || remote.Contains('%')) return false;
         string path;
         const string scpPrefix = "git@github.com:";
         if (remote.StartsWith(scpPrefix, StringComparison.OrdinalIgnoreCase)) path = remote[scpPrefix.Length..];
