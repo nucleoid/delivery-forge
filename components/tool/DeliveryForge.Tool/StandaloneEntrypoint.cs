@@ -57,7 +57,38 @@ internal sealed class StandaloneEntrypoint
             original.Check(); var command = CommandLine.Parse(args); original.Check();
             if (command.Has("help") || command.Has("version")) throw new ToolUsageException("Help/version use the diagnostic entry route.");
             resources = new(original); actualReferences.Add(resources); resources.Enter();
-            if (command.Get("config") is not string configPath) result = ToolResult.Incomplete("TRUSTED_CONFIG_REQUIRED", "Select an explicit independent trusted configuration; no native operation occurred.");
+            if (command.Mode == ToolMode.Plan && !command.Has("config") && command.Get("intent-file") is string intentPath)
+            {
+                var intent = BoundedFiles.ReadJson<PlanIntent>(intentPath, original, 524288);
+                if (intent.Request.Mode != "plan" || intent.Request.RequestedCeiling != "plan")
+                    throw new ToolUsageException("Automatic first-use planning remains plan-only; an implementation request requires its independently selected installation policy.");
+                var setup = new ToolApplication(actualOriginal: original);
+                actualReferences.Add(setup);
+                var setupCommand = CommandLine.Parse(["setup", "--repo", command.Get("repo")!, "--repository", intent.Request.Repository]);
+                // Dry-run must remain effect-free: prepare only on a real plan
+                // request, never turn a diagnostic into filesystem setup.
+                if (command.Has("dry-run")) result = ToolResult.Incomplete("PLANNING_SETUP_REQUIRED", "First-use setup is available automatically on the actual plan request; dry-run creates no setup files.");
+                else
+                {
+                    var prepared = await setup.ExecuteAsync(setupCommand, original.Token).WaitAsync(original.Remaining).ConfigureAwait(false);
+                    if (prepared.Data is AutomaticSetupResult selected && prepared.Code == "SETUP_PREPARED")
+                    {
+                        var options = command.Options.ToDictionary(row => row.Key, row => row.Value, StringComparer.Ordinal);
+                        options.Add("config", selected.ConfigurationPath);
+                        if (!options.ContainsKey("plan-out")) options.Add("plan-out", Path.Combine(selected.RunDirectory, "control", "plan.json"));
+                        command = command with { Options = options };
+                    }
+                    else result = prepared;
+                }
+            }
+            if (result is not null) { /* A setup refusal is already the actual result. */ }
+            else if (command.Mode == ToolMode.Setup || command.Mode == ToolMode.Capabilities && !command.Has("config"))
+            {
+                var application = new ToolApplication(actualOriginal: original);
+                actualReferences.Add(application);
+                result = await application.ExecuteAsync(command, original.Token).WaitAsync(original.Remaining).ConfigureAwait(false);
+            }
+            else if (command.Get("config") is not string configPath) result = ToolResult.Incomplete("TRUSTED_CONFIG_REQUIRED", "Select an explicit independent trusted configuration; no native operation occurred.");
             else
             {
                 var config = TrustedConfiguration.LoadBound(configPath, original, out var configPin); original.Restrict(TimeSpan.FromSeconds(config.OperationSeconds));
@@ -66,7 +97,13 @@ internal sealed class StandaloneEntrypoint
                 // expired external proofs must not mask the actual no-owner fact.
                 // Same-process embedded resume and dry-run history inspection keep
                 // their existing routes and all original binding checks.
-                if (command.Mode == ToolMode.Resume && !command.Has("dry-run")) result = ToolResult.Incomplete("ORIGINAL_OWNER_REQUIRED", "A fresh standalone process has no retained same-original native owner; saved run DATA cannot create one. Use dry-run only to inspect immutable history.");
+                if (command.Mode == ToolMode.Capabilities)
+                {
+                    var application = new ToolApplication(actualOriginal: original, actualConfigurationPin: configPin);
+                    actualReferences.Add(application);
+                    result = await application.ExecuteAsync(command, original.Token).WaitAsync(original.Remaining).ConfigureAwait(false);
+                }
+                else if (command.Mode == ToolMode.Resume && !command.Has("dry-run")) result = ToolResult.Incomplete("ORIGINAL_OWNER_REQUIRED", "A fresh standalone process has no retained same-original native owner; saved run DATA cannot create one. Use dry-run only to inspect immutable history.");
                 else if (config.ProductionBatch is not null)
                 {
                     batch = new(config, configPin, original, resources ?? throw new IOException("Actual aggregate resources unavailable.")); actualReferences.Add(batch);
