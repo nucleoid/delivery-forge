@@ -303,7 +303,7 @@ exit $LASTEXITCODE
         Assert ($receipts.Count -eq 4) 'Native PID/start receipts were not retained for each actual entry.'
         foreach($receiptFile in $receipts){
             $receipt=Get-Content -LiteralPath $receiptFile.FullName -Raw|ConvertFrom-Json
-            Assert ($receipt.Kind -eq 'DeliveryForgeNativeStart-v1' -and $receipt.NativePid -gt 0 -and $receipt.LauncherPid -gt 0 -and [DateTimeOffset]::Parse($receipt.NativeStartUtc) -le [DateTimeOffset]::UtcNow) 'Actual native PID/start receipt is incomplete.'
+            Assert ($receipt.Kind -eq 'DeliveryForgeNativeStart-v1' -and $receipt.NativePid -gt 0 -and $receipt.LauncherPid -gt 0 -and ([DateTimeOffset]$receipt.NativeStartUtc) -le [DateTimeOffset]::UtcNow) 'Actual native PID/start receipt is incomplete.'
         }
         Assert (-not(Test-Path -LiteralPath (Join-Path $fixtureRoot 'bootstrap.lock'))) 'Known failed command retained an UNKNOWN lock.'
     }
@@ -321,7 +321,7 @@ exit $LASTEXITCODE
         $sameProcessAlive=$true
         for($i=0;$i -lt 10 -and $sameProcessAlive;$i++){
             $observed=Get-Process -Id $receipt.NativePid -ErrorAction SilentlyContinue
-            $sameProcessAlive=$observed -and $observed.StartTime.ToUniversalTime().ToString('o') -eq $receipt.NativeStartUtc
+            $sameProcessAlive=$observed -and $observed.StartTime.ToUniversalTime() -eq ([DateTimeOffset]$receipt.NativeStartUtc).UtcDateTime
             if($sameProcessAlive){Start-Sleep -Milliseconds 100}
         }
         Assert (-not $sameProcessAlive) 'This actual single-process fixture survived best-effort termination.'
