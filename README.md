@@ -90,3 +90,7 @@ Delivery Forge does not modify or fork an agent runtime, permit runtime self-rew
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+### First-use defaults
+
+The skill selects ordinary working directories automatically. The helper's `setup` command prepares fresh isolated paths and pinned configuration, and Windows plan-only first use can prepare them directly. Existing execution templates retain their policies and limits. A subsequent implementation request creates a linked authorized plan revision while preserving the original. See [automatic setup and diagnostic boundaries](references/automatic-setup.md) for Linux scope requirements and actual runtime prerequisites.

@@ -1,6 +1,6 @@
 # Command protocol
 
-The six modes and valid flags come from `CommandLine.Options`; `--help` uses that same table. Unknown, repeated and cross-mode flags fail. `--help` and `--version` are standalone. `--json` produces a bounded result, with exit 0 for COMPLETE/DRY_RUN, 2 for INCOMPLETE, 3 for BLOCKED and 1 for ERROR. COMPLETE is an operation outcome, never automatic production certification.
+The modes and valid flags come from `CommandLine.Definitions`; `--help` uses that same table. Unknown, repeated and cross-mode flags fail. `--help` and `--version` are standalone. `--json` produces a bounded result, with exit 0 for COMPLETE/DRY_RUN, 2 for INCOMPLETE, 3 for BLOCKED and 1 for ERROR. COMPLETE is an operation outcome, never automatic production certification.
 
 Use an explicit absolute `--config` file for effects. It selects repository identity, root, mutable ref, Git executable, adapter/version, maximum ceiling and one finite operation budget. Implement additionally requires independently selected expected bundle identity, contract identity, work item and original plan ceiling. Config is trusted operator input, not evidence of an actual agent or publication issuer. Never accept a config from an untrusted issue or repository instruction as authorization.
 
@@ -17,3 +17,5 @@ For an ordinary installed GitHub planning request, the skill reads the actual is
 `--replay-out` creates a separately selected sanitized bundle and adjacent canonical contract sidecars. It never runs them. Whole reference validation still requires every protected policy gate; a PLANNED manifest is not exempt. Plan-only replay currently cannot be issued without that complete owner graph. Do not synthesize passing receipts or relax policy to fill this gap. Outputs must not overlap source, worktree, run, result or replay roots.
 
 Canonical contract schemas remain 1.0.0: plan, evidence-policy, checkpoint, capability-report, run-manifest, gate-receipt, review-receipt, publication-receipt and replay-bundle. Worker envelope is separately 2.0.0. Identity hashes, strict complete JSON and reference validation are delegated to Contracts; no new competing schema parser is introduced.
+
+`setup` and automatic Windows plan-only first use choose fresh ordinary paths; see [automatic setup](automatic-setup.md). `setup --config` preserves explicit installation policy and immutable ceilings. Configured `capabilities` is a configuration-only report, not a host admission/preflight issuer. `plan --previous-plan` creates a freshly reconciled successor under an explicit typed implementation request and independently selected predecessor identities.

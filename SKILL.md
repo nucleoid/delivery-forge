@@ -3,11 +3,17 @@ name: delivery-forge
 description: Plan and deliver a bounded repository change with Delivery Forge, preserving immutable authorization, actual worker evidence, independent review and quality gates. Use for delivery planning, implementation, PR, merge or recovery; not release or deployment.
 ---
 
-Use the installed `delivery-forge` helper as the deterministic owner API boundary. Read `delivery-forge --help` and `--version` from the selected installation before use. Select an explicit mode: `plan`, `implement`, `pr`, `merge`, `resume`, or `capabilities`. Never treat replay output as an execution input.
+Use the installed `delivery-forge` helper as the deterministic owner API boundary. Read `delivery-forge --help` and `--version` from the selected installation before use. Select an explicit mode: `plan`, `implement`, `pr`, `merge`, `resume`, `capabilities`, or `setup`. Never treat replay output as an execution input.
 
 For a GitHub issue, prefer an existing working `gh` CLI for the actual issue/comments; verify access rather than assuming installation proves authentication. A connector-only 404 does not prove the repository is absent.
 
 For planning, read [planning setup and GitHub handoff](references/planning.md#github-issue-planning-and-handoff) and [the command protocol](references/tool-protocol.md). Prepare or reuse plan-only configuration as routine setup; planning does not require worker-host certification. After `PLAN_FROZEN`, attach and verify the complete issue plan before adding `planned`. A GitHub planning request includes that handoff unless the user requests local/chat-only delivery. The label records a plan, not implementation approval or a Continuum lease. For actual Codex, Claude Code or Pi dispatch, read [host bindings](references/host-bindings.md). For packaging, read [installation](docs/installation.md) or [uninstallation](docs/uninstallation.md).
+
+Choose routine setup automatically. Use the current repository, working Git and user-local state; do not ask the user for worktree, result, checkpoint or temporary directories. Read [automatic setup](references/automatic-setup.md). `setup` prepares fresh pinned paths; `setup --config` reuses independently selected installation policy while allocating a fresh attempt. Windows plan-only first use with a typed intent can prepare configuration automatically. Linux native planning still needs its selected ordinary scope profile. Explicit selections take precedence and prior attempts remain preserved.
+
+Treat `capabilities` without a config as a static catalog, never as an installed-runtime check. With `--config`, it reports selected configuration gaps, not actual host acceptance. Neither diagnostic can certify dispatch. Resolve routine missing selections from the installed profile; report a genuine missing conformance producer or policy as a concrete product prerequisite, without asking the user to invent operator JSON.
+
+When the user subsequently asks to implement an attached plan, preserve its original bundle and prepare a new explicitly authorized implementation revision without repeating resolved design questions. `plan --previous-plan` imports the independently selected old identities, freshly reconciles the repository and freezes a linked successor from the new typed implementation intent. Select that new identity for execution; never edit the old bundle or treat `planned` as execution authority.
 
 Keep the original user's ceiling. A plan cannot authorize implementation; implementation cannot authorize a PR or merge. Resume can lower or preserve a stored ceiling and cannot raise it. A config file, stored receipt, model assertion, successful parser, or fixture cannot issue a private runtime or publication capability.
 

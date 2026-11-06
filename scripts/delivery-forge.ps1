@@ -20,7 +20,9 @@ foreach($key in $settings.Keys) { $previous[$key]=[Environment]::GetEnvironmentV
 $exitCode=1
 try {
     foreach($key in $settings.Keys) { [Environment]::SetEnvironmentVariable($key,$settings[$key],'Process') }
+    $LASTEXITCODE=$null
     & $DotNetHost $ToolAssembly @ForgeArguments
+    if($null -eq $LASTEXITCODE) { throw 'The selected native tool returned no actual exit code; completion is unverified.' }
     $exitCode=$LASTEXITCODE
 } finally {
     foreach($key in $settings.Keys) { [Environment]::SetEnvironmentVariable($key,$previous[$key],'Process') }
