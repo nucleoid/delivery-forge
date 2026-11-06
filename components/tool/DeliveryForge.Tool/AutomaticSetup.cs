@@ -159,6 +159,10 @@ public static class AutomaticSetup
         StandaloneEntrypoint.SeparateSelection(configuration, configurationPath, selection);
         original.Check();
         if (Directory.Exists(run) || File.Exists(run)) throw new IOException("New setup run already exists; no previous run is adopted.");
+        // Refuse an explicitly overlong root before attempting its deeper
+        // control anchor; validate the actual physical spelling again below.
+        if (OperatingSystem.IsWindows() && TrustedConfiguration.Ceiling(template.MaximumCeiling) >= DeliveryForge.Contracts.Models.AuthorizationCeiling.Implement)
+            RequireWindowsGitMetadataPath(Path.Combine(state, "worktrees", runId, "worktree"));
         Directory.CreateDirectory(control);
         original.Check();
         _ = BoundedFiles.Plain(control, true);

@@ -49,11 +49,21 @@ internal static class RepositorySetupProfiles
                 BoundedFiles.Separate(path, registrationPath);
         BoundedFiles.Separate(root.InstalledHostAdmission.Path, registrationPath);
         if (root.LinuxScopeProfile is { } scope) BoundedFiles.Separate(scope.Path, registrationPath);
-        if (template.InstalledQuality is { } quality) BoundedFiles.Separate(quality.ArtifactRoot, registrationPath);
+        if (template.InstalledQuality is { } quality)
+        {
+            BoundedFiles.Separate(quality.ArtifactRoot, registrationPath);
+            foreach (var gate in quality.Gates) BoundedFiles.Separate(gate.Profile.Path, registrationPath);
+            if (quality.Registry is { } registry)
+            {
+                BoundedFiles.Separate(registry.ArtifactRoot, registrationPath);
+                BoundedFiles.Separate(registry.OwnerApproval.Path, registrationPath);
+            }
+        }
         if (template.InstalledReview is { } review)
         {
             BoundedFiles.Separate(review.ArtifactRoot, registrationPath);
             BoundedFiles.Separate(review.GitImage.Path, registrationPath);
+            if (review.IndependentReviewer is { } reviewer) BoundedFiles.Separate(reviewer.Image.Path, registrationPath);
         }
     }
 

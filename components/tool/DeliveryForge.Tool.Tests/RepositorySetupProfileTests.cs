@@ -55,6 +55,10 @@ public sealed class RepositorySetupProfileTests
     [InlineData("coordination-checkpoints")]
     [InlineData("coordination-evidence")]
     [InlineData("review-git")]
+    [InlineData("quality-gate-profile")]
+    [InlineData("quality-registry-artifacts")]
+    [InlineData("quality-registry-approval")]
+    [InlineData("review-independent-image")]
     public void Registration_refuses_overlap_with_actual_selected_input_paths_without_overwriting_them(string input)
     {
         var fixture = Fixture.Create(); using var original = Lifetime();
@@ -81,6 +85,30 @@ public sealed class RepositorySetupProfileTests
             {
                 InstalledReview = new("review.json", "evidence.json", "sha256:" + new string('a', 64),
                 new(registrationPath, 1, new string('a', 64)), "git version 2.0", Path.Combine(fixture.Root, "unused-review-artifacts"))
+            };
+        if (input.StartsWith("quality-", StringComparison.Ordinal))
+        {
+            var registry = input.StartsWith("quality-registry-", StringComparison.Ordinal)
+                ? new ProtectedBaselineRegistrySelection(new string('b', 40), new string('c', 40), "refs/heads/main",
+                    "quality/registry.json", "sha256:" + new string('a', 64),
+                    input == "quality-registry-artifacts" ? registrationPath : Path.Combine(fixture.Root, "unused-registry-artifacts"),
+                    new(input == "quality-registry-approval" ? registrationPath : Path.Combine(fixture.Root, "unread-owner-approval"), 1, new string('a', 64)))
+                : null;
+            config = config with
+            {
+                InstalledQuality = new("quality/evidence.json", "sha256:" + new string('a', 64), Path.Combine(fixture.Root, "unused-quality-artifacts"),
+                [
+                    new("mutation", "mutate4csharp", new(input == "quality-gate-profile" ? registrationPath : Path.Combine(fixture.Root, "unread-mutation-profile"), 1, new string('a', 64)), "base", null, 30),
+                    new("crap", "crap4csharp", new(Path.Combine(fixture.Root, "unread-crap-profile"), 1, new string('a', 64)), "base", "tests/fixture.csproj", 30)
+                ], registry)
+            };
+        }
+        if (input == "review-independent-image")
+            config = config with
+            {
+                InstalledReview = new("review.json", "evidence.json", "sha256:" + new string('a', 64),
+                    new(config.GitExecutable, 1, new string('a', 64)), "git version 2.0", Path.Combine(fixture.Root, "unused-review-artifacts"),
+                    IndependentReviewer: new(new(registrationPath, 1, new string('a', 64)), "unexecuted-reviewer", 30))
             };
         File.WriteAllBytes(fixture.Template, JsonSerializer.SerializeToUtf8Bytes(config, BoundedFiles.Json));
         var before = File.Exists(registrationPath) ? File.ReadAllBytes(registrationPath) : null;

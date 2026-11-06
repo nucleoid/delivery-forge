@@ -58,7 +58,7 @@ public sealed class AutomaticSetupTests
         var longState = Path.Combine(fixture.Root, new string('x', 150));
         var refusal = Assert.Throws<ToolUsageException>(() => AutomaticSetup.Rebase(template, longState, original));
         Assert.Contains("exceeds220 UTF-8 bytes", refusal.Message, StringComparison.Ordinal);
-        Assert.Empty(Directory.GetFiles(longState, "*.json", SearchOption.AllDirectories));
+        Assert.False(Directory.Exists(longState));
         Assert.False(Directory.Exists(Path.Combine(longState, "worktrees")));
         Assert.Equal(first.Root, TrustedConfiguration.Load(first.ConfigurationPath, original).StandaloneRoot);
     }
