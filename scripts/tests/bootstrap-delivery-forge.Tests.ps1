@@ -375,6 +375,12 @@ exit $LASTEXITCODE
         $report=Get-ForgeBootstrapReport (Join-Path $TestRoot 'batch readiness') $source -RequiredTools @('git','pwsh') -RequiredAuthentication @()
         $gitRow=$report.Checks|Where-Object Id -eq 'git'
         Assert ($gitRow.Status -eq 'Unsupported' -and -not $gitRow.Automatic -and $script:BatchVersionCalls -eq 0 -and -not $report.AuthenticationChecked) 'Batch-only prerequisite was treated as executable/version-ready or silently replaced.'
+        $script:ScriptPwshProbes=0
+        Mock Find-ForgeCommand {param($Name) if($Name -eq 'pwsh'){Join-Path $TestRoot 'pwsh.ps1'}else{$null}}
+        Mock Invoke-ForgeProcess {param($Executable,$Arguments) $script:ScriptPwshProbes++;throw 'Unsupported PowerShell script must not enter a version/native probe.'}
+        $scriptReport=Get-ForgeBootstrapReport (Join-Path $TestRoot 'script-pwsh-readiness') $source -RequiredTools @('pwsh') -RequiredAuthentication @()
+        $pwshRow=$scriptReport.Checks|Where-Object Id -eq 'pwsh'
+        Assert ($pwshRow.Status -eq 'Unsupported' -and -not $pwshRow.Automatic -and $script:ScriptPwshProbes -eq 0 -and -not $scriptReport.AuthenticationChecked) 'Script-only PowerShell was probed or treated as automatically missing.'
     }
     Test 'Actual direct ambiguous arguments refuse while quoted colon and modern implicit File remain literal' {
         $fixtureRoot=Join-Path $TestRoot 'generated facade actual'
@@ -432,6 +438,74 @@ try {
         [IO.File]::WriteAllBytes($guardFixture,[IO.File]::ReadAllBytes($facade))
         $guard=Invoke-ForgeProcess $ps51 @('-NoProfile','-NonInteractive',$guardFixture,'$env:DF_FIXTURE_X') -Environment $environment -TimeoutSeconds 20
         Assert ($guard.ExitCode -ne 0 -and $guard.Stderr -match 'FORGE_BOOTSTRAP_AMBIGUOUS_FILE_ARGV' -and @(Get-Content -LiteralPath $counter).Count -eq $before) 'PS51 actual implicit facade entry bypassed its guard before manifest/native startup.'
+    }
+
+    Test 'Actual NoExit native File entry refuses before installation or original startup' {
+        $caseRoot=Join-Path $TestRoot 'noexit-guard';$null=New-Item -ItemType Directory -Path $caseRoot
+        $facade=Join-Path $caseRoot 'entry.ps1'
+        [IO.File]::WriteAllText($facade,(Get-ForgeLauncherContent),[Text.UTF8Encoding]::new($false))
+        foreach($origin in @((Get-Process -Id $PID).Path,(Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'))){
+            foreach($blockedSwitch in @('-NoExit','-noe')){
+                $result=Invoke-ForgeProcess $origin @('-NoProfile','-NonInteractive',$blockedSwitch,'-File',$facade,'--help') -TimeoutSeconds 15
+                Assert ($result.Stderr -match 'FORGE_BOOTSTRAP_AMBIGUOUS_FILE_ARGV' -and $result.Stderr -match [regex]::Escape($blockedSwitch) -and -not $script:ForgeBootstrapUnsettled) 'NoExit or its abbreviation was not a known preentry guard refusal.'
+                Assert (-not(Test-Path -LiteralPath (Join-Path $caseRoot 'bootstrap.lock')) -and -not(Test-Path -LiteralPath (Join-Path $TestRoot 'installation.json'))) 'NoExit entered bootstrap/installation setup.'
+            }
+        }
+        # The replay scenario is unobserved; this proves conservative refusal,
+        # not that an interactive PowerShell session could replay a command.
+    }
+    Test 'Actual script transport rejects nonexe shell discovery and uses System32 Windows PowerShell' {
+        $caseRoot=Join-Path $TestRoot 'shell-fallback';$null=New-Item -ItemType Directory -Path $caseRoot
+        $target=Join-Path $caseRoot 'inert-script.ps1'
+        [IO.File]::WriteAllText($target,@'
+$u=New-Object Text.UTF8Encoding($false,$true)
+[Console]::OutputEncoding=New-Object Text.UTF8Encoding($false)
+[Console]::Write((@{Major=$PSVersionTable.PSVersion.Major;Values64=@(foreach($value in $args){[Convert]::ToBase64String($u.GetBytes([string]$value))})}|ConvertTo-Json -Compress))
+exit 17
+'@,[Text.UTF8Encoding]::new($false))
+        $values=@('-foo:bar','-x:','','literal $env:UNCHANGED','space value')
+        $expected=@($values|ForEach-Object{[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_))})
+        foreach($extension in @('.cmd','.ps1')){
+            $script:UnsupportedSelectedShell=Join-Path $caseRoot ('pwsh'+$extension)
+            [IO.File]::WriteAllText($script:UnsupportedSelectedShell,'INERT; MUST NOT BE SELECTED AS A SHELL')
+            Mock Find-ForgeCommand {param($Name) if($Name -eq 'pwsh'){$script:UnsupportedSelectedShell}else{throw 'Unexpected command discovery in script transport fixture.'}}
+            $result=Invoke-ForgeProcess $target $values -TimeoutSeconds 15
+            $observed=$result.Stdout|ConvertFrom-Json
+            Assert ($result.ExitCode -eq 17 -and $observed.Major -eq 5 -and ($observed.Values64|ConvertTo-Json -Compress) -ceq ($expected|ConvertTo-Json -Compress)) 'Nonexe shell discovery did not use fixed System32 PS51 with exact string args/exit.'
+        }
+    }
+    Test 'Actual PATH batch discovery defers to a supported known native install' {
+        $caseRoot=Join-Path $TestRoot 'batch-known-native';$batchRoot=Join-Path $caseRoot 'path';$knownProfile=Join-Path $caseRoot 'profile'
+        $null=New-Item -ItemType Directory -Path $batchRoot,(Join-Path $knownProfile '.local/bin')
+        $batch=Join-Path $batchRoot 'claude.cmd';$native=Join-Path $knownProfile '.local/bin/claude.exe'
+        [IO.File]::WriteAllText($batch,'INERT BATCH; NEVER EXECUTED');[IO.File]::WriteAllText($native,'INERT NATIVE; NEVER EXECUTED')
+        $priorPath=$env:PATH;$priorProfile=$env:USERPROFILE;$priorLocal=$env:LOCALAPPDATA
+        try {
+            $env:PATH=$batchRoot;$env:USERPROFILE=$knownProfile;$env:LOCALAPPDATA=Join-Path $caseRoot 'local'
+            Assert ((Find-ForgeCommand 'claude') -eq $native) 'PATH batch masked an existing supported native known-path installation.'
+            $env:USERPROFILE=Join-Path $caseRoot 'profile-without-native'
+            Assert ((Find-ForgeCommand 'claude') -eq $batch) 'Batch-only installation disappeared instead of remaining available for an Unsupported report.'
+        } finally {$env:PATH=$priorPath;$env:USERPROFILE=$priorProfile;$env:LOCALAPPDATA=$priorLocal}
+        $knownProgramFiles=Join-Path $caseRoot 'program-files'
+        $knownPwsh=Join-Path $knownProgramFiles 'PowerShell/7/pwsh.exe'
+        $null=New-Item -ItemType Directory -Path (Split-Path -Parent $knownPwsh)
+        [IO.File]::WriteAllText($knownPwsh,'INERT KNOWN EXE; LOOKUP ONLY')
+        $shadowPath=Join-Path $caseRoot 'script-path';$null=New-Item -ItemType Directory -Path $shadowPath
+        [IO.File]::WriteAllText((Join-Path $shadowPath 'pwsh.ps1'),'INERT SHADOW; NEVER EXECUTED')
+        $lookupDriver=Join-Path $caseRoot 'PS51 lookup.ps1'
+        [IO.File]::WriteAllText($lookupDriver,@'
+param([string]$SelectedBootstrap,[string]$SelectedPath,[string]$SelectedProgramFiles)
+. $SelectedBootstrap
+$env:PATH=$SelectedPath;$env:ProgramFiles=$SelectedProgramFiles
+$found=Find-ForgeCommand 'pwsh'
+$u=New-Object Text.UTF8Encoding($false,$true)
+[Console]::Write((@{Major=$PSVersionTable.PSVersion.Major;Selected64=[Convert]::ToBase64String($u.GetBytes([string]$found))}|ConvertTo-Json -Compress))
+exit 0
+'@,[Text.UTF8Encoding]::new($false))
+        $ps51=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        $lookup=Invoke-ForgeProcess $ps51 @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$lookupDriver,(Join-Path (Split-Path -Parent $PSScriptRoot) 'bootstrap-delivery-forge.ps1'),$shadowPath,$knownProgramFiles) -TimeoutSeconds 15
+        $observed=$lookup.Stdout|ConvertFrom-Json
+        Assert ($lookup.ExitCode -eq 0 -and $observed.Major -eq 5 -and $observed.Selected64 -ceq [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($knownPwsh))) 'Actual PS51 PATH script shadow masked the isolated known native PowerShell installation.'
     }
 
     Test 'Actual native deadline records PID and attempts termination while retaining UNKNOWN125' {

@@ -120,13 +120,17 @@ Invoke the installed launcher, rather than the SDK-generated raw shim:
 
 For arguments that must remain exact strings, prefer an explicit PowerShell
 `-File` invocation. Both `-File` and `/File` preserve native arguments, including
-trailing-colon strings. Windows PowerShell 5.1's implicit script invocation uses
-command parsing and is refused. Direct invocation accepts ordinary string-array
+trailing-colon strings. Windows PowerShell 5.1's implicit entry through an
+explicit path is refused. Direct invocation accepts ordinary string-array
 splats, but refuses nested argument collections and ambiguous dash-prefixed
 trailing-colon values; use explicit `-File` for those values. Bootstrap reports
 these cases instead of reconstructing a PowerShell expression. Explicit stdin
 is unsupported when a `.ps1` prerequisite needs the script transport, including
 an explicitly empty stdin value. Routine command examples above remain valid.
+Use full host switch spellings; `-NoExit` is unsupported. Arbitrary direct
+unquoted PowerShell arguments can be tokenized before Forge sees them. Prefer
+explicit `-File` or a quoted string-array splat. The PS5.1 implicit-entry guard
+does not resolve commands indirectly through PATH.
 
 Before starting the actual CLI, the launcher checks prerequisites. If installable
 dependencies are missing, it runs bootstrap once and rechecks the installation

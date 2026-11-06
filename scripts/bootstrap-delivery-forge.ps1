@@ -92,10 +92,14 @@ function Find-ForgeCommand([string]$Name) {
         $current = (Get-Process -Id $PID).Path
         if ($current -and [IO.Path]::GetFileName($current) -eq 'pwsh.exe') { return $current }
     }
+    $batchFallback = $null
     $names = @(($Name + '.exe'), ($Name + '.ps1'), ($Name + '.cmd'))
     foreach ($candidate in $names) {
         $command = Get-Command $candidate -CommandType Application, ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
-        if ($command) { return $command.Source }
+        if ($command) {
+            if ([IO.Path]::GetExtension($command.Source) -in @('.cmd', '.bat') -or ($Name -eq 'pwsh' -and [IO.Path]::GetExtension($command.Source) -ine '.exe')) { $batchFallback = $command.Source; continue }
+            return $command.Source
+        }
     }
     $known = switch ($Name) {
         'git' { @("$env:ProgramFiles/Git/cmd/git.exe", "$env:LOCALAPPDATA/Programs/Git/cmd/git.exe") }
@@ -108,7 +112,7 @@ function Find-ForgeCommand([string]$Name) {
         default { @() }
     }
     foreach ($candidate in $known) { if (Test-Path -LiteralPath $candidate -PathType Leaf) { return [IO.Path]::GetFullPath($candidate) } }
-    $null
+    $batchFallback
 }
 
 function Get-ForgeRemainingSeconds([Diagnostics.Stopwatch]$Clock, [int]$MaximumSeconds, [int]$ReserveSeconds = 0) {
@@ -206,7 +210,7 @@ function Invoke-ForgeProcess {
     $info.FileName = $Executable; $inputText = $StandardInput
     if ($extension -ieq '.ps1') {
         $shell = Find-ForgeCommand 'pwsh'
-        if (-not $shell) { $shell = "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" }
+        if (-not $shell -or [IO.Path]::GetExtension($shell) -ine '.exe') { $shell = "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" }
         $inputText = @{ Executable64 = $executable64; Arguments64 = @($argument64) } | ConvertTo-Json -Depth 5 -Compress
         $null = ConvertTo-ForgeWireString $shell
         $info.FileName = $shell
@@ -359,14 +363,17 @@ function Get-ForgeBootstrapReport {
         $path = Find-ForgeCommand $name; $commands[$name] = $path
         $version = $null
         $batchEntry = $path -and [IO.Path]::GetExtension($path) -in @('.cmd', '.bat')
-        if ($path -and -not $batchEntry) {
+        $unsupportedPowerShell = $name -eq 'pwsh' -and $path -and [IO.Path]::GetExtension($path) -ine '.exe'
+        $unsupportedEntry = $batchEntry -or $unsupportedPowerShell
+        if ($path -and -not $unsupportedEntry) {
             try { $probe = Invoke-ForgeProcess $path @('--version') -Clock $Clock -MaximumSeconds $MaximumSeconds; if ($probe.ExitCode -eq 0) { $version = ($probe.Stdout -split '\r?\n')[0].Trim() } } catch { if ($script:ForgeBootstrapUnsettled) { throw } }
         }
         $versions[$name] = $version
-        $status = if ($batchEntry) { 'Unsupported' } elseif ($version) { 'Ready' } elseif ($path) { 'Unverified' } else { 'Missing' }
+        $status = if ($unsupportedEntry) { 'Unsupported' } elseif ($version) { 'Ready' } elseif ($path) { 'Unverified' } else { 'Missing' }
         $steps = if ($status -eq 'Unverified') { @("Run '$path --version' in an ordinary terminal. Check execution permissions or the broken installation; do not blindly install a second copy.") } else { @("winget install --id $($packages[$name]) --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity") }
         if ($batchEntry) { $steps = @('Select an existing supported native executable or .ps1 entry. The batch installation is preserved; do not install a duplicate automatically.') }
-        $checks.Add((New-ForgeCheck $name $status $(if ($version) { $version } elseif ($batchEntry) { "$name resolves only to an unsupported batch entry; no probe was entered." } elseif ($path) { "$name exists but its version probe failed or was denied." } else { "$name CLI is missing." }) ($status -eq 'Missing') $steps))
+        if ($unsupportedPowerShell) { $steps = @('Select an existing native pwsh.exe. The script/batch entry is preserved; do not install a duplicate automatically.') }
+        $checks.Add((New-ForgeCheck $name $status $(if ($version) { $version } elseif ($unsupportedPowerShell) { "pwsh resolves only to a non-native script/batch entry; no probe was entered." } elseif ($batchEntry) { "$name resolves only to an unsupported batch entry; no probe was entered." } elseif ($path) { "$name exists but its version probe failed or was denied." } else { "$name CLI is missing." }) ($status -eq 'Missing') $steps))
     }
     $winget = Find-ForgeCommand 'winget'
     $needsWinget = @($checks | Where-Object { $_.Id -in $packages.Keys -and $_.Status -eq 'Missing' }).Count -gt 0
@@ -545,7 +552,7 @@ function Get-ForgeLauncherContent {
 #requires -Version 5.1
 $forwarded = @($args)
 $hostArguments = [Environment]::GetCommandLineArgs()
-$fileArgument = -1; $unsupportedHostPrefix = $false; $implicitEntry = $false
+$fileArgument = -1; $unsupportedHostPrefix = $false; $unsupportedHostOption = ''; $implicitEntry = $false
 for ($index = 1; $index -lt $hostArguments.Length; $index++) {
     $option = $hostArguments[$index]
     if ($option.StartsWith('/')) { $option = '-' + $option.Substring(1) }
@@ -556,16 +563,16 @@ for ($index = 1; $index -lt $hostArguments.Length; $index++) {
         }
         break
     }
-    if ($option -in @('-NoProfile', '-NoLogo', '-NonInteractive', '-NoExit', '-STA', '-MTA', '-Login')) { continue }
+    if ($option -in @('-NoProfile', '-NoLogo', '-NonInteractive', '-STA', '-MTA', '-Login')) { continue }
     if ($option -in @('-ExecutionPolicy', '-WindowStyle', '-InputFormat', '-OutputFormat', '-WorkingDirectory', '-SettingsFile', '-ConfigurationName', '-Version')) { $index++; continue }
-    if ($option.StartsWith('-')) { $unsupportedHostPrefix = $true; continue }
+    if ($option.StartsWith('-')) { $unsupportedHostPrefix = $true; if (-not $unsupportedHostOption) { $unsupportedHostOption = $option }; continue }
     if ($unsupportedHostPrefix -and [IO.Path]::GetExtension($option) -ine '.ps1') { continue }
     try { if ([string]::Equals([IO.Path]::GetFullPath($option), [IO.Path]::GetFullPath($PSCommandPath), [StringComparison]::OrdinalIgnoreCase)) { $fileArgument = $index; $implicitEntry = $true } } catch { }
     break # Another script is not this -File entry; do not inspect its argv.
 }
 if ($fileArgument -ge 0) {
     if ($implicitEntry -and $PSVersionTable.PSVersion.Major -lt 6) { throw 'FORGE_BOOTSTRAP_AMBIGUOUS_FILE_ARGV: Windows PowerShell implicit script entry uses command semantics; use explicit -File or a string-array splat.' }
-    if ($unsupportedHostPrefix) { throw 'FORGE_BOOTSTRAP_AMBIGUOUS_FILE_ARGV: select an unambiguous PowerShell -File invocation before original command entry.' }
+    if ($unsupportedHostPrefix) { throw "FORGE_BOOTSTRAP_AMBIGUOUS_FILE_ARGV: unsupported host switch '$unsupportedHostOption'; use full PowerShell host switch spellings and explicit -File. -NoExit is unsupported before original command entry." }
     $forwarded = [string[]]@()
     if ($fileArgument + 1 -lt $hostArguments.Length) { $forwarded = [string[]]@($hostArguments[($fileArgument + 1)..($hostArguments.Length - 1)]) }
 }
@@ -779,7 +786,8 @@ function Invoke-ForgeBootstrapInstall {
             }
         }
         $git = Find-ForgeCommand 'git'; $pwsh = Find-ForgeCommand 'pwsh'
-        if (-not $git -or -not $pwsh) { throw 'Git and PowerShell 7 are needed to finish installation; follow the prerequisite report.' }
+        if (-not $git -or -not $pwsh) { throw 'Git and native PowerShell 7 are needed to finish installation; follow the prerequisite report.' }
+        if ([IO.Path]::GetExtension($pwsh) -ine '.exe') { throw 'Existing pwsh entry is unsupported for installation; select a native pwsh.exe without installing a duplicate automatically.' }
         $existing = Read-ForgeInstallation $Root
         $retainedSource = $false
         if (-not $SelectedSource -and $selection -and -not $SourceSelectionExplicit) {
@@ -956,7 +964,9 @@ function Invoke-ForgeBootstrapInstall {
             } elseif (Test-Path -LiteralPath $destination) { throw 'Skill destination appeared before activation; preserve it.' }
             try { Move-ForgeInstallationDirectory $candidate $destination; $item.NewMoved = $true }
             catch {
-                if ((Test-Path -LiteralPath $destination) -or -not (Test-ForgeSkillRestoreState $candidate $newMarker '')) { $script:ForgeBootstrapUnsettled = $true }
+                $unchanged = $false
+                try { $unchanged = -not (Test-Path -LiteralPath $destination) -and (Test-ForgeSkillRestoreState $candidate $newMarker '') } catch { }
+                if (-not $unchanged) { $script:ForgeBootstrapUnsettled = $true }
                 throw
             }
         }
