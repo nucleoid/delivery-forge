@@ -264,6 +264,20 @@ exit $script:ForgeCommandExitCode
         Assert ($errors.Count -eq 0) 'Generated launcher does not parse.'
         Assert ((Get-ForgeLauncherContent) -match 'Invoke-ForgeCommand') 'Generated launcher bypasses bootstrap.'
     }
+    Test 'Non-JSON entrypoint retains UNKNOWN exit 125 before any native prerequisite probe' {
+        $sourceFile=Join-Path (Split-Path -Parent $PSScriptRoot) 'bootstrap-delivery-forge.ps1'
+        $actual=[IO.File]::ReadAllText($sourceFile)
+        $entry="if (`$MyInvocation.InvocationName -ne '.') {"
+        Assert (@([regex]::Matches($actual,[regex]::Escape($entry))).Count -eq 1) 'Actual entrypoint was not uniquely identified.'
+        # Fault injection only: no unknown native process is created. Exercise
+        # the complete real entrypoint, report and catch with sticky refusal.
+        $scratch=Join-Path $TestRoot 'unknown-entrypoint.INJECTED.ps1'
+        [IO.File]::WriteAllText($scratch,$actual.Replace($entry,"`$script:ForgeBootstrapUnsettled = `$true`r`n"+$entry))
+        $readonlyState=Join-Path $TestRoot 'unknown-readonly-state'
+        $result=Invoke-ForgeProcess (Get-Process -Id $PID).Path @('-NoProfile','-NonInteractive','-File',$scratch,'-Mode','Check','-StateRoot',$readonlyState) -TimeoutSeconds 15
+        Assert ($result.ExitCode -eq 125 -and $result.Stderr -match 'FORGE_BOOTSTRAP_UNKNOWN') 'Non-JSON catch lost the original UNKNOWN status.'
+        Assert (-not(Test-Path -LiteralPath $readonlyState)) 'Pre-probe Check refusal created installation state.'
+    }
     Test 'Actual held installation lock prevents every native prerequisite probe' {
         $root=Join-Path $TestRoot 'real-held-lock';$null=New-Item -ItemType Directory -Path $root
         $lock=[IO.File]::Open((Join-Path $root 'bootstrap.lock'),'CreateNew','ReadWrite','None')

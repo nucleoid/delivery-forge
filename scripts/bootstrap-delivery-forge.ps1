@@ -822,7 +822,7 @@ if ($MyInvocation.InvocationName -ne '.') {
     } catch {
         $failureCode = $(if ($script:ForgeBootstrapUnsettled) { 125 } else { 1 })
         if ($Json) { @{ Kind = 'DeliveryForgeBootstrapReport-v1'; ExitCode = $failureCode; Failure = $_.Exception.Message; ExecutionCertified = $false } | ConvertTo-Json }
-        else { Write-Error $_.Exception.Message }
+        else { [Console]::Error.WriteLine($_.Exception.Message) }
         exit $failureCode
     }
 }
