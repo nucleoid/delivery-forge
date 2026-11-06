@@ -424,7 +424,14 @@ try {
         Assert ($modern.ExitCode -eq 17 -and $seen.Count -eq 1 -and $seen.Values64[0] -ceq [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('$env:DF_FIXTURE_X')) -and @(Get-Content -LiteralPath $counter).Count -eq $before+1) 'Modern implicit File changed a literal environment-looking argument.'
         $before=@(Get-Content -LiteralPath $counter).Count
         $legacy=Invoke-ForgeProcess $ps51 @('-NoProfile','-NonInteractive',$facade,'$env:DF_FIXTURE_X') -Environment $environment -TimeoutSeconds 20
-        Assert ($legacy.ExitCode -ne 0 -and $legacy.Stderr -match 'FORGE_BOOTSTRAP_AMBIGUOUS_FILE_ARGV' -and @(Get-Content -LiteralPath $counter).Count -eq $before) 'PS51 implicit Command was mistaken for a literal native File invocation.'
+        # This spaced path is refused by the PS51 command parser before the
+        # facade starts; it does not demonstrate the facade's own guard.
+        Assert ($legacy.ExitCode -ne 0 -and @(Get-Content -LiteralPath $counter).Count -eq $before) 'PS51 spaced implicit invocation entered the original command.'
+        $guardFixture=Join-Path $TestRoot 'implicit-legacy.ps1'
+        Assert ($guardFixture -notmatch '\s') 'The direct implicit-entry guard control requires a no-space test root.'
+        [IO.File]::WriteAllBytes($guardFixture,[IO.File]::ReadAllBytes($facade))
+        $guard=Invoke-ForgeProcess $ps51 @('-NoProfile','-NonInteractive',$guardFixture,'$env:DF_FIXTURE_X') -Environment $environment -TimeoutSeconds 20
+        Assert ($guard.ExitCode -ne 0 -and $guard.Stderr -match 'FORGE_BOOTSTRAP_AMBIGUOUS_FILE_ARGV' -and @(Get-Content -LiteralPath $counter).Count -eq $before) 'PS51 actual implicit facade entry bypassed its guard before manifest/native startup.'
     }
 
     Test 'Actual native deadline records PID and attempts termination while retaining UNKNOWN125' {
