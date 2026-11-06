@@ -259,7 +259,11 @@ function Invoke-ForgeBootstrapInstall {throw 'An entered failed command must not
         $tool=Join-Path $fixtureRoot 'inert tool.ps1'
         [IO.File]::WriteAllText($tool,@'
 [IO.File]::AppendAllText($env:DF_FIXTURE_COUNTER,"entered`n")
-[Console]::Write((@{Values=@($args);Count=$args.Count;Cpu=$env:DOTNET_PROCESSOR_COUNT;Heap=$env:DOTNET_GCHeapHardLimit}|ConvertTo-Json -Compress))
+# Echo each received string as UTF8 Base64 so the fixture's own console code
+# page and JSON date parser cannot alter the evidence being compared.
+$utf8=[Text.UTF8Encoding]::new($false,$true)
+$received64=@(foreach($value in $args){[Convert]::ToBase64String($utf8.GetBytes([string]$value))})
+[Console]::Write((@{Values64=$received64;Count=$args.Count;Cpu=$env:DOTNET_PROCESSOR_COUNT;Heap=$env:DOTNET_GCHeapHardLimit}|ConvertTo-Json -Compress))
 exit 17
 '@)
         $hostPath=(Get-Process -Id $PID).Path
@@ -272,11 +276,12 @@ exit 17
         $environment=@{DF_FIXTURE_RECORD=$recordPath;DF_FIXTURE_PWSH=$hostPath;DF_FIXTURE_COUNTER=$counter;DOTNET_PROCESSOR_COUNT='9'}
         $unicode='path-'+[char]0x65E5+[char]0x672C+'-'+[char]::ConvertFromUtf32(0x1F680)
         $values=@($unicode,'2026-01-15T10:00:00Z','2026-01-15T10:00:00+13:00','','trailing slash','--body','-Verbose','-Debug','-ErrorAction','SilentlyContinue','-?','-f','-ForgeArguments','--')
+        $expected64=@($values|ForEach-Object{[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_))})
         foreach($origin in @($hostPath,(Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'))){
             $result=Invoke-ForgeProcess $origin (@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$facade)+$values) -Environment $environment -TimeoutSeconds 30
             Assert ($result.ExitCode -eq 17) 'Generated facade lost actual failed-command exit.'
             $seen=$result.Stdout|ConvertFrom-Json
-            Assert ($seen.Count -eq $values.Count -and ($seen.Values|ConvertTo-Json -Compress) -ceq ($values|ConvertTo-Json -Compress)) 'Generated facade changed Unicode/date/option/empty argv.'
+            Assert ($seen.Count -eq $values.Count -and ($seen.Values64|ConvertTo-Json -Compress) -ceq ($expected64|ConvertTo-Json -Compress)) 'Generated facade changed Unicode/date/option/empty argv.'
             Assert ($seen.Cpu -eq '2' -and $seen.Heap -eq '0x100000000') 'Generated facade bypassed selected native resource settings.'
         }
         $oem=Join-Path $fixtureRoot 'oem caller.ps1'
@@ -293,7 +298,7 @@ exit $LASTEXITCODE
         $result=Invoke-ForgeProcess $hostPath @('-NoProfile','-NonInteractive','-File',$oem,$facade,$wire) -Environment $environment -TimeoutSeconds 30
         Assert ($result.ExitCode -eq 17) 'OEM-origin command exit changed.'
         $seen=$result.Stdout|ConvertFrom-Json
-        Assert (($seen.Values|ConvertTo-Json -Compress) -ceq ($values|ConvertTo-Json -Compress)) 'OEM input encoding changed actual argv.'
+        Assert (($seen.Values64|ConvertTo-Json -Compress) -ceq ($expected64|ConvertTo-Json -Compress)) 'OEM input encoding changed actual argv.'
         $empty=Invoke-ForgeProcess $hostPath @('-NoProfile','-NonInteractive','-File',$facade) -Environment $environment -TimeoutSeconds 30
         Assert ($empty.ExitCode -eq 17) 'No-argument command did not enter exactly once.'
         $seen=$empty.Stdout|ConvertFrom-Json
