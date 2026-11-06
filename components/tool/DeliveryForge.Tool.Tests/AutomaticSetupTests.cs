@@ -127,8 +127,12 @@ public sealed class AutomaticSetupTests
         var first = AutomaticSetup.PreparePlan("owner/example", fixture.Repository, "refs/heads/main", fixture.Git, fixture.State, original);
         var originalRoot = File.ReadAllBytes(first.Root.Path);
         var template = TrustedConfiguration.Load(first.ConfigurationPath, original);
-        var oldOutput = output switch { "worktree" => first.Selection.WorkerPaths.Worktree,
-            "results" => first.Selection.WorkerPaths.ResultDirectory, _ => first.Selection.StoreRoot };
+        var oldOutput = output switch
+        {
+            "worktree" => first.Selection.WorkerPaths.Worktree,
+            "results" => first.Selection.WorkerPaths.ResultDirectory,
+            _ => first.Selection.StoreRoot
+        };
         Directory.CreateDirectory(oldOutput);
         var input = Path.Combine(oldOutput, "selected-input.DATA");
         File.WriteAllText(input, "preserved old output content");
