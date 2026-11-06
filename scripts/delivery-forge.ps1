@@ -20,10 +20,19 @@ foreach($key in $settings.Keys) { $previous[$key]=[Environment]::GetEnvironmentV
 $exitCode=1
 try {
     foreach($key in $settings.Keys) { [Environment]::SetEnvironmentVariable($key,$settings[$key],'Process') }
-    $LASTEXITCODE=$null
-    & $DotNetHost $ToolAssembly @ForgeArguments
-    if($null -eq $LASTEXITCODE) { throw 'The selected native tool returned no actual exit code; completion is unverified.' }
-    $exitCode=$LASTEXITCODE
+    # Observe the actual process directly. PowerShell native-command forwarding
+    # can return without LASTEXITCODE in a redirected/noninteractive host.
+    $start=[Diagnostics.ProcessStartInfo]::new($DotNetHost)
+    $start.UseShellExecute=$false
+    $start.CreateNoWindow=$true
+    $start.ArgumentList.Add($ToolAssembly)
+    foreach($argument in $ForgeArguments) { $start.ArgumentList.Add($argument) }
+    $process=[Diagnostics.Process]::new()
+    $process.StartInfo=$start
+    if(-not $process.Start()) { throw 'The selected native tool did not start.' }
+    $process.WaitForExit()
+    $exitCode=$process.ExitCode
+    $process.Dispose()
 } finally {
     foreach($key in $settings.Keys) { [Environment]::SetEnvironmentVariable($key,$previous[$key],'Process') }
 }
