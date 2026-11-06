@@ -43,6 +43,7 @@ public sealed class HostInstructionTests
         var defaults = JsonSerializer.SerializeToElement(HostAssignmentPrompt.CodexWorkerThreadStart(r, sandbox, null));
         Assert.Equal(HostAssignmentPrompt.CodexWorkerPolicy, defaults.GetProperty("developerInstructions").GetString());
         Assert.Throws<IOException>(() => HostAssignmentPrompt.CodexWorkerThreadStart(r, "danger-full-access", configured));
+        Assert.Throws<IOException>(() => HostAssignmentPrompt.CodexWorkerThreadStart(r, sandbox, r.WriterToken));
     }
     [Theory]
     [InlineData("{}", null)]
@@ -165,6 +166,11 @@ public sealed class HostInstructionTests
     [InlineData("{\"developer_instructions\":true}", "user")]
     [InlineData("{\"developer_instructions\":\"untrusted-origin-canary-DATA\"}", null)]
     [InlineData("{\"developer_instructions\":\"untrusted-origin-canary-DATA\"}", "project")]
+    [InlineData("{\"developer_instructions\":\"\"}", "project")]
+    [InlineData("{\"developer_instructions\":null}", "project")]
+    [InlineData("{}", "project")]
+    [InlineData("{\"developer_instructions\":\"\"}", "unknown-DATA")]
+    [InlineData("{\"developer_instructions\":null}", "unknown-DATA")]
     public void Malformed_or_nonowner_selection_returns_redacted_reply_then_sticky_refusal(string config, string? origin)
     {
         var capsule = new CodexWorkerInstructions(); var projected = capsule.ObserveAndProject(ConfigResponse(config, origin: origin), 3);
@@ -195,5 +201,17 @@ public sealed class HostInstructionTests
         Assert.DoesNotContain(canary, refusal.ToString(), StringComparison.Ordinal);
         var foreign = new CodexWorkerInstructions(); _ = foreign.ObserveAndProject(TextResponse(canary, 4), 3);
         Assert.Throws<IOException>(() => foreign.RequireObserved());
+    }
+    [Theory]
+    [InlineData("{}", null)]
+    [InlineData("{\"developer_instructions\":null}", null)]
+    [InlineData("{\"developer_instructions\":\"\"}", "")]
+    public void Missing_origin_without_effective_text_preserves_native_defaults(string config, string? expected)
+    {
+        var raw = ConfigResponse(config, origin: null);
+        Assert.Equal(expected, HostAssignmentPrompt.ConfiguredDeveloperInstructions(raw));
+        var capsule = new CodexWorkerInstructions(); var projected = capsule.ObserveAndProject(raw, 3);
+        Assert.Equal(expected, capsule.RequireObserved());
+        Assert.False(projected.GetProperty("result").TryGetProperty("config", out _));
     }
 }

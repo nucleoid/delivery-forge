@@ -11,13 +11,18 @@ public static class HostAssignmentPrompt
         if (response.ValueKind != JsonValueKind.Object || !response.TryGetProperty("result", out var result) || result.ValueKind != JsonValueKind.Object ||
             !result.TryGetProperty("config", out var config) || config.ValueKind != JsonValueKind.Object)
             throw new IOException("Selected developer instruction response is malformed.");
+        var origin = !result.TryGetProperty("origins", out var origins) ? CodexConfigOriginClass.Missing :
+            origins.ValueKind == JsonValueKind.Object ? CodexConfigReadData.DeveloperInstructionOrigin(origins) : CodexConfigOriginClass.Unrecognized;
+        var ownerOrigin = origin is CodexConfigOriginClass.PackagedDefaults or CodexConfigOriginClass.Mdm or CodexConfigOriginClass.System or
+            CodexConfigOriginClass.EnterpriseManaged or CodexConfigOriginClass.User or CodexConfigOriginClass.SessionFlags or
+            CodexConfigOriginClass.LegacyManagedFile or CodexConfigOriginClass.LegacyManagedMdm;
+        // A repository/unknown layer cannot clear owner text through null, empty or omitted values either.
+        if (!ownerOrigin && origin != CodexConfigOriginClass.Missing)
+            throw new IOException("Configured worker instructions require an observed owner origin; repository or unknown origins are refused.");
         if (!config.TryGetProperty("developer_instructions", out var value) || value.ValueKind == JsonValueKind.Null) return null;
         if (value.ValueKind != JsonValueKind.String || value.GetString() is not { Length: <= 16384 } text)
             throw new IOException("Selected developer instructions exceed the finite worker profile.");
-        if (text.Length > 0 && (!result.TryGetProperty("origins", out var origins) || origins.ValueKind != JsonValueKind.Object ||
-            CodexConfigReadData.DeveloperInstructionOrigin(origins) is not (CodexConfigOriginClass.PackagedDefaults or CodexConfigOriginClass.Mdm or
-                CodexConfigOriginClass.System or CodexConfigOriginClass.EnterpriseManaged or CodexConfigOriginClass.User or CodexConfigOriginClass.SessionFlags or
-                CodexConfigOriginClass.LegacyManagedFile or CodexConfigOriginClass.LegacyManagedMdm)))
+        if (!ownerOrigin && text.Length != 0)
             throw new IOException("Configured worker instructions require an observed owner origin; repository or unknown origins are refused.");
         return text;
     }
