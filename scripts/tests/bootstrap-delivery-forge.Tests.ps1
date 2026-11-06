@@ -279,7 +279,8 @@ exit 17
         $expected64=@($values|ForEach-Object{[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_))})
         foreach($origin in @($hostPath,(Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'))){
             $result=Invoke-ForgeProcess $origin (@('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$facade)+$values) -Environment $environment -TimeoutSeconds 30
-            Assert ($result.ExitCode -eq 17) 'Generated facade lost actual failed-command exit.'
+            $result|ConvertTo-Json -Depth 6|Set-Content -LiteralPath (Join-Path $fixtureRoot ([IO.Path]::GetFileNameWithoutExtension($origin)+'-observed.json')) -Encoding utf8NoBOM
+            Assert ($result.ExitCode -eq 17) ('Generated facade lost actual failed-command exit: '+$result.ExitCode+'; '+$result.Stderr)
             $seen=$result.Stdout|ConvertFrom-Json
             Assert ($seen.Count -eq $values.Count -and ($seen.Values64|ConvertTo-Json -Compress) -ceq ($expected64|ConvertTo-Json -Compress)) 'Generated facade changed Unicode/date/option/empty argv.'
             Assert ($seen.Cpu -eq '2' -and $seen.Heap -eq '0x100000000') 'Generated facade bypassed selected native resource settings.'
