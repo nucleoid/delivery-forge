@@ -1,3 +1,4 @@
+#requires -Version 7.0
 # Selected installation launcher. No PATH, authentication or persistent settings change.
 [CmdletBinding(PositionalBinding=$false)]
 param(
@@ -6,6 +7,7 @@ param(
     [Parameter(ValueFromRemainingArguments=$true)][string[]]$ForgeArguments
 )
 $ErrorActionPreference='Stop'
+$clock=[Diagnostics.Stopwatch]::StartNew()
 foreach($selected in @($DotNetHost,$ToolAssembly)) {
     if(-not [IO.Path]::IsPathFullyQualified($selected) -or -not [IO.File]::Exists($selected)) { throw 'Select the existing absolute installed runtime and tool assembly.' }
 }
@@ -34,11 +36,22 @@ try {
     if(-not $process.Start()) { throw 'The selected native tool did not start.' }
     $stdout=$process.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())
     $stderr=$process.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
-    $process.WaitForExit()
-    $stdout.GetAwaiter().GetResult()
-    $stderr.GetAwaiter().GetResult()
-    $exitCode=$process.ExitCode
-    $process.Dispose()
+    $unresolved=$false
+    while(-not $process.WaitForExit(100)) {
+        if($stdout.IsFaulted -or $stderr.IsFaulted -or $clock.ElapsedMilliseconds -ge 1200000) { $unresolved=$true; break }
+    }
+    if(-not $unresolved) {
+        $drainMilliseconds=[int][Math]::Max(0,[Math]::Min(60000,1200000-$clock.ElapsedMilliseconds))
+        try { $unresolved=-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout,$stderr),$drainMilliseconds) }
+        catch { $unresolved=$true }
+    }
+    if($unresolved) {
+        [Console]::Error.WriteLine('DFCLI_LAUNCHER_UNKNOWN: native process/output completion is unverified; preserve this attempt and do not retry automatically.')
+        $exitCode=125
+    } else {
+        $exitCode=$process.ExitCode
+        $process.Dispose()
+    }
 } finally {
     foreach($key in $settings.Keys) { [Environment]::SetEnvironmentVariable($key,$previous[$key],'Process') }
 }

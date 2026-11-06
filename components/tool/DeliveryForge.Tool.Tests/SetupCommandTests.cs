@@ -32,6 +32,7 @@ public sealed class SetupCommandTests
         Assert.False(Directory.Exists(setup.Selection.WorkerPaths.Worktree));
         Assert.False(Directory.Exists(setup.Selection.WorkerPaths.ResultDirectory));
         Assert.False(setup.RuntimeCertified);
+        Assert.Equal("ExplicitSelectionUnverified", setup.RepositoryIdentitySource);
         using var admission = JsonDocument.Parse(File.ReadAllBytes(setup.Selection.InstalledHostAdmission.Path));
         Assert.Equal("DeliveryForgeHostNotAdmitted-v1", admission.RootElement.GetProperty("Kind").GetString());
     }
@@ -61,6 +62,7 @@ public sealed class SetupCommandTests
         Assert.Equal(firstConfig, File.ReadAllBytes(first.ConfigurationPath));
         Assert.Empty(application.RetainedExternalCalls);
         Assert.False(result.RuntimeCertified);
+        Assert.Equal("ExplicitSelectionUnverified", next.RepositoryIdentitySource);
     }
 
     [Theory]
@@ -138,13 +140,78 @@ public sealed class SetupCommandTests
         var executor = new DeliveryForge.Evidence.ProcessCommandExecutor();
         var initialized = await executor.ExecuteAsync(new(git, ["init", "-q", "-b", "selected-feature"], fixture.Repository), TimeSpan.FromSeconds(15), original.Token);
         Assert.True(initialized.ExitCode == 0 && initialized.OwnedProcessQuiescent);
+        var remote = await executor.ExecuteAsync(new(git, ["-C", fixture.Repository, "remote", "add", "origin", "https://github.com/owner/example.git"], fixture.Repository), TimeSpan.FromSeconds(15), original.Token);
+        Assert.True(remote.ExitCode == 0 && remote.OwnedProcessQuiescent);
         var application = new ToolApplication(actualOriginal: original);
         var result = await application.ExecuteAsync(CommandLine.Parse(["setup", "--repo", fixture.Repository, "--repository", "owner/example", "--git", git, "--state-root", fixture.State]), original.Token);
         original.Check();
         Assert.Equal("SETUP_PREPARED", result.Code);
         var selected = Assert.IsType<AutomaticSetupResult>(result.Data);
         Assert.Equal("refs/heads/selected-feature", TrustedConfiguration.Load(selected.ConfigurationPath, original).MutableReference);
-        Assert.Single(application.RetainedExternalCalls);
+        Assert.Equal("CheckoutOriginVerified", selected.RepositoryIdentitySource);
+        Assert.Equal(new[] { "ActualSetupBranch", "ActualSetupOrigin" }, application.RetainedExternalCalls.Select(row => row.Kind));
+    }
+
+    [Theory(Skip = "Automatic repository discovery uses the Windows selected owner.", SkipUnless = nameof(IsWindows))]
+    [InlineData("https://github.com/owner/other.git", "SETUP_REPOSITORY_MISMATCH")]
+    [InlineData("https://user:credential-sentinel@github.com/owner/other.git", "SETUP_REPOSITORY_MISMATCH")]
+    [InlineData("https://example.invalid/owner/example.git", "SETUP_REPOSITORY_IDENTITY_REQUIRED")]
+    [InlineData(null, "SETUP_REPOSITORY_IDENTITY_REQUIRED")]
+    public async Task Automatic_repository_mismatch_or_unresolvable_origin_refuses_without_setup_files_or_remote_url_output(string? remoteUrl, string expectedCode)
+    {
+        var fixture = Fixture.Create();
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(120), TestContext.Current.CancellationToken);
+        var git = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator).Where(Path.IsPathFullyQualified)
+            .Select(path => Path.Combine(path, "git.exe")).First(File.Exists);
+        var executor = new DeliveryForge.Evidence.ProcessCommandExecutor();
+        var initialized = await executor.ExecuteAsync(new(git, ["init", "-q", "-b", "selected-feature"], fixture.Repository), TimeSpan.FromSeconds(15), original.Token);
+        Assert.True(initialized.ExitCode == 0 && initialized.OwnedProcessQuiescent);
+        if (remoteUrl is not null)
+        {
+            var added = await executor.ExecuteAsync(new(git, ["-C", fixture.Repository, "remote", "add", "origin", remoteUrl], fixture.Repository), TimeSpan.FromSeconds(15), original.Token);
+            Assert.True(added.ExitCode == 0 && added.OwnedProcessQuiescent);
+        }
+        var application = new ToolApplication(actualOriginal: original);
+        var result = await application.ExecuteAsync(CommandLine.Parse(["setup", "--repo", fixture.Repository, "--repository", "owner/example", "--git", git, "--state-root", fixture.State]), original.Token);
+        original.Check();
+        Assert.Equal("INCOMPLETE", result.Outcome);
+        Assert.Equal(expectedCode, result.Code);
+        Assert.Null(result.Data);
+        Assert.False(Directory.Exists(fixture.State));
+        Assert.Equal(new[] { "ActualSetupBranch", "ActualSetupOrigin" }, application.RetainedExternalCalls.Select(row => row.Kind));
+        var output = JsonSerializer.Serialize(result, BoundedFiles.Json);
+        Assert.DoesNotContain("credential-sentinel", output, StringComparison.Ordinal);
+        if (remoteUrl is not null) Assert.DoesNotContain(remoteUrl, output, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("https://github.com/Owner/Repo", "Owner/Repo")]
+    [InlineData("https://github.com/Owner/Repo.git", "Owner/Repo")]
+    [InlineData("https://user:credential-sentinel@github.com/owner/example.git", "owner/example")]
+    [InlineData("git@github.com:Owner/Repo.git", "Owner/Repo")]
+    [InlineData("ssh://git@github.com/Owner/Repo.git", "Owner/Repo")]
+    public void Github_origin_parser_projects_only_the_repository_identity(string remote, string expected)
+    {
+        Assert.True(ToolApplication.TryGitHubRepository(remote, out var repository));
+        Assert.Equal(expected, repository);
+        Assert.DoesNotContain("credential-sentinel", repository, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("https://github.com.example.invalid/owner/example.git")]
+    [InlineData("http://github.com/owner/example.git")]
+    [InlineData("https://github.com/owner/example.git?credential-sentinel")]
+    [InlineData("https://github.com/owner/example.git#other")]
+    [InlineData("https://github.com/owner/example/extra")]
+    [InlineData("https://github.com/owner/example%2egit")]
+    [InlineData("git@github.com:../../owner/example.git")]
+    [InlineData("https://github.com/owner/example.git\nhttps://github.com/owner/other.git")]
+    [InlineData("ssh://other@github.com/owner/example.git")]
+    [InlineData("file:///owner/example.git")]
+    public void Unsupported_or_ambiguous_origins_do_not_produce_an_identity(string remote)
+    {
+        Assert.False(ToolApplication.TryGitHubRepository(remote, out var repository));
+        Assert.Equal(string.Empty, repository);
     }
 
     static ToolLifetime Lifetime() => new(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);

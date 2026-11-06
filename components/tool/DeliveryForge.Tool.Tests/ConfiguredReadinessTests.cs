@@ -1,3 +1,4 @@
+using DeliveryForge.Evidence;
 using System.Security.Cryptography;
 using System.Text.Json;
 using DeliveryForge.Tool;
@@ -5,6 +6,7 @@ namespace DeliveryForge.Tool.Tests;
 
 public sealed class ConfiguredReadinessTests
 {
+    public static bool IsLinux => OperatingSystem.IsLinux();
     sealed class Fixture
     {
         internal readonly string Root = Directory.CreateTempSubdirectory("forge-readiness-").FullName;
@@ -12,13 +14,14 @@ public sealed class ConfiguredReadinessTests
         internal string RootPath => Path.Combine(Root, "root.json");
         internal string AdmissionPath => Path.Combine(Root, "host.json");
         internal TrustedConfiguration Configuration;
+        internal StandaloneRootSelection Selection;
         internal Fixture(string kind = "DeliveryForgeHostNotAdmitted-v1")
         {
             var admission = Write(AdmissionPath, new { Kind = kind });
-            var root = new StandaloneRootSelection("DeliveryForgeStandaloneRoot-v1", Path.Combine(Root, "store"),
+            Selection = new StandaloneRootSelection("DeliveryForgeStandaloneRoot-v1", Path.Combine(Root, "store"),
                 new(Path.Combine(Root, "work"), Path.Combine(Root, "results"), ["change.cs"], []), admission);
             Configuration = new("selected/repository", Path.Combine(Root, "repository"), "HEAD",
-                typeof(ToolApplication).Assembly.Location, StandaloneRoot: Write(RootPath, root));
+                typeof(ToolApplication).Assembly.Location, StandaloneRoot: Write(RootPath, Selection));
             Save();
         }
         internal static AdmissionFile Write(string path, object value)
@@ -110,6 +113,46 @@ public sealed class ConfiguredReadinessTests
         var data = Assert.IsType<ConfiguredReadinessReport>((await fixture.Inspect()).Data);
         Assert.DoesNotContain("IMPLEMENT_AUTHORIZATION_REQUIRED", data.Implement.MissingPrerequisites);
         Assert.Contains("IMPLEMENT_PLAN_REVISION_REQUIRED", data.Implement.MissingPrerequisites);
+    }
+
+    [Fact]
+    public async Task Empty_worker_allowed_paths_are_an_implementation_configuration_gap()
+    {
+        var fixture = new Fixture();
+        fixture.Selection = fixture.Selection with { WorkerPaths = fixture.Selection.WorkerPaths with { AllowedPaths = [] } };
+        fixture.Configuration = fixture.Configuration with { StandaloneRoot = Fixture.Write(fixture.RootPath, fixture.Selection) }; fixture.Save();
+        var data = Assert.IsType<ConfiguredReadinessReport>((await fixture.Inspect()).Data);
+        Assert.Contains("WORKER_ALLOWED_PATHS_REQUIRED", data.Implement.MissingPrerequisites);
+        Assert.False(data.Implement.ConfigurationComplete); Assert.False(data.RuntimeCertified);
+    }
+
+    [Theory(Skip = "Exact Linux scope selection is platform-specific.", SkipUnless = nameof(IsLinux))]
+    [InlineData("valid")]
+    [InlineData("missing")]
+    [InlineData("tampered")]
+    [InlineData("malformed")]
+    public async Task Linux_scope_must_match_its_exact_selected_bytes_and_parse_without_native_admission(string scenario)
+    {
+        var fixture = new Fixture(); var path = Path.Combine(fixture.Root, "linux-scope.json");
+        var image = new LinuxScopeImage(Path.Combine(fixture.Root, "inert-image"), 1, new string('a', 64));
+        var scope = new LinuxScopeSelection(image, image, "unverified-manager", "unverified-kernel", image, [image], image);
+        var pin = Fixture.Write(path, scenario == "malformed" ? (object)new { UnknownField = true } : scope);
+        fixture.Selection = fixture.Selection with { LinuxScopeProfile = pin };
+        fixture.Configuration = fixture.Configuration with { StandaloneRoot = Fixture.Write(fixture.RootPath, fixture.Selection) }; fixture.Save();
+        if (scenario == "missing") File.Delete(path);
+        if (scenario == "tampered") File.AppendAllText(path, " ");
+        var application = new ToolApplication();
+        if (scenario == "valid")
+        {
+            var data = Assert.IsType<ConfiguredReadinessReport>((await fixture.Inspect(application)).Data);
+            Assert.True(data.Plan.ConfigurationComplete); Assert.False(data.RuntimeCertified); Assert.False(data.NativeDispatchEvaluated);
+        }
+        else
+        {
+            var error = await Record.ExceptionAsync(() => fixture.Inspect(application)); Assert.NotNull(error);
+        }
+        Assert.Empty(application.RetainedExternalCalls); Assert.Empty(application.RetainedAssignments);
+        Assert.False(File.Exists(image.Path)); Assert.False(Directory.Exists(fixture.Selection.StoreRoot));
     }
 
     [Theory]

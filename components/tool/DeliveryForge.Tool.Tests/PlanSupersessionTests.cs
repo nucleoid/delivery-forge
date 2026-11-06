@@ -33,33 +33,35 @@ public sealed class PlanSupersessionTests
         }
         internal ToolCommand Command(string? output = null) => CommandLine.Parse(["plan", "--repo", Repository,
             "--intent-file", IntentPath, "--previous-plan", Previous, "--config", ConfigPath, "--plan-out", output ?? Output]);
+        internal async Task<string> Git(ToolLifetime original, params string[] arguments)
+        {
+            var executor = new ProcessCommandExecutor();
+            var nullPath = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
+            var argv = new[] { "--no-replace-objects", "-c", "core.hooksPath=" + nullPath, "-c", "core.fsmonitor=false",
+                "-c", "user.name=SupersessionFixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false" }
+                .Concat(arguments).ToArray();
+            var actual = await executor.ExecuteAsync(new(Configuration.GitExecutable, argv, Repository, new Dictionary<string, string>
+            {
+                ["GIT_CONFIG_NOSYSTEM"] = "1",
+                ["GIT_CONFIG_GLOBAL"] = nullPath,
+                ["GIT_CONFIG_SYSTEM"] = nullPath,
+                ["GIT_NO_REPLACE_OBJECTS"] = "1",
+                ["GIT_TERMINAL_PROMPT"] = "0",
+                ["GIT_OPTIONAL_LOCKS"] = "0"
+            }), original.Remaining, original.Token);
+            Assert.True(actual.OwnedProcessQuiescent && actual.ExitCode == 0 && !actual.TimedOut && !actual.Cancelled, actual.StandardError);
+            original.Check();
+            return actual.StandardOutput;
+        }
+
         internal async Task<FrozenPlan> PreparePrevious(ToolLifetime original)
         {
             var executable = OperatingSystem.IsWindows() ? "git.exe" : "git";
             var git = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator).Where(Path.IsPathFullyQualified)
                 .Select(path => Path.Combine(path, executable)).First(File.Exists);
             Configuration = Configuration with { GitExecutable = git };
-            var executor = new ProcessCommandExecutor();
-            async Task Git(params string[] arguments)
-            {
-                var nullPath = OperatingSystem.IsWindows() ? "NUL" : "/dev/null";
-                var argv = new[] { "--no-replace-objects", "-c", "core.hooksPath=" + nullPath, "-c", "core.fsmonitor=false",
-                    "-c", "user.name=SupersessionFixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false" }
-                    .Concat(arguments).ToArray();
-                var actual = await executor.ExecuteAsync(new(git, argv, Repository, new Dictionary<string, string>
-                {
-                    ["GIT_CONFIG_NOSYSTEM"] = "1",
-                    ["GIT_CONFIG_GLOBAL"] = nullPath,
-                    ["GIT_CONFIG_SYSTEM"] = nullPath,
-                    ["GIT_NO_REPLACE_OBJECTS"] = "1",
-                    ["GIT_TERMINAL_PROMPT"] = "0",
-                    ["GIT_OPTIONAL_LOCKS"] = "0"
-                }), original.Remaining, original.Token);
-                Assert.True(actual.OwnedProcessQuiescent && actual.ExitCode == 0 && !actual.TimedOut && !actual.Cancelled, actual.StandardError);
-                original.Check();
-            }
             File.WriteAllText(Path.Combine(Repository, "tracked.txt"), "unchanged repository evidence\n");
-            await Git("init", "-q", "-b", "main"); await Git("add", "--", "tracked.txt"); await Git("commit", "-q", "-m", "original base");
+            await Git(original, "init", "-q", "-b", "main"); await Git(original, "add", "--", "tracked.txt"); await Git(original, "commit", "-q", "-m", "original base");
             var reader = new GitRepositoryContextReader(git);
             var context = await reader.ReadAsync(Repository, "refs/heads/main", original.Token);
             var file = await reader.ReadFileAsync(context, "tracked.txt", original.Token);
@@ -81,9 +83,15 @@ public sealed class PlanSupersessionTests
 
     [Theory]
     [InlineData("success")]
+    [InlineData("dry-run")]
+    [InlineData("no-output")]
     [InlineData("wrong-identity")]
     [InlineData("wrong-original-ceiling")]
-    [InlineData("changed-base")]
+    [InlineData("dirty-worktree")]
+    [InlineData("committed-branch-advance")]
+    [InlineData("widened-scope")]
+    [InlineData("changed-exclusions")]
+    [InlineData("changed-gates")]
     [InlineData("same-revision")]
     [InlineData("different-work-item")]
     [InlineData("same-output")]
@@ -96,22 +104,58 @@ public sealed class PlanSupersessionTests
         {
             case "wrong-identity": fixture.Configuration = fixture.Configuration with { ExpectedBundleIdentity = "sha256:" + new string('0', 64) }; break;
             case "wrong-original-ceiling": fixture.Configuration = fixture.Configuration with { ExpectedPlanCeiling = "implement" }; break;
-            case "changed-base": File.AppendAllText(Path.Combine(fixture.Repository, "tracked.txt"), "unreconciled change\n"); break;
+            case "dirty-worktree": File.AppendAllText(Path.Combine(fixture.Repository, "tracked.txt"), "unreconciled change\n"); break;
+            case "committed-branch-advance":
+                await fixture.Git(original, "commit", "--allow-empty", "-q", "-m", "new committed base");
+                Assert.NotEqual(previous.BaseCommit, (await fixture.Git(original, "rev-parse", "HEAD")).Trim());
+                Assert.Empty(await fixture.Git(original, "status", "--porcelain=v1", "--untracked-files=all"));
+                break;
+            case "widened-scope": fixture.Intent = fixture.Intent with
+            {
+                Request = fixture.Intent.Request with { Included = ["tracked.txt", "other.txt"] },
+                ChangeMap = [new("tracked.txt", "content", "update"), new("other.txt", "content", "update")]
+            }; break;
+            case "changed-exclusions": fixture.Intent = fixture.Intent with { Request = fixture.Intent.Request with { Excluded = ["private/**"] } }; break;
+            case "changed-gates": fixture.Intent = fixture.Intent with
+            { Gates = [new("test", new("dotnet", [PlanCommandArgument.Literal("test"), PlanCommandArgument.Literal("--no-build")]), "PASS")] }; break;
             case "same-revision": fixture.Intent = fixture.Intent with { Revision = previous.Revision }; break;
             case "different-work-item": fixture.Intent = fixture.Intent with { Request = fixture.Intent.Request with { WorkItem = "#9" } }; break;
         }
         fixture.Save(); var application = new ToolApplication(actualOriginal: original);
         ToolResult? result = null;
-        var error = await Record.ExceptionAsync(async () => result = await application.ExecuteAsync(
-            fixture.Command(scenario == "same-output" ? fixture.Previous : null), original.Token));
+        var command = fixture.Command(scenario == "same-output" ? fixture.Previous : null);
+        if (scenario is "dry-run" or "no-output")
+        {
+            var options = command.Options.ToDictionary(row => row.Key, row => row.Value, StringComparer.Ordinal);
+            if (scenario == "dry-run") options.Add("dry-run", null); else options.Remove("plan-out");
+            command = command with { Options = options };
+        }
+        var error = await Record.ExceptionAsync(async () => result = await application.ExecuteAsync(command, original.Token));
         Assert.Equal(before, File.ReadAllBytes(fixture.Previous));
         Assert.Empty(application.RetainedAssignments);
+        if (scenario is "dry-run" or "no-output")
+        {
+            Assert.Null(error); Assert.NotNull(result); Assert.Equal("PLAN_FROZEN", result.Code);
+            using var data = JsonDocument.Parse(JsonSerializer.Serialize(result.Data, BoundedFiles.Json));
+            Assert.Equal(JsonValueKind.Null, data.RootElement.GetProperty("PlanPath").ValueKind);
+            Assert.False(File.Exists(fixture.Output)); return;
+        }
         if (scenario != "success")
         {
             Assert.True(error is not null || result?.Outcome == "INCOMPLETE");
+            if (scenario is "widened-scope" or "changed-exclusions" or "changed-gates")
+            {
+                Assert.Null(error); Assert.NotNull(result); Assert.Equal("PREVIOUS_PLAN_SCOPE_CHANGED", result.Code);
+            }
+            if (scenario == "committed-branch-advance")
+            {
+                Assert.Null(error); Assert.NotNull(result); Assert.Equal("PREVIOUS_PLAN_RECONCILIATION_INCOMPLETE", result.Code);
+            }
             Assert.False(File.Exists(fixture.Output)); return;
         }
         Assert.Null(error); Assert.NotNull(result); Assert.Equal("PLAN_FROZEN", result.Code); Assert.False(result.RuntimeCertified);
+        using var resultData = JsonDocument.Parse(JsonSerializer.Serialize(result.Data, BoundedFiles.Json));
+        Assert.Equal(fixture.Output, resultData.RootElement.GetProperty("PlanPath").GetString());
         using var json = JsonDocument.Parse(File.ReadAllBytes(fixture.Output)); var successor = json.RootElement;
         Assert.Equal(previous.ContractIdentity, successor.GetProperty("supersedes").GetString());
         Assert.NotEqual(previous.Identity, successor.GetProperty("identity").GetString());

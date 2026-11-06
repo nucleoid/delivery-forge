@@ -26,6 +26,7 @@ public sealed partial class ToolApplication
             var repository = command.Get("repository") ?? throw new ToolUsageException("Setup requires resolved repository identity.");
             var git = ResolveSetupGit(command.Get("git"));
             var reference = command.Get("reference");
+            var repositoryIdentitySource = "ExplicitSelectionUnverified";
             if (reference is null)
             {
                 // Pure setup with an explicit branch works on either platform.
@@ -38,19 +39,62 @@ public sealed partial class ToolApplication
                     .ToDictionary(row => (string)row.Key, row => (string)row.Value!, StringComparer.OrdinalIgnoreCase);
                 environment["GIT_CONFIG_NOSYSTEM"] = "1"; environment["GIT_CONFIG_GLOBAL"] = "NUL";
                 environment["GIT_TERMINAL_PROMPT"] = "0"; environment["GIT_OPTIONAL_LOCKS"] = "0";
-                var capture = await Observe("ActualSetupBranch", () => new ProcessCommandExecutor().ExecuteBoundedCaptureAsync(
-                    new(git, ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", "-C", repo, "symbolic-ref", "--quiet", "HEAD"], repo, environment) { EnvironmentIsComplete = true },
-                    life.Remaining < TimeSpan.FromSeconds(30) ? life.Remaining : TimeSpan.FromSeconds(30), 8192, life.Token, new OwnedWorkPhaseBudget(life)), life).ConfigureAwait(false);
-                if (!capture.RootExitObserved || !capture.StandardOutputDrainCompleted || !capture.StandardErrorDrainCompleted || !capture.Command.OwnedProcessQuiescent)
-                { life.RetainUnknown(); throw new IOException("Actual setup Git process or I/O remains unresolved."); }
+                var executor = new ProcessCommandExecutor();
+                var budget = new OwnedWorkPhaseBudget(life);
+                async Task<BoundedCommandCaptureResult> Capture(string kind, params string[] arguments)
+                {
+                    var observed = await Observe(kind, () => executor.ExecuteBoundedCaptureAsync(
+                        new(git, new[] { "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", "-C", repo }.Concat(arguments).ToArray(), repo, environment) { EnvironmentIsComplete = true },
+                        life.Remaining < TimeSpan.FromSeconds(30) ? life.Remaining : TimeSpan.FromSeconds(30), 8192, life.Token, budget), life).ConfigureAwait(false);
+                    if (!observed.RootExitObserved || !observed.StandardOutputDrainCompleted || !observed.StandardErrorDrainCompleted || !observed.Command.OwnedProcessQuiescent)
+                    { life.RetainUnknown(); throw new IOException("Actual setup Git process or I/O remains unresolved."); }
+                    return observed;
+                }
+                var capture = await Capture("ActualSetupBranch", "symbolic-ref", "--quiet", "HEAD").ConfigureAwait(false);
                 if (capture.Command.ExitCode != 0 || capture.CaptureBoundExceeded || capture.Command.TimedOut || capture.Command.Cancelled)
                     return ToolResult.Incomplete("SETUP_BRANCH_REQUIRED", "Current checkout must have an exact branch reference; no default branch was guessed.");
                 reference = new UTF8Encoding(false, true).GetString(capture.StandardOutputBytes).TrimEnd('\r', '\n');
+                var origin = await Capture("ActualSetupOrigin", "remote", "get-url", "origin").ConfigureAwait(false);
+                if (origin.Command.ExitCode != 0 || origin.CaptureBoundExceeded || origin.Command.TimedOut || origin.Command.Cancelled)
+                    return ToolResult.Incomplete("SETUP_REPOSITORY_IDENTITY_REQUIRED", "Current checkout origin must identify the requested GitHub repository; no setup files were created.");
+                string remote;
+                try { remote = new UTF8Encoding(false, true).GetString(origin.StandardOutputBytes).TrimEnd('\r', '\n'); }
+                catch (DecoderFallbackException)
+                { return ToolResult.Incomplete("SETUP_REPOSITORY_IDENTITY_REQUIRED", "Current checkout origin must identify the requested GitHub repository; no setup files were created."); }
+                if (!TryGitHubRepository(remote, out var actualRepository))
+                    return ToolResult.Incomplete("SETUP_REPOSITORY_IDENTITY_REQUIRED", "Current checkout origin must identify the requested GitHub repository; no setup files were created.");
+                if (!string.Equals(actualRepository, repository, StringComparison.OrdinalIgnoreCase))
+                    return ToolResult.Incomplete("SETUP_REPOSITORY_MISMATCH", "Requested GitHub repository differs from the current checkout origin; no setup files were created.");
+                repositoryIdentitySource = "CheckoutOriginVerified";
             }
-            selected = AutomaticSetup.PreparePlan(repository, repo, reference, git, state, life);
+            selected = AutomaticSetup.PreparePlan(repository, repo, reference, git, state, life) with { RepositoryIdentitySource = repositoryIdentitySource };
         }
         life.Check();
         return new("COMPLETE", "SETUP_PREPARED", "Fresh isolated paths and pinned configuration prepared; no worker, lease or runtime capability was created.", selected);
+    }
+
+    // Projection only: no URL is exported in setup output, including URLs that
+    // contain a username or credential. Unsupported remotes remain unverified.
+    internal static bool TryGitHubRepository(string remote, out string repository)
+    {
+        repository = string.Empty;
+        if (string.IsNullOrEmpty(remote) || remote.Length > 8192 || remote.Any(char.IsControl)) return false;
+        string path;
+        const string scpPrefix = "git@github.com:";
+        if (remote.StartsWith(scpPrefix, StringComparison.OrdinalIgnoreCase)) path = remote[scpPrefix.Length..];
+        else
+        {
+            if (!Uri.TryCreate(remote, UriKind.Absolute, out var uri) ||
+                !uri.Host.Equals("github.com", StringComparison.OrdinalIgnoreCase) || !uri.IsDefaultPort ||
+                uri.Query.Length != 0 || uri.Fragment.Length != 0 ||
+                !(uri.Scheme == "https" || uri.Scheme == "ssh" && uri.UserInfo == "git")) return false;
+            path = uri.AbsolutePath.StartsWith('/') ? uri.AbsolutePath[1..] : uri.AbsolutePath;
+        }
+        if (path.EndsWith(".git", StringComparison.Ordinal)) path = path[..^4];
+        if (!System.Text.RegularExpressions.Regex.IsMatch(path, "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant) ||
+            path.Split('/').Any(part => part is "." or "..")) return false;
+        repository = path;
+        return true;
     }
 
     internal static string ResolveSetupGit(string? selected)

@@ -143,15 +143,38 @@ public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssue
             predecessor = imported.Plan;
         }
         var reader = actualExecutor is null ? new GitRepositoryContextReader(config.GitExecutable) : new GitRepositoryContextReader(config.GitExecutable, actualExecutor, life); var context = await Observe("ActualRepositoryRead", () => reader.ReadAsync(repo, config.MutableReference, life.Token), life).ConfigureAwait(false); life.Check();
+        if (predecessor is not null && context.Commit != predecessor.BaseCommit)
+            return ToolResult.Incomplete("PREVIOUS_PLAN_RECONCILIATION_INCOMPLETE", "Current branch advanced after predecessor reconciliation; no successor was frozen.");
         if (intent.EvidencePaths.Count is < 1 or > 128) throw new ToolUsageException("Explicit bounded repository evidence paths are required.");
         var evidence = new List<EvidenceItem>();
         foreach (var path in intent.EvidencePaths) { life.Check(); var file = await Observe("ActualRepositoryFile", () => reader.ReadFileAsync(context, path, life.Token), life).ConfigureAwait(false); life.Check(); evidence.Add(EvidenceItem.FromRepositoryFile(file, DateTimeOffset.UtcNow, [])); }
         var intake = IntakePlanner.Assess(intent.Request, evidence); var draft = new PlanDraft(intent.Request, context, evidence, intent.ChangeMap, intent.Dependencies, intent.Gates, intent.Rollout, intent.Unknowns, intake);
         if (!intake.Ready) return ToolResult.Incomplete("INTAKE_INCOMPLETE", "Owner intake requires reconciliation.", new { intake.Limitations, intake.RecommendedQuestion });
         var frozen = PlanFreezer.Freeze(draft, intent.Revision, DateTimeOffset.UtcNow, predecessor); life.Check();
+        if (predecessor is not null)
+        {
+            using var previousDocument = JsonDocument.Parse(predecessor.CanonicalBytes);
+            using var successorDocument = JsonDocument.Parse(frozen.CanonicalBytes);
+            var previousMaterial = previousDocument.RootElement.GetProperty("plan");
+            var successorMaterial = successorDocument.RootElement.GetProperty("plan");
+            // Compare the freezer's normalized reviewed material, not caller
+            // spelling or new provenance, revision, mode and ceiling fields.
+            foreach (var field in new[] { "scope", "intent", "acceptanceCriteria", "changeMap", "dependencyDag", "gates", "rollout", "unknowns" })
+            {
+                var before = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(JsonSerializer.SerializeToUtf8Bytes(previousMaterial.GetProperty(field)));
+                var after = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(JsonSerializer.SerializeToUtf8Bytes(successorMaterial.GetProperty(field)));
+                life.Check();
+                if (!before.AsSpan().SequenceEqual(after))
+                    return ToolResult.Incomplete("PREVIOUS_PLAN_SCOPE_CHANGED", "Reviewed plan material changed; reconcile the changed scope separately before preparing an implementation revision.", new { ChangedField = field });
+            }
+        }
         if (command.Get("replay-out") is string replay && command.Get("plan-out") is string destination) BoundedFiles.Separate(replay, destination);
-        if (!command.Has("dry-run") && !command.Has("replay-out") && command.Get("plan-out") is string output) BoundedFiles.WriteNew(output, frozen.CanonicalBytes, life);
-        return new(command.Has("dry-run") ? "DRY_RUN" : "COMPLETE", "PLAN_FROZEN", "Owner-produced rich plan; no implementation or publication occurred.", new { ConfigurationPath = command.Get("config"), PlanPath = command.Get("plan-out"), frozen.Identity, frozen.ContractIdentity, frozen.DownstreamReady, Plan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), frozen.Limitations });
+        string? writtenPlanPath = null;
+        if (!command.Has("dry-run") && !command.Has("replay-out") && command.Get("plan-out") is string output)
+        {
+            BoundedFiles.WriteNew(output, frozen.CanonicalBytes, life); writtenPlanPath = output;
+        }
+        return new(command.Has("dry-run") ? "DRY_RUN" : "COMPLETE", "PLAN_FROZEN", "Owner-produced rich plan; no implementation or publication occurred.", new { ConfigurationPath = command.Get("config"), PlanPath = writtenPlanPath, frozen.Identity, frozen.ContractIdentity, frozen.DownstreamReady, Plan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), frozen.Limitations });
     }
     async Task<ToolResult> ImplementAsync(ToolCommand command, TrustedConfiguration config, ToolLifetime life)
     {

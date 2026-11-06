@@ -67,7 +67,8 @@ internal sealed class StandaloneEntrypoint
                 var setupCommand = CommandLine.Parse(["setup", "--repo", command.Get("repo")!, "--repository", intent.Request.Repository]);
                 // Dry-run must remain effect-free: prepare only on a real plan
                 // request, never turn a diagnostic into filesystem setup.
-                if (command.Has("dry-run")) result = ToolResult.Incomplete("PLANNING_SETUP_REQUIRED", "First-use setup is available automatically on the actual plan request; dry-run creates no setup files.");
+                if (command.Has("replay-out")) result = ToolResult.Incomplete("REPLAY_OWNER_GRAPH_REQUIRED", "First-use planning cannot issue a complete replay owner graph; no setup or bundle was written.");
+                else if (command.Has("dry-run")) result = ToolResult.Incomplete("PLANNING_SETUP_REQUIRED", "First-use setup is available automatically on the actual plan request; dry-run creates no setup files.");
                 else
                 {
                     var setupTask = setup.ExecuteAsync(setupCommand, original.Token); actualReferences.Add(setupTask);

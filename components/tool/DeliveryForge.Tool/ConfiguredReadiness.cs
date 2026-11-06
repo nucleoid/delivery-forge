@@ -1,3 +1,4 @@
+using DeliveryForge.Evidence;
 using System.Text.Json;
 namespace DeliveryForge.Tool;
 
@@ -29,7 +30,19 @@ internal static class ConfiguredReadiness
             var root = JsonSerializer.Deserialize<StandaloneRootSelection>(bytes, BoundedFiles.Json)
                 ?? throw new ToolUsageException("Selected standalone root is null.");
             StandaloneEntrypoint.SeparateSelection(config, configPath, root);
-            if (OperatingSystem.IsLinux() && root.LinuxScopeProfile is null) plan.Add("LINUX_SCOPE_PROFILE_REQUIRED");
+            if (OperatingSystem.IsLinux())
+            {
+                if (root.LinuxScopeProfile is null) plan.Add("LINUX_SCOPE_PROFILE_REQUIRED");
+                else
+                {
+                    var scopeBytes = InstalledHostAdmission.ReadExact(root.LinuxScopeProfile, life, 65536);
+                    _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(scopeBytes);
+                    _ = JsonSerializer.Deserialize<LinuxScopeSelection>(scopeBytes, BoundedFiles.Json)
+                        ?? throw new ToolUsageException("Selected Linux scope is null.");
+                    life.Check();
+                }
+            }
+            if (root.WorkerPaths.AllowedPaths is not { Count: > 0 }) implement.Add("WORKER_ALLOWED_PATHS_REQUIRED");
             // Inspect only the bounded selected marker/receipt kind. Even an
             // accepted-looking receipt is not verified or promoted to authority.
             var selected = InstalledHostAdmission.ReadExact(root.InstalledHostAdmission, life, 1048576);

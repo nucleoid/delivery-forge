@@ -8,6 +8,7 @@ public sealed record AutomaticSetupResult(string ConfigurationPath, AdmissionFil
 {
     // Setup produces selections, never an installed-host acceptance or owner.
     public bool RuntimeCertified => false;
+    public string RepositoryIdentitySource { get; init; } = "ExplicitSelectionUnverified";
 }
 
 /// <summary>Materializes ordinary path defaults as explicit independently pinned DATA.</summary>
