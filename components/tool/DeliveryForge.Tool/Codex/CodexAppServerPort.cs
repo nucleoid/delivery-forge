@@ -28,6 +28,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     WindowsImageUse? trustedImage;
     bool trustedNativeCreationEntered, trustedNativeCreationReturned;
     HostInstructionContext? instructions;
+    string? configuredDeveloperInstructions; bool developerInstructionsObserved;
     public void BindInstructions(HostInstructionContext context) { lock (gate) { if (startEntered || instructions is not null && !ReferenceEquals(instructions, context)) throw new WorkerEnvelopeException("Actual instructions cannot change after selection or dispatch."); instructions = context; } }
     readonly CodexAppServerSelection selection; ToolLifetime? boundOriginal; readonly WorktreeManager actualGit;
     ToolLifetime original => boundOriginal ?? throw new ToolUsageException("The actual containing original is not bound.");
@@ -238,6 +239,14 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                                 linuxWorkspaceRoots ?? throw CodexProtocolFailure.Create(CodexProtocolFailureKind.MissingConfinedRoots, "Confined roots were not selected before thread dispatch."));
                             linuxWorkspaceThreadVerified = linuxWorkspaceThreadRefusal is null;
                         }
+                        if (actualMethod == "config/read" && !message.TryGetProperty("error", out _))
+                        {
+                            // Keep selected instruction text private and transient; it never enters the projected trace.
+                            var configured = HostAssignmentPrompt.ConfiguredDeveloperInstructions(message);
+                            if (developerInstructionsObserved && configured != configuredDeveloperInstructions)
+                                throw new IOException("Selected developer instructions changed during the worker original.");
+                            configuredDeveloperInstructions = configured; developerInstructionsObserved = true;
+                        }
                         try { refusal = CodexTrustProtocolData.Refusal(message, actualId); }
                         catch (Exception) { /* Optional facts cannot change response admission or failure. */ }
                         message = CodexTrustProtocolData.Response(message, actualMethod); trustedResponseMethod = actualMethod;
@@ -430,7 +439,9 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             startup.SetStage(CodexStartupStage.ThreadStart);
             var confinedRoots = confined ? LinuxWorkspaceWriteRoots(actualGit, original, actual) : null;
             linuxWorkspaceRoots = confinedRoots;
+            if (TrustProtocol && !developerInstructionsObserved) throw new IOException("Selected developer instructions were not observed before worker thread creation.");
             object threadParameters = conformanceDangerFullAccess ? ConformanceDangerFullAccessParameters(actual) :
+                TrustProtocol ? HostAssignmentPrompt.CodexWorkerThreadStart(actual, confined ? "workspace-write" : null, configuredDeveloperInstructions) :
                 confined ? new { cwd = actual.Worktree, sandbox = "workspace-write" } : new { cwd = actual.Worktree };
             var started = await Rpc("thread/start", threadParameters, token).ConfigureAwait(false);
             if (conformanceDangerFullAccess) RequireConformanceDangerFullAccessThread(started, actual);
@@ -458,13 +469,13 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             }
             ObserveConformanceLeafCounters("before-turn");
             ObserveRuntimeLeafCounters("before-turn");
-            object turnParameters = HostAssignmentPrompt.CodexTurnStart(actual, instructions!, threadId);
+            object turnParameters = HostAssignmentPrompt.CodexTurnStart(actual, instructions!, threadId, TrustProtocol);
             if (confined)
             {
                 var roots = LinuxWorkspaceWriteRoots(actualGit, original, actual);
                 if (!roots.SequenceEqual(confinedRoots!, OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal))
                     throw new WorktreeBoundaryException("Original confined Git roots changed before turn.");
-                turnParameters = new { threadId, input = new[] { new { type = "text", text = HostAssignmentPrompt.Create(actual, instructions!) } }, sandboxPolicy = LinuxWorkspaceWritePolicy(roots) };
+                turnParameters = new { threadId, input = new[] { new { type = "text", text = TrustProtocol ? HostAssignmentPrompt.CodexAssignmentData(actual, instructions!) : HostAssignmentPrompt.Create(actual, instructions!) } }, sandboxPolicy = LinuxWorkspaceWritePolicy(roots) };
             }
             reportedUsage?.BeginTurn();
             startup.SetStage(CodexStartupStage.TurnStart); var turn = await Rpc("turn/start", turnParameters, token).ConfigureAwait(false); turnId = Text(turn.GetProperty("turn"), "id");
