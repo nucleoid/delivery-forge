@@ -599,7 +599,10 @@ exit 0
         $readonlyState=Join-Path $TestRoot 'unknown-readonly-state'
         $result=Invoke-ForgeProcess (Get-Process -Id $PID).Path @('-NoProfile','-NonInteractive','-File',$scratch,'-Mode','Check','-StateRoot',$readonlyState) -TimeoutSeconds 15
         Assert ($result.ExitCode -eq 125 -and $result.Stderr -match 'FORGE_BOOTSTRAP_UNKNOWN') 'Non-JSON catch lost the original UNKNOWN status.'
-        Assert (-not(Test-Path -LiteralPath $readonlyState)) 'Pre-probe Check refusal created installation state.'
+        $barrier=Join-Path $readonlyState 'bootstrap.lock'
+        Assert (Test-Path -LiteralPath $barrier -PathType Leaf) 'UNKNOWN Check refusal lost its persistent barrier.'
+        $saved=Get-Content -LiteralPath $barrier -Raw|ConvertFrom-Json
+        Assert ($saved.Kind -eq 'DeliveryForgeBootstrapUnknown-v1' -and @(Get-ChildItem -LiteralPath $readonlyState -Force).Count -eq 1) 'Pre-probe refusal created installation payload instead of only UNKNOWN evidence.'
     }
     Test 'Actual held installation lock prevents every native prerequisite probe' {
         $root=Join-Path $TestRoot 'real-held-lock';$null=New-Item -ItemType Directory -Path $root

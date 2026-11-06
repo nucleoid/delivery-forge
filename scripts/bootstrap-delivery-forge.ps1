@@ -3,7 +3,8 @@
 .SYNOPSIS
 Checks or installs the Windows Delivery Forge prerequisites, CLI and both skills.
 .DESCRIPTION
-Check is read-only. Install performs automatable setup and leaves authentication
+Check performs no installation; UNKNOWN retains its process evidence and barrier.
+Install performs automatable setup and leaves authentication
 to the user. Dot-source this file to use its functions without running the entrypoint.
 #>
 [CmdletBinding()]
