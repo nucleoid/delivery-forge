@@ -69,13 +69,19 @@ public sealed class RepositorySetupProfileTests
             config = config with { StandaloneRoot = config.StandaloneRoot! with { Path = registrationPath } };
         }
         if (input.StartsWith("coordination-", StringComparison.Ordinal))
-            config = config with { Coordination = new(new Uri("https://fixture.invalid"), "fixture", "fixture-principal",
+            config = config with
+            {
+                Coordination = new(new Uri("https://fixture.invalid"), "fixture", "fixture-principal",
                 input == "coordination-key" ? registrationPath : Path.Combine(fixture.Root, "unread-key"),
                 input == "coordination-checkpoints" ? registrationPath : Path.Combine(fixture.Root, "unused-checkpoints"),
-                new(input == "coordination-evidence" ? registrationPath : Path.Combine(fixture.Root, "unread-deployment"), 1, new string('a', 64))) };
+                new(input == "coordination-evidence" ? registrationPath : Path.Combine(fixture.Root, "unread-deployment"), 1, new string('a', 64)))
+            };
         if (input == "review-git")
-            config = config with { InstalledReview = new("review.json", "evidence.json", "sha256:" + new string('a', 64),
-                new(registrationPath, 1, new string('a', 64)), "git version 2.0", Path.Combine(fixture.Root, "unused-review-artifacts")) };
+            config = config with
+            {
+                InstalledReview = new("review.json", "evidence.json", "sha256:" + new string('a', 64),
+                new(registrationPath, 1, new string('a', 64)), "git version 2.0", Path.Combine(fixture.Root, "unused-review-artifacts"))
+            };
         File.WriteAllBytes(fixture.Template, JsonSerializer.SerializeToUtf8Bytes(config, BoundedFiles.Json));
         var before = File.Exists(registrationPath) ? File.ReadAllBytes(registrationPath) : null;
         var failure = Assert.Throws<ToolUsageException>(() => RepositorySetupProfiles.Register(fixture.Template,

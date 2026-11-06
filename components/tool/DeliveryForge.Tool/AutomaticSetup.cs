@@ -176,7 +176,8 @@ public static class AutomaticSetup
             worker = worker with { Worktree = Path.Combine(run, "worktree"), ResultDirectory = Path.Combine(run, "results") };
             selection = selection with
             {
-                StoreRoot = Path.Combine(run, "store"), WorkerPaths = worker,
+                StoreRoot = Path.Combine(run, "store"),
+                WorkerPaths = worker,
                 InstalledHostAdmission = prior?.InstalledHostAdmission ?? Pin(unadmittedPath, unadmitted)
             };
             rootBytes = Encode(selection); rootPin = Pin(rootPath, rootBytes);
