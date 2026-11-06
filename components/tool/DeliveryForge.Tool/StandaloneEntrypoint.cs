@@ -70,7 +70,10 @@ internal sealed class StandaloneEntrypoint
                 if (command.Has("dry-run")) result = ToolResult.Incomplete("PLANNING_SETUP_REQUIRED", "First-use setup is available automatically on the actual plan request; dry-run creates no setup files.");
                 else
                 {
-                    var prepared = await setup.ExecuteAsync(setupCommand, original.Token).WaitAsync(original.Remaining).ConfigureAwait(false);
+                    var setupTask = setup.ExecuteAsync(setupCommand, original.Token); actualReferences.Add(setupTask);
+                    ToolResult prepared;
+                    try { prepared = await setupTask.WaitAsync(original.Remaining).ConfigureAwait(false); }
+                    finally { if (!setupTask.IsCompleted) original.RetainUnknown(); }
                     if (prepared.Data is AutomaticSetupResult selected && prepared.Code == "SETUP_PREPARED")
                     {
                         var options = command.Options.ToDictionary(row => row.Key, row => row.Value, StringComparer.Ordinal);
@@ -86,7 +89,9 @@ internal sealed class StandaloneEntrypoint
             {
                 var application = new ToolApplication(actualOriginal: original);
                 actualReferences.Add(application);
-                result = await application.ExecuteAsync(command, original.Token).WaitAsync(original.Remaining).ConfigureAwait(false);
+                var actual = application.ExecuteAsync(command, original.Token); actualReferences.Add(actual);
+                try { result = await actual.WaitAsync(original.Remaining).ConfigureAwait(false); }
+                finally { if (!actual.IsCompleted) original.RetainUnknown(); }
             }
             else if (command.Get("config") is not string configPath) result = ToolResult.Incomplete("TRUSTED_CONFIG_REQUIRED", "Select an explicit independent trusted configuration; no native operation occurred.");
             else
@@ -101,7 +106,9 @@ internal sealed class StandaloneEntrypoint
                 {
                     var application = new ToolApplication(actualOriginal: original, actualConfigurationPin: configPin);
                     actualReferences.Add(application);
-                    result = await application.ExecuteAsync(command, original.Token).WaitAsync(original.Remaining).ConfigureAwait(false);
+                    var actual = application.ExecuteAsync(command, original.Token); actualReferences.Add(actual);
+                try { result = await actual.WaitAsync(original.Remaining).ConfigureAwait(false); }
+                finally { if (!actual.IsCompleted) original.RetainUnknown(); }
                 }
                 else if (command.Mode == ToolMode.Resume && !command.Has("dry-run")) result = ToolResult.Incomplete("ORIGINAL_OWNER_REQUIRED", "A fresh standalone process has no retained same-original native owner; saved run DATA cannot create one. Use dry-run only to inspect immutable history.");
                 else if (config.ProductionBatch is not null)
