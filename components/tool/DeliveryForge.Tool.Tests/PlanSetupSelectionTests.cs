@@ -2,6 +2,10 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using DeliveryForge.Evidence;
 using DeliveryForge.Planning;
+using DeliveryForge.Execution;
+using DeliveryForge.Execution.Git;
+using DeliveryForge.Execution.Host;
+using DeliveryForge.Scheduling;
 using DeliveryForge.Tool;
 
 namespace DeliveryForge.Tool.Tests;
@@ -27,6 +31,40 @@ public sealed class PlanSetupSelectionTests
         Assert.Equal(new[] { "src/A.cs", "tests/Case.cs" }, actual);
         Assert.Equal(new[] { "src/private", "secrets" }, owner.Exclusions);
         Assert.Equal(new[] { "src", "tests" }, owner.AllowedPaths);
+    }
+
+    [Fact]
+    public void Frozen_plan_exclusions_keep_exact_spellings_add_denies_and_preserve_owner_protection()
+    {
+        var owner = Paths(["src"], ["quality/private"]);
+        string[] planExclusions = ["publication", "quality", "src/blocked", "merge"];
+        var adopted = PlanSetupSelection.ConstrainExclusions(planExclusions, owner.Exclusions);
+        Assert.Equal(planExclusions, adopted);
+        Assert.Equal(new[] { "quality/private" }, owner.Exclusions);
+        Assert.Equal(new[] { "src/A.cs" }, PlanSetupSelection.ConstrainPaths(["src/A.cs"], owner with { Exclusions = adopted }));
+        Assert.Throws<ToolUsageException>(() => PlanSetupSelection.ConstrainPaths(["src/blocked/A.cs"], owner with { Exclusions = adopted }));
+    }
+
+    [Theory]
+    [InlineData("quality", "quality/private")]
+    [InlineData("quality", "quality-other")]
+    public void Frozen_plan_cannot_replace_owner_deny_with_a_narrower_or_unrelated_prefix(string owner, string selected)
+        => Assert.Throws<ToolUsageException>(() => PlanSetupSelection.ConstrainExclusions([selected], [owner]));
+
+    [Fact]
+    public void Frozen_plan_cannot_omit_owner_deny_or_exceed_existing_list_bounds()
+    {
+        Assert.Throws<ToolUsageException>(() => PlanSetupSelection.ConstrainExclusions([], ["quality"]));
+        Assert.Throws<ToolUsageException>(() => PlanSetupSelection.ConstrainExclusions(Enumerable.Range(0, 129).Select(index => "deny" + index).ToArray(), []));
+    }
+
+    [Fact]
+    public void Owner_deny_coverage_uses_actual_platform_case_semantics()
+    {
+        if (OperatingSystem.IsWindows())
+            Assert.Equal(new[] { "library" }, PlanSetupSelection.ConstrainExclusions(["library"], ["Library/Secret.cs"]));
+        else
+            Assert.Throws<ToolUsageException>(() => PlanSetupSelection.ConstrainExclusions(["library"], ["Library/Secret.cs"]));
     }
 
     [Theory]
@@ -92,6 +130,7 @@ public sealed class PlanSetupSelectionTests
     [InlineData("excluded-file")]
     [InlineData("dirty-source")]
     [InlineData("committed-base-advance")]
+    [InlineData("missing-owner-exclusion")]
     public async Task Actual_owned_import_binds_independent_selection_before_returning_non_authoritative_DATA(string scenario)
     {
         using var original = new ToolLifetime(TimeSpan.FromSeconds(120), TestContext.Current.CancellationToken);
@@ -123,12 +162,16 @@ public sealed class PlanSetupSelectionTests
         var execute = scenario.StartsWith("execute", StringComparison.Ordinal);
         var implementationPlan = scenario is "execute-implement" or "execute-above-plan";
         var oldCeiling = implementationPlan ? "implement" : "plan";
-        var request = new PlanningRequest("fixture/selection", "#8", implementationPlan ? "implement" : "plan", "Update one file", [path], [], ["Only selected file changes"], oldCeiling);
+        var planExclusions = scenario == "missing-owner-exclusion" ? Array.Empty<string>() : new[] { "src/private", "publication", "merge" };
+        var request = new PlanningRequest("fixture/selection", "#8", implementationPlan ? "implement" : "plan", "Update one file", [path], planExclusions, ["Only selected file changes"], oldCeiling);
         EvidenceItem[] evidence = [EvidenceItem.FromRepositoryFile(file, DateTimeOffset.UtcNow, [])];
         var draft = new PlanDraft(request, context, evidence, [new(path, "content", "update")], [new("#8", [], "root")],
             [new("test", new("dotnet", [PlanCommandArgument.Literal("test")]), "PASS")],
             new("additive", "none", "none", "none", "none", "none", "receipt", "revert", []), [], IntakePlanner.Assess(request, evidence));
         var plan = PlanFreezer.Freeze(draft, "independent-original", DateTimeOffset.UtcNow);
+        using var frozenMaterial = JsonDocument.Parse(plan.CanonicalBytes);
+        var frozenExclusions = frozenMaterial.RootElement.GetProperty("plan").GetProperty("scope").GetProperty("excluded")
+            .EnumerateArray().Select(item => item.GetString()!).ToArray();
         var bundlePath = Path.Combine(root, "bundle.json"); File.WriteAllBytes(bundlePath, plan.CanonicalBytes);
         var bundle = new AdmissionFile(bundlePath, plan.CanonicalBytes.LongLength, Convert.ToHexStringLower(SHA256.HashData(plan.CanonicalBytes)));
         var admission = Write(Path.Combine(root, "non-admitted.json"), new { Kind = "DeliveryForgeHostNotAdmitted-v1" });
@@ -154,8 +197,30 @@ public sealed class PlanSetupSelectionTests
         Assert.Null(error); Assert.NotNull(result);
         Assert.Equal(plan.Identity, result.Configuration.ExpectedBundleIdentity); Assert.Equal(plan.ContractIdentity, result.Configuration.ExpectedContractIdentity);
         Assert.Equal(oldCeiling, result.Configuration.ExpectedPlanCeiling); Assert.Equal("implement", result.Configuration.MaximumCeiling);
-        Assert.Equal(new[] { path }, result.Root.WorkerPaths.AllowedPaths); Assert.Equal(selectionRoot.WorkerPaths.Exclusions, result.Root.WorkerPaths.Exclusions);
+        Assert.Equal(new[] { path }, result.Root.WorkerPaths.AllowedPaths); Assert.Equal(frozenExclusions, result.Root.WorkerPaths.Exclusions);
         Assert.Equal(admission, result.Root.InstalledHostAdmission); Assert.False(result.RuntimeCertified); Assert.False(result.ExecutionAuthorityIssued);
+        if (scenario == "execute-implement")
+        {
+            // Exercise the real scheduler's exact frozen exclusion gate. The
+            // old owner-only list fails; the adopted complete plan list passes.
+            var store = new RunStore(Path.Combine(root, "scope-only-scheduler-store"));
+            var worktrees = new WorktreeManager(git, executor, original);
+            await using var processes = new ProcessControl();
+            using var coordinator = new ExecutionCoordinator(store, worktrees, processes);
+            var slots = new ResourceSlots(1, 2, 4096, 1, 1, 0);
+            var budget = ResourceBudget.Measure(slots, new("scope-constructor-only", true, slots, TimeSpan.FromSeconds(30), 1000, 0));
+            var demand = new RunDemand(slots, [], TimeSpan.FromSeconds(30), 1000, 0);
+            var worker = new FrozenWorkerPlan("scope-only", plan.ContractIdentity, plan.BaseCommit, plan.Repository, repo,
+                selectionRoot.WorkerPaths.Worktree, selectionRoot.WorkerPaths.ResultDirectory, "scope-only-token",
+                result.Root.WorkerPaths.AllowedPaths, result.Root.WorkerPaths.Exclusions, "codex.cli", "unexecuted-scope-data",
+                [AgentCapability.Launch, AgentCapability.CompletionEvidence], "implement");
+            Assert.Throws<SchedulingException>(() => LocalSingleScheduler.Create(plan,
+                worker with { Exclusions = selectionRoot.WorkerPaths.Exclusions }, demand, budget, store, coordinator, worktrees, reader));
+            Assert.NotNull(LocalSingleScheduler.Create(plan, worker, demand, budget, store, coordinator, worktrees, reader));
+            Assert.False(Directory.Exists(store.RootPath));
+            Assert.False(Directory.Exists(worker.Worktree));
+            Assert.False(Directory.Exists(worker.ResultDirectory));
+        }
         // Exercise public setup grammar/discovery and the owning task boundary,
         // rather than treating successful helper parsing as end-to-end setup.
         var state = Path.Combine(root, "state");
@@ -173,6 +238,7 @@ public sealed class PlanSetupSelectionTests
         Assert.Equal(oldCeiling, actualConfig.ExpectedPlanCeiling);
         Assert.Equal("implement", actualConfig.MaximumCeiling);
         Assert.Equal(new[] { path }, automatic.Selection.WorkerPaths.AllowedPaths);
+        Assert.Equal(frozenExclusions, automatic.Selection.WorkerPaths.Exclusions);
         Assert.NotNull(automatic.ProfileRegistration);
         Assert.False(Directory.Exists(automatic.Selection.WorkerPaths.Worktree));
         Assert.Contains(application.RetainedExternalCalls, call => call.Kind == "ActualSetupPlanSelection" && call.ActualTask is { IsCompletedSuccessfully: true });

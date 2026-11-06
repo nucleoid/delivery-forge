@@ -155,6 +155,26 @@ public sealed class RepositorySetupProfileTests
     }
 
     [Fact]
+    public void Parent_selected_setup_may_add_or_broaden_denies_but_cannot_omit_owner_protection()
+    {
+        var fixture = Fixture.Create(["src"], ["private/secret"]);
+        using var original = Lifetime();
+        var config = TrustedConfiguration.Load(fixture.Template, original);
+        var root = AutomaticSetup.ReadOrdinaryTemplateRoot(config, fixture.Template, original);
+        string[] planExclusions = ["publication", "private", "src/blocked", "merge"];
+        var selected = root with { WorkerPaths = root.WorkerPaths with { AllowedPaths = ["src/control.txt"], Exclusions = planExclusions } };
+        var prepared = AutomaticSetup.RebaseSelected(config, selected, fixture.State, original);
+        Assert.Equal(planExclusions, prepared.Selection.WorkerPaths.Exclusions);
+        var before = Directory.GetFiles(fixture.State, "*", SearchOption.AllDirectories);
+        Assert.Throws<ToolUsageException>(() => AutomaticSetup.RebaseSelected(config,
+            selected with { WorkerPaths = selected.WorkerPaths with { Exclusions = ["publication", "merge"] } }, fixture.State, original));
+        Assert.Throws<ToolUsageException>(() => AutomaticSetup.RebaseSelected(config,
+            selected with { WorkerPaths = selected.WorkerPaths with { AllowedPaths = ["src/blocked/control.txt"] } }, fixture.State, original));
+        Assert.Equal(before, Directory.GetFiles(fixture.State, "*", SearchOption.AllDirectories));
+        Assert.Equal(new[] { "private/secret" }, root.WorkerPaths.Exclusions);
+    }
+
+    [Fact]
     public void Parent_selected_scope_uses_platform_case_for_exclusions_and_refuses_Windows_case_collisions()
     {
         var fixture = Fixture.Create(["Library"], ["Library/Secret.cs"]);

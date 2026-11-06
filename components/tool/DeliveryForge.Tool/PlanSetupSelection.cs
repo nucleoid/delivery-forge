@@ -65,14 +65,20 @@ internal static class PlanSetupSelection
             throw new ToolUsageException("A complete finite imported change map is required.");
         var paths = changes.EnumerateArray().Select(change => change.GetProperty("path").GetString()
             ?? throw new ToolUsageException("Imported change-map path missing.")).ToArray();
-        var allowed = ConstrainPaths(paths, root.WorkerPaths);
+        var excluded = material.GetProperty("scope").GetProperty("excluded");
+        if (excluded.ValueKind != JsonValueKind.Array || excluded.GetArrayLength() > 128)
+            throw new ToolUsageException("Finite imported exclusion scope required.");
+        var planExclusions = excluded.EnumerateArray().Select(item => item.GetString()
+            ?? throw new ToolUsageException("Imported exclusion path missing.")).ToArray();
+        var exclusions = ConstrainExclusions(planExclusions, root.WorkerPaths.Exclusions);
+        var allowed = ConstrainPaths(paths, root.WorkerPaths with { Exclusions = exclusions });
         // The registration, config, root and selected bundle remain exact DATA
         // throughout reconciliation. This observes no host/runtime acceptance.
         _ = InstalledHostAdmission.ReadExact(selectedTemplate, original, 65536);
         _ = InstalledHostAdmission.ReadExact(template.StandaloneRoot!, original, 65536);
         _ = InstalledHostAdmission.ReadExact(selected.Bundle, original, PlanImporter.MaximumBundleBytes);
         original.Check();
-        var narrowedRoot = root with { WorkerPaths = root.WorkerPaths with { AllowedPaths = allowed } };
+        var narrowedRoot = root with { WorkerPaths = root.WorkerPaths with { AllowedPaths = allowed, Exclusions = exclusions } };
         var configuration = template with
         {
             MaximumCeiling = selected.RequestedCeiling,
@@ -87,6 +93,21 @@ internal static class PlanSetupSelection
         // frozen revision. Neither path creates a writer, lease or capability.
         return new(configuration, narrowedRoot, import.Plan.Identity, import.Plan.ContractIdentity,
             selected.OldCeiling, selected.Purpose);
+    }
+
+    // The scheduler binds the worker to the exact frozen exclusion list.
+    // Preserve its spellings while refusing any loss of independent owner deny
+    // coverage. A parent deny may be replaced by a broader ancestor deny.
+    internal static IReadOnlyList<string> ConstrainExclusions(IReadOnlyList<string> imported, IReadOnlyList<string> owner)
+    {
+        if (imported is null || owner is null || imported.Count > 128 || owner.Count > 128)
+            throw new ToolUsageException("Finite imported and owner exclusion lists required.");
+        var selected = imported.ToArray();
+        var protection = owner.Select(Relative).ToArray();
+        var denies = selected.Select(Relative).ToArray();
+        if (protection.Any(prefix => !denies.Any(deny => Within(prefix, deny))))
+            throw new ToolUsageException("Imported exclusions cannot omit or narrow independently selected owner protection.");
+        return Array.AsReadOnly(selected);
     }
 
     internal static IReadOnlyList<string> ConstrainPaths(IReadOnlyList<string> paths, LocalWorkerPaths owner)

@@ -59,19 +59,22 @@ public static class AutomaticSetup
         var prior = ReadOrdinaryTemplateRoot(template, pin.Path, original);
         if (selectedRoot?.WorkerPaths?.AllowedPaths is not { Count: > 0 and <= 128 } allowed ||
             prior.WorkerPaths.AllowedPaths is not { Count: > 0 and <= 128 } permitted ||
-            selectedRoot.WorkerPaths.Exclusions is null || prior.WorkerPaths.Exclusions is null ||
-            !selectedRoot.WorkerPaths.Exclusions.SequenceEqual(prior.WorkerPaths.Exclusions, StringComparer.Ordinal))
-            throw new ToolUsageException("Selected plan setup requires an existing finite owner allowlist and unchanged exclusions.");
+            selectedRoot.WorkerPaths.Exclusions is null || prior.WorkerPaths.Exclusions is null)
+            throw new ToolUsageException("Selected plan setup requires an existing finite owner allowlist and exclusion protection.");
         var trusted = permitted.Select(NormalizeSetupScope).ToArray();
         var narrowed = allowed.Select(NormalizeSetupScope).ToArray();
-        var excluded = prior.WorkerPaths.Exclusions.Select(NormalizeSetupScope).ToArray();
+        var exclusions = PlanSetupSelection.ConstrainExclusions(selectedRoot.WorkerPaths.Exclusions, prior.WorkerPaths.Exclusions);
+        var excluded = exclusions.Select(NormalizeSetupScope).ToArray();
         var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
         bool Within(string path, string prefix) => string.Equals(path, prefix, comparison) || path.StartsWith(prefix + "/", comparison);
         if (narrowed.Distinct(StringComparer.Ordinal).Count() != narrowed.Length ||
             OperatingSystem.IsWindows() && narrowed.Distinct(StringComparer.OrdinalIgnoreCase).Count() != narrowed.Length ||
             narrowed.Any(path => !trusted.Any(prefix => Within(path, prefix)) || excluded.Any(prefix => Within(path, prefix) || Within(prefix, path))))
             throw new ToolUsageException("Selected plan setup cannot widen the registered worker scope or overlap its exclusions.");
-        var unchanged = selectedRoot with { WorkerPaths = selectedRoot.WorkerPaths with { AllowedPaths = prior.WorkerPaths.AllowedPaths } };
+        var unchanged = selectedRoot with { WorkerPaths = selectedRoot.WorkerPaths with
+        {
+            AllowedPaths = prior.WorkerPaths.AllowedPaths, Exclusions = prior.WorkerPaths.Exclusions
+        } };
         if (!JsonSerializer.SerializeToUtf8Bytes(unchanged, BoundedFiles.Json).AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(prior, BoundedFiles.Json)))
             throw new ToolUsageException("Selected plan setup cannot replace other registered root selections.");
         original.Check();
