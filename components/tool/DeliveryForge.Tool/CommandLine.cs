@@ -15,10 +15,10 @@ public static class CommandLine
         new("help",false,ModeNames),new("version",false,ModeNames),new("json",false,ModeNames),new("dry-run",false,ModeNames),new("config",true,ModeNames),
         new("repo",true,["plan","implement","setup"]),new("issue",true,["plan"]),new("intent-file",true,["plan"]),new("plan-out",true,["plan"]),
         new("plan",true,["implement","quality-baseline"]),new("run-dir",true,["implement","pr","merge","resume"]),new("result-dir",true,["implement"]),
-        new("replay-out",true,["plan","implement","pr","merge","resume"]),new("ceiling",true,["resume"]),new("profile",true,["capabilities"]),
+        new("replay-out",true,["plan","implement","pr","merge","resume"]),new("ceiling",true,["resume","setup"]),new("profile",true,["capabilities"]),
         new("title-file",true,["pr"]),new("body-file",true,["pr"]),
         new("repository",true,["setup"]),new("git",true,["setup"]),new("reference",true,["setup"]),new("state-root",true,["setup"]),
-        new("previous-plan",true,["plan"])
+        new("previous-plan",true,["plan"]),new("register-config",true,["setup"]),new("plan-selection",true,["setup"])
     ];
     public static IReadOnlyList<string> Modes => Array.AsReadOnly(ModeNames);
     public static IReadOnlyList<OptionDefinition> Definitions => Table.Select(x => new OptionDefinition(x.Name, x.TakesValue, x.Modes.ToArray())).ToArray();
@@ -58,9 +58,7 @@ public static class CommandLine
         switch (mode)
         {
             case ToolMode.Setup:
-                if (Has("dry-run") || Has("config") && (Has("repo") || Has("repository") || Has("git") || Has("reference")) ||
-                    !Has("config") && (!Has("repo") || !Has("repository")))
-                    throw new ToolUsageException("setup requires --repo ROOT --repository OWNER/NAME, or --config TEMPLATE; overrides cannot replace template policy.");
+                RequireSetupGrammar(new(ToolMode.Setup, values));
                 break;
             case ToolMode.Plan: if (!Has("repo") || Has("issue") == Has("intent-file")) throw new ToolUsageException("plan requires --repo and exactly one --issue/--intent-file."); break;
             case ToolMode.Implement: case ToolMode.QualityBaseline: if (!Has("plan")) throw new ToolUsageException("This mode requires --plan."); break;
@@ -70,6 +68,17 @@ public static class CommandLine
         if (Has("ceiling") && values["ceiling"] is not ("plan" or "implement" or "pr" or "merge")) throw new ToolUsageException("Invalid ceiling.");
         return new(mode, values);
     }
+    internal static void RequireSetupGrammar(ToolCommand command)
+    {
+        var template = command.Has("config");
+        var registration = command.Has("register-config");
+        if (command.Has("dry-run") ||
+            template && (registration || command.Has("repo") || command.Has("repository") || command.Has("git") || command.Has("reference") || command.Has("ceiling") || command.Has("plan-selection")) ||
+            registration && (command.Has("git") || command.Has("reference") || command.Has("ceiling") || command.Has("plan-selection")) ||
+            !template && (!command.Has("repo") || !command.Has("repository")))
+            throw new ToolUsageException("setup requires repository selection, explicit owner registration with --register-config, or --config TEMPLATE; registration/template policy cannot be overridden.");
+    }
+
     // Bind the public API's actual enumeration once without silently changing
     // comparer/custom-dictionary semantics. Reuse this parser's exact key/mode
     // table; required/value grammar remains at its existing owning boundary.
@@ -112,6 +121,8 @@ public static class CommandLine
         "quality-baseline --plan RICH_BUNDLE --config TRUSTED_CONFIG (real gates only; candidate remains unapproved)\n" +
         "pr|merge|resume --run-dir DIR; resume [--ceiling plan|implement|pr|merge]\n" +
         "capabilities [--profile local|production] [--config FILE] (diagnostics; no runtime certification)\n" +
-        "setup (--repo ROOT --repository OWNER/NAME | --config TEMPLATE) [--state-root DIR]\n" +
+        "setup (--repo ROOT --repository OWNER/NAME [--ceiling plan|implement|pr|merge] | --config TEMPLATE) [--state-root DIR]\n" +
+        "setup --repo ROOT --repository OWNER/NAME --plan-selection PARENT_SELECTION [--state-root DIR] (registered profile required)\n" +
+        "setup --register-config OWNER_TEMPLATE --repo ROOT --repository OWNER/NAME [--state-root DIR]\n" +
         string.Join("\n", Table.Select(x => "--" + x.Name + (x.TakesValue ? " VALUE" : "") + " (" + string.Join(",", x.Modes) + ")")) + "\nNo implicit publication, replay execution, release or deploy. Unsupported live profiles remain INCOMPLETE.\n";
 }

@@ -1,0 +1,178 @@
+using System.Security.Cryptography;
+using System.Text.Json;
+using DeliveryForge.Evidence;
+using DeliveryForge.Planning;
+using DeliveryForge.Tool;
+
+namespace DeliveryForge.Tool.Tests;
+
+public sealed class PlanSetupSelectionTests
+{
+    // Ordinary Windows owned Git is directly available to this fixture. A Linux
+    // run needs its real independently selected process scope, not a test bypass.
+    public static bool IsWindows => OperatingSystem.IsWindows();
+    static AdmissionFile Write(string path, object value)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value, BoundedFiles.Json); File.WriteAllBytes(path, bytes);
+        return new(path, bytes.LongLength, Convert.ToHexStringLower(SHA256.HashData(bytes)));
+    }
+    static LocalWorkerPaths Paths(string[] allowed, string[] excluded) => new(
+        Path.Combine(Path.GetTempPath(), "unexecuted-work"), Path.Combine(Path.GetTempPath(), "unexecuted-results"), allowed, excluded);
+
+    [Fact]
+    public void File_derivation_narrows_directory_prefixes_and_does_not_mutate_exclusions()
+    {
+        var owner = Paths(["src", "tests"], ["src/private", "secrets"]);
+        var actual = PlanSetupSelection.ConstrainPaths(["tests/Case.cs", "src/A.cs", "src/A.cs"], owner);
+        Assert.Equal(new[] { "src/A.cs", "tests/Case.cs" }, actual);
+        Assert.Equal(new[] { "src/private", "secrets" }, owner.Exclusions);
+        Assert.Equal(new[] { "src", "tests" }, owner.AllowedPaths);
+    }
+
+    [Theory]
+    [InlineData("src-other/A.cs", "src", "excluded")]
+    [InlineData("src/private/A.cs", "src", "src/private")]
+    [InlineData("src", "src", "src/private")]
+    [InlineData("../outside.cs", "src", "excluded")]
+    [InlineData("src/../A.cs", "src", "excluded")]
+    [InlineData("src/A.cs", "src/**", "excluded")]
+    [InlineData("src/A.cs", "src", "**/secret")]
+    [InlineData("C:/outside.cs", "src", "excluded")]
+    public void Unsupported_or_widened_file_scope_refuses(string file, string allowed, string excluded) =>
+        Assert.Throws<ToolUsageException>(() => PlanSetupSelection.ConstrainPaths([file], Paths([allowed], [excluded])));
+
+    [Fact]
+    public void Empty_profile_scope_is_not_repository_wide_authorization() =>
+        Assert.Throws<ToolUsageException>(() => PlanSetupSelection.ConstrainPaths(["src/A.cs"], Paths([], [])));
+
+    [Fact]
+    public void Exclusions_follow_actual_platform_path_case_semantics()
+    {
+        var owner = Paths(["Library"], ["Library/Secret.cs"]);
+        if (OperatingSystem.IsWindows())
+            Assert.Throws<ToolUsageException>(() => PlanSetupSelection.ConstrainPaths(["Library/secret.cs"], owner));
+        else
+            Assert.Equal(new[] { "Library/secret.cs" }, PlanSetupSelection.ConstrainPaths(["Library/secret.cs"], owner));
+    }
+
+    [Fact]
+    public void Distinct_plan_spellings_that_case_collide_are_not_silently_collapsed_on_Windows()
+    {
+        var owner = Paths(["Library"], []);
+        if (OperatingSystem.IsWindows())
+            Assert.Throws<ToolUsageException>(() => PlanSetupSelection.ConstrainPaths(["Library/A.cs", "Library/a.cs"], owner));
+        else
+            Assert.Equal(new[] { "Library/A.cs", "Library/a.cs" }, PlanSetupSelection.ConstrainPaths(["Library/A.cs", "Library/a.cs"], owner));
+    }
+
+    [Fact]
+    public async Task Requested_ceiling_and_template_pin_refuse_before_bundle_or_Git_access()
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(30), TestContext.Current.CancellationToken);
+        var root = Directory.CreateTempSubdirectory("forge-selection-early-").FullName;
+        var template = new TrustedConfiguration("fixture/selection", Path.Combine(root, "repo"), "refs/heads/main",
+            Path.Combine(root, "unread-git"), MaximumCeiling: "plan");
+        var pin = Write(Path.Combine(root, "template.json"), template);
+        var bundle = new AdmissionFile(Path.Combine(root, "unread-bundle"), 1, new string('a', 64));
+        var selected = new ParentPlanSetupSelection(bundle, "independent-bundle", "independent-contract", "#8", "plan", PlanSetupPurpose.Revise, "implement");
+        await Assert.ThrowsAsync<ToolUsageException>(() => PlanSetupSelection.SelectAsync(pin, selected, new(), original));
+        File.AppendAllText(pin.Path, " ");
+        await Assert.ThrowsAsync<IOException>(() => PlanSetupSelection.SelectAsync(pin, selected, new(), original));
+        Assert.False(File.Exists(bundle.Path)); Assert.False(File.Exists(template.GitExecutable));
+    }
+
+    [Theory(Skip = "Owned Windows Git fixture; Linux needs its actual selected ordinary scope.", SkipUnless = nameof(IsWindows))]
+    [InlineData("revise-plan")]
+    [InlineData("execute-implement")]
+    [InlineData("execute-plan")]
+    [InlineData("execute-above-plan")]
+    [InlineData("wrong-independent-identity")]
+    [InlineData("tampered-bundle")]
+    [InlineData("prefix-collision")]
+    [InlineData("excluded-file")]
+    [InlineData("dirty-source")]
+    [InlineData("committed-base-advance")]
+    public async Task Actual_owned_import_binds_independent_selection_before_returning_non_authoritative_DATA(string scenario)
+    {
+        using var original = new ToolLifetime(TimeSpan.FromSeconds(120), TestContext.Current.CancellationToken);
+        var root = Directory.CreateTempSubdirectory("forge-selection-import-").FullName;
+        var repo = Directory.CreateDirectory(Path.Combine(root, "repo")).FullName;
+        var git = (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator).Where(Path.IsPathFullyQualified)
+            .Select(path => Path.Combine(path, "git.exe")).First(File.Exists);
+        var executor = new ProcessCommandExecutor();
+        async Task Git(params string[] args)
+        {
+            var argv = new[] { "--no-replace-objects", "-c", "core.hooksPath=NUL", "-c", "core.fsmonitor=false",
+                "-c", "user.name=SelectionFixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false" }.Concat(args).ToArray();
+            var capture = await executor.ExecuteAsync(new(git, argv, repo, new Dictionary<string, string>
+            {
+                ["GIT_CONFIG_NOSYSTEM"] = "1", ["GIT_CONFIG_GLOBAL"] = "NUL", ["GIT_CONFIG_SYSTEM"] = "NUL",
+                ["GIT_NO_REPLACE_OBJECTS"] = "1", ["GIT_TERMINAL_PROMPT"] = "0", ["GIT_OPTIONAL_LOCKS"] = "0"
+            }), original.Remaining, original.Token);
+            Assert.True(capture.OwnedProcessQuiescent && capture.ExitCode == 0 && !capture.TimedOut && !capture.Cancelled, capture.StandardError);
+        }
+        var path = scenario == "prefix-collision" ? "src-other/A.cs" : scenario == "excluded-file" ? "src/private/A.cs" : "src/A.cs";
+        Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(repo, path))!); File.WriteAllText(Path.Combine(repo, path), "original content\n");
+        await Git("init", "-q", "-b", "main"); await Git("add", "--", path); await Git("commit", "-q", "-m", "base");
+        var reader = new GitRepositoryContextReader(git); var context = await reader.ReadAsync(repo, "refs/heads/main", original.Token);
+        var file = await reader.ReadFileAsync(context, path, original.Token);
+        var execute = scenario.StartsWith("execute", StringComparison.Ordinal);
+        var implementationPlan = scenario is "execute-implement" or "execute-above-plan";
+        var oldCeiling = implementationPlan ? "implement" : "plan";
+        var request = new PlanningRequest("fixture/selection", "#8", implementationPlan ? "implement" : "plan", "Update one file", [path], [], ["Only selected file changes"], oldCeiling);
+        EvidenceItem[] evidence = [EvidenceItem.FromRepositoryFile(file, DateTimeOffset.UtcNow, [])];
+        var draft = new PlanDraft(request, context, evidence, [new(path, "content", "update")], [new("#8", [], "root")],
+            [new("test", new("dotnet", [PlanCommandArgument.Literal("test")]), "PASS")],
+            new("additive", "none", "none", "none", "none", "none", "receipt", "revert", []), [], IntakePlanner.Assess(request, evidence));
+        var plan = PlanFreezer.Freeze(draft, "independent-original", DateTimeOffset.UtcNow);
+        var bundlePath = Path.Combine(root, "bundle.json"); File.WriteAllBytes(bundlePath, plan.CanonicalBytes);
+        var bundle = new AdmissionFile(bundlePath, plan.CanonicalBytes.LongLength, Convert.ToHexStringLower(SHA256.HashData(plan.CanonicalBytes)));
+        var admission = Write(Path.Combine(root, "non-admitted.json"), new { Kind = "DeliveryForgeHostNotAdmitted-v1" });
+        var selectionRoot = new StandaloneRootSelection("DeliveryForgeStandaloneRoot-v1", Path.Combine(root, "old-store"),
+            new(Path.Combine(root, "old-work"), Path.Combine(root, "old-results"), ["src"], ["src/private"]), admission);
+        var rootPin = Write(Path.Combine(root, "root.json"), selectionRoot);
+        var maximum = scenario == "execute-above-plan" ? "pr" : "implement";
+        var template = new TrustedConfiguration(request.Repository, repo, "refs/heads/main", git, MaximumCeiling: maximum,
+            StandaloneRoot: rootPin);
+        var templatePin = Write(Path.Combine(root, "template.json"), template);
+        var selected = new ParentPlanSetupSelection(bundle, scenario == "wrong-independent-identity" ? "sha256:" + new string('0', 64) : plan.Identity,
+            plan.ContractIdentity, "#8", oldCeiling, execute ? PlanSetupPurpose.Execute : PlanSetupPurpose.Revise,
+            scenario == "execute-above-plan" ? "pr" : "implement");
+        if (scenario == "tampered-bundle") File.AppendAllText(bundlePath, " ");
+        if (scenario == "dirty-source") File.AppendAllText(Path.Combine(repo, path), "dirty\n");
+        if (scenario == "committed-base-advance") await Git("commit", "--allow-empty", "-q", "-m", "advanced base");
+        var beforeTemplate = File.ReadAllBytes(templatePin.Path); var beforeRoot = File.ReadAllBytes(rootPin.Path);
+        SelectedPlanSetupData? result = null;
+        var error = await Record.ExceptionAsync(async () => result = await PlanSetupSelection.SelectAsync(templatePin, selected, executor, original));
+        Assert.Equal(beforeTemplate, File.ReadAllBytes(templatePin.Path)); Assert.Equal(beforeRoot, File.ReadAllBytes(rootPin.Path));
+        Assert.False(Directory.Exists(selectionRoot.StoreRoot)); Assert.False(Directory.Exists(selectionRoot.WorkerPaths.Worktree));
+        if (scenario is not ("revise-plan" or "execute-implement")) { Assert.NotNull(error); Assert.Null(result); return; }
+        Assert.Null(error); Assert.NotNull(result);
+        Assert.Equal(plan.Identity, result.Configuration.ExpectedBundleIdentity); Assert.Equal(plan.ContractIdentity, result.Configuration.ExpectedContractIdentity);
+        Assert.Equal(oldCeiling, result.Configuration.ExpectedPlanCeiling); Assert.Equal("implement", result.Configuration.MaximumCeiling);
+        Assert.Equal(new[] { path }, result.Root.WorkerPaths.AllowedPaths); Assert.Equal(selectionRoot.WorkerPaths.Exclusions, result.Root.WorkerPaths.Exclusions);
+        Assert.Equal(admission, result.Root.InstalledHostAdmission); Assert.False(result.RuntimeCertified); Assert.False(result.ExecutionAuthorityIssued);
+        // Exercise public setup grammar/discovery and the owning task boundary,
+        // rather than treating successful helper parsing as end-to-end setup.
+        var state = Path.Combine(root, "state");
+        var application = new ToolApplication(actualExecutor: executor, actualOriginal: original);
+        var registration = await application.ExecuteAsync(CommandLine.Parse(["setup", "--register-config", templatePin.Path,
+            "--repo", repo, "--repository", request.Repository, "--state-root", state]), original.Token);
+        Assert.Equal("SETUP_PROFILE_REGISTERED", registration.Code);
+        var selectionPin = Write(Path.Combine(root, "parent-selection.json"), selected);
+        var prepared = await application.ExecuteAsync(CommandLine.Parse(["setup", "--repo", repo, "--repository", request.Repository,
+            "--plan-selection", selectionPin.Path, "--state-root", state]), original.Token);
+        Assert.Equal("SETUP_PREPARED", prepared.Code);
+        var automatic = Assert.IsType<AutomaticSetupResult>(prepared.Data);
+        var actualConfig = TrustedConfiguration.Load(automatic.ConfigurationPath, original);
+        Assert.Equal(plan.Identity, actualConfig.ExpectedBundleIdentity);
+        Assert.Equal(oldCeiling, actualConfig.ExpectedPlanCeiling);
+        Assert.Equal("implement", actualConfig.MaximumCeiling);
+        Assert.Equal(new[] { path }, automatic.Selection.WorkerPaths.AllowedPaths);
+        Assert.NotNull(automatic.ProfileRegistration);
+        Assert.False(Directory.Exists(automatic.Selection.WorkerPaths.Worktree));
+        Assert.Contains(application.RetainedExternalCalls, call => call.Kind == "ActualSetupPlanSelection" && call.ActualTask is { IsCompletedSuccessfully: true });
+        Assert.Equal(beforeTemplate, File.ReadAllBytes(templatePin.Path));
+        Assert.Equal(beforeRoot, File.ReadAllBytes(rootPin.Path));
+    }
+}

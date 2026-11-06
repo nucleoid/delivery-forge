@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using DeliveryForge.Evidence;
 namespace DeliveryForge.Tool;
 
@@ -6,13 +7,16 @@ public sealed partial class ToolApplication
 {
     async Task<ToolResult> SetupAsync(ToolCommand command, CancellationToken token)
     {
-        if (command.Has("dry-run") || command.Has("config") && (command.Has("repo") || command.Has("repository") || command.Has("git") || command.Has("reference")) ||
-            !command.Has("config") && (string.IsNullOrWhiteSpace(command.Get("repo")) || string.IsNullOrWhiteSpace(command.Get("repository"))))
-            throw new ToolUsageException("setup requires either repository selection or an existing template and never creates files during dry-run.");
+        CommandLine.RequireSetupGrammar(command);
         var life = actualOriginal ?? new ToolLifetime(TimeSpan.FromSeconds(120), token);
         using var local = actualOriginal is null ? life : null;
         life.Check();
         var state = command.Get("state-root") ?? AutomaticSetup.DefaultStateRoot();
+        if (command.Get("register-config") is string registrationTemplate)
+        {
+            var registration = RepositorySetupProfiles.Register(registrationTemplate, command.Get("repository")!, command.Get("repo")!, state, life);
+            return new("COMPLETE", "SETUP_PROFILE_REGISTERED", "Explicit owner-selected repository template registered without creating runtime admission or a run.", registration);
+        }
         AutomaticSetupResult selected;
         if (command.Get("config") is string templatePath)
         {
@@ -24,6 +28,54 @@ public sealed partial class ToolApplication
         {
             var repo = BoundedFiles.Plain(command.Get("repo") ?? throw new ToolUsageException("Setup repository required."), true);
             var repository = command.Get("repository") ?? throw new ToolUsageException("Setup requires resolved repository identity.");
+            var planSelection = command.Get("plan-selection") is string selectionPath
+                ? BoundedFiles.ReadJson<ParentPlanSetupSelection>(selectionPath, life, 65536) : null;
+            var requestedCeiling = command.Get("ceiling") ?? planSelection?.RequestedCeiling ?? "plan";
+            if (planSelection is not null && requestedCeiling != planSelection.RequestedCeiling)
+                throw new ToolUsageException("Explicit ceiling differs from independently selected plan setup ceiling.");
+            var requested = TrustedConfiguration.Ceiling(requestedCeiling);
+            var profile = RepositorySetupProfiles.Read(repository, repo, state, life);
+            if (profile is not null)
+            {
+                var template = profile.Template;
+                if (requested > TrustedConfiguration.Ceiling(template.MaximumCeiling))
+                    return ToolResult.Incomplete("SETUP_PROFILE_CEILING_EXCEEDED", "Requested setup ceiling exceeds the independently selected repository template; no run was created.");
+                if (command.Get("reference") is string selectedReference && selectedReference != template.MutableReference ||
+                    command.Get("git") is string selectedGit && !Same(selectedGit, template.GitExecutable))
+                    return ToolResult.Incomplete("SETUP_PROFILE_OVERRIDE_REFUSED", "Explicit Git/reference differs from the registered template; select and reconcile a new owner profile instead of overriding it.");
+                if (TimeSpan.FromSeconds(template.OperationSeconds) < life.WholeLimit) life.Restrict(TimeSpan.FromSeconds(template.OperationSeconds));
+                if (planSelection is not null)
+                {
+                    ProcessCommandExecutor executor;
+                    if (actualExecutor is not null) executor = actualExecutor;
+                    else if (OperatingSystem.IsLinux())
+                    {
+                        var root = AutomaticSetup.ReadOrdinaryTemplateRoot(template, profile.TemplatePin.Path, life);
+                        var scopePin = root.LinuxScopeProfile ?? throw new ToolUsageException("Exact Linux ordinary scope required before plan reconciliation.");
+                        var scopeBytes = InstalledHostAdmission.ReadExact(scopePin, life, 65536);
+                        _ = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(scopeBytes);
+                        var scope = JsonSerializer.Deserialize<LinuxScopeSelection>(scopeBytes, BoundedFiles.Json)
+                            ?? throw new ToolUsageException("Selected Linux ordinary scope is null.");
+                        executor = new(StandaloneOwnerComposition.OrdinaryLinuxScope(scope), life);
+                    }
+                    else executor = new();
+                    var narrowed = await Observe("ActualSetupPlanSelection",
+                        () => PlanSetupSelection.SelectAsync(profile.TemplatePin, planSelection, executor, life), life).ConfigureAwait(false);
+                    selected = AutomaticSetup.RebaseSelected(narrowed.Configuration, narrowed.Root, state, life)
+                        with { ProfileRegistration = profile.Registration };
+                }
+                else selected = AutomaticSetup.Rebase(template with { MaximumCeiling = requestedCeiling }, state, life)
+                    with { ProfileRegistration = profile.Registration };
+                life.Check();
+                return new("COMPLETE", "SETUP_PREPARED", "Registered repository template discovered and fresh paths prepared. Explicit plan selection is reconciled when supplied; host restrictions remain selected DATA, and no runtime capability or plan authorization was issued.", selected);
+            }
+            if (planSelection is not null || requested > DeliveryForge.Contracts.Models.AuthorizationCeiling.Plan)
+                return ToolResult.Incomplete("SETUP_EXECUTION_PROFILE_REQUIRED", "No independently selected repository execution profile is registered; ordinary paths do not require an owner decision.", new
+                {
+                    Repository = repository, RepositoryRoot = repo, RequestedCeiling = requestedCeiling,
+                    RegistrationPath = RepositorySetupProfiles.Location(repository, repo, state),
+                    MissingPrerequisites = new[] { "INDEPENDENT_REPOSITORY_PROFILE_REGISTRATION_REQUIRED" }, RuntimeCertified = false
+                });
             var git = ResolveSetupGit(command.Get("git"));
             var reference = command.Get("reference");
             var repositoryIdentitySource = "ExplicitSelectionUnverified";

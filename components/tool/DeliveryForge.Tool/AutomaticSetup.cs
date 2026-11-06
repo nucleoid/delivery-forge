@@ -9,6 +9,7 @@ public sealed record AutomaticSetupResult(string ConfigurationPath, AdmissionFil
     // Setup produces selections, never an installed-host acceptance or owner.
     public bool RuntimeCertified => false;
     public string RepositoryIdentitySource { get; init; } = "ExplicitSelectionUnverified";
+    public AdmissionFile? ProfileRegistration { get; init; }
 }
 
 /// <summary>Materializes ordinary path defaults as explicit independently pinned DATA.</summary>
@@ -46,6 +47,50 @@ public static class AutomaticSetup
     /// <summary>Preserves every selected policy and ceiling, replacing only per-run storage paths.</summary>
     public static AutomaticSetupResult Rebase(TrustedConfiguration template, string stateRoot, ToolLifetime original)
     {
+        var selected = template?.StandaloneRoot ?? throw new ToolUsageException("Existing setup template requires its exact standalone root selection.");
+        return Prepare(template, ReadOrdinaryTemplateRoot(template, selected.Path, original), stateRoot, original);
+    }
+
+    // The actual parent plan-selection helper may narrow a selected profile,
+    // never substitute another root or add writable paths to its allowlist.
+    internal static AutomaticSetupResult RebaseSelected(TrustedConfiguration template, StandaloneRootSelection selectedRoot, string stateRoot, ToolLifetime original)
+    {
+        var pin = template.StandaloneRoot ?? throw new ToolUsageException("Exact original setup root selection required.");
+        var prior = ReadOrdinaryTemplateRoot(template, pin.Path, original);
+        if (selectedRoot?.WorkerPaths?.AllowedPaths is not { Count: > 0 and <= 128 } allowed ||
+            prior.WorkerPaths.AllowedPaths is not { Count: > 0 and <= 128 } permitted ||
+            selectedRoot.WorkerPaths.Exclusions is null || prior.WorkerPaths.Exclusions is null ||
+            !selectedRoot.WorkerPaths.Exclusions.SequenceEqual(prior.WorkerPaths.Exclusions, StringComparer.Ordinal))
+            throw new ToolUsageException("Selected plan setup requires an existing finite owner allowlist and unchanged exclusions.");
+        var trusted = permitted.Select(NormalizeSetupScope).ToArray();
+        var narrowed = allowed.Select(NormalizeSetupScope).ToArray();
+        var excluded = prior.WorkerPaths.Exclusions.Select(NormalizeSetupScope).ToArray();
+        var comparison = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        bool Within(string path, string prefix) => string.Equals(path, prefix, comparison) || path.StartsWith(prefix + "/", comparison);
+        if (narrowed.Distinct(StringComparer.Ordinal).Count() != narrowed.Length ||
+            OperatingSystem.IsWindows() && narrowed.Distinct(StringComparer.OrdinalIgnoreCase).Count() != narrowed.Length ||
+            narrowed.Any(path => !trusted.Any(prefix => Within(path, prefix)) || excluded.Any(prefix => Within(path, prefix) || Within(prefix, path))))
+            throw new ToolUsageException("Selected plan setup cannot widen the registered worker scope or overlap its exclusions.");
+        var unchanged = selectedRoot with { WorkerPaths = selectedRoot.WorkerPaths with { AllowedPaths = prior.WorkerPaths.AllowedPaths } };
+        if (!JsonSerializer.SerializeToUtf8Bytes(unchanged, BoundedFiles.Json).AsSpan().SequenceEqual(JsonSerializer.SerializeToUtf8Bytes(prior, BoundedFiles.Json)))
+            throw new ToolUsageException("Selected plan setup cannot replace other registered root selections.");
+        original.Check();
+        return Prepare(template, selectedRoot, stateRoot, original);
+    }
+
+    static string NormalizeSetupScope(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || path.Length > 4096 || path != path.Trim())
+            throw new ToolUsageException("Finite normalized repository-relative profile paths required.");
+        var normalized = path.Replace('\\', '/');
+        if (normalized.Any(character => char.IsControl(character) || character is ':' or '*' or '?' or '[' or ']' or '<' or '>' or '\"' or '|') ||
+            normalized.Split('/').Any(part => part is "" or "." or ".."))
+            throw new ToolUsageException("Profile path prefixes cannot contain traversal, globs or absolute/ambiguous components.");
+        return normalized;
+    }
+
+    internal static StandaloneRootSelection ReadOrdinaryTemplateRoot(TrustedConfiguration template, string configurationPath, ToolLifetime original)
+    {
         ArgumentNullException.ThrowIfNull(template);
         original.Check();
         if (template.ProductionBatch is not null || template.HistoricalQuality is not null || template.LocalRealGolden is not null)
@@ -60,8 +105,8 @@ public static class AutomaticSetup
         // The selected root path is itself an independently selected control
         // input. Validate the old topology before allocating another one;
         // rebasing must not quietly repair an invalid input selection.
-        StandaloneEntrypoint.SeparateSelection(template, selected.Path, root);
-        return Prepare(template, root, stateRoot, original);
+        StandaloneEntrypoint.SeparateSelection(template, configurationPath, root);
+        return root;
     }
 
     static AutomaticSetupResult Prepare(TrustedConfiguration template, StandaloneRootSelection? prior,
@@ -79,8 +124,7 @@ public static class AutomaticSetup
         if (!Directory.Exists(repository)) throw new ToolUsageException("Setup requires an existing resolved repository directory.");
         var git = BoundedFiles.Plain(template.GitExecutable);
         var state = BoundedFiles.Plain(stateRoot, true);
-        var pathIdentity = OperatingSystem.IsWindows() ? repository.ToUpperInvariant() : repository;
-        var key = BoundedFiles.Sha(Encoding.UTF8.GetBytes(template.Repository + "\n" + pathIdentity));
+        var key = RepositoryKey(template.Repository, repository);
         var runId = "run-" + Guid.NewGuid().ToString("N");
         var run = BoundedFiles.Plain(Path.Combine(state, "repos", key, "runs", runId), true);
         var control = Path.Combine(run, "control");
@@ -113,6 +157,17 @@ public static class AutomaticSetup
         BoundedFiles.WriteNew(rootPath, rootBytes, original);
         BoundedFiles.WriteNew(configurationPath, configurationBytes, original);
         return new(configurationPath, Pin(configurationPath, configurationBytes), rootPin, key, runId, run, selection);
+    }
+
+    internal static string RepositoryKey(string repositoryIdentity, string repositoryRoot)
+    {
+        if (string.IsNullOrWhiteSpace(repositoryIdentity) || repositoryIdentity.Length > 256 ||
+            !System.Text.RegularExpressions.Regex.IsMatch(repositoryIdentity, "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$", System.Text.RegularExpressions.RegexOptions.CultureInvariant) ||
+            repositoryIdentity.Split('/').Any(part => part is "." or ".."))
+            throw new ToolUsageException("Setup requires the resolved repository identity.");
+        var repository = Path.TrimEndingDirectorySeparator(BoundedFiles.Plain(repositoryRoot, true));
+        var pathIdentity = OperatingSystem.IsWindows() ? repository.ToUpperInvariant() : repository;
+        return BoundedFiles.Sha(Encoding.UTF8.GetBytes(repositoryIdentity + "\n" + pathIdentity));
     }
 
     static byte[] Encode<T>(T value)
