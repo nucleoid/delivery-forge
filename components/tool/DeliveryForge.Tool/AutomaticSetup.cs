@@ -173,7 +173,16 @@ public static class AutomaticSetup
             configurationPath = Path.Combine(control, "configuration.json");
             rootPath = Path.Combine(control, "root.json");
             unadmittedPath = Path.Combine(control, "host-unadmitted.json");
-            worker = worker with { Worktree = Path.Combine(run, "worktree"), ResultDirectory = Path.Combine(run, "results") };
+            // Keep Windows Git's administrative path below its native fixed
+            // bound without truncating repository keys or the fresh run UUID.
+            // State now exists through the same newly created control anchor.
+            var physicalState = BoundedFiles.Plain(DeliveryForge.Execution.Git.WorktreeManager.WindowsFinalPath(state), true);
+            var worktree = BoundedFiles.Plain(Path.Combine(physicalState, "worktrees", runId, "worktree"), true);
+            if (Directory.Exists(worktree) || File.Exists(worktree))
+                throw new IOException("New setup worktree already exists; no previous worktree is adopted.");
+            if (TrustedConfiguration.Ceiling(template.MaximumCeiling) >= DeliveryForge.Contracts.Models.AuthorizationCeiling.Implement)
+                RequireWindowsGitMetadataPath(worktree);
+            worker = worker with { Worktree = worktree, ResultDirectory = Path.Combine(run, "results") };
             selection = selection with
             {
                 StoreRoot = Path.Combine(run, "store"),
@@ -209,6 +218,15 @@ public static class AutomaticSetup
         BoundedFiles.WriteNew(rootPath, rootBytes, original);
         BoundedFiles.WriteNew(configurationPath, configurationBytes, original);
         return new(configurationPath, Pin(configurationPath, configurationBytes), rootPin, key, runId, run, selection);
+    }
+
+    // The selected Git for Windows profile refuses $GIT_DIR beyond220 UTF-8
+    // bytes independently of core.longpaths. This is selection refusal only;
+    // it neither creates a worktree nor changes Git configuration or limits.
+    internal static void RequireWindowsGitMetadataPath(string worktree)
+    {
+        if (Encoding.UTF8.GetByteCount(Path.Combine(worktree, ".git")) > 220)
+            throw new ToolUsageException("Selected Windows worktree metadata path exceeds220 UTF-8 bytes; the explicit state root is too long for this installed Git profile.");
     }
 
     internal static string RepositoryKey(string repositoryIdentity, string repositoryRoot)

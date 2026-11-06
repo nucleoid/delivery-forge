@@ -32,7 +32,8 @@ public sealed class AutomaticSetupTests
         Assert.Equal(physical, result.RunDirectory);
         Assert.Equal(Path.Combine(physical, "control", "configuration.json"), result.ConfigurationPath);
         Assert.Equal(Path.Combine(physical, "control", "root.json"), result.Root.Path);
-        Assert.Equal(Path.Combine(physical, "worktree"), result.Selection.WorkerPaths.Worktree);
+        var physicalState = DeliveryForge.Execution.Git.WorktreeManager.WindowsFinalPath(fixture.State);
+        Assert.Equal(Path.Combine(physicalState, "worktrees", result.RunId, "worktree"), result.Selection.WorkerPaths.Worktree);
         Assert.Equal(Path.Combine(physical, "results"), result.Selection.WorkerPaths.ResultDirectory);
         Assert.Equal(Path.Combine(physical, "store"), result.Selection.StoreRoot);
         Assert.Equal(Path.Combine(physical, "control", "host-unadmitted.json"), result.Selection.InstalledHostAdmission.Path);
@@ -45,6 +46,34 @@ public sealed class AutomaticSetupTests
         Assert.False(Directory.Exists(result.Selection.StoreRoot));
         Assert.False(Directory.Exists(Path.Combine(physical, "checkpoints")));
         if (existingState) Assert.Equal("preserved state evidence", File.ReadAllText(preserved));
+    }
+
+    [Fact(Skip = "Actual Windows Git metadata path selection required.", SkipUnless = nameof(IsWindows))]
+    public void Windows_implementation_selection_refuses_a_long_explicit_state_before_DATA_or_worker_creation()
+    {
+        var fixture = Fixture.Create();
+        using var original = Lifetime();
+        var first = AutomaticSetup.PreparePlan("owner/example", fixture.Repository, "refs/heads/main", fixture.Git, fixture.State, original);
+        var template = TrustedConfiguration.Load(first.ConfigurationPath, original) with { MaximumCeiling = "implement" };
+        var longState = Path.Combine(fixture.Root, new string('x', 150));
+        var refusal = Assert.Throws<ToolUsageException>(() => AutomaticSetup.Rebase(template, longState, original));
+        Assert.Contains("exceeds220 UTF-8 bytes", refusal.Message, StringComparison.Ordinal);
+        Assert.Empty(Directory.GetFiles(longState, "*.json", SearchOption.AllDirectories));
+        Assert.False(Directory.Exists(Path.Combine(longState, "worktrees")));
+        Assert.Equal(first.Root, TrustedConfiguration.Load(first.ConfigurationPath, original).StandaloneRoot);
+    }
+
+    [Fact(Skip = "Windows Git uses this selected administrative path profile.", SkipUnless = nameof(IsWindows))]
+    public void Windows_Git_metadata_bound_counts_UTF8_bytes_including_dotgit()
+    {
+        var boundary = @"C:\" + new string('a', 212);
+        Assert.Equal(220, System.Text.Encoding.UTF8.GetByteCount(Path.Combine(boundary, ".git")));
+        AutomaticSetup.RequireWindowsGitMetadataPath(boundary);
+        Assert.Throws<ToolUsageException>(() => AutomaticSetup.RequireWindowsGitMetadataPath(boundary + "a"));
+        var unicodeBoundary = @"C:\" + new string('a', 210) + "\u00e9";
+        Assert.Equal(220, System.Text.Encoding.UTF8.GetByteCount(Path.Combine(unicodeBoundary, ".git")));
+        AutomaticSetup.RequireWindowsGitMetadataPath(unicodeBoundary);
+        Assert.Throws<ToolUsageException>(() => AutomaticSetup.RequireWindowsGitMetadataPath(unicodeBoundary + "a"));
     }
 
     [Fact]

@@ -58,6 +58,9 @@ public sealed class AutomaticPhysicalGitProvisionTests
                 AutomaticSetup.DefaultStateRoot(), original);
             TestContext.Current.TestOutputHelper!.WriteLine("Retained selected physical run: " + selected.RunDirectory);
             Assert.Equal(WorktreeManager.WindowsFinalPath(selected.RunDirectory), selected.RunDirectory);
+            var state = WorktreeManager.WindowsFinalPath(AutomaticSetup.DefaultStateRoot());
+            Assert.Equal(Path.Combine(state, "worktrees", selected.RunId, "worktree"), selected.Selection.WorkerPaths.Worktree);
+            Assert.True(Encoding.UTF8.GetByteCount(Path.Combine(selected.Selection.WorkerPaths.Worktree, ".git")) <= 220);
             Assert.False(Directory.Exists(selected.Selection.WorkerPaths.Worktree));
             var manager = new WorktreeManager(git, executor, original).WithParentAdmission(parent, "local-repro");
             await manager.PrepareAsync(repository, selected.Selection.WorkerPaths.Worktree, head, original.Token);

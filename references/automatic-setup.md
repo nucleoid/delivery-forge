@@ -13,10 +13,12 @@ repos/<key>/runs/run-<nonce>/
   control/configuration.json
   control/root.json
   store/
-  worktree/
+  worktree/  (Linux)
   results/
   checkpoints/
 ```
+
+On Windows the worktree alone uses `worktrees/run-<same-nonce>/worktree` directly under the same physically resolved state root. Control, store, results and checkpoints retain the repository/run layout above. The full128-bit run nonce is unchanged; setup leaves the worktree absent for its actual owner. Implementation-capable setup refuses a selected Windows `worktree/.git` path longer than220 UTF-8 bytes before DATA or checkpoint writes. It does not alter Git configuration, relocate existing work or choose a broader fallback root.
 
 Setup creates control files with exact pins and CreateNew. When coordination is selected, it also creates and verifies an empty plain checkpoint directory for the fresh run, as required by the existing parent owner. Previous checkpoint directories and their evidence stay untouched. The actual implementation owner creates the worktree/store/results later. Existing attempts, dirty worktrees, failed output and immutable history are never adopted or overwritten. Outputs refuse source overlap and nonplain ancestors. Setup refuses dry-run rather than silently writing files.
 
