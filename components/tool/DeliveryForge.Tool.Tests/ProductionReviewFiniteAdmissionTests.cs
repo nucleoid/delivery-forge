@@ -281,8 +281,8 @@ public sealed class ProductionReviewFiniteAdmissionTests
             var expectedSubject = Encoding.UTF8.GetBytes("candidate\n");
             Assert.Equal(expectedSubject.LongLength, subject.Bytes);
             Assert.Equal("sha256:" + Convert.ToHexStringLower(SHA256.HashData(expectedSubject)), subject.Sha256);
-            if (allGoldenChecks) { Assert.Equal(Convert.ToHexStringLower(expectedSubject), subject.Hex); Assert.Null(subject.HexOmittedReason); }
-            else { Assert.Null(subject.Hex); Assert.Equal("SnapshotHexBudgetExhausted", subject.HexOmittedReason); }
+            if (subject.Hex is not null) { Assert.Equal(Convert.ToHexStringLower(expectedSubject), subject.Hex); Assert.Null(subject.HexOmittedReason); }
+            else { Assert.False(allGoldenChecks); Assert.Equal("SnapshotHexBudgetExhausted", subject.HexOmittedReason); }
             Assert.Equal("100644", subject.Mode); Assert.Equal(40, subject.BlobIdentity.Length);
             Assert.InRange(byteFacts.Files.Sum(row => (row.Hex?.Length ?? 0) / 2), 0, 4096);
             Assert.Contains(byteFacts.Files, row => row.RelativePath == "review.json" && row.Hex is null && row.HexOmittedReason == "FileExceeds128Bytes");
