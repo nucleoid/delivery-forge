@@ -110,14 +110,16 @@ public sealed class PlanSupersessionTests
                 Assert.NotEqual(previous.BaseCommit, (await fixture.Git(original, "rev-parse", "HEAD")).Trim());
                 Assert.Empty(await fixture.Git(original, "status", "--porcelain=v1", "--untracked-files=all"));
                 break;
-            case "widened-scope": fixture.Intent = fixture.Intent with
-            {
-                Request = fixture.Intent.Request with { Included = ["tracked.txt", "other.txt"] },
-                ChangeMap = [new("tracked.txt", "content", "update"), new("other.txt", "content", "update")]
-            }; break;
+            case "widened-scope":
+                fixture.Intent = fixture.Intent with
+                {
+                    Request = fixture.Intent.Request with { Included = ["tracked.txt", "other.txt"] },
+                    ChangeMap = [new("tracked.txt", "content", "update"), new("other.txt", "content", "update")]
+                }; break;
             case "changed-exclusions": fixture.Intent = fixture.Intent with { Request = fixture.Intent.Request with { Excluded = ["private/**"] } }; break;
-            case "changed-gates": fixture.Intent = fixture.Intent with
-            { Gates = [new("test", new("dotnet", [PlanCommandArgument.Literal("test"), PlanCommandArgument.Literal("--no-build")]), "PASS")] }; break;
+            case "changed-gates":
+                fixture.Intent = fixture.Intent with
+                { Gates = [new("test", new("dotnet", [PlanCommandArgument.Literal("test"), PlanCommandArgument.Literal("--no-build")]), "PASS")] }; break;
             case "same-revision": fixture.Intent = fixture.Intent with { Revision = previous.Revision }; break;
             case "different-work-item": fixture.Intent = fixture.Intent with { Request = fixture.Intent.Request with { WorkItem = "#9" } }; break;
         }
