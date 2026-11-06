@@ -28,7 +28,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
     WindowsImageUse? trustedImage;
     bool trustedNativeCreationEntered, trustedNativeCreationReturned;
     HostInstructionContext? instructions;
-    string? configuredDeveloperInstructions; bool developerInstructionsObserved;
+    readonly CodexWorkerInstructions workerInstructions = new();
     public void BindInstructions(HostInstructionContext context) { lock (gate) { if (startEntered || instructions is not null && !ReferenceEquals(instructions, context)) throw new WorkerEnvelopeException("Actual instructions cannot change after selection or dispatch."); instructions = context; } }
     readonly CodexAppServerSelection selection; ToolLifetime? boundOriginal; readonly WorktreeManager actualGit;
     ToolLifetime original => boundOriginal ?? throw new ToolUsageException("The actual containing original is not bound.");
@@ -239,17 +239,12 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
                                 linuxWorkspaceRoots ?? throw CodexProtocolFailure.Create(CodexProtocolFailureKind.MissingConfinedRoots, "Confined roots were not selected before thread dispatch."));
                             linuxWorkspaceThreadVerified = linuxWorkspaceThreadRefusal is null;
                         }
-                        if (actualMethod == "config/read" && !message.TryGetProperty("error", out _))
-                        {
-                            // Keep selected instruction text private and transient; it never enters the projected trace.
-                            var configured = HostAssignmentPrompt.ConfiguredDeveloperInstructions(message);
-                            if (developerInstructionsObserved && configured != configuredDeveloperInstructions)
-                                throw new IOException("Selected developer instructions changed during the worker original.");
-                            configuredDeveloperInstructions = configured; developerInstructionsObserved = true;
-                        }
                         try { refusal = CodexTrustProtocolData.Refusal(message, actualId); }
                         catch (Exception) { /* Optional facts cannot change response admission or failure. */ }
-                        message = CodexTrustProtocolData.Response(message, actualMethod); trustedResponseMethod = actualMethod;
+                        // The selected text stays private; known policy refusals are raised by ObserveRoute after the projected RPC settles.
+                        message = actualMethod == "config/read" && !message.TryGetProperty("error", out _) ?
+                            workerInstructions.ObserveAndProject(message, actualId) : CodexTrustProtocolData.Response(message, actualMethod);
+                        trustedResponseMethod = actualMethod;
                     }
                 }
                 else if (!message.TryGetProperty("method", out _) && message.TryGetProperty("id", out var accountId) && accountId.ValueKind == JsonValueKind.Number && accountId.TryGetInt64(out var observedId) && observedId == Volatile.Read(ref accountReadId)) message = CodexAccountReadData.Redact(message);
@@ -439,7 +434,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
             startup.SetStage(CodexStartupStage.ThreadStart);
             var confinedRoots = confined ? LinuxWorkspaceWriteRoots(actualGit, original, actual) : null;
             linuxWorkspaceRoots = confinedRoots;
-            if (TrustProtocol && !developerInstructionsObserved) throw new IOException("Selected developer instructions were not observed before worker thread creation.");
+            var configuredDeveloperInstructions = TrustProtocol ? workerInstructions.RequireObserved() : null;
             object threadParameters = conformanceDangerFullAccess ? ConformanceDangerFullAccessParameters(actual) :
                 TrustProtocol ? HostAssignmentPrompt.CodexWorkerThreadStart(actual, confined ? "workspace-write" : null, configuredDeveloperInstructions) :
                 confined ? new { cwd = actual.Worktree, sandbox = "workspace-write" } : new { cwd = actual.Worktree };
@@ -615,6 +610,7 @@ public sealed class CodexAppServerPort : IHostToolSessionPort, IOriginalBoundHos
         {
             var projected = await Rpc("config/read", new { cwd = request!.Worktree, includeLayers = true }, token).ConfigureAwait(false);
             var current = CodexConfigReadData.RequireSupported(projected);
+            _ = workerInstructions.RequireObserved();
             CodexConfigReadData.RequireUnchanged(observedRoute, current);
             observedRoute = current; routeProjection = projected;
         }
