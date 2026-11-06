@@ -197,7 +197,7 @@ internal sealed class InstalledReviewHost : IDisposable
             var snapshotFacts = sourceOwner.RequireVerifiedSnapshotFacts(completion.HeadCommit, completion.TreeId);
             static bool WithinSelectedPath(string file, string path)
             {
-                var scope = path.Replace('\', ' / ').Trim(' / ');
+                var scope = path.Replace((char)92, '/').Trim('/');
                 return file == scope || file.StartsWith(scope + "/", StringComparison.Ordinal);
             }
             var selectedFileFacts = snapshotFacts.Files.Where(file => assignment.AllowedPaths.Any(path => WithinSelectedPath(file.RelativePath, path)) &&
