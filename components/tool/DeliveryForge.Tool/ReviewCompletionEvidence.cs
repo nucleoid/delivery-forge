@@ -68,8 +68,8 @@ internal static class ReviewCompletionEvidence
             {
                 Accepted = new { ApplicationRunId = accepted.RunId, accepted.RequestIdentity, accepted.Worktree, accepted.AdapterId, accepted.AdapterVersion, accepted.RuntimeRunIdentity, accepted.RuntimeTaskIdentity },
                 Completed = new { ApplicationRunId = completion.RunId, completion.RequestIdentity, completion.Worktree, completion.AdapterId, completion.AdapterVersion, completion.RuntimeRunIdentity, completion.RuntimeTaskIdentity },
-                RuntimeIdentitySemantics = accepted.AdapterId == "codex.cli" ? "RuntimeRunIdentity is the actual Codex app-server threadId; RuntimeTaskIdentity is the actual app-server turnId." : "Opaque runtime run/task identities reported by the selected adapter.",
-                Qualification = "The containing owner binds the accepted and completed observations to the same application run, request, worktree and runtime identities. The generated application run ID and the independently owner-selected worktree allocation directory are different identities; no directory-name parsing supplies authority. These are containing-owner observations, not provider cryptographic attestation or production certification."
+                RuntimeIdentitySemantics = accepted.AdapterId == "codex.cli" ? "For the codex.cli adapter, RuntimeRunIdentity carries the app-server threadId and RuntimeTaskIdentity carries the turnId as reported through the accepted receipt." : "Opaque runtime run/task identities reported by the selected adapter.",
+                Qualification = "The containing owner binds the accepted and completed observations to the same application run, request, worktree and runtime identities. Authority does not derive from worktree directory names, and no path segment is compared with the application run ID. These are containing-owner observations, not provider cryptographic attestation or production certification."
             },
             BaseCommit = baseCommit,
             completion.HeadCommit,

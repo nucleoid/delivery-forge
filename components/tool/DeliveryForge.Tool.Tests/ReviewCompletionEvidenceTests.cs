@@ -32,7 +32,7 @@ public sealed class ReviewCompletionEvidenceTests
             "quality/evidence-policy.json", 358, "sha256:" + new string('1', 64), "sha256:" + new string('2', 64));
 
     [Fact]
-    public void Accepted_and_completed_observations_bind_application_run_to_independent_worktree_and_actual_Codex_thread_turn()
+    public void Accepted_and_completed_observations_bind_application_run_to_worktree_and_reported_adapter_identities()
     {
         var completion = Completion() with { Worktree = Path.GetFullPath(Path.Combine("allocation-DATA", "different-directory-id", "worktree")) };
         var data = ReviewCompletionEvidence.Create(Accepted(completion), completion, Before, Snapshot(Fact("subject.txt")),
@@ -52,13 +52,27 @@ public sealed class ReviewCompletionEvidenceTests
         }
         Assert.Contains("threadId", binding.GetProperty("RuntimeIdentitySemantics").GetString()!, StringComparison.Ordinal);
         Assert.Contains("turnId", binding.GetProperty("RuntimeIdentitySemantics").GetString()!, StringComparison.Ordinal);
-        Assert.DoesNotContain(completion.RunId, completion.Worktree, StringComparison.Ordinal);
+        var renamed = completion with { Worktree = Path.GetFullPath(Path.Combine("allocation-DATA", completion.RunId, "worktree")) };
+        var renamedData = ReviewCompletionEvidence.Create(Accepted(renamed), renamed, Before, Snapshot(Fact("subject.txt")),
+            new[] { "subject.txt" }, "", Head + " " + Before + "\n", "quality/evidence-policy.json", 358,
+            "sha256:" + new string('1', 64), "sha256:" + new string('2', 64));
+        var renamedBinding = renamedData.GetProperty("AcceptedCompletionBinding");
+        foreach (var name in new[] { "Accepted", "Completed" })
+        {
+            Assert.Equal(renamed.Worktree, renamedBinding.GetProperty(name).GetProperty("Worktree").GetString());
+            foreach (var property in binding.GetProperty(name).EnumerateObject().Where(property => property.Name != "Worktree"))
+                Assert.Equal(property.Value.GetRawText(), renamedBinding.GetProperty(name).GetProperty(property.Name).GetRawText());
+        }
+        Assert.Equal(binding.GetProperty("Qualification").GetString(), renamedBinding.GetProperty("Qualification").GetString());
+        Assert.Equal(data.GetProperty("SourceBytes").GetRawText(), renamedData.GetProperty("SourceBytes").GetRawText());
     }
     [Fact]
     public void Mismatched_accepted_worker_observations_cannot_be_presented_as_completed_source()
     {
         var completion = Completion(); var accepted = Accepted(completion);
-        var mismatches = new[] { accepted with { RunId = "foreign-DATA" }, accepted with { RequestIdentity = "foreign-DATA" },
+        var mismatches = new[] { accepted with { SchemaVersion = "foreign-DATA" },
+            accepted with { RuntimeRunIdentity = "" }, accepted with { RuntimeTaskIdentity = " " },
+            accepted with { RunId = "foreign-DATA" }, accepted with { RequestIdentity = "foreign-DATA" },
             accepted with { BaseCommit = new string('9', 40) }, accepted with { Worktree = Path.GetFullPath("foreign-worktree-DATA") },
             accepted with { AdapterId = "other-adapter-DATA" }, accepted with { AdapterVersion = "other-version-DATA" },
             accepted with { RuntimeRunIdentity = "foreign-thread-DATA" }, accepted with { RuntimeTaskIdentity = "foreign-turn-DATA" } };
