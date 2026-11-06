@@ -27,6 +27,15 @@ try {
         try { $env:LOCALAPPDATA = Join-Path $env:USERPROFILE 'AppData/Local/Packages/sandbox.test/AC'; Assert ((Get-ForgeDefaultStateRoot) -eq (Join-Path $env:USERPROFILE 'AppData/Local/DeliveryForge')) 'Default escaped into disposable sandbox.' }
         finally { $env:LOCALAPPDATA = $before }
     }
+    Test 'Actual command discovery searches each supported filename separately' {
+        $lookup=Join-Path $TestRoot 'actual-native-path';$null=New-Item -ItemType Directory -Path $lookup
+        $expected=Join-Path $lookup 'codex.exe';[IO.File]::WriteAllText($expected,'INERT lookup fixture; never executed.')
+        $priorPath=$env:Path
+        try{
+            $env:Path=$lookup+';'+$priorPath
+            Assert ((Find-ForgeCommand 'codex') -eq $expected) 'Actual PATH lookup did not select the existing native executable.'
+        }finally{$env:Path=$priorPath}
+    }
     Test 'Missing prerequisite report includes every tool and exact remediation without creating state' {
         Mock Find-ForgeCommand { param($Name) $null }
         Mock Invoke-ForgeProcess { throw 'A missing executable must never be invoked.' }

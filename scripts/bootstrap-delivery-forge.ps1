@@ -71,7 +71,7 @@ function Find-ForgeCommand([string]$Name) {
         $current = (Get-Process -Id $PID).Path
         if ($current -and [IO.Path]::GetFileName($current) -eq 'pwsh.exe') { return $current }
     }
-    $names = @($Name + '.exe', $Name + '.ps1', $Name + '.cmd')
+    $names = @(($Name + '.exe'), ($Name + '.ps1'), ($Name + '.cmd'))
     foreach ($candidate in $names) {
         $command = Get-Command $candidate -CommandType Application, ExternalScript -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($command) { return $command.Source }
