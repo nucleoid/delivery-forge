@@ -84,8 +84,8 @@ public sealed class HostInstructionTests
         Assert.Equal(r.Repository, assignment.GetProperty("Repository").GetString());
         Assert.Equal(r.Worktree, assignment.GetProperty("Worktree").GetString());
         Assert.Equal(r.AuthorizationCeiling, assignment.GetProperty("AuthorizationCeiling").GetString());
-        Assert.Equal(r.AllowedPaths, assignment.GetProperty("AllowedPaths").EnumerateArray().Select(x => x.GetString()).ToArray());
-        Assert.Equal(r.Exclusions, assignment.GetProperty("Exclusions").EnumerateArray().Select(x => x.GetString()).ToArray());
+        Assert.Equal(r.AllowedPaths, assignment.GetProperty("AllowedPaths").EnumerateArray().Select(x => x.GetString()!).ToArray());
+        Assert.Equal(r.Exclusions, assignment.GetProperty("Exclusions").EnumerateArray().Select(x => x.GetString()!).ToArray());
         Assert.Equal(context.FrozenBundleIdentity, assignment.GetProperty("FrozenBundleIdentity").GetString());
         Assert.Equal(hostile, assignment.GetProperty("TaskData").GetProperty("Intent").GetString());
         Assert.False(assignment.TryGetProperty("developerInstructions", out _)); Assert.DoesNotContain(r.WriterToken, text, StringComparison.Ordinal);
