@@ -153,6 +153,22 @@ public static class AutomaticSetup
         Directory.CreateDirectory(control);
         original.Check();
         _ = BoundedFiles.Plain(control, true);
+        if (coordination is not null)
+        {
+            // The existing parent requires a prepared empty checkpoint
+            // directory. Only this fresh run receives one; never adopt or
+            // clear the previous template's checkpoint namespace.
+            var checkpoints = BoundedFiles.Plain(coordination.CheckpointRoot, true);
+            if (Directory.Exists(checkpoints) || File.Exists(checkpoints))
+                throw new IOException("New checkpoint directory already exists; no previous state is adopted.");
+            original.Check();
+            Directory.CreateDirectory(checkpoints);
+            original.Check();
+            _ = BoundedFiles.Plain(checkpoints, true);
+            if (Directory.EnumerateFileSystemEntries(checkpoints).Any())
+                throw new IOException("New checkpoint directory must be empty before setup returns.");
+            original.Check();
+        }
         if (prior is null) BoundedFiles.WriteNew(unadmittedPath, unadmitted, original);
         BoundedFiles.WriteNew(rootPath, rootBytes, original);
         BoundedFiles.WriteNew(configurationPath, configurationBytes, original);

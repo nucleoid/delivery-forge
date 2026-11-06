@@ -18,7 +18,7 @@ repos/<key>/runs/run-<nonce>/
   checkpoints/
 ```
 
-Setup creates only control files with exact pins and CreateNew. The actual implementation owner creates the worktree/store/results later. Existing attempts, dirty worktrees, failed output and immutable history are never adopted or overwritten. Outputs refuse source overlap and nonplain ancestors. Setup refuses dry-run rather than silently writing files.
+Setup creates control files with exact pins and CreateNew. When coordination is selected, it also creates and verifies an empty plain checkpoint directory for the fresh run, as required by the existing parent owner. Previous checkpoint directories and their evidence stay untouched. The actual implementation owner creates the worktree/store/results later. Existing attempts, dirty worktrees, failed output and immutable history are never adopted or overwritten. Outputs refuse source overlap and nonplain ancestors. Setup refuses dry-run rather than silently writing files.
 
 `setup --config ABSOLUTE_EXISTING_TEMPLATE --json` allocates a fresh attempt while preserving the selected repository, branch, Git, adapter, host/scope pins, authorization ceiling, expected plan identities, finite policy and quality/review settings. It replaces store/worktree/results/checkpoint paths only. Batch, historical and golden-fixture configurations are not ordinary execution templates. Template selection does not make conformance current, and exact runtime-trust bindings still undergo their existing execution checks.
 

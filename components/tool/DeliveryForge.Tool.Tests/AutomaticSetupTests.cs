@@ -16,6 +16,7 @@ public sealed class AutomaticSetupTests
         Assert.Equal("plan", config.MaximumCeiling);
         Assert.Equal("unverified", config.AdapterVersion);
         Assert.Null(config.Coordination);
+        Assert.False(Directory.Exists(Path.Combine(result.RunDirectory, "checkpoints")));
         Assert.Null(config.LocalSingle);
         Assert.False(result.RuntimeCertified);
         Assert.Equal(result.Root, config.StandaloneRoot);
@@ -78,8 +79,11 @@ public sealed class AutomaticSetupTests
         var rootBytes = JsonSerializer.SerializeToUtf8Bytes(originalRoot, BoundedFiles.Json);
         var rootPath = Path.Combine(fixture.Root, "selected-template-root.json");
         BoundedFiles.WriteNew(rootPath, rootBytes, original);
+        var oldCheckpoints = Directory.CreateDirectory(Path.Combine(fixture.Root, "old-checkpoints")).FullName;
+        var oldEvidence = Path.Combine(oldCheckpoints, "retained-checkpoint.DATA");
+        File.WriteAllText(oldEvidence, "preserve prior checkpoint evidence");
         var coordination = new ParentCoordinationConfiguration(new Uri("https://example.invalid/coordination"), "project-data", "principal-data",
-            Path.Combine(fixture.Root, "unread-private-key-data"), Path.Combine(fixture.Root, "old-checkpoints"), scope);
+            Path.Combine(fixture.Root, "unread-private-key-data"), oldCheckpoints, scope);
         var template = TrustedConfiguration.Load(first.ConfigurationPath, original) with
         {
             MaximumCeiling = "implement",
@@ -106,7 +110,16 @@ public sealed class AutomaticSetupTests
         Assert.Equal(originalRoot.WorkerPaths.AllowedPaths, result.Selection.WorkerPaths.AllowedPaths);
         Assert.Equal(originalRoot.WorkerPaths.Exclusions, result.Selection.WorkerPaths.Exclusions);
         Assert.NotEqual(originalRoot.StoreRoot, result.Selection.StoreRoot);
-        Assert.False(Directory.Exists(rebound.Coordination!.CheckpointRoot));
+        var checkpoints = rebound.Coordination!.CheckpointRoot;
+        Assert.True(Directory.Exists(checkpoints));
+        Assert.Equal(checkpoints, BoundedFiles.Plain(checkpoints, true));
+        Assert.Empty(Directory.EnumerateFileSystemEntries(checkpoints));
+        Assert.NotEqual(oldCheckpoints, checkpoints);
+        Assert.Equal("preserve prior checkpoint evidence", File.ReadAllText(oldEvidence));
+        Assert.Equal(new[] { oldEvidence }, Directory.GetFiles(oldCheckpoints));
+        Assert.False(Directory.Exists(result.Selection.StoreRoot));
+        Assert.False(Directory.Exists(result.Selection.WorkerPaths.Worktree));
+        Assert.False(Directory.Exists(result.Selection.WorkerPaths.ResultDirectory));
         Assert.False(File.Exists(Path.Combine(result.RunDirectory, "control", "host-unadmitted.json")));
         Assert.False(result.RuntimeCertified);
         Assert.Equal(rootBytes, File.ReadAllBytes(rootPath));
