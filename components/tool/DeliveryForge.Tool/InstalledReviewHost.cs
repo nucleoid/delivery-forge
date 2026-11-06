@@ -197,7 +197,7 @@ internal sealed class InstalledReviewHost : IDisposable
             var snapshotFacts = sourceOwner.RequireVerifiedSnapshotFacts(completion.HeadCommit, completion.TreeId);
             static bool WithinSelectedPath(string file, string path)
             {
-                var scope = path.Replace('\', '/').Trim('/');
+                var scope = path.Replace('\', ' / ').Trim(' / ');
                 return file == scope || file.StartsWith(scope + "/", StringComparison.Ordinal);
             }
             var selectedFileFacts = snapshotFacts.Files.Where(file => assignment.AllowedPaths.Any(path => WithinSelectedPath(file.RelativePath, path)) &&
@@ -205,8 +205,13 @@ internal sealed class InstalledReviewHost : IDisposable
             var ownerCompletionEvidence = new
             {
                 Qualification = "Same containing owner observations, not an installed quality gate result or a new authority.",
-                completion.RunId, completion.RequestIdentity, completion.RuntimeRunIdentity, completion.RuntimeTaskIdentity,
-                assignment.BaseCommit, completion.HeadCommit, completion.TreeId,
+                completion.RunId,
+                completion.RequestIdentity,
+                completion.RuntimeRunIdentity,
+                completion.RuntimeTaskIdentity,
+                assignment.BaseCommit,
+                completion.HeadCommit,
+                completion.TreeId,
                 FinalWorkerStatus = new { Command = new[] { "git", "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching" }, StandardOutput = completedStatusOutput ?? throw new WorkerEnvelopeException("Actual completed source status observation is absent."), Phase = "CompletedWorkerBeforeQuality" },
                 CommitAncestry = new { Command = new[] { "git", "rev-list", "--parents", assignment.BaseCommit + ".." + completion.HeadCommit }, StandardOutput = completedAncestryOutput ?? throw new WorkerEnvelopeException("Actual completed ancestry observation is absent."), BaseIsAncestor = true, Qualification = "BaseIsAncestor is checked by the successful controlled GitPatchIdentity computation; complete parent rows are actual bounded Git output, not an assumed single commit." },
                 SourceBytes = new { snapshotFacts.HeadCommit, snapshotFacts.TreeId, snapshotFacts.SourceFingerprint, SelectedPaths = assignment.AllowedPaths, Files = selectedFileFacts, Selection = "Current committed files within selected worker paths, excluding protected paths; deletions remain visible in the complete patch.", PerFileHexMaximumBytes = 128, SnapshotHexMaximumBytes = 4096, Qualification = "Every digest/length comes from the successful complete archive-to-physical-source comparison. Hex omissions are explicit; no file bytes are inferred from diff rendering." },
