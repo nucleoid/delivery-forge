@@ -25,12 +25,17 @@ try {
     $start=[Diagnostics.ProcessStartInfo]::new($DotNetHost)
     $start.UseShellExecute=$false
     $start.CreateNoWindow=$true
+    $start.RedirectStandardOutput=$true
+    $start.RedirectStandardError=$true
     $start.ArgumentList.Add($ToolAssembly)
     foreach($argument in $ForgeArguments) { $start.ArgumentList.Add($argument) }
     $process=[Diagnostics.Process]::new()
     $process.StartInfo=$start
     if(-not $process.Start()) { throw 'The selected native tool did not start.' }
+    $stdout=$process.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())
+    $stderr=$process.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
     $process.WaitForExit()
+    [Threading.Tasks.Task]::WhenAll(@($stdout,$stderr)).GetAwaiter().GetResult()
     $exitCode=$process.ExitCode
     $process.Dispose()
 } finally {
