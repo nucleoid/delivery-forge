@@ -14,7 +14,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-delivery
 Install all automatable prerequisites, the CLI and both skills:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-delivery-forge.ps1 -Mode Install
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-delivery-forge.ps1 -Mode Install -SourceRoot .
 ```
 
 An agent can use `-Json` with either mode. The report includes every missing or
@@ -40,6 +40,11 @@ On a first install with no source selection, a fresh checkout of
 `nucleoid/delivery-forge` is retained under the attempt and `main` is resolved to
 an exact commit before build. Use explicit `-Ref COMMIT_OR_REF` to select a
 revision, or `-SourceRoot ABSOLUTE_CLEAN_CHECKOUT` to select an existing checkout.
+With `-SourceRoot` alone, its current HEAD is selected. If both are supplied, the
+requested ref must resolve to that HEAD; bootstrap never changes the checkout.
+A standalone downloaded script without `-SourceRoot` selects remote `main`.
+The installation records the executing bootstrap and selected source-bootstrap
+hashes separately and reports whether they match.
 Repair of an existing installation without either explicit selection keeps its
 recorded commit and reuses its retained clean source when available; otherwise
 it obtains a fresh checkout of that same commit. Automatic repair does not
@@ -121,9 +126,17 @@ reconciliation failures are not repaired by reinstalling or relabelling receipts
 The bootstrap never runs `gh auth login`, `codex login` or `claude auth login`.
 It prints those exact actions when needed, checks subscription login rather than
 accepting API billing as equivalent, and checks `gh` without refreshing its token.
+It detects `--no-refresh` from the installed help and supplies it when supported.
+The exact legacy 2.86.0 status route is separately supported as read-only; other
+versions without a known refresh-suppression policy remain unverified. See the
+[current manual](https://cli.github.com/manual/gh_auth_status) and the
+[2.86.0 source](https://github.com/cli/cli/blob/v2.86.0/pkg/cmd/auth/status/status.go).
 Provider-override environment variables are reported by name only and left intact.
 Full `Check` reports all tool and authentication states. Command readiness uses
-only the relevant authentication: help/version need none, and planning/setup
+only the tools and authentication needed by the command. Exact `--help`/`--version`
+and `MODE --help`/`MODE --version` diagnostics do not probe unrelated workers,
+GitHub sign-in, SDKs or skills. Local recovery does not require new worker sign-ins.
+Planning/setup
 do not require worker subscription logins. GitHub issue reading or posting needs
 the user's GitHub access; the containing agent verifies it before that operation.
 After completing a genuinely required browser sign-in, run the original command
@@ -154,13 +167,23 @@ Before the original CLI can start, bootstrap creates and flushes `bootstrap.lock
 as a replay barrier. It records the containing PID/start time and points to the
 unique command attempt's `native-start.json`; after native birth that receipt
 records the launcher and actual native PID/start times, without argv or account
-data. UNKNOWN retains the lock, available receipt and diagnostics for an operator.
+data. A matching `native-completion.json` records the native exit and both output
+EOFs, bound to the start receipt. Only that verified completion can clear the
+command barrier; a forwarder exit alone cannot. Older bootstrap payloads without
+this capability refuse before entry and require an explicit compatible source.
+Pre-entry probe UNKNOWNs retain their observed PID/start context separately.
+UNKNOWN retains the lock, available receipts and diagnostics for an operator.
 A failed receipt or diagnostic update does not authorize replay. Do not delete the
 lock or infer closure from a PID alone: inspect the exact PID/start observations
 and reconcile process/output state first. Best-effort termination remains UNKNOWN
 until independently resolved.
 
-An agent's normal workflow is: run `Check -Json`, run `Install -Json` when there
+`Check -Json` is a complete inventory, including tools not required for the next
+command; a held lock reports authentication as unobserved, not ready. Agents must
+act only on prerequisites relevant to the requested operation. The installed
+launcher performs that scoped check automatically.
+
+An agent's first-use workflow is: run `Check -Json`, run `Install -Json` when there
 are automatable actions, explain only the remaining human actions, and use the
 installed launcher for subsequent Forge commands. Do not request routine directory
 choices, copy credentials, select a different model/provider, fabricate runtime

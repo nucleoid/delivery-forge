@@ -61,6 +61,10 @@ function Assert-ForgeWithin([string]$Parent, [string]$Child) {
     if (-not [IO.Path]::GetFullPath($Child).StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'An installation path escaped its selected parent.' }
 }
 
+function Read-ForgeUtf8Text([string]$Path) {
+    [IO.File]::ReadAllText($Path, (New-Object Text.UTF8Encoding($false, $true)))
+}
+
 function ConvertTo-ForgeWireString([AllowEmptyString()][string]$Value) {
     # ASCII-only private wire value; strict UTF8 refuses lone surrogates.
     $utf8 = New-Object Text.UTF8Encoding($false, $true)
@@ -120,14 +124,33 @@ function Get-ForgeSkillDestination([string]$Agent) {
     $standard
 }
 
+function Test-ForgeDiagnosticArguments([string[]]$Arguments) {
+    if ($Arguments.Count -eq 1 -and $Arguments[0] -cin @('--help', '--version')) { return $true }
+    $Arguments.Count -eq 2 -and $Arguments[0] -cin @('plan','implement','pr','merge','resume','capabilities','quality-baseline','setup') -and $Arguments[1] -cin @('--help','--version')
+}
+
 function Get-ForgeRequiredAuthentication([string[]]$Arguments) {
-    if (-not $Arguments -or $Arguments[0] -in @('--help', '--version', 'setup', 'capabilities')) { return @() }
-    switch ($Arguments[0]) {
+    if (-not $Arguments -or (Test-ForgeDiagnosticArguments $Arguments)) { return @() }
+    switch -CaseSensitive ($Arguments[0]) {
         'implement' { @('codex', 'claude') }
-        'resume' { @('codex', 'claude') }
         'pr' { @('gh', 'codex', 'claude') }
         'merge' { @('gh', 'codex', 'claude') }
-        'plan' { if ($Arguments -contains '--issue') { @('gh') } }
+        'plan' { if ($Arguments -ccontains '--issue') { @('gh') } }
+    }
+}
+
+function Get-ForgeRequiredTools([string[]]$Arguments) {
+    'pwsh'
+    if (-not $Arguments -or (Test-ForgeDiagnosticArguments $Arguments)) { return }
+    switch -CaseSensitive ($Arguments[0]) {
+        'plan' { 'git'; if ($Arguments -ccontains '--issue') { 'gh' } }
+        'implement' { 'git'; 'codex'; 'claude' }
+        'pr' { 'git'; 'gh'; 'codex'; 'claude' }
+        'merge' { 'git'; 'gh'; 'codex'; 'claude' }
+        'setup' { 'git' }
+        'quality-baseline' { 'git' }
+        # Standalone resume only observes local history or refuses without its
+        # fresh same-owner host; JSON does not authorize new worker/publication.
     }
 }
 
@@ -137,7 +160,7 @@ function Save-ForgeUnknown([string]$Root) {
     if (-not (Test-Path -LiteralPath $path)) {
         $null = Assert-ForgePlainPath $Root -Directory
         $null = New-Item -ItemType Directory -Path $Root -Force
-        try { Write-ForgeNewJson $path @{ Kind = 'DeliveryForgeBootstrapUnknown-v1'; Reason = 'Native process/output disposition is unverified. Preserve this attempt; no automatic retry.' } }
+        try { Write-ForgeNewJson $path @{ Kind = 'DeliveryForgeBootstrapUnknown-v1'; Reason = 'Native process/output disposition is unverified. Preserve this attempt; no automatic retry.'; ProcessObservation = $script:ForgeUnknownProcessObservation } }
         catch { if (-not (Test-Path -LiteralPath $path)) { throw } }
     }
 }
@@ -150,8 +173,13 @@ function Write-ForgeImmutableBytes([string]$Path, [byte[]]$Bytes) {
         if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($Path)) -ne [Convert]::ToBase64String($Bytes)) { throw 'An immutable installation file differs; preserve it.' }
         return
     }
-    $stream = [IO.File]::Open($Path, 'CreateNew', 'Write', 'None')
+    $stage = $Path + '.stage-' + [guid]::NewGuid().ToString('N')
+    $null = Assert-ForgePlainPath $stage
+    $stream = [IO.File]::Open($stage, 'CreateNew', 'Write', 'None')
     try { $stream.Write($Bytes, 0, $Bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
+    if ([Convert]::ToBase64String([IO.File]::ReadAllBytes($stage)) -ne [Convert]::ToBase64String($Bytes)) { throw 'Immutable stage readback differs; preserve the stage and previous selection.' }
+    $null = Assert-ForgePlainPath $stage; $null = Assert-ForgePlainPath $Path
+    [IO.File]::Move($stage, $Path) # Same-parent, no-overwrite publication; failed stages remain evidence.
 }
 
 function Invoke-ForgeProcess {
@@ -169,6 +197,7 @@ function Invoke-ForgeProcess {
         if ($null -eq $argument) { throw 'Null is not a native argument; use an explicit empty string.' }
         $argument64 += ConvertTo-ForgeWireString $argument
     }
+    if ($null -ne $StandardInput -and $StandardInput -match '[^\x00-\x7f]') { throw 'Internal stdin must be ASCII encoded before native entry.' }
     $info = New-Object Diagnostics.ProcessStartInfo
     $info.FileName = $Executable; $inputText = $StandardInput
     if ([IO.Path]::GetExtension($Executable) -in @('.ps1', '.cmd', '.bat')) {
@@ -177,7 +206,7 @@ function Invoke-ForgeProcess {
         $inputText = @{ Executable64 = $executable64; Arguments64 = @($argument64) } | ConvertTo-Json -Depth 5 -Compress
         $null = ConvertTo-ForgeWireString $shell
         $info.FileName = $shell
-        $Arguments = @('-NoProfile', '-NonInteractive', '-Command', '$r=[Console]::In.ReadToEnd()|ConvertFrom-Json;$u=New-Object Text.UTF8Encoding($false,$true);$e=$u.GetString([Convert]::FromBase64String($r.Executable64));$a=@($r.Arguments64|ForEach-Object{$u.GetString([Convert]::FromBase64String($_))});& $e @a;if($null -eq $LASTEXITCODE){exit 125}else{exit $LASTEXITCODE}')
+        $Arguments = @('-NoProfile', '-NonInteractive', '-Command', '$ErrorActionPreference=''Stop'';$u=New-Object Text.UTF8Encoding($false,$true);$m=New-Object IO.MemoryStream;[Console]::OpenStandardInput().CopyTo($m);$r=$u.GetString($m.ToArray()).TrimStart([char]0xfeff)|ConvertFrom-Json;$e=$u.GetString([Convert]::FromBase64String($r.Executable64));$a=@($r.Arguments64|ForEach-Object{$u.GetString([Convert]::FromBase64String($_))});& $e @a;if($null -eq $LASTEXITCODE){exit 125}else{exit $LASTEXITCODE}')
     }
     $info.Arguments = (@($Arguments | ForEach-Object { ConvertTo-ForgeNativeArgument $_ }) -join ' ')
     $info.UseShellExecute = $false; $info.CreateNoWindow = $true
@@ -193,7 +222,7 @@ function Invoke-ForgeProcess {
             $stdout = $process.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())
             $stderr = $process.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
         } else { $stdout = $process.StandardOutput.ReadToEndAsync(); $stderr = $process.StandardError.ReadToEndAsync() }
-        if ($null -ne $inputText) { $process.StandardInput.Write($inputText) }; $process.StandardInput.Close()
+        if ($null -ne $inputText) { $inputBytes = [Text.Encoding]::ASCII.GetBytes($inputText); $process.StandardInput.BaseStream.Write($inputBytes, 0, $inputBytes.Length); $process.StandardInput.BaseStream.Flush() }; $process.StandardInput.BaseStream.Close()
         if (-not $process.WaitForExit($timeout * 1000)) { throw 'The bounded native command timed out.' }
         $drain = [Math]::Min(5000, 1000 * (Get-ForgeRemainingSeconds $Clock $MaximumSeconds))
         if (-not [Threading.Tasks.Task]::WaitAll([Threading.Tasks.Task[]]@($stdout, $stderr), [int]$drain)) { throw 'Native output did not settle.' }
@@ -208,6 +237,7 @@ function Invoke-ForgeProcess {
     } catch {
         if ($started -and -not $settled) {
             $script:ForgeBootstrapUnsettled = $true
+            $script:ForgeUnknownProcessObservation = @{ ObservedPid = $nativePid; ObservedStartUtc = $nativeStart; ContainingPid = $PID; Executable = $info.FileName; Scope = 'Observed prerequisite or forwarder process; no descendant closure claim.' }
             try { if (-not $process.HasExited) { if ($PSVersionTable.PSVersion.Major -ge 7) { $process.Kill($true) } else { $process.Kill() } } } catch { }
             Write-ForgeDiagnostic ("FORGE_BOOTSTRAP_UNKNOWN_PROCESS: pid={0}; startUtc={1}; kill was best-effort and does not prove tree closure." -f $nativePid, $nativeStart)
             throw 'FORGE_BOOTSTRAP_UNKNOWN: native process/output completion is unverified; preserve evidence and do not retry automatically.'
@@ -230,19 +260,21 @@ function New-ForgeCheck([string]$Id, [string]$Status, [string]$Detail, [bool]$Au
     [pscustomobject]@{ Id = $Id; Status = $Status; Detail = $Detail; Automatic = $Automatic; Steps = @($Steps) }
 }
 
-function Get-ForgeRequiredPackages {
+function Get-ForgeRequiredPackages([string[]]$RequiredTools = @('git','gh','codex','claude','pwsh')) {
     $packages = [ordered]@{ git = 'Git.Git'; gh = 'GitHub.cli'; codex = 'OpenAI.Codex'; claude = 'Anthropic.ClaudeCode'; pwsh = 'Microsoft.PowerShell' }
-    $codex = Find-ForgeCommand 'codex'
+    $codex = if ('codex' -in $RequiredTools) { Find-ForgeCommand 'codex' } else { $null }
     # Native Codex does not need Node. Retain an existing npm installation and
     # repair its prerequisite instead of creating a competing Codex installation.
     if ($codex -and [IO.Path]::GetExtension($codex) -in @('.ps1', '.cmd', '.bat')) { $packages['node'] = 'OpenJS.NodeJS.LTS' }
-    $packages
+    $selected = [ordered]@{}
+    foreach ($name in $packages.Keys) { if ($name -in $RequiredTools -or ($name -eq 'node' -and 'codex' -in $RequiredTools)) { $selected[$name] = $packages[$name] } }
+    $selected
 }
 
 function Get-ForgeSdkVersion([string]$SelectedSource) {
     $path = if ($SelectedSource) { Join-Path $SelectedSource 'global.json' } else { Join-Path (Split-Path -Parent $PSScriptRoot) 'global.json' }
     if (Test-Path -LiteralPath $path -PathType Leaf) {
-        $selected = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $selected = Read-ForgeUtf8Text $path | ConvertFrom-Json
         if ($selected.sdk.version -notmatch '^\d+\.\d+\.\d+$') { throw 'Source global.json must pin an exact stable SDK version.' }
         return [string]$selected.sdk.version
     }
@@ -255,18 +287,18 @@ function Read-ForgeInstallationSelection([string]$Root) {
     try {
         $null = Assert-ForgePlainPath $path
         if ((Get-Item -LiteralPath $path).Length -gt 1MB) { return $null }
-        $record = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $record = Read-ForgeUtf8Text $path | ConvertFrom-Json
         if ($record.Kind -ne 'DeliveryForgeBootstrapInstallation-v1') { return $null }
         if ($record.SourceCommit -notmatch '^[a-f0-9]{40}$') { return $null }
         $record
     } catch { $null }
 }
 
-function Test-ForgeNativeStartReceiptParameter([string]$Path) {
+function Test-ForgeNativeStartReceiptParameter([string]$Path, [string]$Parameter = 'NativeStartReceipt') {
     $tokens = $null; $errors = $null
     $ast = [Management.Automation.Language.Parser]::ParseFile($Path, [ref]$tokens, [ref]$errors)
     if ($errors.Count -gt 0) { throw 'Pinned native launcher has parse errors.' }
-    @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq 'NativeStartReceipt' }).Count -eq 1
+    @($ast.ParamBlock.Parameters | Where-Object { $_.Name.VariablePath.UserPath -eq $Parameter }).Count -eq 1
 }
 
 function Read-ForgeInstallation([string]$Root) {
@@ -281,6 +313,8 @@ function Read-ForgeInstallation([string]$Root) {
         }
         if ($null -ne $record.NativeStartReceiptSupported -and $record.NativeStartReceiptSupported -isnot [bool]) { return $null }
         if ($record.NativeStartReceiptSupported -eq $true -and -not (Test-ForgeNativeStartReceiptParameter $record.NativeLauncher)) { return $null }
+        if ($null -ne $record.NativeCompletionReceiptSupported -and $record.NativeCompletionReceiptSupported -isnot [bool]) { return $null }
+        if ($record.NativeCompletionReceiptSupported -eq $true -and (-not $record.NativeStartReceiptSupported -or -not (Test-ForgeNativeStartReceiptParameter $record.NativeLauncher 'NativeCompletionReceipt'))) { return $null }
         Assert-ForgeWithin $Root $record.ToolAssembly
         $null = Assert-ForgePlainPath $record.ToolAssembly
         if (-not (Test-Path -LiteralPath $record.ToolAssembly -PathType Leaf)) { return $null }
@@ -300,7 +334,7 @@ function Read-ForgeInstallation([string]$Root) {
 function Get-ForgeBootstrapReport {
     param([string]$Root, [string]$SelectedSource, [switch]$SkipAuthentication,
         [string[]]$RequiredAuthentication = @('gh', 'codex', 'claude'), [Diagnostics.Stopwatch]$Clock,
-        [int]$MaximumSeconds = 1200, [IO.FileStream]$OwnedLock)
+        [int]$MaximumSeconds = 1200, [IO.FileStream]$OwnedLock, [string[]]$RequiredTools = @('git','gh','codex','claude','pwsh','dotnet-sdk','codex-skill','claude-skill'))
     if (-not $Clock) { $Clock = [Diagnostics.Stopwatch]::StartNew() }
     $checks = New-Object 'Collections.Generic.List[object]'
     $windows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
@@ -311,16 +345,19 @@ function Get-ForgeBootstrapReport {
     if ($script:ForgeBootstrapUnsettled) { throw 'FORGE_BOOTSTRAP_UNKNOWN: an earlier native disposition is unresolved.' }
     if ((Test-Path -LiteralPath (Join-Path $Root 'bootstrap.lock')) -and -not $ownLock) {
         $checks.Add((New-ForgeCheck 'bootstrap-lock' 'UserAction' 'Another bootstrap owns the installation, or a previous attempt has unresolved process/IO state.' $false @('Inspect the retained bootstrap attempt and confirm its processes are closed before an operator removes bootstrap.lock. Do not delete it or retry automatically.')))
-        return New-ForgeReport $Root $checks 'unknown' $RequiredAuthentication
+        $locked = New-ForgeReport $Root $checks 'unknown' $RequiredAuthentication
+        $locked.AuthenticationReady = $null; $locked.AuthenticationChecked = $false; $locked.ReportComplete = $false
+        return $locked
     }
-    $commands = @{}
-    $packages = Get-ForgeRequiredPackages
+    $commands = @{}; $versions = @{}
+    $packages = Get-ForgeRequiredPackages -RequiredTools $RequiredTools
     foreach ($name in $packages.Keys) {
         $path = Find-ForgeCommand $name; $commands[$name] = $path
         $version = $null
         if ($path) {
             try { $probe = Invoke-ForgeProcess $path @('--version') -Clock $Clock -MaximumSeconds $MaximumSeconds; if ($probe.ExitCode -eq 0) { $version = ($probe.Stdout -split '\r?\n')[0].Trim() } } catch { if ($script:ForgeBootstrapUnsettled) { throw } }
         }
+        $versions[$name] = $version
         $status = if ($version) { 'Ready' } elseif ($path) { 'Unverified' } else { 'Missing' }
         $steps = if ($status -eq 'Unverified') { @("Run '$path --version' in an ordinary terminal. Check execution permissions or the broken installation; do not blindly install a second copy.") } else { @("winget install --id $($packages[$name]) --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity") }
         $checks.Add((New-ForgeCheck $name $status $(if ($version) { $version } elseif ($path) { "$name exists but its version probe failed or was denied." } else { "$name CLI is missing." }) ($status -eq 'Missing') $steps))
@@ -330,23 +367,35 @@ function Get-ForgeBootstrapReport {
     $checks.Add((New-ForgeCheck 'winget' $(if ($winget) { 'Ready' } elseif ($needsWinget) { 'UserAction' } else { 'NotNeeded' }) 'Windows App Installer supplies WinGet; existing prerequisites do not need reinstalling.' $false @('Install or update App Installer: https://apps.microsoft.com/detail/9NBLGGH4NNS1', 'Open a new terminal and rerun this script.')))
     $installation = Read-ForgeInstallation $Root
     $sdkVersion = if (-not $SelectedSource -and $installation) { $installation.RequiredSdkVersion } else { Get-ForgeSdkVersion $SelectedSource }
-    $sdkCandidates = @((Join-Path $Root "sdk/$sdkVersion/dotnet.exe"), (Find-ForgeCommand 'dotnet')) | Where-Object { $_ } | Select-Object -Unique
     $sdkHost = $null
-    foreach ($candidate in $sdkCandidates) {
-        if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-            try { $probe = Invoke-ForgeProcess $candidate @('--list-sdks') -Clock $Clock -MaximumSeconds $MaximumSeconds; if ($probe.ExitCode -eq 0 -and $probe.Stdout -match ('(?m)^' + [regex]::Escape($sdkVersion) + '\s')) { $sdkHost = $candidate; break } } catch { if ($script:ForgeBootstrapUnsettled) { throw } }
+    if ('dotnet-sdk' -in $RequiredTools) {
+        $sdkCandidates = @((Join-Path $Root "sdk/$sdkVersion/dotnet.exe"), (Find-ForgeCommand 'dotnet')) | Where-Object { $_ } | Select-Object -Unique
+        $sdkHost = $null
+        foreach ($candidate in $sdkCandidates) {
+            if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+                try { $probe = Invoke-ForgeProcess $candidate @('--list-sdks') -Clock $Clock -MaximumSeconds $MaximumSeconds; if ($probe.ExitCode -eq 0 -and $probe.Stdout -match ('(?m)^' + [regex]::Escape($sdkVersion) + '\s')) { $sdkHost = $candidate; break } } catch { if ($script:ForgeBootstrapUnsettled) { throw } }
+            }
         }
+        $checks.Add((New-ForgeCheck 'dotnet-sdk' $(if ($sdkHost) { 'Ready' } else { 'Missing' }) "Exact source-pinned .NET SDK $sdkVersion; newer major/minor versions are not a substitute." $true @("Run this script with -Mode Install; it installs SDK $sdkVersion privately under $Root/sdk/$sdkVersion without changing system .NET.")))
+    } else {
+        if ($installation) { $sdkHost = $installation.DotNetHost }
+        $checks.Add((New-ForgeCheck 'dotnet-sdk' 'NotNeeded' 'This command uses the hashed installed runtime/CLI; no source SDK probe is required.' $false))
     }
-    $checks.Add((New-ForgeCheck 'dotnet-sdk' $(if ($sdkHost) { 'Ready' } else { 'Missing' }) "Exact source-pinned .NET SDK $sdkVersion; newer major/minor versions are not a substitute." $true @("Run this script with -Mode Install; it installs SDK $sdkVersion privately under $Root/sdk/$sdkVersion without changing system .NET.")))
-    if ($installation) {
+    $launcherCompatible = $installation -and $installation.NativeStartReceiptSupported -eq $true -and $installation.NativeCompletionReceiptSupported -eq $true
+    if ($launcherCompatible) {
         try {
             $probe = Invoke-ForgeProcess $installation.DotNetHost @($installation.ToolAssembly, '--version') -Environment @{ DOTNET_ROOT = (Split-Path -Parent $installation.DotNetHost); DOTNET_PROCESSOR_COUNT = '2'; DOTNET_GCHeapHardLimit = '0x100000000' } -Clock $Clock -MaximumSeconds $MaximumSeconds
             $version = $probe.Stdout | ConvertFrom-Json
             if ($probe.ExitCode -ne 0 -or $version.tool -ne 'delivery-forge') { $installation = $null }
         } catch { if ($script:ForgeBootstrapUnsettled) { throw }; $installation = $null }
     }
-    $checks.Add((New-ForgeCheck 'forge-cli' $(if ($installation) { 'Ready' } else { 'Missing' }) 'Hashed installation plus actual CLI version startup; neither certifies worker execution.' $true @('Run this script with -Mode Install.')))
+    if ($installation -and -not $launcherCompatible) {
+        $checks.Add((New-ForgeCheck 'forge-cli' 'Unsupported' 'Pinned CLI launcher lacks durable start/completion receipts; existing payload and source selection are preserved. No CLI startup probe was entered.' $false @('Explicitly select a compatible SourceRoot/Ref and run Install. Rebuilding the unchanged pin cannot add the required launcher contract.')))
+    } else {
+        $checks.Add((New-ForgeCheck 'forge-cli' $(if ($installation) { 'Ready' } else { 'Missing' }) 'Hashed installation plus actual CLI version startup; neither certifies worker execution.' (-not [bool]$installation) @('Run this script with -Mode Install.')))
+    }
     foreach ($agent in @('codex', 'claude')) {
+        if (($agent + '-skill') -notin $RequiredTools) { $checks.Add((New-ForgeCheck ($agent + '-skill') 'NotNeeded' 'Agent skill is not a prerequisite of this CLI command.' $false)); continue }
         try { $skillRoot = Get-ForgeSkillDestination $agent }
         catch { $checks.Add((New-ForgeCheck ($agent + '-skill') 'Conflict' 'Both Codex skill locations exist; preserve and resolve the duplicate.' $false @('Select the existing installed skill location; do not create a competing copy.'))); continue }
         $marker = Join-Path $skillRoot '.forge-bootstrap-skill.json'
@@ -363,7 +412,16 @@ function Get-ForgeBootstrapReport {
             $unsupported = $false
             if ($commands[$agent]) {
                 try {
-                    $arguments = switch ($agent) { 'gh' { @('auth', 'status', '--active', '--hostname', 'github.com', '--no-refresh') } 'codex' { @('login', 'status') } 'claude' { @('auth', 'status') } }
+                    $arguments = switch ($agent) { 'gh' { @('auth', 'status', '--active', '--hostname', 'github.com') } 'codex' { @('login', 'status') } 'claude' { @('auth', 'status') } }
+                    if ($agent -eq 'gh') {
+                        $help = Invoke-ForgeProcess $commands[$agent] @('auth','status','--help') -Clock $Clock -MaximumSeconds $MaximumSeconds
+                        if ($help.ExitCode -eq 0 -and ($help.Stdout + $help.Stderr) -match '(?m)(?:^|\s)--no-refresh(?:\s|,|$)') { $arguments += '--no-refresh' }
+                        elseif ($help.ExitCode -ne 0 -or $versions[$agent] -notmatch '^gh version 2\.86\.0(?:\s|$)') {
+                            $unsupported = $true; throw 'GitHub auth-status mutation policy is unverified for this version; no authentication probe was entered.'
+                        }
+                        # Exact legacy2.86.0 status.go is read-only; newer help
+                        # advertising refresh suppression must receive the flag.
+                    }
                     # Deliberately never persist or print account-status stdout/stderr.
                     $auth = Invoke-ForgeProcess $commands[$agent] $arguments -Clock $Clock -MaximumSeconds $MaximumSeconds
                     $unsupported = $auth.ExitCode -ne 0 -and $auth.Stderr -match '(?i)unknown (flag|command|option)|unrecognized (argument|option)'
@@ -378,16 +436,20 @@ function Get-ForgeBootstrapReport {
             if ($unsupported) { $detail = 'The installed CLI does not support the required non-mutating authentication-status command.'; $steps = @("Update the CLI: winget upgrade --id $($packages[$agent]) --exact --source winget", 'Rerun the check. An unsupported status command is not a reason to discard or repeat an existing sign-in.') }
             $checks.Add((New-ForgeCheck ($agent + '-authentication') $status $detail $false $steps))
         }
-        $overrides = @('OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_SIMPLE') | Where-Object {
-            $value = [Environment]::GetEnvironmentVariable($_)
-            -not [string]::IsNullOrEmpty($value) -and ($_ -notlike 'CLAUDE_CODE_*' -or $value -notin @('0', 'false', 'False'))
+        if (@($RequiredAuthentication | Where-Object { $_ -in @('codex','claude') }).Count -gt 0) {
+            $overrides = @('OPENAI_API_KEY', 'CODEX_API_KEY', 'OPENAI_BASE_URL', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN', 'ANTHROPIC_BASE_URL', 'CLAUDE_CODE_USE_BEDROCK', 'CLAUDE_CODE_USE_VERTEX', 'CLAUDE_CODE_USE_FOUNDRY', 'CLAUDE_CODE_SIMPLE') | Where-Object {
+                $value = [Environment]::GetEnvironmentVariable($_)
+                -not [string]::IsNullOrEmpty($value) -and ($_ -notlike 'CLAUDE_CODE_*' -or $value -notin @('0', 'false', 'False'))
+            }
+            if ($overrides.Count -gt 0) { $checks.Add((New-ForgeCheck 'provider-environment' 'UserAction' ('Subscription routing needs review; environment variable names present: ' + ($overrides -join ', ')) $false @('Review these variables yourself for this Forge session. Bootstrap never prints their values, clears them or changes your provider.'))) }
         }
-        if ($overrides.Count -gt 0) { $checks.Add((New-ForgeCheck 'provider-environment' 'UserAction' ('Subscription routing needs review; environment variable names present: ' + ($overrides -join ', ')) $false @('Review these variables yourself for this Forge session. Bootstrap never prints their values, clears them or changes your provider.'))) }
     }
     $report = New-ForgeReport $Root $checks $sdkVersion $RequiredAuthentication
     $report.AuthenticationChecked = -not [bool]$SkipAuthentication -and $RequiredAuthentication.Count -gt 0
     if ($SkipAuthentication -or $RequiredAuthentication.Count -eq 0) { $report.AuthenticationReady = $null }
     $report | Add-Member NoteProperty DotNetHost $sdkHost
+    $report | Add-Member NoteProperty RequiredTools @($RequiredTools)
+    if ($installation -and $null -ne $installation.BootstrapMatchesSelectedSource) { $report | Add-Member NoteProperty BootstrapMatchesSelectedSource $installation.BootstrapMatchesSelectedSource }
     $report
 }
 
@@ -403,7 +465,7 @@ function New-ForgeReport([string]$Root, $Checks, [string]$SdkVersion, [string[]]
         Kind = 'DeliveryForgeBootstrapReport-v1'; StateRoot = $Root; RequiredSdkVersion = $SdkVersion
         InstallationReady = @($pending | Where-Object { $_.Id -notlike '*-authentication' -and $_.Id -ne 'provider-environment' }).Count -eq 0
         AuthenticationChecked = $false; AuthenticationReady = @($gating | Where-Object { $_.Id -like '*-authentication' -or $_.Id -eq 'provider-environment' }).Count -eq 0
-        ExecutionCertified = $false; ExecutionReadiness = 'NotEvaluated'
+        ReportComplete = $true; ExecutionCertified = $false; ExecutionReadiness = 'NotEvaluated'
         Checks = $rows; AutomatableActions = @($pending | Where-Object Automatic); UserActions = @($pending | Where-Object { -not $_.Automatic })
         RequiredAuthentication = @($RequiredAuthentication); ExitCode = $(if ($gating.Count -eq 0) { 0 } else { 2 })
         NextExecutionSteps = @('The installed owner must still reconcile the selected plan and verify current host admission, Continuum and project quality/review policy before dispatch. Bootstrap does not manufacture acceptance receipts.')
@@ -423,7 +485,7 @@ function Get-ForgeSkillStatus([string]$Root) {
         $marker = Join-Path $Root '.forge-bootstrap-skill.json'
         $null = Assert-ForgePlainPath $marker
         if (-not (Test-Path -LiteralPath $marker -PathType Leaf) -or (Get-Item -LiteralPath $marker).Length -gt 1MB) { return 'Conflict' }
-        $record = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+        $record = Read-ForgeUtf8Text $marker | ConvertFrom-Json
         if ($record.Kind -ne 'DeliveryForgeBootstrapSkill-v1' -or $record.Files.Count -lt 2 -or $record.Files.Count -gt 4096) { return 'Conflict' }
         $missing = $false; $selected = @{}
         foreach ($pin in $record.Files) {
@@ -446,23 +508,7 @@ function Test-ForgeSkill([string]$Root) { (Get-ForgeSkillStatus $Root) -eq 'Read
 
 function Install-ForgeSkill([string]$SelectedSource, [string]$Destination, [string]$Launcher, [string]$Commit) {
     $null = Assert-ForgePlainPath $Destination -Directory
-    if (Test-Path -LiteralPath $Destination) {
-        $status = Get-ForgeSkillStatus $Destination
-        if ($status -eq 'Conflict') { throw 'Existing unmanaged/modified skill preserved. See the prerequisite report for conflict-resolution steps.' }
-        $old = Get-Content -LiteralPath (Join-Path $Destination '.forge-bootstrap-skill.json') -Raw | ConvertFrom-Json
-        if ($status -eq 'Ready' -and $old.SourceCommit -eq $Commit -and $old.Launcher -eq $Launcher) { return }
-        # Replacing only intact/missing managed files is permitted; retain the
-        # complete prior directory away from agent skill-discovery directories.
-        $state = Split-Path -Parent (Split-Path -Parent $Launcher)
-        $backupRoot = Join-Path $state 'bootstrap/skill-backups'
-        $null = Assert-ForgePlainPath $backupRoot -Directory
-        $null = New-Item -ItemType Directory -Path $backupRoot -Force
-        $backup = Join-Path $backupRoot ([guid]::NewGuid().ToString('N'))
-        Assert-ForgeWithin $backupRoot $backup
-        $resolvedSource = Assert-ForgePlainPath $Destination -Directory
-        if ($resolvedSource -ne [IO.Path]::GetFullPath($Destination).TrimEnd('\', '/')) { throw 'Skill replacement source changed.' }
-        Move-Item -LiteralPath $resolvedSource -Destination $backup -ErrorAction Stop
-    }
+    if (Test-Path -LiteralPath $Destination) { throw 'Skill staging requires a fresh destination; existing skills are preserved and changed only by installation activation.' }
     $files = @((Join-Path $SelectedSource 'SKILL.md'))
     foreach ($folder in @('references', 'docs')) {
         $files += @(Get-ChildItem -LiteralPath (Join-Path $SelectedSource $folder) -Filter '*.md' -File | Where-Object { $_.Name -notmatch '^(review-remediation-|astra-dry-gate-options|fable-dry-gate-options)' } | ForEach-Object FullName)
@@ -492,12 +538,35 @@ function Get-ForgeLauncherContent {
     @'
 #requires -Version 5.1
 [string[]]$forwarded = @($args)
+$hostArguments = [Environment]::GetCommandLineArgs()
+$fileArgument = -1; $unsupportedHostPrefix = $false
+for ($index = 1; $index -lt $hostArguments.Length; $index++) {
+    $option = $hostArguments[$index]
+    if ($option.Length -gt 1 -and ('-Command'.StartsWith($option, [StringComparison]::OrdinalIgnoreCase) -or '-EncodedCommand'.StartsWith($option, [StringComparison]::OrdinalIgnoreCase) -or '-CommandWithArgs'.StartsWith($option, [StringComparison]::OrdinalIgnoreCase))) { break }
+    if ($option -ieq '-File' -or $option -ieq '-f') {
+        if ($index + 1 -lt $hostArguments.Length) {
+            try { if ([string]::Equals([IO.Path]::GetFullPath($hostArguments[$index + 1]), [IO.Path]::GetFullPath($PSCommandPath), [StringComparison]::OrdinalIgnoreCase)) { $fileArgument = $index + 1 } } catch { }
+        }
+        break
+    }
+    if ($option -in @('-NoProfile', '-NoLogo', '-NonInteractive', '-NoExit', '-STA', '-MTA', '-Login')) { continue }
+    if ($option -in @('-ExecutionPolicy', '-WindowStyle', '-InputFormat', '-OutputFormat', '-WorkingDirectory', '-SettingsFile', '-ConfigurationName', '-Version')) { $index++; continue }
+    if ($option.StartsWith('-')) { $unsupportedHostPrefix = $true; continue }
+    if ($unsupportedHostPrefix -and [IO.Path]::GetExtension($option) -ine '.ps1') { continue }
+    try { if ([string]::Equals([IO.Path]::GetFullPath($option), [IO.Path]::GetFullPath($PSCommandPath), [StringComparison]::OrdinalIgnoreCase)) { $fileArgument = $index } } catch { }
+    break # Another script is not this -File entry; do not inspect its argv.
+}
+if ($fileArgument -ge 0) {
+    if ($unsupportedHostPrefix) { throw 'FORGE_BOOTSTRAP_AMBIGUOUS_FILE_ARGV: select an unambiguous PowerShell -File invocation before original command entry.' }
+    $forwarded = [string[]]@()
+    if ($fileArgument + 1 -lt $hostArguments.Length) { $forwarded = [string[]]@($hostArguments[($fileArgument + 1)..($hostArguments.Length - 1)]) }
+}
 if ($PSVersionTable.PSVersion.Major -eq 5) { Import-Module -Name (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force -ErrorAction Stop }
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $recordPath = Join-Path $root 'installation.json'
 if (-not (Test-Path -LiteralPath $recordPath -PathType Leaf) -or (Get-Item -LiteralPath $recordPath).Length -gt 1MB) { throw 'Select the retained bootstrap installation before command entry.' }
-$record = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+$record = [IO.File]::ReadAllText($recordPath, (New-Object Text.UTF8Encoding($false, $true))) | ConvertFrom-Json
 $bootstrap = [IO.Path]::GetFullPath([string]$record.BootstrapScript)
 if (-not $bootstrap.StartsWith(([IO.Path]::GetFullPath($root).TrimEnd('\', '/') + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) { throw 'Bootstrap selection escaped its installation.' }
 $cursor = $bootstrap
@@ -509,9 +578,33 @@ exit $script:ForgeCommandExitCode
 '@
 }
 
+function Test-ForgeNativeCompletion([string]$StartPath, [string]$CompletionPath, [int]$ExitCode) {
+    try {
+        foreach ($path in @($StartPath, $CompletionPath)) {
+            $null = Assert-ForgePlainPath $path
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf) -or (Get-Item -LiteralPath $path).Length -gt 4096) { return $false }
+        }
+        $started = Read-ForgeUtf8Text $StartPath | ConvertFrom-Json
+        $ended = Read-ForgeUtf8Text $CompletionPath | ConvertFrom-Json
+        if ($started.Kind -ne 'DeliveryForgeNativeStart-v1' -or $ended.Kind -ne 'DeliveryForgeNativeCompletion-v1') { return $false }
+        foreach ($field in @('NativeExited', 'StdoutEof', 'StderrEof')) { if ($ended.$field -isnot [bool] -or $ended.$field -ne $true) { return $false } }
+        foreach ($field in @('NativePid', 'LauncherPid')) {
+            foreach ($value in @($started.$field, $ended.$field)) { if (($value -isnot [int] -and $value -isnot [long]) -or $value -le 0 -or $value -gt [int]::MaxValue) { return $false } }
+            if ($ended.$field -ne $started.$field) { return $false }
+        }
+        foreach ($field in @('NativeStartUtc', 'LauncherStartUtc')) {
+            if ([string]::IsNullOrWhiteSpace([string]$started.$field) -or [string]::IsNullOrWhiteSpace([string]$ended.$field)) { return $false }
+            $first = [DateTimeOffset]$started.$field; $last = [DateTimeOffset]$ended.$field
+            if ($first.UtcDateTime.Ticks -le 0 -or $last.UtcDateTime.Ticks -ne $first.UtcDateTime.Ticks) { return $false }
+        }
+        if ($ended.NativeStartReceiptSha256 -ne (Get-FileHash -LiteralPath $StartPath -Algorithm SHA256).Hash.ToLowerInvariant()) { return $false }
+        ($ended.ExitCode -is [int] -or $ended.ExitCode -is [long]) -and $ended.ExitCode -eq $ExitCode
+    } catch { $false }
+}
+
 function Invoke-ForgeCommand([string]$Root, [string[]]$Arguments, [int]$MaximumSeconds = 1200) {
     $script:ForgeCommandExitCode = 1; $clock = [Diagnostics.Stopwatch]::StartNew()
-    $commandLock = $null; $knownSettled = $false
+    $commandLock = $null; $knownSettled = $false; $dispatchRequested = $false
     if ($null -eq $Arguments) { $Arguments = [string[]]@() }
     $argument64 = @()
     foreach ($argument in $Arguments) {
@@ -519,49 +612,54 @@ function Invoke-ForgeCommand([string]$Root, [string[]]$Arguments, [int]$MaximumS
         $argument64 += ConvertTo-ForgeWireString $argument
     }
     $required = @(Get-ForgeRequiredAuthentication $Arguments)
+    $requiredTools = @(Get-ForgeRequiredTools $Arguments)
     try {
-        $diagnostic = $Arguments.Count -eq 1 -and $Arguments[0] -in @('--help', '--version')
-        $report = Get-ForgeBootstrapReport $Root -SkipAuthentication:$diagnostic -RequiredAuthentication $required -Clock $clock -MaximumSeconds $MaximumSeconds
+        $diagnostic = Test-ForgeDiagnosticArguments $Arguments
+        $report = Get-ForgeBootstrapReport $Root -SkipAuthentication:$diagnostic -RequiredAuthentication $required -RequiredTools $requiredTools -Clock $clock -MaximumSeconds $MaximumSeconds
         if ($report.AutomatableActions.Count -gt 0 -and -not @($report.Checks | Where-Object Id -eq 'bootstrap-lock').Count) {
             $selected = Read-ForgeInstallationSelection $Root
             if ((Test-Path -LiteralPath (Join-Path $Root 'installation.json')) -and -not $selected) { throw 'Existing installation source selection is malformed; preserve it and explicitly select a known source before repair.' }
             $ref = if ($selected) { $selected.SourceCommit } else { 'main' }
-            $report = Invoke-ForgeBootstrapInstall $Root $null $ref $MaximumSeconds -Clock $clock -RequiredAuthentication $required
+            $report = Invoke-ForgeBootstrapInstall $Root $null $ref $MaximumSeconds -Clock $clock -RequiredAuthentication $required -RequiredTools $requiredTools
         }
         if ($report.ExitCode -ne 0) { Write-ForgeBootstrapReport $report; $script:ForgeCommandExitCode = [int]$report.ExitCode; return }
         $installation = Read-ForgeInstallation $Root
         if (-not $installation) { throw 'Installation readback failed; original command was not started.' }
+        if ($installation.NativeStartReceiptSupported -ne $true -or $installation.NativeCompletionReceiptSupported -ne $true) { throw 'Pinned native launcher lacks durable completion receipts; explicitly select a compatible source before original command entry. Existing payload and source selection were preserved.' }
         $pwsh = Find-ForgeCommand 'pwsh'; if (-not $pwsh) { throw 'The selected PowerShell7 launcher host is missing.' }
         $null = ConvertTo-ForgeWireString $Root
         $attempt = Join-Path $Root ('bootstrap/command-' + [guid]::NewGuid().ToString('N'))
         Assert-ForgeWithin $Root $attempt; $null = Assert-ForgePlainPath $attempt -Directory
         $null = New-Item -ItemType Directory -Path $attempt
         $receipt = Join-Path $attempt 'native-start.json'
-        $payload = @{ NativeLauncher64 = (ConvertTo-ForgeWireString $installation.NativeLauncher); DotNetHost64 = (ConvertTo-ForgeWireString $installation.DotNetHost); ToolAssembly64 = (ConvertTo-ForgeWireString $installation.ToolAssembly); NativeStartReceipt64 = (ConvertTo-ForgeWireString $receipt); NativeStartReceiptSupported = ($installation.NativeStartReceiptSupported -eq $true); Arguments64 = @($argument64) }
+        $completionReceipt = Join-Path $attempt 'native-completion.json'
+        $payload = @{ NativeLauncher64 = (ConvertTo-ForgeWireString $installation.NativeLauncher); DotNetHost64 = (ConvertTo-ForgeWireString $installation.DotNetHost); ToolAssembly64 = (ConvertTo-ForgeWireString $installation.ToolAssembly); NativeStartReceipt64 = (ConvertTo-ForgeWireString $receipt); NativeCompletionReceipt64 = (ConvertTo-ForgeWireString $completionReceipt); Arguments64 = @($argument64) }
         $lockPath = Join-Path $Root 'bootstrap.lock'; $null = Assert-ForgePlainPath $lockPath
         $commandLock = [IO.File]::Open($lockPath, 'CreateNew', 'ReadWrite', 'None')
         # The durable lock is born and flushed BEFORE any original CLI can start.
         $containing = Get-Process -Id $PID
-        $lockData = @{ Kind = 'DeliveryForgeCommandOriginal-v1'; ContainingPid = $PID; ContainingStartUtc = $containing.StartTime.ToUniversalTime().ToString('o'); AttemptDirectory = $attempt; NativeStartReceipt = $receipt } | ConvertTo-Json -Depth 5 -Compress
+        $lockData = @{ Kind = 'DeliveryForgeCommandOriginal-v1'; ContainingPid = $PID; ContainingStartUtc = $containing.StartTime.ToUniversalTime().ToString('o'); AttemptDirectory = $attempt; NativeStartReceipt = $receipt; NativeCompletionReceipt = $completionReceipt } | ConvertTo-Json -Depth 5 -Compress
         $lockBytes = (New-Object Text.UTF8Encoding $false).GetBytes($lockData)
         $commandLock.Write($lockBytes, 0, $lockBytes.Length); $commandLock.Flush($true)
         # Recheck the selected immutable payload while holding its install lock.
         $rechecked = Read-ForgeInstallation $Root
         if (-not $rechecked -or $rechecked.ToolSha256 -ne $installation.ToolSha256 -or $rechecked.NativeLauncherSha256 -ne $installation.NativeLauncherSha256) { throw 'Selected installation changed before original entry.' }
-        $remaining = Get-ForgeRemainingSeconds $clock $MaximumSeconds 6
+        $remaining = Get-ForgeRemainingSeconds $clock $MaximumSeconds 20
         if ($remaining -lt 1) { throw 'Original invocation deadline expired before command entry.' }
         $payload.MaximumSeconds = $remaining
         $wire = $payload | ConvertTo-Json -Depth 5 -Compress
-        $fixed = '$r=[Console]::In.ReadToEnd()|ConvertFrom-Json;$u=New-Object Text.UTF8Encoding($false,$true);$l=$u.GetString([Convert]::FromBase64String($r.NativeLauncher64));$h=$u.GetString([Convert]::FromBase64String($r.DotNetHost64));$t=$u.GetString([Convert]::FromBase64String($r.ToolAssembly64));$p=$u.GetString([Convert]::FromBase64String($r.NativeStartReceipt64));$a=@($r.Arguments64|ForEach-Object{$u.GetString([Convert]::FromBase64String($_))});$o=@{DotNetHost=$h;ToolAssembly=$t;MaximumSeconds=$r.MaximumSeconds;ForgeArguments=$a};if($r.NativeStartReceiptSupported -eq $true){$o.NativeStartReceipt=$p};& $l @o;if($null -eq $LASTEXITCODE){exit 125}else{exit $LASTEXITCODE}'
-        $result = Invoke-ForgeProcess $pwsh @('-NoProfile', '-NonInteractive', '-Command', $fixed) -TimeoutSeconds ($remaining + 1) -StandardInput $wire -ForwardOutput -Clock $clock -MaximumSeconds $MaximumSeconds
+        $fixed = '$ErrorActionPreference=''Stop'';$u=New-Object Text.UTF8Encoding($false,$true);$m=New-Object IO.MemoryStream;[Console]::OpenStandardInput().CopyTo($m);$r=$u.GetString($m.ToArray()).TrimStart([char]0xfeff)|ConvertFrom-Json;$l=$u.GetString([Convert]::FromBase64String($r.NativeLauncher64));$h=$u.GetString([Convert]::FromBase64String($r.DotNetHost64));$t=$u.GetString([Convert]::FromBase64String($r.ToolAssembly64));$p=$u.GetString([Convert]::FromBase64String($r.NativeStartReceipt64));$c=$u.GetString([Convert]::FromBase64String($r.NativeCompletionReceipt64));$a=@($r.Arguments64|ForEach-Object{$u.GetString([Convert]::FromBase64String($_))});$o=@{DotNetHost=$h;ToolAssembly=$t;MaximumSeconds=$r.MaximumSeconds;NativeStartReceipt=$p;NativeCompletionReceipt=$c;ForgeArguments=$a};& $l @o;if($null -eq $LASTEXITCODE){exit 125}else{exit $LASTEXITCODE}'
+        $dispatchRequested = $true
+        $result = Invoke-ForgeProcess $pwsh @('-NoProfile', '-NonInteractive', '-Command', $fixed) -TimeoutSeconds ($remaining + 15) -StandardInput $wire -ForwardOutput -Clock $clock -MaximumSeconds $MaximumSeconds
         $script:ForgeCommandExitCode = [int]$result.ExitCode
-        $knownSettled = $result.ExitCode -ne 125
+        $knownSettled = $result.ExitCode -ne 125 -and (Test-ForgeNativeCompletion $receipt $completionReceipt ([int]$result.ExitCode))
         if (-not $knownSettled) {
             $script:ForgeCommandExitCode = 125; $script:ForgeBootstrapUnsettled = $true
             try { Save-ForgeUnknown $Root } catch { Write-ForgeDiagnostic 'FORGE_BOOTSTRAP_UNKNOWN_LOCK_UPDATE_FAILED: exit125 retained; the pre-entry lock and native-start receipt must be preserved.' }
         }
     } catch {
-        if ($script:ForgeBootstrapUnsettled) {
+        if ($dispatchRequested -or $script:ForgeBootstrapUnsettled) {
+            $script:ForgeBootstrapUnsettled = $true
             $script:ForgeCommandExitCode = 125
             try { Save-ForgeUnknown $Root } catch { Write-ForgeDiagnostic 'FORGE_BOOTSTRAP_UNKNOWN_LOCK_UPDATE_FAILED: exit125 retained; do not retry.' }
         } else { $knownSettled = $true } # No original entry occurred on this failure.
@@ -588,14 +686,15 @@ function Test-ForgeSkillRestoreState([string]$Root, [string]$MarkerHash, [string
     if ((Get-ForgeSkillStatus $Root) -notin @('Ready', 'Repairable')) { return $false }
     $marker = Join-Path $Root '.forge-bootstrap-skill.json'
     if ((Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash.ToLowerInvariant() -ne $MarkerHash) { return $false }
-    $record = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+    $record = Read-ForgeUtf8Text $marker | ConvertFrom-Json
     $nowMissing = @($record.Files | Where-Object { -not (Test-Path -LiteralPath (Join-Path $Root $_.RelativePath) -PathType Leaf) } | ForEach-Object RelativePath | Sort-Object) -join [char]0
     $nowMissing -ceq $Missing
 }
 
 function Invoke-ForgeBootstrapInstall {
     param([string]$Root, [string]$SelectedSource, [string]$SelectedRef, [int]$Seconds = 1200,
-        [Diagnostics.Stopwatch]$Clock, [string[]]$RequiredAuthentication = @('gh', 'codex', 'claude'), [switch]$SourceSelectionExplicit)
+        [Diagnostics.Stopwatch]$Clock, [string[]]$RequiredAuthentication = @('gh', 'codex', 'claude'), [switch]$SourceSelectionExplicit, [string[]]$RequiredTools = @('git','gh','codex','claude','pwsh','dotnet-sdk','codex-skill','claude-skill'))
+    $installTools = @(@($RequiredTools) + @('git','pwsh','dotnet-sdk') | Select-Object -Unique)
     $null = Assert-ForgePlainPath $Root -Directory
     if ($script:ForgeBootstrapUnsettled) { throw 'FORGE_BOOTSTRAP_UNKNOWN: earlier native state is unresolved; no installation entered.' }
     $watch = $Clock; if (-not $watch) { $watch = [Diagnostics.Stopwatch]::StartNew() }
@@ -644,12 +743,12 @@ function Invoke-ForgeBootstrapInstall {
             if ($facadeOldHash -ne $facadeHash -and ($oldPin.Count -ne 1 -or $facadeOldHash -ne $oldPin[0].Sha256)) { throw 'Unmanaged/modified launcher is preserved; no installation step entered.' }
             $facadeExisted = $true
         }
-        $report = Get-ForgeBootstrapReport $Root $SelectedSource -RequiredAuthentication $RequiredAuthentication -Clock $watch -MaximumSeconds $Seconds -OwnedLock $lock
+        $report = Get-ForgeBootstrapReport $Root $SelectedSource -RequiredAuthentication $RequiredAuthentication -Clock $watch -MaximumSeconds $Seconds -OwnedLock $lock -RequiredTools $installTools
         # This exact attempt owns the newly created lock, so its own report need
         # not classify that lock as a competing owner.
         $report.Checks = @($report.Checks | Where-Object Id -ne 'bootstrap-lock')
         $winget = Find-ForgeCommand 'winget'
-        $packages = Get-ForgeRequiredPackages
+        $packages = Get-ForgeRequiredPackages -RequiredTools $installTools
         foreach ($name in $packages.Keys) {
             if (($report.Checks | Where-Object Id -eq $name).Status -eq 'Missing') {
                 if (-not $winget) { continue }
@@ -661,29 +760,48 @@ function Invoke-ForgeBootstrapInstall {
         $git = Find-ForgeCommand 'git'; $pwsh = Find-ForgeCommand 'pwsh'
         if (-not $git -or -not $pwsh) { throw 'Git and PowerShell 7 are needed to finish installation; follow the prerequisite report.' }
         $existing = Read-ForgeInstallation $Root
+        $retainedSource = $false
         if (-not $SelectedSource -and $selection -and -not $SourceSelectionExplicit) {
             $SelectedRef = $selection.SourceCommit
-            if (Test-Path -LiteralPath $selection.SourceRoot -PathType Container) { $SelectedSource = $selection.SourceRoot }
+            if (Test-Path -LiteralPath $selection.SourceRoot -PathType Container) { $SelectedSource = $selection.SourceRoot; $retainedSource = $true }
+        }
+        if ($SelectedSource) {
+            try {
+                $SelectedSource = Assert-ForgePlainPath $SelectedSource -Directory
+                $selected = Run-Step 'read-source' $git @('-C', $SelectedSource, 'rev-parse', '--verify', 'HEAD') $run
+                $commit = $selected.Stdout.Trim()
+                if ($commit -notmatch '^[a-f0-9]{40}$') { throw 'The selected source HEAD is not one exact commit.' }
+                $status = Run-Step 'source-status' $git @('-C', $SelectedSource, 'status', '--porcelain') $run
+                if ($status.Stdout.Trim()) { throw 'Selected source checkout is dirty; it is preserved. Use a clean checkout or omit -SourceRoot.' }
+                if ($retainedSource -and $commit -ne $selection.SourceCommit) { throw 'Retained source HEAD moved; preserve it and clone the exact recorded commit.' }
+                if (-not $retainedSource) {
+                    $requested = Run-Step 'resolve-explicit-ref' $git @('-C', $SelectedSource, 'rev-parse', '--verify', '--end-of-options', ($SelectedRef + '^{commit}')) $run
+                    if ($requested.Stdout.Trim() -ne $commit) { throw 'Explicit SourceRoot HEAD does not match the explicitly selected Ref; checkout and installation were preserved.' }
+                }
+            } catch {
+                if (-not $retainedSource -or $script:ForgeBootstrapUnsettled) { throw }
+                # A known moved/dirty/unavailable retained checkout is evidence,
+                # never a reset target. Continue only by a fresh exact-pin clone.
+                $SelectedSource = $null
+            }
         }
         if (-not $SelectedSource) {
             $SelectedSource = Join-Path $run 'source'
             $null = Run-Step 'clone-source' $git @('clone', '--no-checkout', '--origin', 'origin', 'https://github.com/nucleoid/delivery-forge.git', $SelectedSource) $run @{ GIT_TERMINAL_PROMPT = '0'; GCM_INTERACTIVE = 'Never' }
-            $selected = Run-Step 'resolve-source' $git @('-C', $SelectedSource, 'rev-parse', '--verify', '--end-of-options', ($SelectedRef + '^{commit}')) $run
+            try { $selected = Run-Step 'resolve-source' $git @('-C', $SelectedSource, 'rev-parse', '--verify', '--end-of-options', ($SelectedRef + '^{commit}')) $run }
+            catch {
+                if ($script:ForgeBootstrapUnsettled -or $SelectedRef -match '^[a-f0-9]{40}$') { throw }
+                $selected = Run-Step 'resolve-origin-source' $git @('-C', $SelectedSource, 'rev-parse', '--verify', '--end-of-options', ('refs/remotes/origin/' + $SelectedRef + '^{commit}')) $run
+            }
             $commit = $selected.Stdout.Trim()
             if ($commit -notmatch '^[a-f0-9]{40}$') { throw 'The selected source did not resolve to one exact commit.' }
+            if ($selection -and -not $SourceSelectionExplicit -and $commit -ne $selection.SourceCommit) { throw 'Automatic repair clone did not resolve to its recorded exact commit.' }
             $null = Run-Step 'checkout-source' $git @('-C', $SelectedSource, 'checkout', '--detach', $commit) $run
-        } else {
-            $SelectedSource = Assert-ForgePlainPath $SelectedSource -Directory
-            $selected = Run-Step 'read-source' $git @('-C', $SelectedSource, 'rev-parse', '--verify', 'HEAD') $run
-            $commit = $selected.Stdout.Trim()
-            if ($selection -and $SelectedRef -eq $selection.SourceCommit -and $commit -ne $selection.SourceCommit) { throw 'Retained repair source moved away from its pinned commit; explicitly select a compatible source instead.' }
-            $status = Run-Step 'source-status' $git @('-C', $SelectedSource, 'status', '--porcelain') $run
-            if ($status.Stdout.Trim()) { throw 'Explicit source checkout is dirty; it is preserved. Use a clean checkout or omit -SourceRoot.' }
         }
         $project = Join-Path $SelectedSource 'components/tool/DeliveryForge.Tool/DeliveryForge.Tool.csproj'
         if (-not (Test-Path -LiteralPath $project) -or -not (Test-Path -LiteralPath (Join-Path $SelectedSource 'SKILL.md'))) { throw 'Selected source lacks the public CLI/skill. Select a compatible merged revision.' }
         $sdkVersion = Get-ForgeSdkVersion $SelectedSource
-        $sdkReport = Get-ForgeBootstrapReport $Root $SelectedSource -SkipAuthentication -Clock $watch -MaximumSeconds $Seconds -OwnedLock $lock
+        $sdkReport = Get-ForgeBootstrapReport $Root $SelectedSource -SkipAuthentication -Clock $watch -MaximumSeconds $Seconds -OwnedLock $lock -RequiredTools $installTools
         $dotnet = $sdkReport.DotNetHost
         if (-not $dotnet) {
             $installer = Join-Path $run 'dotnet-install.ps1'
@@ -706,7 +824,7 @@ function Invoke-ForgeBootstrapInstall {
             $null = Run-Step 'pack' $dotnet @('pack', $project, '-c', 'Release', '--no-build', '--no-restore', '--output', $feed) $SelectedSource $sdkEnvironment
             $archives = @(Get-ChildItem -LiteralPath $feed -Filter '*.nupkg' -File)
             if ($archives.Count -ne 1) { throw 'Expected one complete tool package.' }
-            [xml]$projectXml = Get-Content -LiteralPath $project -Raw
+            [xml]$projectXml = Read-ForgeUtf8Text $project
             $version = @($projectXml.Project.PropertyGroup | ForEach-Object { $_.Version } | Where-Object { $_ })[0]
             $prefix = Join-Path $Root ('installations/' + $commit.Substring(0, 12) + '-' + [guid]::NewGuid().ToString('N'))
             $localConfig = Join-Path $run 'NuGet.Local.Config'
@@ -749,6 +867,7 @@ function Invoke-ForgeBootstrapInstall {
             $installation.NativeLauncher = $nativeLauncher; $installation.NativeLauncherBytes = $launcherBytes.Length
             $installation.NativeLauncherSha256 = (Get-FileHash -LiteralPath $nativeLauncher -Algorithm SHA256).Hash.ToLowerInvariant()
             $installation.NativeStartReceiptSupported = Test-ForgeNativeStartReceiptParameter $nativeLauncher
+            $installation.NativeCompletionReceiptSupported = $installation.NativeStartReceiptSupported -and (Test-ForgeNativeStartReceiptParameter $nativeLauncher 'NativeCompletionReceipt')
         }
         $bootstrapBytes = [IO.File]::ReadAllBytes($PSCommandPath)
         $bootstrapHash = (Get-FileHash -LiteralPath $PSCommandPath -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -757,6 +876,10 @@ function Invoke-ForgeBootstrapInstall {
         if ($installation -isnot [Collections.IDictionary]) {
             $copy = @{}; foreach ($property in $installation.PSObject.Properties) { $copy[$property.Name] = $property.Value }; $installation = $copy
         }
+        $selectedBootstrap = Join-Path $SelectedSource 'scripts/bootstrap-delivery-forge.ps1'
+        $installation.SelectedSourceBootstrapSha256 = if (Test-Path -LiteralPath $selectedBootstrap -PathType Leaf) { $null = Assert-ForgePlainPath $selectedBootstrap; (Get-FileHash -LiteralPath $selectedBootstrap -Algorithm SHA256).Hash.ToLowerInvariant() } else { $null }
+        $installation.BootstrapMatchesSelectedSource = $null -ne $installation.SelectedSourceBootstrapSha256 -and $installation.SelectedSourceBootstrapSha256 -eq $bootstrapHash
+        $installation.SourceRoot = $SelectedSource
         $installation.BootstrapScript = $installedBootstrap; $installation.BootstrapScriptSha256 = $bootstrapHash
         $installation.Files = @($installation.Files | Where-Object { $_.Path -notin @($launcher, $installedBootstrap, $installation.NativeLauncher) }) + @(
             @{ Path = $installedBootstrap; Sha256 = $bootstrapHash },
@@ -780,13 +903,18 @@ function Invoke-ForgeBootstrapInstall {
             if (Test-Path -LiteralPath $destination) {
                 $marker = Join-Path $destination '.forge-bootstrap-skill.json'
                 $item.OldMarker = (Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash.ToLowerInvariant()
-                $oldSkill = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+                $oldSkill = Read-ForgeUtf8Text $marker | ConvertFrom-Json
                 $item.OldMissing = @($oldSkill.Files | Where-Object { -not (Test-Path -LiteralPath (Join-Path $destination $_.RelativePath) -PathType Leaf) } | ForEach-Object RelativePath | Sort-Object) -join [char]0
                 $backupRoot = Join-Path $Root 'bootstrap/skill-backups'; $null = Assert-ForgePlainPath $backupRoot -Directory
                 $null = New-Item -ItemType Directory -Path $backupRoot -Force
                 $item.Backup = Join-Path $backupRoot ([guid]::NewGuid().ToString('N')); Assert-ForgeWithin $backupRoot $item.Backup
                 try { Move-ForgeInstallationDirectory $destination $item.Backup; $item.OldMoved = $true }
-                catch { $script:ForgeBootstrapUnsettled = $true; throw }
+                catch {
+                    $unchanged = $false
+                    try { $unchanged = -not (Test-Path -LiteralPath $item.Backup) -and (Test-ForgeSkillRestoreState $destination $item.OldMarker $item.OldMissing) } catch { }
+                    if (-not $unchanged) { $script:ForgeBootstrapUnsettled = $true }
+                    throw
+                }
             }
             try { Move-ForgeInstallationDirectory $candidate $destination; $item.NewMoved = $true }
             catch {
@@ -799,7 +927,15 @@ function Invoke-ForgeBootstrapInstall {
             if ($facadeExisted) { [IO.File]::Replace($facadeCandidate, $launcher, $facadeBackup) }
             else { [IO.File]::Move($facadeCandidate, $launcher) }
             $facadeActivated = $true
-        } catch { $script:ForgeBootstrapUnsettled = $true; throw }
+        } catch {
+            $unchanged = $false
+            try {
+                $oldStillSelected = if ($facadeExisted) { (Test-Path -LiteralPath $launcher) -and (Get-FileHash -LiteralPath $launcher -Algorithm SHA256).Hash.ToLowerInvariant() -eq $facadeOldHash } else { -not (Test-Path -LiteralPath $launcher) }
+                $unchanged = $oldStillSelected -and -not (Test-Path -LiteralPath $facadeBackup) -and (Test-Path -LiteralPath $facadeCandidate) -and (Get-FileHash -LiteralPath $facadeCandidate -Algorithm SHA256).Hash.ToLowerInvariant() -eq $facadeHash
+            } catch { }
+            if (-not $unchanged) { $script:ForgeBootstrapUnsettled = $true }
+            throw
+        }
         if ((Get-ForgeRemainingSeconds $watch $Seconds 5) -lt 1) { throw 'Original deadline expired before pointer activation.' }
         try {
             if (Test-Path -LiteralPath $pointer) { [IO.File]::Replace($pending, $pointer, (Join-Path $run 'installation.previous.json')) }
@@ -812,10 +948,12 @@ function Invoke-ForgeBootstrapInstall {
             if (-not $oldStillSelected -or -not (Test-Path -LiteralPath $pending) -or (Get-FileHash -LiteralPath $pending -Algorithm SHA256).Hash.ToLowerInvariant() -ne $pendingHash) { $script:ForgeBootstrapUnsettled = $true }
             throw
         }
-        $report = Get-ForgeBootstrapReport $Root $SelectedSource -RequiredAuthentication $RequiredAuthentication -Clock $watch -MaximumSeconds $Seconds -OwnedLock $lock
+        $report = Get-ForgeBootstrapReport $Root $SelectedSource -RequiredAuthentication $RequiredAuthentication -Clock $watch -MaximumSeconds $Seconds -OwnedLock $lock -RequiredTools $installTools
         $checks = [Collections.Generic.List[object]]::new()
         foreach ($row in $report.Checks) { if ($row.Id -ne 'bootstrap-lock') { $checks.Add($row) } }
         $report = New-ForgeReport $Root $checks $sdkVersion $RequiredAuthentication
+        $report | Add-Member NoteProperty RequiredTools @($installTools)
+        $report | Add-Member NoteProperty BootstrapMatchesSelectedSource $installation.BootstrapMatchesSelectedSource
         $report.AuthenticationChecked = $RequiredAuthentication.Count -gt 0
         if (-not $report.AuthenticationChecked) { $report.AuthenticationReady = $null }
         Write-ForgeNewJson (Join-Path $run 'report.json') $report
@@ -860,7 +998,7 @@ function Invoke-ForgeBootstrapInstall {
         }
         try {
             if ($script:ForgeBootstrapUnsettled -or (Get-ForgeRemainingSeconds $watch $Seconds 5) -lt 1) { throw 'No further native diagnostics after UNKNOWN/deadline.' }
-            $report = Get-ForgeBootstrapReport $Root $SelectedSource -RequiredAuthentication $RequiredAuthentication -Clock $watch -MaximumSeconds $Seconds -OwnedLock $lock
+            $report = Get-ForgeBootstrapReport $Root $SelectedSource -RequiredAuthentication $RequiredAuthentication -Clock $watch -MaximumSeconds $Seconds -OwnedLock $lock -RequiredTools $installTools
         }
         catch { $report = [pscustomobject]@{ Kind = 'DeliveryForgeBootstrapReport-v1'; StateRoot = $Root; Checks = @(); AutomatableActions = @(); UserActions = @(); InstallationReady = $false; AuthenticationReady = $false; ExecutionCertified = $false; ExitCode = 1 } }
         $report.ExitCode = $(if ($script:ForgeBootstrapUnsettled) { 125 } else { 1 })
@@ -882,6 +1020,7 @@ function Write-ForgeBootstrapReport($Report, [switch]$AsJson) {
     }
     if ($Report.PSObject.Properties.Name -contains 'Failure') { Write-Host ("`nInstallation stopped: " + $Report.Failure) }
     Write-Host ("`nInstallation ready: {0}; sign-ins ready: {1}; execution certification: not evaluated." -f $Report.InstallationReady, $Report.AuthenticationReady)
+    if ($Report.PSObject.Properties.Name -contains 'BootstrapMatchesSelectedSource' -and $Report.BootstrapMatchesSelectedSource -eq $false) { Write-Host 'Bootstrap and selected CLI source bytes differ; their separate hashes are recorded. No source equivalence is implied.' }
     Write-Host ('Launcher: ' + (Join-Path $Report.StateRoot 'bin/delivery-forge.ps1'))
     if ($Report.PSObject.Properties.Name -contains 'AttemptDirectory') { Write-Host ('Evidence: ' + $Report.AttemptDirectory) }
 }
@@ -892,11 +1031,13 @@ if ($MyInvocation.InvocationName -ne '.') {
         if (-not $StateRoot) { $StateRoot = Get-ForgeDefaultStateRoot }
         $StateRoot = Assert-ForgePlainPath $StateRoot -Directory
         $clock = [Diagnostics.Stopwatch]::StartNew()
+        if ($SourceRoot -and -not $PSBoundParameters.ContainsKey('Ref')) { $Ref = 'HEAD' }
         $report = if ($Mode -eq 'Install') { Invoke-ForgeBootstrapInstall $StateRoot $SourceRoot $Ref $MaximumSeconds -Clock $clock -SourceSelectionExplicit:($PSBoundParameters.ContainsKey('Ref') -or $PSBoundParameters.ContainsKey('SourceRoot')) } else { Get-ForgeBootstrapReport $StateRoot $SourceRoot -Clock $clock -MaximumSeconds $MaximumSeconds }
         Write-ForgeBootstrapReport $report -AsJson:$Json
         exit $report.ExitCode
     } catch {
         $failureCode = $(if ($script:ForgeBootstrapUnsettled) { 125 } else { 1 })
+        if ($script:ForgeBootstrapUnsettled) { try { Save-ForgeUnknown $StateRoot } catch { Write-ForgeDiagnostic 'FORGE_BOOTSTRAP_UNKNOWN_LOCK_UPDATE_FAILED: exit125 retained; preserve the observed PID/start evidence and do not retry.' } }
         if ($Json) { @{ Kind = 'DeliveryForgeBootstrapReport-v1'; ExitCode = $failureCode; Failure = $_.Exception.Message; ExecutionCertified = $false } | ConvertTo-Json }
         else { [Console]::Error.WriteLine($_.Exception.Message) }
         exit $failureCode

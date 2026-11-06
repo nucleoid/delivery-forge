@@ -32,7 +32,7 @@ The normal intake is a minimal interview. Delivery Forge asks one plain conversa
 Run the one-shot bootstrap from a selected checkout:
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-delivery-forge.ps1 -Mode Install
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\bootstrap-delivery-forge.ps1 -Mode Install -SourceRoot .
 ```
 
 It installs missing prerequisites, the CLI and Codex/Claude skills, while leaving
