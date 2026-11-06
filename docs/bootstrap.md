@@ -35,6 +35,9 @@ need diagnosis rather than a second installation. If WinGet/App Installer is
 unavailable, the report gives the official installation link. Windows may require
 the owner to approve an installer/UAC prompt; the script does not elevate itself
 or switch Windows users.
+Prerequisite entry points must be native executables or supported `.ps1` scripts.
+A tool found only through a `.cmd`/`.bat` shim is preserved and reported as
+unsupported; bootstrap does not run it or install a competing copy automatically.
 
 On a first install with no source selection, a fresh checkout of
 `nucleoid/delivery-forge` is retained under the attempt and `main` is resolved to
@@ -114,6 +117,16 @@ Invoke the installed launcher, rather than the SDK-generated raw shim:
 ```powershell
 & "$env:LOCALAPPDATA\DeliveryForge\bin\delivery-forge.ps1" plan --repo ABSOLUTE_ROOT --intent-file ABSOLUTE_INTENT
 ```
+
+For arguments that must remain exact strings, prefer an explicit PowerShell
+`-File` invocation. Both `-File` and `/File` preserve native arguments, including
+trailing-colon strings. Windows PowerShell 5.1's implicit script invocation uses
+command parsing and is refused. Direct invocation accepts ordinary string-array
+splats, but refuses nested argument collections and ambiguous dash-prefixed
+trailing-colon values; use explicit `-File` for those values. Bootstrap reports
+these cases instead of reconstructing a PowerShell expression. Explicit stdin
+is unsupported when a `.ps1` prerequisite needs the script transport, including
+an explicitly empty stdin value. Routine command examples above remain valid.
 
 Before starting the actual CLI, the launcher checks prerequisites. If installable
 dependencies are missing, it runs bootstrap once and rechecks the installation

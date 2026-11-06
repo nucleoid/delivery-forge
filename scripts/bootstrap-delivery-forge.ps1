@@ -187,6 +187,9 @@ function Invoke-ForgeProcess {
     param([string]$Executable, [string[]]$Arguments = @(), [string]$WorkingDirectory,
         [int]$TimeoutSeconds = 20, [hashtable]$Environment = @{}, [string]$LogPrefix,
         [Diagnostics.Stopwatch]$Clock, [int]$MaximumSeconds = 1200, [switch]$ForwardOutput, [string]$StandardInput)
+    $extension = [IO.Path]::GetExtension($Executable)
+    if ($extension -in @('.cmd', '.bat')) { throw 'FORGE_BOOTSTRAP_UNSUPPORTED_BATCH: select an existing native executable or .ps1 entry; batch argument semantics are unsupported and no duplicate install was attempted.' }
+    if ($extension -ieq '.ps1' -and $PSBoundParameters.ContainsKey('StandardInput')) { throw 'FORGE_BOOTSTRAP_UNSUPPORTED_SHIM_STDIN: explicit stdin cannot be combined with a .ps1 transport envelope.' }
     $timeout = [Math]::Min($TimeoutSeconds, (Get-ForgeRemainingSeconds $Clock $MaximumSeconds 5))
     if ($timeout -lt 1) { throw 'The original bootstrap/command deadline expired before native entry.' }
     # Validate every process path/argument before native entry. The Windows
@@ -201,7 +204,7 @@ function Invoke-ForgeProcess {
     if ($null -ne $StandardInput -and $StandardInput -match '[^\x00-\x7f]') { throw 'Internal stdin must be ASCII encoded before native entry.' }
     $info = New-Object Diagnostics.ProcessStartInfo
     $info.FileName = $Executable; $inputText = $StandardInput
-    if ([IO.Path]::GetExtension($Executable) -in @('.ps1', '.cmd', '.bat')) {
+    if ($extension -ieq '.ps1') {
         $shell = Find-ForgeCommand 'pwsh'
         if (-not $shell) { $shell = "$env:SystemRoot/System32/WindowsPowerShell/v1.0/powershell.exe" }
         $inputText = @{ Executable64 = $executable64; Arguments64 = @($argument64) } | ConvertTo-Json -Depth 5 -Compress
@@ -266,7 +269,7 @@ function Get-ForgeRequiredPackages([string[]]$RequiredTools = @('git','gh','code
     $codex = if ('codex' -in $RequiredTools) { Find-ForgeCommand 'codex' } else { $null }
     # Native Codex does not need Node. Retain an existing npm installation and
     # repair its prerequisite instead of creating a competing Codex installation.
-    if ($codex -and [IO.Path]::GetExtension($codex) -in @('.ps1', '.cmd', '.bat')) { $packages['node'] = 'OpenJS.NodeJS.LTS' }
+    if ($codex -and [IO.Path]::GetExtension($codex) -ieq '.ps1') { $packages['node'] = 'OpenJS.NodeJS.LTS' }
     $selected = [ordered]@{}
     foreach ($name in $packages.Keys) { if ($name -in $RequiredTools -or ($name -eq 'node' -and 'codex' -in $RequiredTools)) { $selected[$name] = $packages[$name] } }
     $selected
@@ -355,13 +358,15 @@ function Get-ForgeBootstrapReport {
     foreach ($name in $packages.Keys) {
         $path = Find-ForgeCommand $name; $commands[$name] = $path
         $version = $null
-        if ($path) {
+        $batchEntry = $path -and [IO.Path]::GetExtension($path) -in @('.cmd', '.bat')
+        if ($path -and -not $batchEntry) {
             try { $probe = Invoke-ForgeProcess $path @('--version') -Clock $Clock -MaximumSeconds $MaximumSeconds; if ($probe.ExitCode -eq 0) { $version = ($probe.Stdout -split '\r?\n')[0].Trim() } } catch { if ($script:ForgeBootstrapUnsettled) { throw } }
         }
         $versions[$name] = $version
-        $status = if ($version) { 'Ready' } elseif ($path) { 'Unverified' } else { 'Missing' }
+        $status = if ($batchEntry) { 'Unsupported' } elseif ($version) { 'Ready' } elseif ($path) { 'Unverified' } else { 'Missing' }
         $steps = if ($status -eq 'Unverified') { @("Run '$path --version' in an ordinary terminal. Check execution permissions or the broken installation; do not blindly install a second copy.") } else { @("winget install --id $($packages[$name]) --exact --source winget --silent --accept-package-agreements --accept-source-agreements --disable-interactivity") }
-        $checks.Add((New-ForgeCheck $name $status $(if ($version) { $version } elseif ($path) { "$name exists but its version probe failed or was denied." } else { "$name CLI is missing." }) ($status -eq 'Missing') $steps))
+        if ($batchEntry) { $steps = @('Select an existing supported native executable or .ps1 entry. The batch installation is preserved; do not install a duplicate automatically.') }
+        $checks.Add((New-ForgeCheck $name $status $(if ($version) { $version } elseif ($batchEntry) { "$name resolves only to an unsupported batch entry; no probe was entered." } elseif ($path) { "$name exists but its version probe failed or was denied." } else { "$name CLI is missing." }) ($status -eq 'Missing') $steps))
     }
     $winget = Find-ForgeCommand 'winget'
     $needsWinget = @($checks | Where-Object { $_.Id -in $packages.Keys -and $_.Status -eq 'Missing' }).Count -gt 0
@@ -411,7 +416,7 @@ function Get-ForgeBootstrapReport {
             }
             $status = 'UserAction'; $detail = 'Authentication has not been verified; this alone does not prove that you are signed out.'
             $unsupported = $false
-            if ($commands[$agent]) {
+            if ($commands[$agent] -and [IO.Path]::GetExtension($commands[$agent]) -notin @('.cmd', '.bat')) {
                 try {
                     $arguments = switch ($agent) { 'gh' { @('auth', 'status', '--active', '--hostname', 'github.com') } 'codex' { @('login', 'status') } 'claude' { @('auth', 'status') } }
                     if ($agent -eq 'gh') {
@@ -538,11 +543,12 @@ function Install-ForgeSkill([string]$SelectedSource, [string]$Destination, [stri
 function Get-ForgeLauncherContent {
     @'
 #requires -Version 5.1
-[string[]]$forwarded = @($args)
+$forwarded = @($args)
 $hostArguments = [Environment]::GetCommandLineArgs()
-$fileArgument = -1; $unsupportedHostPrefix = $false
+$fileArgument = -1; $unsupportedHostPrefix = $false; $implicitEntry = $false
 for ($index = 1; $index -lt $hostArguments.Length; $index++) {
     $option = $hostArguments[$index]
+    if ($option.StartsWith('/')) { $option = '-' + $option.Substring(1) }
     if ($option.Length -gt 1 -and ('-Command'.StartsWith($option, [StringComparison]::OrdinalIgnoreCase) -or '-EncodedCommand'.StartsWith($option, [StringComparison]::OrdinalIgnoreCase) -or '-CommandWithArgs'.StartsWith($option, [StringComparison]::OrdinalIgnoreCase))) { break }
     if ($option -ieq '-File' -or $option -ieq '-f') {
         if ($index + 1 -lt $hostArguments.Length) {
@@ -554,14 +560,20 @@ for ($index = 1; $index -lt $hostArguments.Length; $index++) {
     if ($option -in @('-ExecutionPolicy', '-WindowStyle', '-InputFormat', '-OutputFormat', '-WorkingDirectory', '-SettingsFile', '-ConfigurationName', '-Version')) { $index++; continue }
     if ($option.StartsWith('-')) { $unsupportedHostPrefix = $true; continue }
     if ($unsupportedHostPrefix -and [IO.Path]::GetExtension($option) -ine '.ps1') { continue }
-    try { if ([string]::Equals([IO.Path]::GetFullPath($option), [IO.Path]::GetFullPath($PSCommandPath), [StringComparison]::OrdinalIgnoreCase)) { $fileArgument = $index } } catch { }
+    try { if ([string]::Equals([IO.Path]::GetFullPath($option), [IO.Path]::GetFullPath($PSCommandPath), [StringComparison]::OrdinalIgnoreCase)) { $fileArgument = $index; $implicitEntry = $true } } catch { }
     break # Another script is not this -File entry; do not inspect its argv.
 }
 if ($fileArgument -ge 0) {
+    if ($implicitEntry -and $PSVersionTable.PSVersion.Major -lt 6) { throw 'FORGE_BOOTSTRAP_AMBIGUOUS_FILE_ARGV: Windows PowerShell implicit script entry uses command semantics; use explicit -File or a string-array splat.' }
     if ($unsupportedHostPrefix) { throw 'FORGE_BOOTSTRAP_AMBIGUOUS_FILE_ARGV: select an unambiguous PowerShell -File invocation before original command entry.' }
     $forwarded = [string[]]@()
     if ($fileArgument + 1 -lt $hostArguments.Length) { $forwarded = [string[]]@($hostArguments[($fileArgument + 1)..($hostArguments.Length - 1)]) }
 }
+foreach ($value in $forwarded) {
+    if ($value -is [Collections.IEnumerable] -and $value -isnot [string]) { throw 'FORGE_BOOTSTRAP_AMBIGUOUS_ARGUMENT: use an explicit string-array splat; nested argument collections are not native strings.' }
+    if ($fileArgument -lt 0 -and $value -is [string] -and $value -match '^-.*:$') { throw 'FORGE_BOOTSTRAP_AMBIGUOUS_ARGUMENT: a direct trailing-colon argument may have been split by PowerShell; use explicit -File to preserve it.' }
+}
+[string[]]$forwarded = @($forwarded)
 if ($PSVersionTable.PSVersion.Major -eq 5) { Import-Module -Name (Join-Path $PSHOME 'Modules/Microsoft.PowerShell.Utility/Microsoft.PowerShell.Utility.psd1') -Force -ErrorAction Stop }
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
@@ -675,6 +687,13 @@ function Invoke-ForgeCommand([string]$Root, [string[]]$Arguments, [int]$MaximumS
     }
 }
 
+function Assert-ForgeFilePreimage([string]$Path, [string]$ExpectedSha256) {
+    $null = Assert-ForgePlainPath $Path
+    if ($ExpectedSha256) {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf) -or (Get-FileHash -LiteralPath $Path -Algorithm SHA256).Hash.ToLowerInvariant() -ne $ExpectedSha256) { throw 'Selected installation entry changed during preparation; its activation was not attempted.' }
+    } elseif (Test-Path -LiteralPath $Path) { throw 'An installation entry appeared during preparation; its activation was not attempted.' }
+}
+
 function Move-ForgeInstallationDirectory([string]$From, [string]$To) {
     $source = Assert-ForgePlainPath $From -Directory
     $target = Assert-ForgePlainPath $To -Directory
@@ -707,6 +726,7 @@ function Invoke-ForgeBootstrapInstall {
     $activations = New-Object 'Collections.Generic.List[object]'
     $pointerPublished = $false; $facadeActivated = $false; $facadeExisted = $false
     $facadeBackup = Join-Path $run 'delivery-forge.facade.previous.ps1'
+    $pointerBackup = Join-Path $run 'installation.previous.json'; $activationPlanPath = $null
     $pointer = Join-Path $Root 'installation.json'; $pointerOldHash = $null
     if (Test-Path -LiteralPath $pointer) { $pointerOldHash = (Get-FileHash -LiteralPath $pointer -Algorithm SHA256).Hash.ToLowerInvariant() }
     function Run-Step([string]$Name, [string]$Executable, [string[]]$Arguments, [string]$WorkingDirectory, [hashtable]$Environment = @{}) {
@@ -888,27 +908,44 @@ function Invoke-ForgeBootstrapInstall {
             @{ Path = $launcher; Sha256 = $facadeHash }
         )
         if ($installation.Files.Count -gt 4096) { throw 'Complete installation manifest exceeds its finite file bound.' }
+        $consumedHead = Run-Step 'verify-consumed-source-head' $git @('-C', $SelectedSource, 'rev-parse', '--verify', 'HEAD') $run
+        $consumedStatus = Run-Step 'verify-consumed-source-status' $git @('-C', $SelectedSource, 'status', '--porcelain') $run
+        if ($consumedHead.Stdout.Trim() -ne $commit -or $consumedStatus.Stdout.Trim()) { throw 'Source changed while payload bytes were consumed; no activation.' }
         foreach ($destination in $destinations.Values) {
             if ((Get-ForgeSkillStatus $destination) -eq 'Conflict') { throw 'A skill changed before activation; existing selection preserved.' }
         }
         $pending = Join-Path $run 'installation.READY.json'; Write-ForgeNewJson $pending $installation
         $pendingHash = (Get-FileHash -LiteralPath $pending -Algorithm SHA256).Hash.ToLowerInvariant()
         if ((Get-ForgeRemainingSeconds $watch $Seconds 5) -lt 1) { throw 'Original deadline expired before activation; previous selection preserved.' }
-        # Keep exact prior marker/missing-file state for a bounded restoration.
+        # Freeze all destination/backup mappings before the first move. This
+        # immutable plan records intended preimages, never claims applied state.
+        $backupRoot = Join-Path $Root 'bootstrap/skill-backups'; $null = Assert-ForgePlainPath $backupRoot -Directory
+        $null = New-Item -ItemType Directory -Path $backupRoot -Force
         foreach ($agent in @('codex', 'claude')) {
             $destination = $destinations[$agent]; $candidate = $skillCandidates[$agent]
             $newMarker = (Get-FileHash -LiteralPath (Join-Path $candidate '.forge-bootstrap-skill.json') -Algorithm SHA256).Hash.ToLowerInvariant()
-            $item = [pscustomobject]@{ Destination = $destination; Candidate = $candidate; Backup = $null; OldMarker = $null; OldMissing = ''; NewMarker = $newMarker; OldMoved = $false; NewMoved = $false }
-            $activations.Add($item)
-            $null = New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force
-            if (Test-Path -LiteralPath $destination) {
+            $backup = Join-Path $backupRoot ([guid]::NewGuid().ToString('N')); Assert-ForgeWithin $backupRoot $backup
+            $item = [pscustomobject]@{ Agent = $agent; Destination = $destination; Candidate = $candidate; Backup = $backup; OldExists = [bool](Test-Path -LiteralPath $destination); OldMarker = $null; OldMissing = ''; NewMarker = $newMarker; OldMoved = $false; NewMoved = $false }
+            if ($item.OldExists) {
                 $marker = Join-Path $destination '.forge-bootstrap-skill.json'
                 $item.OldMarker = (Get-FileHash -LiteralPath $marker -Algorithm SHA256).Hash.ToLowerInvariant()
                 $oldSkill = Read-ForgeUtf8Text $marker | ConvertFrom-Json
                 $item.OldMissing = @($oldSkill.Files | Where-Object { -not (Test-Path -LiteralPath (Join-Path $destination $_.RelativePath) -PathType Leaf) } | ForEach-Object RelativePath | Sort-Object) -join [char]0
-                $backupRoot = Join-Path $Root 'bootstrap/skill-backups'; $null = Assert-ForgePlainPath $backupRoot -Directory
-                $null = New-Item -ItemType Directory -Path $backupRoot -Force
-                $item.Backup = Join-Path $backupRoot ([guid]::NewGuid().ToString('N')); Assert-ForgeWithin $backupRoot $item.Backup
+            }
+            $activations.Add($item)
+        }
+        Assert-ForgeFilePreimage $launcher $facadeOldHash
+        Assert-ForgeFilePreimage $pointer $pointerOldHash
+        $activationPlanPath = Join-Path $run 'activation-plan.json'
+        $plannedSkills = @($activations | ForEach-Object { @{ Agent = $_.Agent; Destination = $_.Destination; Candidate = $_.Candidate; Backup = $_.Backup; OldExists = $_.OldExists; OldMarker = $_.OldMarker; OldMissing = $_.OldMissing; NewMarker = $_.NewMarker } })
+        Write-ForgeNewJson $activationPlanPath @{ Kind = 'DeliveryForgeBootstrapActivationPlan-v1'; SourceCommit = $commit; Skills = $plannedSkills; Facade = @{ Path = $launcher; Candidate = $facadeCandidate; Backup = $facadeBackup; OldSha256 = $facadeOldHash; NewSha256 = $facadeHash }; Pointer = @{ Path = $pointer; Candidate = $pending; Backup = $pointerBackup; OldSha256 = $pointerOldHash; NewSha256 = $pendingHash } }
+        $lockBytes = (New-Object Text.UTF8Encoding $false).GetBytes((@{ Kind = 'DeliveryForgeBootstrapActivation-v1'; AttemptDirectory = $run; ActivationPlan = $activationPlanPath } | ConvertTo-Json -Compress))
+        $lock.Write($lockBytes, 0, $lockBytes.Length); $lock.Flush($true)
+        foreach ($item in $activations) {
+            $destination = $item.Destination; $candidate = $item.Candidate; $newMarker = $item.NewMarker
+            $null = New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force
+            if ($item.OldExists) {
+                if (-not (Test-ForgeSkillRestoreState $destination $item.OldMarker $item.OldMissing)) { throw 'Skill preimage changed before activation; preserve the selected directory.' }
                 try { Move-ForgeInstallationDirectory $destination $item.Backup; $item.OldMoved = $true }
                 catch {
                     $unchanged = $false
@@ -916,7 +953,7 @@ function Invoke-ForgeBootstrapInstall {
                     if (-not $unchanged) { $script:ForgeBootstrapUnsettled = $true }
                     throw
                 }
-            }
+            } elseif (Test-Path -LiteralPath $destination) { throw 'Skill destination appeared before activation; preserve it.' }
             try { Move-ForgeInstallationDirectory $candidate $destination; $item.NewMoved = $true }
             catch {
                 if ((Test-Path -LiteralPath $destination) -or -not (Test-ForgeSkillRestoreState $candidate $newMarker '')) { $script:ForgeBootstrapUnsettled = $true }
@@ -924,6 +961,7 @@ function Invoke-ForgeBootstrapInstall {
             }
         }
         $null = New-Item -ItemType Directory -Path $bin -Force
+        Assert-ForgeFilePreimage $launcher $facadeOldHash
         try {
             if ($facadeExisted) { [IO.File]::Replace($facadeCandidate, $launcher, $facadeBackup) }
             else { [IO.File]::Move($facadeCandidate, $launcher) }
@@ -938,15 +976,20 @@ function Invoke-ForgeBootstrapInstall {
             throw
         }
         if ((Get-ForgeRemainingSeconds $watch $Seconds 5) -lt 1) { throw 'Original deadline expired before pointer activation.' }
+        Assert-ForgeFilePreimage $pointer $pointerOldHash
         try {
-            if (Test-Path -LiteralPath $pointer) { [IO.File]::Replace($pending, $pointer, (Join-Path $run 'installation.previous.json')) }
+            if (Test-Path -LiteralPath $pointer) { [IO.File]::Replace($pending, $pointer, $pointerBackup) }
             else { [IO.File]::Move($pending, $pointer) }
             $pointerPublished = $true
         } catch {
             # A failed publication is known unentered only if the complete old
             # pointer and new candidate bytes are both still exactly present.
-            $oldStillSelected = if ($pointerOldHash) { (Test-Path -LiteralPath $pointer) -and (Get-FileHash -LiteralPath $pointer -Algorithm SHA256).Hash.ToLowerInvariant() -eq $pointerOldHash } else { -not (Test-Path -LiteralPath $pointer) }
-            if (-not $oldStillSelected -or -not (Test-Path -LiteralPath $pending) -or (Get-FileHash -LiteralPath $pending -Algorithm SHA256).Hash.ToLowerInvariant() -ne $pendingHash) { $script:ForgeBootstrapUnsettled = $true }
+            $unchanged = $false
+            try {
+                $oldStillSelected = if ($pointerOldHash) { (Test-Path -LiteralPath $pointer) -and (Get-FileHash -LiteralPath $pointer -Algorithm SHA256).Hash.ToLowerInvariant() -eq $pointerOldHash } else { -not (Test-Path -LiteralPath $pointer) }
+                $unchanged = $oldStillSelected -and -not (Test-Path -LiteralPath $pointerBackup) -and (Test-Path -LiteralPath $pending) -and (Get-FileHash -LiteralPath $pending -Algorithm SHA256).Hash.ToLowerInvariant() -eq $pendingHash
+            } catch { }
+            if (-not $unchanged) { $script:ForgeBootstrapUnsettled = $true }
             throw
         }
         $report = Get-ForgeBootstrapReport $Root $SelectedSource -RequiredAuthentication $RequiredAuthentication -Clock $watch -MaximumSeconds $Seconds -OwnedLock $lock -RequiredTools $installTools
@@ -957,6 +1000,7 @@ function Invoke-ForgeBootstrapInstall {
         $report | Add-Member NoteProperty BootstrapMatchesSelectedSource $installation.BootstrapMatchesSelectedSource
         $report.AuthenticationChecked = $RequiredAuthentication.Count -gt 0
         if (-not $report.AuthenticationChecked) { $report.AuthenticationReady = $null }
+        $report | Add-Member NoteProperty ActivationPlan $activationPlanPath
         Write-ForgeNewJson (Join-Path $run 'report.json') $report
         $report | Add-Member NoteProperty AttemptDirectory $run
         $report
@@ -1003,6 +1047,7 @@ function Invoke-ForgeBootstrapInstall {
         }
         catch { $report = [pscustomobject]@{ Kind = 'DeliveryForgeBootstrapReport-v1'; StateRoot = $Root; Checks = @(); AutomatableActions = @(); UserActions = @(); InstallationReady = $false; AuthenticationReady = $false; ExecutionCertified = $false; ExitCode = 1 } }
         $report.ExitCode = $(if ($script:ForgeBootstrapUnsettled) { 125 } else { 1 })
+        $report | Add-Member NoteProperty ActivationPlan $activationPlanPath
         $report | Add-Member NoteProperty Failure $failure
         $report | Add-Member NoteProperty AttemptDirectory $run
         Write-ForgeNewJson (Join-Path $run 'failure-report.json') $report

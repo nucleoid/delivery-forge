@@ -6,7 +6,7 @@ $ErrorActionPreference = 'Stop'
 $null = New-Item -ItemType Directory -Path $TestRoot -Force
 $results = [Collections.Generic.List[object]]::new()
 $originals = @{}
-foreach ($name in @('Find-ForgeCommand', 'Invoke-ForgeProcess', 'Read-ForgeInstallation', 'Get-ForgeBootstrapReport', 'Invoke-ForgeBootstrapInstall', 'Write-ForgeBootstrapReport', 'Get-ForgeSkillStatus', 'Get-ForgeSkillDestination', 'Save-ForgeUnknown', 'Move-ForgeInstallationDirectory')) { $originals[$name] = (Get-Item ('Function:' + $name)).ScriptBlock }
+foreach ($name in @('Find-ForgeCommand', 'Invoke-ForgeProcess', 'Read-ForgeInstallation', 'Get-ForgeBootstrapReport', 'Invoke-ForgeBootstrapInstall', 'Write-ForgeBootstrapReport', 'Get-ForgeSkillStatus', 'Get-ForgeSkillDestination', 'Save-ForgeUnknown', 'Move-ForgeInstallationDirectory', 'Install-ForgeSkill')) { $originals[$name] = (Get-Item ('Function:' + $name)).ScriptBlock }
 function Assert($Condition, [string]$Message) { if (-not $Condition) { throw $Message } }
 function Mock([string]$Name, [scriptblock]$Body) { Set-Item ('Function:script:' + $Name) $Body }
 function Test([string]$Name, [scriptblock]$Body) {
@@ -306,11 +306,15 @@ $decoded=@(foreach($item in $encoded.Values64){[Text.Encoding]::UTF8.GetString([
 & $SelectedFacade @decoded
 exit $LASTEXITCODE
 '@)
-        $wire=@{Values64=@($values|ForEach-Object{[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_))})}|ConvertTo-Json -Compress
+        # Trailing-colon tokens have no recoverable provenance through a direct
+        # invocation. Raw native -File above still proves exact '-x:' support.
+        $directValues=@($values|Where-Object {$_ -cne '-x:'})
+        $directExpected64=@($directValues|ForEach-Object{[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_))})
+        $wire=@{Values64=$directExpected64}|ConvertTo-Json -Compress
         $result=Invoke-ForgeProcess $hostPath @('-NoProfile','-NonInteractive','-File',$oem,$facade,$wire) -Environment $environment -TimeoutSeconds 30
         Assert ($result.ExitCode -eq 17) 'OEM-origin command exit changed.'
         $seen=$result.Stdout|ConvertFrom-Json
-        Assert (($seen.Values64|ConvertTo-Json -Compress) -ceq ($expected64|ConvertTo-Json -Compress)) 'OEM input encoding changed actual argv.'
+        Assert (($seen.Values64|ConvertTo-Json -Compress) -ceq ($directExpected64|ConvertTo-Json -Compress)) 'OEM input encoding changed actual argv.'
         $utf8Caller=Join-Path $fixtureRoot 'PS51 UTF8 caller.ps1'
         [IO.File]::WriteAllText($utf8Caller,@'
 param([string]$SelectedFacade,[string]$Wire)
@@ -326,7 +330,7 @@ exit $LASTEXITCODE
         $utf8Result=Invoke-ForgeProcess $ps51Host @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$utf8Caller,$facade,$wire) -Environment $environment -TimeoutSeconds 30
         Assert ($utf8Result.ExitCode -eq 17 -and $utf8Result.Stderr -match 'INPUT_CODE_PAGE=65001') 'Actual PS51 UTF8-input origin did not enter and preserve exit.'
         $utf8Seen=$utf8Result.Stdout|ConvertFrom-Json
-        Assert (($utf8Seen.Values64|ConvertTo-Json -Compress) -ceq ($expected64|ConvertTo-Json -Compress)) 'PS51 input code page65001 mutated or rejected actual argv.'
+        Assert (($utf8Seen.Values64|ConvertTo-Json -Compress) -ceq ($directExpected64|ConvertTo-Json -Compress)) 'PS51 input code page65001 mutated or rejected actual argv.'
 
         $empty=Invoke-ForgeProcess $hostPath @('-NoProfile','-NonInteractive','-File',$facade) -Environment $environment -TimeoutSeconds 30
         Assert ($empty.ExitCode -eq 17) 'No-argument command did not enter exactly once.'
@@ -341,6 +345,88 @@ exit $LASTEXITCODE
         }
         Assert (-not(Test-Path -LiteralPath (Join-Path $fixtureRoot 'bootstrap.lock'))) 'Known failed command retained an UNKNOWN lock.'
     }
+    Test 'Batch and explicit script-shim stdin are refused before native entry' {
+        $caseRoot=Join-Path $TestRoot 'A1 preentry boundaries';$null=New-Item -ItemType Directory -Path $caseRoot
+        foreach($extension in @('.cmd','.bat')){
+            $target=Join-Path $caseRoot ('inert'+$extension)
+            [IO.File]::WriteAllText($target,'INERT FILE; MUST NEVER EXECUTE')
+            $refused=$false
+            try{Invoke-ForgeProcess $target @('literal') -TimeoutSeconds 5|Out-Null}catch{$refused=$_.Exception.Message -match 'FORGE_BOOTSTRAP_UNSUPPORTED_BATCH'}
+            Assert ($refused -and -not $script:ForgeBootstrapUnsettled) 'Batch target was entered or became UNKNOWN instead of known preentry refusal.'
+        }
+        $scriptTarget=Join-Path $caseRoot 'stdin target.ps1';$entered=Join-Path $caseRoot 'entered.txt'
+        [IO.File]::WriteAllText($scriptTarget,'[IO.File]::WriteAllText($env:DF_STDIN_ENTERED,''entered'');exit 0')
+        foreach($inputValue in @('','controlled ASCII fixture',$null)){
+            $options=@{Executable=$scriptTarget;Arguments=@('literal');StandardInput=$inputValue;Environment=@{DF_STDIN_ENTERED=$entered};TimeoutSeconds=5}
+            $refused=$false
+            try{Invoke-ForgeProcess @options|Out-Null}catch{$refused=$_.Exception.Message -match 'FORGE_BOOTSTRAP_UNSUPPORTED_SHIM_STDIN'}
+            Assert ($refused -and -not(Test-Path -LiteralPath $entered) -and -not $script:ForgeBootstrapUnsettled) 'Explicit shim stdin was lost or entered instead of known preentry refusal.'
+        }
+    }
+    Test 'Batch-only prerequisite discovery is unsupported without version or authentication entry' {
+        $script:BatchVersionCalls=0
+        Mock Find-ForgeCommand {param($Name) if($Name -eq 'git'){Join-Path $TestRoot 'git.cmd'}elseif($Name -eq 'pwsh'){Join-Path $TestRoot 'pwsh.exe'}else{$null}}
+        Mock Read-ForgeInstallation {$null}
+        Mock Invoke-ForgeProcess {
+            param($Executable,$Arguments)
+            if($Executable -like '*.cmd' -or $Executable -like '*.bat'){$script:BatchVersionCalls++;throw 'Batch prerequisite must not start.'}
+            [pscustomobject]@{ExitCode=0;Stdout='fixture version';Stderr=''}
+        }
+        $report=Get-ForgeBootstrapReport (Join-Path $TestRoot 'batch readiness') $source -RequiredTools @('git','pwsh') -RequiredAuthentication @()
+        $gitRow=$report.Checks|Where-Object Id -eq 'git'
+        Assert ($gitRow.Status -eq 'Unsupported' -and -not $gitRow.Automatic -and $script:BatchVersionCalls -eq 0 -and -not $report.AuthenticationChecked) 'Batch-only prerequisite was treated as executable/version-ready or silently replaced.'
+    }
+    Test 'Actual direct ambiguous arguments refuse while quoted colon and modern implicit File remain literal' {
+        $fixtureRoot=Join-Path $TestRoot 'generated facade actual'
+        $facade=Join-Path $fixtureRoot 'bin/delivery-forge.ps1'
+        $counter=Join-Path $fixtureRoot 'entries.txt'
+        $hostPath=(Get-Process -Id $PID).Path
+        $ps51=Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+        $environment=@{DF_FIXTURE_RECORD=(Join-Path $fixtureRoot 'installation.json');DF_FIXTURE_PWSH=$hostPath;DF_FIXTURE_COUNTER=$counter;DF_FIXTURE_X='controlled-fixture-value'}
+        $caller=Join-Path $fixtureRoot 'A1 direct caller.ps1'
+        [IO.File]::WriteAllText($caller,@'
+param([string]$SelectedFacade,[string]$SelectedCase)
+$ErrorActionPreference='Stop'
+try {
+    switch -Exact ($SelectedCase){
+        'NestedLiteral' { & $SelectedFacade --tools a,b }
+        'UnquotedColon' { & $SelectedFacade -foo:bar }
+        'DirectTrailingColon' { $v=@('-x:'); & $SelectedFacade @v }
+        'QuotedColon' { $v=@('-foo:bar'); & $SelectedFacade @v }
+        default { throw 'Unknown finite fixture case.' }
+    }
+    exit $LASTEXITCODE
+}catch{[Console]::Error.Write($_.Exception.Message);exit 91}
+'@,[Text.UTF8Encoding]::new($false))
+        foreach($origin in @($hostPath,$ps51)){
+            foreach($selectedCase in @('NestedLiteral','UnquotedColon','DirectTrailingColon')){
+                $before=@(Get-Content -LiteralPath $counter).Count
+                $result=Invoke-ForgeProcess $origin @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$caller,$facade,$selectedCase) -Environment $environment -TimeoutSeconds 20
+                Assert ($result.ExitCode -eq 91 -and $result.Stderr -match 'FORGE_BOOTSTRAP_AMBIGUOUS_ARGUMENT' -and @(Get-Content -LiteralPath $counter).Count -eq $before) 'Ambiguous direct input mutated or entered the original command.'
+                Assert (-not(Test-Path -LiteralPath (Join-Path $fixtureRoot 'bootstrap.lock'))) 'Known ambiguous input left an entered-command barrier.'
+            }
+            $before=@(Get-Content -LiteralPath $counter).Count
+            $quoted=Invoke-ForgeProcess $origin @('-NoProfile','-NonInteractive','-ExecutionPolicy','Bypass','-File',$caller,$facade,'QuotedColon') -Environment $environment -TimeoutSeconds 20
+            $observed=$quoted.Stdout|ConvertFrom-Json
+            $expected=[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('-foo:bar'))
+            Assert ($quoted.ExitCode -eq 17 -and $observed.Count -eq 1 -and $observed.Values64[0] -ceq $expected -and @(Get-Content -LiteralPath $counter).Count -eq $before+1) 'Ordinary quoted/splatted colon text failed exact literal forwarding.'
+        }
+        foreach($origin in @($hostPath,$ps51)){
+            $before=@(Get-Content -LiteralPath $counter).Count
+            $slash=Invoke-ForgeProcess $origin @('-NoProfile','-NonInteractive','/File',$facade,'-x:y','-x:') -Environment $environment -TimeoutSeconds 20
+            $observed=$slash.Stdout|ConvertFrom-Json
+            $expectedSlash=@('-x:y','-x:'|ForEach-Object{[Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($_))})
+            Assert ($slash.ExitCode -eq 17 -and $observed.Count -eq 2 -and ($observed.Values64|ConvertTo-Json -Compress) -ceq ($expectedSlash|ConvertTo-Json -Compress) -and @(Get-Content -LiteralPath $counter).Count -eq ($before+1)) 'Explicit slash-File failed to recover native colon-shaped argv.'
+        }
+        $before=@(Get-Content -LiteralPath $counter).Count
+        $modern=Invoke-ForgeProcess $hostPath @('-NoProfile','-NonInteractive',$facade,'$env:DF_FIXTURE_X') -Environment $environment -TimeoutSeconds 20
+        $seen=$modern.Stdout|ConvertFrom-Json
+        Assert ($modern.ExitCode -eq 17 -and $seen.Count -eq 1 -and $seen.Values64[0] -ceq [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes('$env:DF_FIXTURE_X')) -and @(Get-Content -LiteralPath $counter).Count -eq $before+1) 'Modern implicit File changed a literal environment-looking argument.'
+        $before=@(Get-Content -LiteralPath $counter).Count
+        $legacy=Invoke-ForgeProcess $ps51 @('-NoProfile','-NonInteractive',$facade,'$env:DF_FIXTURE_X') -Environment $environment -TimeoutSeconds 20
+        Assert ($legacy.ExitCode -ne 0 -and $legacy.Stderr -match 'FORGE_BOOTSTRAP_AMBIGUOUS_FILE_ARGV' -and @(Get-Content -LiteralPath $counter).Count -eq $before) 'PS51 implicit Command was mistaken for a literal native File invocation.'
+    }
+
     Test 'Actual native deadline records PID and attempts termination while retaining UNKNOWN125' {
         $case=Join-Path $TestRoot 'actual native deadline';$null=New-Item -ItemType Directory -Path $case
         $tool=Join-Path $case 'bounded sleeper.ps1'
@@ -775,6 +861,20 @@ exit 0
         Assert (Test-ForgeSkill $codexSkill) 'Whole orchestration failed to repair the managed missing file.'
         $backups=@(Get-ChildItem -LiteralPath (Join-Path $root 'bootstrap/skill-backups') -Directory)
         Assert ($backups.Count -ge 2) 'Whole orchestration failed to preserve prior discovery payloads.'
+        $activationPlanPath=Join-Path $reused.AttemptDirectory 'activation-plan.json'
+        $activationPlan=Read-ForgeUtf8Text $activationPlanPath|ConvertFrom-Json
+        Assert ($activationPlan.Kind -eq 'DeliveryForgeBootstrapActivationPlan-v1' -and $activationPlan.SourceCommit -eq $record.SourceCommit -and @($activationPlan.Skills).Count -eq 2) 'Durable activation plan did not bind the actual selected source and two skills.'
+        foreach($skillMove in $activationPlan.Skills){
+            Assert ($skillMove.Destination -eq (Get-ForgeSkillDestination $skillMove.Agent) -and $skillMove.OldExists -and (Test-Path -LiteralPath $skillMove.Backup -PathType Container)) 'Durable plan did not map the selected skill to its actual prior backup.'
+            Assert ((Get-FileHash -LiteralPath (Join-Path $skillMove.Backup '.forge-bootstrap-skill.json')).Hash.ToLowerInvariant() -ceq $skillMove.OldMarker) 'Actual skill backup differs from its planned old marker.'
+            Assert ((Get-FileHash -LiteralPath (Join-Path $skillMove.Destination '.forge-bootstrap-skill.json')).Hash.ToLowerInvariant() -ceq $skillMove.NewMarker) 'Selected new skill differs from its durable planned marker.'
+            Assert (-not(Test-Path -LiteralPath $skillMove.Candidate)) 'Success left the planned new skill candidate unmoved.'
+        }
+        foreach($role in @($activationPlan.Facade,$activationPlan.Pointer)){
+            Assert ((Get-FileHash -LiteralPath $role.Path).Hash.ToLowerInvariant() -ceq $role.NewSha256) 'Selected facade/pointer is not its planned new bytes.'
+            Assert ((Get-FileHash -LiteralPath $role.Backup).Hash.ToLowerInvariant() -ceq $role.OldSha256) 'Durable facade/pointer backup mapping does not match actual previous bytes.'
+        }
+
         # Exercise known-no-effect failures after real candidate directory moves,
         # while keeping the source/SDK/Git calls in this existing mocked fixture.
         foreach($faultKind in @('old-skill','facade')){
@@ -804,6 +904,52 @@ exit 0
             foreach($agent in @('codex','claude')){Assert (Test-ForgeSkill (Get-ForgeSkillDestination $agent)) 'Known rollback lost previous complete skill payload.'}
             Assert (-not(Test-Path -LiteralPath (Join-Path $root 'bootstrap.lock'))) 'Known rollback retained an unresolved-operation lock.'
         }
+        # Inject actual owner-file edits after the existing fixture has consumed
+        # source, while Git/SDK observations retain their existing mocks.
+        foreach($mutationKind in @('source','facade','pointer')){
+            $selected=Read-ForgeInstallation $root
+            $script:BMutationKind=$mutationKind;$script:BMutationDone=$false;$script:BActivationMoves=0
+            $script:BSourceFile=Join-Path $selected.SourceRoot 'SKILL.md'
+            $script:BFacadeFile=Join-Path $root 'bin/delivery-forge.ps1'
+            $script:BPointerFile=Join-Path $root 'installation.json'
+            $observedFiles=@($script:BSourceFile,$script:BFacadeFile,$script:BPointerFile)
+            $savedBytes=@{};foreach($path in $observedFiles){$savedBytes[$path]=[IO.File]::ReadAllBytes($path)}
+            $skillMarkers=@((Join-Path (Get-ForgeSkillDestination 'codex') '.forge-bootstrap-skill.json'),(Join-Path (Get-ForgeSkillDestination 'claude') '.forge-bootstrap-skill.json'))
+            $savedMarkers=@{};foreach($path in $skillMarkers){$savedMarkers[$path]=(Get-FileHash -LiteralPath $path).Hash}
+            $script:SimulatedDriftRoot=[string]$selected.SourceRoot;$script:SimulatedDriftKind=$null
+            Mock Move-ForgeInstallationDirectory {
+                param($From,$To)
+                $script:BActivationMoves++
+                & $originals['Move-ForgeInstallationDirectory'] $From $To
+            }
+            Mock Install-ForgeSkill {
+                param($SelectedSource,$Destination,$Launcher,$SourceCommit)
+                & $originals['Install-ForgeSkill'] $SelectedSource $Destination $Launcher $SourceCommit
+                if(-not $script:BMutationDone){
+                    $script:BMutationDone=$true
+                    switch($script:BMutationKind){
+                        'source' {[IO.File]::AppendAllText($script:BSourceFile,"`nOwner source edit after consumption.");$script:SimulatedDriftKind='dirty'}
+                        'facade' {[IO.File]::AppendAllText($script:BFacadeFile,"`n# Owner facade edit during installation.")}
+                        'pointer' {[IO.File]::AppendAllText($script:BPointerFile,"`n ")}
+                    }
+                }
+            }
+            try {
+                $failed=Invoke-ForgeBootstrapInstall $root $selected.SourceRoot 'HEAD' 120 -SourceSelectionExplicit -RequiredAuthentication @()
+                Assert ($failed.ExitCode -eq 1 -and $script:BMutationDone -and $script:BActivationMoves -eq 0 -and -not $script:ForgeBootstrapUnsettled) 'Post-consumption/preactivation mutation was activated or incorrectly classified.'
+                $changedPath=switch($mutationKind){'source'{$script:BSourceFile}'facade'{$script:BFacadeFile}'pointer'{$script:BPointerFile}}
+                Assert ([Convert]::ToBase64String([IO.File]::ReadAllBytes($changedPath)) -cne [Convert]::ToBase64String($savedBytes[$changedPath])) 'Installation removed an owner edit from its selected path.'
+                foreach($path in $skillMarkers){Assert ((Get-FileHash -LiteralPath $path).Hash -ceq $savedMarkers[$path]) 'Refused mutation still displaced an old skill.'}
+                Assert (-not(Test-Path -LiteralPath (Join-Path $root 'bootstrap.lock'))) 'Known preactivation refusal left UNKNOWN.'
+            } finally {
+                # Explicit fixture restoration only; the installer must not do it.
+                foreach($path in $observedFiles){[IO.File]::WriteAllBytes($path,$savedBytes[$path])}
+                $script:SimulatedDriftRoot=$null;$script:SimulatedDriftKind=$null
+                Set-Item Function:script:Install-ForgeSkill $originals['Install-ForgeSkill']
+                Set-Item Function:script:Move-ForgeInstallationDirectory $originals['Move-ForgeInstallationDirectory']
+            }
+        }
+
         foreach($driftKind in @('dirty','moved')){
             $selected=Read-ForgeInstallation $root
             $script:SimulatedDriftRoot=[string]$selected.SourceRoot;$script:SimulatedDriftKind=$driftKind
@@ -828,6 +974,50 @@ exit 0
         $script:ExplicitMismatchRef=$null
         Assert ($mismatched.ExitCode -eq 1 -and (Get-FileHash -LiteralPath (Join-Path $root 'installation.json')).Hash -ceq $beforePointer) 'Explicit source/ref mismatch changed the selected installation.'
         Assert (-not(Test-Path -LiteralPath (Join-Path $root 'bootstrap.lock'))) 'Known explicit ref mismatch was misclassified as UNKNOWN.'
+
+        # This is last: preserve an intentionally unresolved activation instead
+        # of deleting its barrier or silently restoring its mixed state.
+        $selected=Read-ForgeInstallation $root
+        $script:BPointerFile=Join-Path $root 'installation.json'
+        $script:BDoubleFaultMoves=0;$script:BPointerHashes=0;$script:BHashFaultObserved=$false;$script:BPointerHold=$null;$script:BPointerArmed=$false
+        $script:BHashCommand=Get-Command Get-FileHash
+        $priorHashFunction=if(Test-Path Function:Get-FileHash){(Get-Item Function:Get-FileHash).ScriptBlock}else{$null}
+        Mock Get-FileHash {
+            param([string]$LiteralPath,[string]$Algorithm='SHA256')
+            if($script:BPointerArmed -and [string]::Equals($LiteralPath,$script:BPointerFile,[StringComparison]::OrdinalIgnoreCase)){
+                $script:BPointerHashes++
+                if($script:BPointerHashes -ge 2){$script:BHashFaultObserved=$true;throw 'Injected classification hash failure after pointer replacement refused.'}
+            }
+            & $script:BHashCommand -LiteralPath $LiteralPath -Algorithm $Algorithm
+        }
+        Mock Move-ForgeInstallationDirectory {
+            param($From,$To)
+            $script:BDoubleFaultMoves++
+            & $originals['Move-ForgeInstallationDirectory'] $From $To
+            if($script:BDoubleFaultMoves -eq 4){
+                # Exact preimage read is allowed, but File.Replace is denied.
+                $script:BPointerHold=[IO.File]::Open($script:BPointerFile,'Open','Read','Read')
+                $script:BPointerArmed=$true
+            }
+        }
+        try {
+            $unknown=Invoke-ForgeBootstrapInstall $root $selected.SourceRoot 'HEAD' 120 -SourceSelectionExplicit -RequiredAuthentication @()
+        } finally {
+            if($script:BPointerHold){$script:BPointerHold.Dispose()}
+            if($priorHashFunction){Set-Item Function:script:Get-FileHash $priorHashFunction}else{Remove-Item Function:script:Get-FileHash}
+            Set-Item Function:script:Move-ForgeInstallationDirectory $originals['Move-ForgeInstallationDirectory']
+            $script:BPointerArmed=$false
+        }
+        Assert ($unknown.ExitCode -eq 125 -and $script:ForgeBootstrapUnsettled -and $script:BHashFaultObserved -and $script:BDoubleFaultMoves -eq 4) 'Pointer publication/classification double fault became ordinary failure or destructively rolled back.'
+        $barrierPath=Join-Path $root 'bootstrap.lock'
+        Assert (Test-Path -LiteralPath $barrierPath) 'Unresolved pointer disposition lost its replay barrier.'
+        $barrier=Read-ForgeUtf8Text $barrierPath|ConvertFrom-Json
+        $unknownPlanPath=Join-Path $unknown.AttemptDirectory 'activation-plan.json'
+        Assert ($barrier.Kind -eq 'DeliveryForgeBootstrapActivation-v1' -and $barrier.AttemptDirectory -eq $unknown.AttemptDirectory -and $barrier.ActivationPlan -eq $unknownPlanPath) 'Retained barrier does not point to its durable activation evidence.'
+        $unknownPlan=Read-ForgeUtf8Text $unknownPlanPath|ConvertFrom-Json
+        foreach($skillMove in $unknownPlan.Skills){
+            Assert ((Get-FileHash -LiteralPath (Join-Path $skillMove.Backup '.forge-bootstrap-skill.json')).Hash.ToLowerInvariant() -ceq $skillMove.OldMarker -and (Get-FileHash -LiteralPath (Join-Path $skillMove.Destination '.forge-bootstrap-skill.json')).Hash.ToLowerInvariant() -ceq $skillMove.NewMarker) 'UNKNOWN activation lost its exact old/new skill mapping.'
+        }
 
         [IO.File]::AppendAllText((Join-Path (Split-Path -Parent $record.ToolAssembly) 'dependency.dll'), 'changed')
         Assert ($null -eq (Read-ForgeInstallation $root)) 'Changed non-entry assembly was accepted as installed.'
