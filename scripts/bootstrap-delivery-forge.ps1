@@ -740,7 +740,8 @@ function Invoke-ForgeBootstrapInstall {
         $checks = [Collections.Generic.List[object]]::new()
         foreach ($row in $report.Checks) { if ($row.Id -ne 'bootstrap-lock') { $checks.Add($row) } }
         $report = New-ForgeReport $Root $checks $sdkVersion $RequiredAuthentication
-        $report.AuthenticationChecked = $true
+        $report.AuthenticationChecked = $RequiredAuthentication.Count -gt 0
+        if (-not $report.AuthenticationChecked) { $report.AuthenticationReady = $null }
         Write-ForgeNewJson (Join-Path $run 'report.json') $report
         $report | Add-Member NoteProperty AttemptDirectory $run
         $report

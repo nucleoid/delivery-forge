@@ -319,8 +319,9 @@ exit $script:ForgeCommandExitCode
             }
             [pscustomobject]@{ ExitCode = 0; Stdout = $out; Stderr = '' }
         }
-        $result = Invoke-ForgeBootstrapInstall $root $payload 'main' 120
+        $result = Invoke-ForgeBootstrapInstall $root $payload 'main' 120 -RequiredAuthentication @()
         Assert ($result.ExitCode -eq 0) ('Install fixture failed: ' + $result.Failure)
+        Assert (-not $result.AuthenticationChecked -and $null -eq $result.AuthenticationReady) 'Installation falsely certified unobserved sign-ins.'
         $record = Read-ForgeInstallation $root
         Assert ($null -ne $record -and -not $record.RuntimeCertified) 'Installation selection missing or falsely runtime-certified.'
         Assert (Test-Path -LiteralPath $record.BootstrapScript) 'Immutable shared bootstrap not copied.'
