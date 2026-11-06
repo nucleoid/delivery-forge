@@ -24,10 +24,49 @@ public sealed class ReviewCompletionEvidenceTests
     static SnapshotFacts Snapshot(params FileFact[] files) => new(Head, Tree, "sha256:" + new string('e', 64), Array.AsReadOnly(files));
     static AgentCompletionReceipt Completion() => new("1.0.0", "projection-DATA", "sha256:" + new string('f', 64), "codex.cli", "fixture-v1",
         "runtime-thread-DATA", "runtime-turn-DATA", "success", Path.GetFullPath("worker-DATA"), Head, Tree, DateTimeOffset.UnixEpoch, [], []);
+    static AgentAcceptedReceipt Accepted(AgentCompletionReceipt completion) => new(completion.SchemaVersion, completion.RunId, completion.RequestIdentity,
+        "sha256:" + new string('3', 64), Before, completion.Worktree, completion.AdapterId, completion.AdapterVersion,
+        completion.RuntimeRunIdentity, completion.RuntimeTaskIdentity, DateTimeOffset.UnixEpoch, []);
     static JsonElement Project(SnapshotFacts snapshot, IReadOnlyList<string> changedPaths, string? ancestry = null) =>
-        ReviewCompletionEvidence.Create(Completion(), Before, snapshot, changedPaths, "", ancestry ?? Head + " " + Before + "\n",
+        ReviewCompletionEvidence.Create(Accepted(Completion()), Completion(), Before, snapshot, changedPaths, "", ancestry ?? Head + " " + Before + "\n",
             "quality/evidence-policy.json", 358, "sha256:" + new string('1', 64), "sha256:" + new string('2', 64));
 
+    [Fact]
+    public void Accepted_and_completed_observations_bind_application_run_to_independent_worktree_and_actual_Codex_thread_turn()
+    {
+        var completion = Completion() with { Worktree = Path.GetFullPath(Path.Combine("allocation-DATA", "different-directory-id", "worktree")) };
+        var data = ReviewCompletionEvidence.Create(Accepted(completion), completion, Before, Snapshot(Fact("subject.txt")),
+            new[] { "subject.txt" }, "", Head + " " + Before + "\n", "quality/evidence-policy.json", 358,
+            "sha256:" + new string('1', 64), "sha256:" + new string('2', 64));
+        using var serialized = JsonDocument.Parse(JsonSerializer.SerializeToUtf8Bytes(data, BoundedFiles.Json));
+        var binding = serialized.RootElement.GetProperty("AcceptedCompletionBinding");
+        foreach (var name in new[] { "Accepted", "Completed" })
+        {
+            var observed = binding.GetProperty(name);
+            Assert.Equal(completion.RunId, observed.GetProperty("ApplicationRunId").GetString());
+            Assert.Equal(completion.RequestIdentity, observed.GetProperty("RequestIdentity").GetString());
+            Assert.Equal(completion.Worktree, observed.GetProperty("Worktree").GetString());
+            Assert.Equal("codex.cli", observed.GetProperty("AdapterId").GetString());
+            Assert.Equal(completion.RuntimeRunIdentity, observed.GetProperty("RuntimeRunIdentity").GetString());
+            Assert.Equal(completion.RuntimeTaskIdentity, observed.GetProperty("RuntimeTaskIdentity").GetString());
+        }
+        Assert.Contains("threadId", binding.GetProperty("RuntimeIdentitySemantics").GetString()!, StringComparison.Ordinal);
+        Assert.Contains("turnId", binding.GetProperty("RuntimeIdentitySemantics").GetString()!, StringComparison.Ordinal);
+        Assert.DoesNotContain(completion.RunId, completion.Worktree, StringComparison.Ordinal);
+    }
+    [Fact]
+    public void Mismatched_accepted_worker_observations_cannot_be_presented_as_completed_source()
+    {
+        var completion = Completion(); var accepted = Accepted(completion);
+        var mismatches = new[] { accepted with { RunId = "foreign-DATA" }, accepted with { RequestIdentity = "foreign-DATA" },
+            accepted with { BaseCommit = new string('9', 40) }, accepted with { Worktree = Path.GetFullPath("foreign-worktree-DATA") },
+            accepted with { AdapterId = "other-adapter-DATA" }, accepted with { AdapterVersion = "other-version-DATA" },
+            accepted with { RuntimeRunIdentity = "foreign-thread-DATA" }, accepted with { RuntimeTaskIdentity = "foreign-turn-DATA" } };
+        foreach (var mismatch in mismatches)
+            Assert.Throws<WorkerEnvelopeException>(() => ReviewCompletionEvidence.Create(mismatch, completion, Before, Snapshot(Fact("subject.txt")),
+                new[] { "subject.txt" }, "", Head + " " + Before + "\n", "quality/evidence-policy.json", 358,
+                "sha256:" + new string('1', 64), "sha256:" + new string('2', 64)));
+    }
     [Fact]
     public void Hundreds_of_unselected_small_files_do_not_spend_hex_or_grow_changed_file_presentation()
     {
@@ -108,7 +147,7 @@ public sealed class ReviewCompletionEvidenceTests
         var policy = ContractValidator.ParseAndValidate(rawPolicy); var rawHash = "sha256:" + Convert.ToHexStringLower(SHA256.HashData(rawPolicy));
         Assert.NotEqual(rawHash, policy.Identity);
         var parents = Head + " " + Before + " " + new string('9', 40) + "\n";
-        var data = ReviewCompletionEvidence.Create(Completion(), Before, Snapshot(Fact("subject.txt")), new[] { "subject.txt" }, "", parents,
+        var data = ReviewCompletionEvidence.Create(Accepted(Completion()), Completion(), Before, Snapshot(Fact("subject.txt")), new[] { "subject.txt" }, "", parents,
             "quality/evidence-policy.json", rawPolicy.LongLength, rawHash, policy.Identity);
         var serialized = JsonSerializer.SerializeToUtf8Bytes(data, BoundedFiles.Json); using var roundTrip = JsonDocument.Parse(serialized);
         var output = roundTrip.RootElement;

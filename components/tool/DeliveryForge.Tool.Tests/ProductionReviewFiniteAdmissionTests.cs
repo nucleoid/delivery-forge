@@ -286,7 +286,10 @@ public sealed class ProductionReviewFiniteAdmissionTests
             else Assert.Equal(new[] { "subject.txt" }, changedPaths);
             var completionData = new AgentCompletionReceipt("1.0.0", "owned", "sha256:" + new string('a', 64), "codex.cli", "fixture-v1",
                 "fixture-thread-DATA", "fixture-turn-DATA", "success", worker, head, patch.HeadTree, DateTimeOffset.UnixEpoch, [], []);
-            var projected = ReviewCompletionEvidence.Create(completionData, baseCommit, byteFacts, changedPaths,
+            var acceptedData = new AgentAcceptedReceipt(completionData.SchemaVersion, completionData.RunId, completionData.RequestIdentity,
+                planIdentity, baseCommit, worker, completionData.AdapterId, completionData.AdapterVersion,
+                completionData.RuntimeRunIdentity, completionData.RuntimeTaskIdentity, DateTimeOffset.UnixEpoch, []);
+            var projected = ReviewCompletionEvidence.Create(acceptedData, completionData, baseCommit, byteFacts, changedPaths,
                 await Git(worker, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"),
                 await Git(worker, "rev-list", "--parents", baseCommit + ".." + head),
                 "evidence-policy.json", evidenceBytes.LongLength, "sha256:" + Convert.ToHexStringLower(SHA256.HashData(evidenceBytes)), evidenceIdentity);
