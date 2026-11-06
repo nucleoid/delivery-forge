@@ -27,6 +27,20 @@ Delivery Forge separates five authorization modes:
 
 The normal intake is a minimal interview. Delivery Forge asks one plain conversational question—with a recommendation—only when a genuine intent, risk, or product decision belongs to the user. Engineering questions are resolved from repository evidence when possible. A deep interview is available by explicit opt-in.
 
+## Start with a GitHub issue plan
+
+With the skill and helper installed, open the target repository in the agent and
+request `$delivery-forge Plan OWNER/REPO#123. Plan only.` The skill reads the actual
+issue and repository, prepares or reuses plan-only setup, and freezes the plan.
+It then attaches the complete plan to the issue, verifies the comment, and adds
+`planned` while preserving existing labels. Request local/chat-only delivery if
+you do not want the issue updated.
+
+A local frozen bundle alone does not complete the GitHub handoff. The `planned`
+label does not authorize implementation or reserve a Continuum execution lease.
+See [planning setup and GitHub handoff](references/planning.md#github-issue-planning-and-handoff)
+for first-use configuration, safe publication and recovery from uncertain delivery.
+
 ## Core principles
 
 - A shared plan artifact records scope, acceptance criteria, source of each decision, exact files/symbols/contracts, prerequisites, test policy, rollout/rollback, unknowns, and exclusions.

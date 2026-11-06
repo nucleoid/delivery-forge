@@ -98,6 +98,79 @@ verified `refs/heads/*` reference; commit/tree drift invalidates downstream read
 Validation establishes shape and identity only. It grants no approval, publication, merge, release,
 deployment, configuration, credential, or installation authority.
 
+## GitHub issue planning and handoff
+
+A requested GitHub issue plan includes durable delivery back to that issue unless
+the user explicitly requests a local/chat-only draft. This is planning
+metadata, not permission to implement, create a PR or merge. The skill's agent
+performs the GitHub reads/comment/label operations; the deterministic planning
+core only freezes the bundle and does not call GitHub.
+
+### Read the actual issue and prepare planning inputs
+
+Prefer an existing working `gh` CLI. Use an explicit repository and read the body,
+comments, labels and state, for example:
+
+```powershell
+gh issue view <N> --repo <owner>/<repo> --json number,title,state,body,comments,labels,url
+```
+
+An actual successful read establishes access. Merely finding `gh` does not prove
+it is authenticated, and a separate connector's 404 does not establish that an
+issue is absent. If the selected route fails, report its actual error and use
+another already-authorized route where available; do not change authentication.
+
+Standalone `--issue` requires an embedding issue-content port. The ordinary
+installed CLI does not provide a built-in GitHub reader. Read through `gh`,
+investigate the repository, and prepare the typed local `--intent-file` described
+in [the command protocol](tool-protocol.md).
+
+Reuse an existing target-repository plan-only configuration, or prepare its path
+and configuration records as part of the requested planning task. The current
+standalone entry point requires a pinned `StandaloneRoot` even for planning;
+`STANDALONE_ROOT_REQUIRED` means missing setup, not missing worker certification
+or implementation permission. Keep the ceiling `plan`, use distinct repository,
+store, worker and result paths, and leave worker runtime admission unavailable.
+Where the root shape requires an admission selection, use an explicitly
+non-admitted record; never fabricate successful conformance or copy a fixture's
+accepted runtime/baseline. Worker dispatch must continue to reject that record.
+
+The containing caller must still establish the existing process/resource limits
+before CLR startup. Linux Git inspection also needs its supported ordinary
+process scope. Skipping worker conformance does not bypass these restrictions.
+An existing setup must be checked for the actual repository and current path/pin
+identities before reuse.
+
+### Freeze, attach, verify, then label
+
+1. Obtain actual `COMPLETE / PLAN_FROZEN` output and retain its exact bundle,
+   revision, contract identity and base commit. A readable draft or `INCOMPLETE`
+   result is not a frozen plan. Do not rerun a successful freeze just to renew dates.
+2. Prepare a self-contained issue comment containing the intent, findings versus
+   hypotheses, exact base/revision, files and ordered work, acceptance/tests,
+   prerequisites, rollout/rollback and remaining limitations. Include the frozen
+   bundle when it is safe to publish. Exclude credentials, private host paths,
+   operator configuration and private evidence. Do not redact or rewrite a frozen
+   bundle and present it as retaining the original identity; if unsafe, publish a
+   separate readable public handoff with the identity and keep private bytes local.
+3. Post the complete comment through the authorized GitHub route, using a UTF-8
+   body file with `gh`. Read it back and verify its complete body and issue identity.
+   Reuse an exact existing comment. After an uncertain result, inspect remote state
+   before another attempt; do not duplicate comments blindly.
+4. Only after comment verification, create `planned` if absent, preserving existing
+   label metadata, then add it to the issue without replacing other labels. Read
+   back the final comment and labels. If posting or readback is incomplete, leave
+   the label unapplied and report that the local plan exists but handoff is incomplete.
+5. Report the plan-comment URL and verified label. A revised plan must identify
+   which revision it supersedes; reconcile stale plan/label state before treating
+   the issue as ready for downstream work.
+
+A `planned` label is durable discoverability, not an execution lock or approval.
+The Continuum execution lease is acquired on the actual implementation path before
+worker provisioning/dispatch and released through that run's owned disposition.
+Before implementation, reconcile the frozen base and obtain the separately
+required execution, quality, review and runtime prerequisites.
+
 ## Platforms
 
 Linux and Windows are v1 targets. Local evidence establishes Linux behavior; Windows requires its
