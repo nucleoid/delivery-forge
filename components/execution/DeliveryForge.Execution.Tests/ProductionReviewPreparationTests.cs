@@ -186,7 +186,9 @@ public sealed class ProductionReviewPreparationTests : IDisposable
         var baseCommit = await Git("rev-parse", "HEAD");
         await File.WriteAllTextAsync(Path.Combine(fixture.Root, "review.json"), "{}", bound.Token);
         await File.WriteAllTextAsync(Path.Combine(fixture.Root, "subject.txt"), "candidate source\n", bound.Token);
-        await Git("add", "--", "review.json", "subject.txt");
+        var lineEndingBytes = new byte[] { 239, 187, 191 }.Concat(Encoding.UTF8.GetBytes(new string('a', 256) + "\r\n\n")).ToArray();
+        await File.WriteAllBytesAsync(Path.Combine(fixture.Root, "line-endings.txt"), lineEndingBytes, bound.Token);
+        await Git("-c", "core.autocrlf=false", "add", "--", "review.json", "subject.txt", "line-endings.txt");
         await Git("-c", "user.name=SourceBuilderConformance", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgSign=false", "commit", "-q", "-m", "candidate cannot replace protected policy");
         var headCommit = await Git("rev-parse", "HEAD");
         DirectoryInfo? repository = new(AppContext.BaseDirectory);
@@ -229,6 +231,10 @@ public sealed class ProductionReviewPreparationTests : IDisposable
         var subjectFact = Assert.Single(verifiedFacts.Files, row => row.RelativePath == "subject.txt");
         Assert.Equal("sha256:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("candidate source\n"))), subjectFact.Sha256);
         Assert.Equal(Convert.ToHexStringLower(Encoding.UTF8.GetBytes("candidate source\n")), subjectFact.Hex);
+        var endings = Assert.Single(verifiedFacts.Files, row => row.RelativePath == "line-endings.txt");
+        Assert.Equal(lineEndingBytes.LongLength, endings.Bytes); Assert.True(endings.ValidUtf8); Assert.True(endings.HasUtf8Bom);
+        Assert.Equal(1L, endings.CrCount); Assert.Equal(2L, endings.LfCount); Assert.True(endings.EndsWithLf);
+        Assert.Null(endings.Hex); Assert.Equal("FileExceeds128Bytes", endings.HexOmittedReason);
         Assert.False(owner.Uncertain);
         // Empty directories yield no files; traversal must still stop at its depth bound.
         var emptyRoot = Path.Combine(fixture.Root, "empty-depth-control"); var deepest = emptyRoot;

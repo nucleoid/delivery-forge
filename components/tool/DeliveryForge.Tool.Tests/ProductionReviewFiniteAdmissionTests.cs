@@ -281,12 +281,13 @@ public sealed class ProductionReviewFiniteAdmissionTests
             var expectedSubject = Encoding.UTF8.GetBytes("candidate\n");
             Assert.Equal(expectedSubject.LongLength, subject.Bytes);
             Assert.Equal("sha256:" + Convert.ToHexStringLower(SHA256.HashData(expectedSubject)), subject.Sha256);
-            if (subject.Hex is not null) { Assert.Equal(Convert.ToHexStringLower(expectedSubject), subject.Hex); Assert.Null(subject.HexOmittedReason); }
-            else { Assert.False(allGoldenChecks); Assert.Equal("SnapshotHexBudgetExhausted", subject.HexOmittedReason); }
+            Assert.Equal(Convert.ToHexStringLower(expectedSubject), subject.Hex); Assert.Null(subject.HexOmittedReason);
             Assert.Equal("100644", subject.Mode); Assert.Equal(40, subject.BlobIdentity.Length);
-            Assert.InRange(byteFacts.Files.Sum(row => (row.Hex?.Length ?? 0) / 2), 0, 4096);
+            var presentation = ReviewCompletionEvidence.SelectChangedFiles(byteFacts, new[] { "subject.txt" });
+            Assert.Equal(subject.Hex, Assert.Single(presentation).Hex);
+            Assert.InRange(presentation.Sum(row => (row.Hex?.Length ?? 0) / 2), 0, 4096);
             Assert.Contains(byteFacts.Files, row => row.RelativePath == "review.json" && row.Hex is null && row.HexOmittedReason == "FileExceeds128Bytes");
-            if (!allGoldenChecks) Assert.Contains(byteFacts.Files, row => row.HexOmittedReason == "SnapshotHexBudgetExhausted");
+            if (!allGoldenChecks) Assert.True(byteFacts.Files.Sum(row => (row.Hex?.Length ?? 0) / 2) > 4096);
             Assert.Throws<NotSupportedException>(() => ((IList<ProductionReviewSourceOwner.VerifiedSourceFileFact>)byteFacts.Files).Clear());
             Assert.Throws<ReviewPreflightException>(() => owner.RequireVerifiedSnapshotFacts(head, new string('f', 40)));
             for (var export = 0; export < (allGoldenChecks ? 11 : 3); export++)

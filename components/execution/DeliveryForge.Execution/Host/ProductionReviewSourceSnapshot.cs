@@ -7,9 +7,10 @@ namespace DeliveryForge.Execution.Host;
 
 public sealed partial class ProductionReviewSourceOwner
 {
-    internal sealed record VerifiedSourceFileFact(string RelativePath, string Mode, string BlobIdentity, long Bytes, string Sha256, string? Hex, string? HexOmittedReason);
+    internal sealed record VerifiedSourceFileFact(string RelativePath, string Mode, string BlobIdentity, long Bytes, string Sha256, string? Hex, string? HexOmittedReason, bool ValidUtf8, bool HasUtf8Bom, long CrCount, long LfCount, bool EndsWithLf);
     internal sealed record VerifiedSourceSnapshotFacts(string HeadCommit, string TreeId, string SourceFingerprint, IReadOnlyList<VerifiedSourceFileFact> Files);
     VerifiedSourceSnapshotFacts? verifiedSnapshotFacts;
+    // Retained census DATA only: the production consumer must first complete the same-source GitPatchIdentity computation.
     internal VerifiedSourceSnapshotFacts RequireVerifiedSnapshotFacts(string head, string tree)
     {
         Check();
@@ -153,9 +154,14 @@ public sealed partial class ProductionReviewSourceOwner
                             fingerprint.AppendData(Encoding.ASCII.GetBytes(mode)); fingerprint.AppendData([0]);
                             var byteHash = SHA256.HashData(bytes);
                             fingerprint.AppendData(byteHash);
+                            var validUtf8 = true;
+                            try { _ = new UTF8Encoding(false, true).GetCharCount(bytes); }
+                            catch (DecoderFallbackException) { validUtf8 = false; }
                             fileFacts.Add(new(relative, mode, tree[relative].ObjectId, bytes.LongLength,
                                 "sha256:" + Convert.ToHexStringLower(byteHash), bytes.Length <= 128 ? Convert.ToHexStringLower(bytes) : null,
-                                bytes.Length <= 128 ? null : "FileExceeds128Bytes"));
+                                bytes.Length <= 128 ? null : "FileExceeds128Bytes", validUtf8,
+                                bytes.Length >= 3 && bytes[0] == 239 && bytes[1] == 187 && bytes[2] == 191,
+                                bytes.LongCount(value => value == 13), bytes.LongCount(value => value == 10), bytes.Length > 0 && bytes[^1] == 10));
                             Current();
                         }
                     }
@@ -167,14 +173,8 @@ public sealed partial class ProductionReviewSourceOwner
                 if (outputSeen.Count != (outputs?.Count ?? 0)) throw new ReviewPreflightException("Measured quality output membership changed.");
                 _ = CurrentQualityOutputFiles(headTree);
                 var sourceFingerprint = fingerprint.GetHashAndReset();
-                var hexBytesRemaining = 4096;
-                var boundedFacts = fileFacts.OrderBy(row => row.RelativePath, StringComparer.Ordinal).Select(row =>
-                {
-                    if (row.Hex is null) return row;
-                    if (row.Bytes > hexBytesRemaining) return row with { Hex = null, HexOmittedReason = "SnapshotHexBudgetExhausted" };
-                    hexBytesRemaining -= checked((int)row.Bytes); return row;
-                }).ToArray();
-                verifiedSnapshotFacts = new(headCommit, headTree, "sha256:" + Convert.ToHexStringLower(sourceFingerprint), Array.AsReadOnly(boundedFacts));
+                var orderedFacts = fileFacts.OrderBy(row => row.RelativePath, StringComparer.Ordinal).ToArray();
+                verifiedSnapshotFacts = new(headCommit, headTree, "sha256:" + Convert.ToHexStringLower(sourceFingerprint), Array.AsReadOnly(orderedFacts));
                 return sourceFingerprint;
             });
         }
