@@ -35,7 +35,8 @@ try {
     $stdout=$process.StandardOutput.BaseStream.CopyToAsync([Console]::OpenStandardOutput())
     $stderr=$process.StandardError.BaseStream.CopyToAsync([Console]::OpenStandardError())
     $process.WaitForExit()
-    [Threading.Tasks.Task]::WhenAll(@($stdout,$stderr)).GetAwaiter().GetResult()
+    $stdout.GetAwaiter().GetResult()
+    $stderr.GetAwaiter().GetResult()
     $exitCode=$process.ExitCode
     $process.Dispose()
 } finally {
