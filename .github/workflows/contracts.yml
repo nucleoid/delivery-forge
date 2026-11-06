@@ -14,6 +14,9 @@ on:
       - "components/scheduling/**"
       - "components/tool/**"
       - "SKILL.md"
+      - "scripts/bootstrap-delivery-forge.ps1"
+      - "scripts/tests/bootstrap-delivery-forge.Tests.ps1"
+      - "scripts/delivery-forge.ps1"
       - "docs/**"
       - "DeliveryForge.slnx"
       - "Directory.*.props"
@@ -44,6 +47,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: Run Windows bootstrap controls without installation or sign-in
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $results = Join-Path $env:RUNNER_TEMP 'delivery-forge-bootstrap-controls'
+          ./scripts/tests/bootstrap-delivery-forge.Tests.ps1 -TestRoot $results
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Retain Windows bootstrap control results
+        if: always() && runner.os == 'Windows'
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: bootstrap-control-results-Windows
+          path: ${{ runner.temp }}/delivery-forge-bootstrap-controls/results.json
+          if-no-files-found: warn
+          retention-days: 7
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: 10.0.401

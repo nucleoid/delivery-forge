@@ -22,7 +22,7 @@ public sealed class StandaloneEntrypointTests
         finally { Console.SetOut(before); }
     }
     [Fact(Timeout = 30000)]
-    public async Task Default_missing_config_returns_incomplete_and_restores_actual_caller_affinity()
+    public async Task Default_catalog_returns_diagnostics_and_restores_actual_caller_affinity()
     {
         if (!OperatingSystem.IsWindows() && !OperatingSystem.IsLinux()) throw new PlatformNotSupportedException("Actual standalone caller resource profile requires Windows/Linux.");
         using var actual = System.Diagnostics.Process.GetCurrentProcess(); var beforeMask = ReadActualAffinity(actual);
@@ -30,7 +30,7 @@ public sealed class StandaloneEntrypointTests
         try
         {
             Assert.Equal(2, await Program.Main(["capabilities"]).WaitAsync(TimeSpan.FromSeconds(20), TestContext.Current.CancellationToken));
-            using var doc = JsonDocument.Parse(output.ToString()); Assert.Equal("INCOMPLETE", doc.RootElement.GetProperty("Outcome").GetString()); Assert.Equal("TRUSTED_CONFIG_REQUIRED", doc.RootElement.GetProperty("Code").GetString()); Assert.False(doc.RootElement.GetProperty("RuntimeCertified").GetBoolean()); Assert.Empty(errors.ToString()); Assert.Equal(beforeMask, ReadActualAffinity(actual));
+            using var doc = JsonDocument.Parse(output.ToString()); Assert.Equal("INCOMPLETE", doc.RootElement.GetProperty("Outcome").GetString()); Assert.Equal("PROFILE_REQUIRES_ACTUAL_CONFORMANCE", doc.RootElement.GetProperty("Code").GetString()); Assert.False(doc.RootElement.GetProperty("RuntimeCertified").GetBoolean()); Assert.Empty(errors.ToString()); Assert.Equal(beforeMask, ReadActualAffinity(actual));
         }
         finally { Console.SetOut(beforeOut); Console.SetError(beforeError); }
     }

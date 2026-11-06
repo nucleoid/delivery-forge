@@ -167,7 +167,8 @@ public sealed class ProductionReviewFiniteAdmissionTests
             Assert.Equal(0, capture.Command.ExitCode); Assert.True(capture.Command.OwnedProcessQuiescent);
             Assert.True(capture.RootExitObserved); Assert.True(capture.StandardOutputDrainCompleted); Assert.True(capture.StandardErrorDrainCompleted);
             Assert.True(capture.Command.LifecycleDiagnostics?.OwnedTree is { CreationOwned: true, SettlementObserved: true, ActiveProcesses: 0 });
-            return Encoding.UTF8.GetString(capture.StandardOutputBytes).Trim();
+            var text = new UTF8Encoding(false, true).GetString(capture.StandardOutputBytes);
+            return args.Length > 0 && args[0] == "diff" && args.Contains("-z", StringComparer.Ordinal) ? text : text.Trim();
         }
         var passed = false;
         try
@@ -207,7 +208,8 @@ public sealed class ProductionReviewFiniteAdmissionTests
             await manager.PrepareAsync(repository, worker, baseCommit, TestContext.Current.CancellationToken);
             using var writer = manager.AcquireWriter(worker, "owned", "actual-source-builder-writer");
             var provisioned = manager.RequireOriginalBinding(worker);
-            await File.WriteAllTextAsync(Path.Combine(worker, "subject.txt"), "candidate\n", TestContext.Current.CancellationToken);
+            if (allGoldenChecks) File.Delete(Path.Combine(worker, "subject.txt"));
+            else await File.WriteAllTextAsync(Path.Combine(worker, "subject.txt"), "candidate\n", TestContext.Current.CancellationToken);
             await Git(worker, "add", "--", "subject.txt");
             await Git(worker, "-c", "user.name=SourceBuilder", "-c", "user.email=fixture@example.invalid", "commit", "-q", "-m", "candidate");
             var head = await Git(worker, "rev-parse", "HEAD");
@@ -216,7 +218,7 @@ public sealed class ProductionReviewFiniteAdmissionTests
             Assert.True(File.Exists(Path.Combine(worker, ".git"))); Assert.NotEqual(workerGit, commonGit);
             var objectFiles = Directory.EnumerateFiles(Path.Combine(commonGit, "objects"), "*", SearchOption.AllDirectories).Count();
             Assert.True(objectFiles >= (allGoldenChecks ? 6 : 507));
-            Assert.Equal(allGoldenChecks ? 2 : 507, Directory.EnumerateFiles(worker).Count(path => Path.GetFileName(path) != ".git"));
+            Assert.Equal(allGoldenChecks ? 1 : 507, Directory.EnumerateFiles(worker).Count(path => Path.GetFileName(path) != ".git"));
             if (!allGoldenChecks)
             {
                 Assert.Equal("complete-source-0\n", await File.ReadAllTextAsync(Path.Combine(worker, "census-0.txt"), TestContext.Current.CancellationToken));
@@ -273,6 +275,45 @@ public sealed class ProductionReviewFiniteAdmissionTests
             var patch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, baseCommit, head,
                 planIdentity, new Dictionary<string, string>(), TestContext.Current.CancellationToken);
             counts.Add(parent.EnteredCount);
+            // These facts come from the actual successful archive/physical census
+            // just used by ComputeAsync, not a caller-created digest receipt.
+            var byteFacts = owner.RequireVerifiedSnapshotFacts(head, patch.HeadTree);
+            Assert.Equal(allGoldenChecks ? 1 : 507, byteFacts.Files.Count);
+            // Real Git emits the production argument list; the fixture preserves
+            // the complete NUL output before the actual parser/projection join.
+            var changedPaths = ReviewCompletionEvidence.ParseChangedPaths(await Git(worker, ReviewCompletionEvidence.ChangedPathArguments(baseCommit, head)));
+            if (allGoldenChecks) Assert.Empty(changedPaths);
+            else Assert.Equal(new[] { "subject.txt" }, changedPaths);
+            var completionData = new AgentCompletionReceipt("1.0.0", "owned", "sha256:" + new string('a', 64), "codex.cli", "fixture-v1",
+                "fixture-thread-DATA", "fixture-turn-DATA", "success", worker, head, patch.HeadTree, DateTimeOffset.UnixEpoch, [], []);
+            var acceptedData = new AgentAcceptedReceipt(completionData.SchemaVersion, completionData.RunId, completionData.RequestIdentity,
+                planIdentity, baseCommit, worker, completionData.AdapterId, completionData.AdapterVersion,
+                completionData.RuntimeRunIdentity, completionData.RuntimeTaskIdentity, DateTimeOffset.UnixEpoch, []);
+            var projected = ReviewCompletionEvidence.Create(acceptedData, completionData, baseCommit, byteFacts, changedPaths,
+                await Git(worker, "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching"),
+                await Git(worker, "rev-list", "--parents", baseCommit + ".." + head),
+                "evidence-policy.json", evidenceBytes.LongLength, "sha256:" + Convert.ToHexStringLower(SHA256.HashData(evidenceBytes)), evidenceIdentity);
+            var rows = projected.GetProperty("SourceBytes").GetProperty("Files");
+            if (allGoldenChecks) Assert.Empty(rows.EnumerateArray()); // Actual deletion-only commit: no postimage row.
+            else
+            {
+                var subject = Assert.Single(byteFacts.Files, row => row.RelativePath == "subject.txt");
+                var expectedSubject = Encoding.UTF8.GetBytes("candidate\n"); // Ten actual UTF8 bytes.
+                Assert.Equal(expectedSubject.LongLength, subject.Bytes);
+                Assert.Equal("sha256:" + Convert.ToHexStringLower(SHA256.HashData(expectedSubject)), subject.Sha256);
+                Assert.Equal(Convert.ToHexStringLower(expectedSubject), subject.Hex); Assert.Null(subject.HexOmittedReason);
+                Assert.Equal("100644", subject.Mode); Assert.Equal(40, subject.BlobIdentity.Length);
+                var row = Assert.Single(rows.EnumerateArray());
+                Assert.Equal("subject.txt", row.GetProperty("RelativePath").GetString());
+                Assert.Equal(subject.Hex, row.GetProperty("Hex").GetString());
+                Assert.Equal(subject.Sha256, row.GetProperty("Sha256").GetString());
+            }
+            var presentation = ReviewCompletionEvidence.SelectChangedFiles(byteFacts, changedPaths);
+            Assert.InRange(presentation.Sum(row => (row.Hex?.Length ?? 0) / 2), 0, 4096);
+            Assert.Contains(byteFacts.Files, row => row.RelativePath == "review.json" && row.Hex is null && row.HexOmittedReason == "FileExceeds128Bytes");
+            if (!allGoldenChecks) Assert.True(byteFacts.Files.Sum(row => (row.Hex?.Length ?? 0) / 2) > 4096);
+            Assert.Throws<NotSupportedException>(() => ((IList<ProductionReviewSourceOwner.VerifiedSourceFileFact>)byteFacts.Files).Clear());
+            Assert.Throws<ReviewPreflightException>(() => owner.RequireVerifiedSnapshotFacts(head, new string('f', 40)));
             for (var export = 0; export < (allGoldenChecks ? 11 : 3); export++)
             {
                 TestContext.Current.TestOutputHelper!.WriteLine($"Before fresh export {export}: {parent.EnteredCount} retained effects; source-path regression budget1024, parent capacity{ParentEffectAdmission.MaximumOriginalInvocations}.");

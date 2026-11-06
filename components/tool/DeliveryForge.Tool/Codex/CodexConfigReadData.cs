@@ -107,6 +107,7 @@ internal static class CodexConfigReadData
             ? documented ? CodexConfigReadDiagnostic.LayerChatGptDocumentedDefaultDestination : CodexConfigReadDiagnostic.LayerChatGptOtherStringDestination
             : documented ? CodexConfigReadDiagnostic.EffectiveChatGptDocumentedDefaultDestination : CodexConfigReadDiagnostic.EffectiveChatGptOtherStringDestination;
     }
+    internal static CodexConfigOriginClass DeveloperInstructionOrigin(JsonElement origins) => EffectiveOrigin(origins, "developer_instructions");
     static CodexConfigOriginClass EffectiveOrigin(JsonElement origins, string key)
     {
         if (!origins.TryGetProperty(key, out var metadata)) return CodexConfigOriginClass.Missing;

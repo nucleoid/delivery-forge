@@ -39,12 +39,16 @@ public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssue
         // The caller may retain a mutable backing dictionary. Bind all options
         // once before validating paths or awaiting any external operation.
         command = CommandLine.SnapshotForExecution(command);
-        if (command.Mode == ToolMode.Capabilities) return Capabilities(command.Get("profile") ?? "local");
+        if (command.Mode == ToolMode.Setup) return await SetupAsync(command, cancellationToken).ConfigureAwait(false);
+        if (command.Mode == ToolMode.Capabilities && !command.Has("config")) return Capabilities(command.Get("profile") ?? "local");
         if (command.Get("config") is not string configPath) return ToolResult.Incomplete("TRUSTED_CONFIG_REQUIRED", "Select explicit owner-reviewed --config; ambient paths and capabilities are not inferred.");
         var life = actualOriginal ?? new ToolLifetime(TimeSpan.FromSeconds(1200), cancellationToken);
         using var locallyOwnedLifetime = actualOriginal is null ? life : null;
         life.Check();
         var config = TrustedConfiguration.LoadSelected(configPath, life, actualConfigurationPin);
+        var operationLimit = TimeSpan.FromSeconds(config.OperationSeconds);
+        if (operationLimit < life.WholeLimit) life.Restrict(operationLimit);
+        if (command.Mode == ToolMode.Capabilities) return ConfiguredReadiness.Inspect(command.Get("profile") ?? "local", configPath, config, life);
         if (config.ProductionBatch is not null) return ToolResult.Incomplete("CONTAINING_BATCH_OWNER_REQUIRED", "Production batch selection requires the concrete installed containing owner; it cannot be ignored by a single-run embedding.");
         if (config.HistoricalQuality is not null && command.Mode != ToolMode.QualityBaseline) throw new ToolUsageException("Historical quality selection requires the explicit quality-baseline mode.");
         if ((config.InstalledQuality is not null || config.InstalledReview is not null || config.LocalRealGolden is not null || config.HistoricalQuality is not null) && actualOriginal is not null && actualConfigurationPin is not null)
@@ -58,8 +62,6 @@ public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssue
                 config = retainedQualityConfiguration;
             }
         }
-        var operationLimit = TimeSpan.FromSeconds(config.OperationSeconds);
-        if (operationLimit < life.WholeLimit) life.Restrict(operationLimit);
         if (config.PolicyFile is string policyPath)
         {
             var policy = ContractValidator.ParseAndValidate(BoundedFiles.Read(policyPath, life)); life.Check();
@@ -95,9 +97,9 @@ public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssue
     }
     ToolResult Capabilities(string profile)
     {
-        if (host is not null) return ToolResult.Incomplete("BOUND_HOST_PROFILE_REQUIRES_CONFORMANCE_AUDIT", "Actual containing port supplied; profile evidence is exposed without certifying the installed live pipeline.", new { Profile = profile, ProvidedProfile = host.AdapterProfile, Realm = host.Realm.ToString(), RuntimeCertified = false });
+        if (host is not null) return ToolResult.Incomplete("BOUND_HOST_PROFILE_REQUIRES_CONFORMANCE_AUDIT", "Actual containing port supplied; profile evidence is exposed without certifying the installed live pipeline.", new { DiagnosticKind = "CapabilityCatalog", IsExecutionPreflight = false, Profile = profile, ProvidedProfile = host.AdapterProfile, Realm = host.Realm.ToString(), RuntimeCertified = false });
         var profiles = new[] { KnownAgentProfiles.CodexCli("unverified"), KnownAgentProfiles.ClaudeCodeCli("unverified"), KnownAgentProfiles.PiCliUnavailable(), KnownAgentProfiles.OpenClawOptional("unverified") };
-        return ToolResult.Incomplete("PROFILE_REQUIRES_ACTUAL_CONFORMANCE", "Host interfaces are diagnostics; no installed command or saved DATA grants runtime authority.", new { Profile = profile, Agents = profiles, ContractSchemas = "1.0.0", WorkerEnvelope = WorkerEnvelope.SchemaVersion, ProductionCoordination = "unavailable", ProductionPublication = "unavailable", RuntimeCertified = false });
+        return ToolResult.Incomplete("PROFILE_REQUIRES_ACTUAL_CONFORMANCE", "Host interfaces are diagnostics; no installed command or saved DATA grants runtime authority.", new { DiagnosticKind = "CapabilityCatalog", IsExecutionPreflight = false, Profile = profile, Agents = profiles, ContractSchemas = "1.0.0", WorkerEnvelope = WorkerEnvelope.SchemaVersion, ProductionCoordination = "unavailable", ProductionPublication = "unavailable", RuntimeCertified = false });
     }
     async Task<ToolResult> PlanAsync(ToolCommand command, TrustedConfiguration config, ToolLifetime life)
     {
@@ -105,6 +107,8 @@ public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssue
         var selectedIssue = command.Get("issue"); var selectedIntentFile = command.Get("intent-file");
         if (string.IsNullOrWhiteSpace(command.Get("repo")) || hasIssue == hasIntentFile || (hasIssue && string.IsNullOrWhiteSpace(selectedIssue)) || (hasIntentFile && string.IsNullOrWhiteSpace(selectedIntentFile)))
             throw new ToolUsageException("plan requires --repo and exactly one --issue/--intent-file.");
+        if (command.Has("previous-plan") && (hasIssue || string.IsNullOrWhiteSpace(command.Get("previous-plan"))))
+            throw new ToolUsageException("Plan supersession requires an explicit previous bundle and typed implementation intent.");
         var repo = BoundedFiles.Plain(command.Get("repo")!, true); if (!Same(repo, config.RepositoryRoot)) throw new ToolUsageException("Repository differs from explicit trusted configuration.");
         PlanIntent intent; bool fromIssue;
         if (hasIssue)
@@ -121,16 +125,56 @@ public sealed partial class ToolApplication(OwnerHostBridge? host = null, IIssue
             TrustedConfiguration.Ceiling(intent.Request.RequestedCeiling) > TrustedConfiguration.Ceiling(config.MaximumCeiling) ||
             (intent.Request.Mode == "implement" && (fromIssue || TrustedConfiguration.Ceiling(intent.Request.RequestedCeiling) < AuthorizationCeiling.Implement)))
             throw new ToolUsageException("Intent identity/mode/ceiling differs from protected selection.");
+        FrozenPlan? predecessor = null;
+        if (command.Get("previous-plan") is string previous)
+        {
+            if (intent.Request.Mode != "implement")
+                throw new ToolUsageException("Plan supersession requires an explicit typed implementation intent.");
+            if (config.ExpectedBundleIdentity is null || config.ExpectedContractIdentity is null ||
+                config.ExpectedWorkItem is null || config.ExpectedPlanCeiling is null)
+                return ToolResult.Incomplete("PLAN_EXPECTATIONS_REQUIRED", "Independently select the previous bundle, contract, work item and original ceiling before supersession.");
+            if (TrustedConfiguration.Ceiling(config.ExpectedPlanCeiling) > TrustedConfiguration.Ceiling(config.MaximumCeiling))
+                throw new ToolUsageException("Previous plan ceiling exceeds selected immutable maximum.");
+            if (command.Get("plan-out") is string selectedOutput) BoundedFiles.Separate(previous, selectedOutput);
+            var previousBytes = BoundedFiles.Read(previous, life, PlanImporter.MaximumBundleBytes);
+            var imported = await Observe("ActualPreviousPlanImport", () => ImportPlan(previousBytes, config, life), life).ConfigureAwait(false);
+            if (imported.Plan is null || !imported.DownstreamReady)
+                return ToolResult.Incomplete("PREVIOUS_PLAN_RECONCILIATION_INCOMPLETE", "Previous rich plan did not freshly reconcile; no successor was frozen.", imported.Diagnostics);
+            predecessor = imported.Plan;
+        }
         var reader = actualExecutor is null ? new GitRepositoryContextReader(config.GitExecutable) : new GitRepositoryContextReader(config.GitExecutable, actualExecutor, life); var context = await Observe("ActualRepositoryRead", () => reader.ReadAsync(repo, config.MutableReference, life.Token), life).ConfigureAwait(false); life.Check();
+        if (predecessor is not null && context.Commit != predecessor.BaseCommit)
+            return ToolResult.Incomplete("PREVIOUS_PLAN_RECONCILIATION_INCOMPLETE", "Current branch advanced after predecessor reconciliation; no successor was frozen.");
         if (intent.EvidencePaths.Count is < 1 or > 128) throw new ToolUsageException("Explicit bounded repository evidence paths are required.");
         var evidence = new List<EvidenceItem>();
         foreach (var path in intent.EvidencePaths) { life.Check(); var file = await Observe("ActualRepositoryFile", () => reader.ReadFileAsync(context, path, life.Token), life).ConfigureAwait(false); life.Check(); evidence.Add(EvidenceItem.FromRepositoryFile(file, DateTimeOffset.UtcNow, [])); }
         var intake = IntakePlanner.Assess(intent.Request, evidence); var draft = new PlanDraft(intent.Request, context, evidence, intent.ChangeMap, intent.Dependencies, intent.Gates, intent.Rollout, intent.Unknowns, intake);
         if (!intake.Ready) return ToolResult.Incomplete("INTAKE_INCOMPLETE", "Owner intake requires reconciliation.", new { intake.Limitations, intake.RecommendedQuestion });
-        var frozen = PlanFreezer.Freeze(draft, intent.Revision, DateTimeOffset.UtcNow); life.Check();
+        var frozen = PlanFreezer.Freeze(draft, intent.Revision, DateTimeOffset.UtcNow, predecessor); life.Check();
+        if (predecessor is not null)
+        {
+            using var previousDocument = JsonDocument.Parse(predecessor.CanonicalBytes);
+            using var successorDocument = JsonDocument.Parse(frozen.CanonicalBytes);
+            var previousMaterial = previousDocument.RootElement.GetProperty("plan");
+            var successorMaterial = successorDocument.RootElement.GetProperty("plan");
+            // Compare the freezer's normalized reviewed material, not caller
+            // spelling or new provenance, revision, mode and ceiling fields.
+            foreach (var field in new[] { "scope", "intent", "acceptanceCriteria", "changeMap", "dependencyDag", "gates", "rollout", "unknowns" })
+            {
+                var before = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(JsonSerializer.SerializeToUtf8Bytes(previousMaterial.GetProperty(field)));
+                var after = DeliveryForge.Contracts.Serialization.CanonicalJson.Canonicalize(JsonSerializer.SerializeToUtf8Bytes(successorMaterial.GetProperty(field)));
+                life.Check();
+                if (!before.AsSpan().SequenceEqual(after))
+                    return ToolResult.Incomplete("PREVIOUS_PLAN_SCOPE_CHANGED", "Reviewed plan material changed; reconcile the changed scope separately before preparing an implementation revision.", new { ChangedField = field });
+            }
+        }
         if (command.Get("replay-out") is string replay && command.Get("plan-out") is string destination) BoundedFiles.Separate(replay, destination);
-        if (!command.Has("dry-run") && !command.Has("replay-out") && command.Get("plan-out") is string output) BoundedFiles.WriteNew(output, frozen.CanonicalBytes, life);
-        return new(command.Has("dry-run") ? "DRY_RUN" : "COMPLETE", "PLAN_FROZEN", "Owner-produced rich plan; no implementation or publication occurred.", new { frozen.Identity, frozen.ContractIdentity, frozen.DownstreamReady, Plan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), frozen.Limitations });
+        string? writtenPlanPath = null;
+        if (!command.Has("dry-run") && !command.Has("replay-out") && command.Get("plan-out") is string output)
+        {
+            BoundedFiles.WriteNew(output, frozen.CanonicalBytes, life); writtenPlanPath = output;
+        }
+        return new(command.Has("dry-run") ? "DRY_RUN" : "COMPLETE", "PLAN_FROZEN", "Owner-produced rich plan; no implementation or publication occurred.", new { ConfigurationPath = command.Get("config"), PlanPath = writtenPlanPath, frozen.Identity, frozen.ContractIdentity, frozen.DownstreamReady, Plan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), frozen.Limitations });
     }
     async Task<ToolResult> ImplementAsync(ToolCommand command, TrustedConfiguration config, ToolLifetime life)
     {
