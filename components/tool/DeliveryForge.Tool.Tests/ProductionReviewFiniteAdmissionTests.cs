@@ -273,6 +273,22 @@ public sealed class ProductionReviewFiniteAdmissionTests
             var patch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, baseCommit, head,
                 planIdentity, new Dictionary<string, string>(), TestContext.Current.CancellationToken);
             counts.Add(parent.EnteredCount);
+            // These facts come from the actual successful archive/physical census
+            // just used by ComputeAsync, not a caller-created digest receipt.
+            var byteFacts = owner.RequireVerifiedSnapshotFacts(head, patch.HeadTree);
+            Assert.Equal(allGoldenChecks ? 2 : 507, byteFacts.Files.Count);
+            var subject = Assert.Single(byteFacts.Files, row => row.RelativePath == "subject.txt");
+            var expectedSubject = Encoding.UTF8.GetBytes("candidate\n");
+            Assert.Equal(expectedSubject.LongLength, subject.Bytes);
+            Assert.Equal("sha256:" + Convert.ToHexStringLower(SHA256.HashData(expectedSubject)), subject.Sha256);
+            if (allGoldenChecks) { Assert.Equal(Convert.ToHexStringLower(expectedSubject), subject.Hex); Assert.Null(subject.HexOmittedReason); }
+            else { Assert.Null(subject.Hex); Assert.Equal("SnapshotHexBudgetExhausted", subject.HexOmittedReason); }
+            Assert.Equal("100644", subject.Mode); Assert.Equal(40, subject.BlobIdentity.Length);
+            Assert.InRange(byteFacts.Files.Sum(row => (row.Hex?.Length ?? 0) / 2), 0, 4096);
+            Assert.Contains(byteFacts.Files, row => row.RelativePath == "review.json" && row.Hex is null && row.HexOmittedReason == "FileExceeds128Bytes");
+            if (!allGoldenChecks) Assert.Contains(byteFacts.Files, row => row.HexOmittedReason == "SnapshotHexBudgetExhausted");
+            Assert.Throws<NotSupportedException>(() => ((IList<ProductionReviewSourceOwner.VerifiedSourceFileFact>)byteFacts.Files).Clear());
+            Assert.Throws<ReviewPreflightException>(() => owner.RequireVerifiedSnapshotFacts(head, new string('f', 40)));
             for (var export = 0; export < (allGoldenChecks ? 11 : 3); export++)
             {
                 TestContext.Current.TestOutputHelper!.WriteLine($"Before fresh export {export}: {parent.EnteredCount} retained effects; source-path regression budget1024, parent capacity{ParentEffectAdmission.MaximumOriginalInvocations}.");

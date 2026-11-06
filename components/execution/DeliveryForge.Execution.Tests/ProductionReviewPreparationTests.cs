@@ -204,6 +204,7 @@ public sealed class ProductionReviewPreparationTests : IDisposable
         var owner = new ProductionReviewSourceOwner(executor, original, admittedParent, "run-source-builder-conformance", fixture.Root,
             fixture.GitDirectory, fixture.GitDirectory, fixture.Git, imageBytes.Length, Convert.ToHexStringLower(SHA256.HashData(imageBytes)), fixture.Version,
             baseCommit, headCommit, () => true, frozenPlan.Identity, evidence.Identity, "review.json", 1048576);
+        Assert.Throws<ReviewPreflightException>(() => owner.RequireVerifiedSnapshotFacts(headCommit, new string('a', 40)));
         var substitutedPlan = plan.DeepClone().AsObject(); substitutedPlan["planRevision"] = "caller-substitution";
         substitutedPlan["identity"] = CanonicalJson.ComputeIdentity(Encoding.UTF8.GetBytes(substitutedPlan.ToJsonString()));
         await Assert.ThrowsAsync<ReviewPreflightException>(() => ReviewAuthorityHost.CreateProductionFromOwnedSourceAsync(owner,
@@ -224,6 +225,10 @@ public sealed class ProductionReviewPreparationTests : IDisposable
         var emptyDirectoryPatch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, baseCommit, headCommit,
             frozenPlan.Identity, new Dictionary<string, string>(), bound.Token);
         Assert.Equal(headCommit, emptyDirectoryPatch.HeadCommit);
+        var verifiedFacts = owner.RequireVerifiedSnapshotFacts(headCommit, emptyDirectoryPatch.HeadTree);
+        var subjectFact = Assert.Single(verifiedFacts.Files, row => row.RelativePath == "subject.txt");
+        Assert.Equal("sha256:" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes("candidate source\n"))), subjectFact.Sha256);
+        Assert.Equal(Convert.ToHexStringLower(Encoding.UTF8.GetBytes("candidate source\n")), subjectFact.Hex);
         Assert.False(owner.Uncertain);
         // Empty directories yield no files; traversal must still stop at its depth bound.
         var emptyRoot = Path.Combine(fixture.Root, "empty-depth-control"); var deepest = emptyRoot;
@@ -232,6 +237,7 @@ public sealed class ProductionReviewPreparationTests : IDisposable
         var depthFailure = await Assert.ThrowsAsync<ReviewPreflightException>(() => GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, baseCommit, headCommit,
             frozenPlan.Identity, new Dictionary<string, string>(), bound.Token));
         Assert.Equal("Owned source traversal exceeds64 directory levels.", depthFailure.Message);
+        Assert.Throws<ReviewPreflightException>(() => owner.RequireVerifiedSnapshotFacts(headCommit, emptyDirectoryPatch.HeadTree));
         // Preserve the refused deep tree. Index validation precedes traversal,
         // so the next control does not need to move this Windows directory tree.
         // Retain the accepted raw index before a real bounded-read refusal control.

@@ -31,6 +31,7 @@ internal sealed class InstalledReviewHost : IDisposable
     ClaudeIndependentReviewer? independentReviewer;
     InstalledQualityHost? boundCompletedQuality;
     DeliveryForge.Contracts.Validation.ValidatedContract? protectedEvidencePolicy;
+    string? completedStatusOutput, completedAncestryOutput, evidencePolicySourceSha256; long evidencePolicySourceBytes;
     bool entered, disposed, uncertain, dispositionEntered;
     int independentEntry;
     enum SourceGitOperation { Head, Tree, FilterConfig, Status, BaseEvidence, Other }
@@ -193,7 +194,25 @@ internal sealed class InstalledReviewHost : IDisposable
                 }, requiredTestsBudget, HasPresentationReadCapacity));
             }
             var patch = await GitPatchIdentity.ComputeAsync(bootstrap.ObjectView, assignment.BaseCommit, completion.HeadCommit, frozen.ContractIdentity, identities, token).ConfigureAwait(false);
-            var planAndEvidence = JsonSerializer.SerializeToUtf8Bytes(new { FrozenPlan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), QualityEvidence = qualityEvidence, QualityToolProvenance = qualityToolProvenance, SourceAndGateScope = qualityToolProvenance is null ? null : new { SourceRealm = bootstrap.ObjectView.SourceRealm.ToString(), Qualification = "SourceRealm describes the source/object-view ownership authority, independently of gate ProductionCapable flags. The completed quality binding supplies separate gate measurements and ProtectedComparison DATA; its exact registry/scope approval does not certify producers universally. Preserve all reported limitations and authority flags." }, MissingQualityEvidence = actualQualityResults.Count == 0 }, BoundedFiles.Json);
+            var snapshotFacts = sourceOwner.RequireVerifiedSnapshotFacts(completion.HeadCommit, completion.TreeId);
+            static bool WithinSelectedPath(string file, string path)
+            {
+                var scope = path.Replace('\', '/').Trim('/');
+                return file == scope || file.StartsWith(scope + "/", StringComparison.Ordinal);
+            }
+            var selectedFileFacts = snapshotFacts.Files.Where(file => assignment.AllowedPaths.Any(path => WithinSelectedPath(file.RelativePath, path)) &&
+                !assignment.Exclusions.Any(path => WithinSelectedPath(file.RelativePath, path))).ToArray();
+            var ownerCompletionEvidence = new
+            {
+                Qualification = "Same containing owner observations, not an installed quality gate result or a new authority.",
+                completion.RunId, completion.RequestIdentity, completion.RuntimeRunIdentity, completion.RuntimeTaskIdentity,
+                assignment.BaseCommit, completion.HeadCommit, completion.TreeId,
+                FinalWorkerStatus = new { Command = new[] { "git", "status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching" }, StandardOutput = completedStatusOutput ?? throw new WorkerEnvelopeException("Actual completed source status observation is absent."), Phase = "CompletedWorkerBeforeQuality" },
+                CommitAncestry = new { Command = new[] { "git", "rev-list", "--parents", assignment.BaseCommit + ".." + completion.HeadCommit }, StandardOutput = completedAncestryOutput ?? throw new WorkerEnvelopeException("Actual completed ancestry observation is absent."), BaseIsAncestor = true, Qualification = "BaseIsAncestor is checked by the successful controlled GitPatchIdentity computation; complete parent rows are actual bounded Git output, not an assumed single commit." },
+                SourceBytes = new { snapshotFacts.HeadCommit, snapshotFacts.TreeId, snapshotFacts.SourceFingerprint, SelectedPaths = assignment.AllowedPaths, Files = selectedFileFacts, Selection = "Current committed files within selected worker paths, excluding protected paths; deletions remain visible in the complete patch.", PerFileHexMaximumBytes = 128, SnapshotHexMaximumBytes = 4096, Qualification = "Every digest/length comes from the successful complete archive-to-physical-source comparison. Hex omissions are explicit; no file bytes are inferred from diff rendering." },
+                EvidencePolicyDerivation = new { Source = "git:" + selection.EvidencePolicyRelativePath, assignment.BaseCommit, RawSourceBytes = evidencePolicySourceBytes, RawSourceSha256 = evidencePolicySourceSha256 ?? throw new WorkerEnvelopeException("Actual evidence policy source observation is absent."), ContractIdentity = protectedEvidencePolicy!.Identity, IdentityAlgorithm = "SHA256 of RFC8785 canonical JSON with the top-level identity property removed; the raw source digest instead includes exact stored formatting and identity." }
+            };
+            var planAndEvidence = JsonSerializer.SerializeToUtf8Bytes(new { FrozenPlan = JsonSerializer.Deserialize<JsonElement>(frozen.CanonicalBytes), OwnerCompletionEvidence = ownerCompletionEvidence, QualityEvidence = qualityEvidence, QualityToolProvenance = qualityToolProvenance, SourceAndGateScope = qualityToolProvenance is null ? null : new { SourceRealm = bootstrap.ObjectView.SourceRealm.ToString(), Qualification = "SourceRealm describes the source/object-view ownership authority, independently of gate ProductionCapable flags. The completed quality binding supplies separate gate measurements and ProtectedComparison DATA; its exact registry/scope approval does not certify producers universally. Preserve all reported limitations and authority flags." }, MissingQualityEvidence = actualQualityResults.Count == 0 }, BoundedFiles.Json);
             token.ThrowIfCancellationRequested(); sourceOwner.Check();
             BoundedFiles.RequireReadCapacity(original, reviewerReadOperations, reviewerReadBytes);
             return (patch, planAndEvidence);
@@ -380,13 +399,16 @@ internal sealed class InstalledReviewHost : IDisposable
         catch (Exception error) { original.RecordFirstCaught("review-source-metadata-path", error); throw; }
         var head = (await Git("rev-parse", "HEAD^{commit}").ConfigureAwait(false)).Trim();
         var tree = (await Git("rev-parse", "HEAD^{tree}").ConfigureAwait(false)).Trim();
-        if (head != completion.HeadCommit || tree != completion.TreeId ||
-            (await Git("status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching").ConfigureAwait(false)).Length != 0)
+        var statusOutput = await Git("status", "--porcelain=v1", "--untracked-files=all", "--ignored=matching").ConfigureAwait(false);
+        if (head != completion.HeadCommit || tree != completion.TreeId || statusOutput.Length != 0)
         {
             var error = new WorkerEnvelopeException("Actual completed worker source changed before immutable review preparation.");
             original.RecordFirstCaught("review-source-identity-mismatch", error); throw error;
         }
+        completedStatusOutput = statusOutput;
+        completedAncestryOutput = await Git("rev-list", "--parents", run.BaseCommit + ".." + completion.HeadCommit).ConfigureAwait(false);
         var evidenceBytes = Encoding.UTF8.GetBytes(await Git("show", run.BaseCommit + ":" + selection.EvidencePolicyRelativePath).ConfigureAwait(false));
+        evidencePolicySourceBytes = evidenceBytes.LongLength; evidencePolicySourceSha256 = "sha256:" + BoundedFiles.Sha(evidenceBytes);
         DeliveryForge.Contracts.Validation.ValidatedContract evidence;
         try
         {
